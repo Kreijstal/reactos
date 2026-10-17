@@ -32,6 +32,56 @@ NtfsReportPathChange(PNTFS_VCB Vcb, PCWSTR Path, ULONG Filter, ULONG Action)
 }
 
 VOID
+NtfsReportChange(PNTFS_FCB Fcb, ULONG Filter, ULONG Action)
+{
+    PNTFS_VCB Vcb = Fcb->Vcb;
+    UNICODE_STRING Name, Stream;
+    PSTRING StreamName = NULL;
+    PCWSTR LastPart;
+    USHORT Offset;
+
+    if (NtfsFCBIsRoot(Fcb))
+        return;
+    ExAcquireResourceExclusiveLite(&Vcb->DirResource, TRUE);
+    if (!(Vcb->Flags & VCB_DEVICE_REMOVED))
+    {
+        Name = Fcb->NotifyName;
+        if (Fcb->Stream[0] != UNICODE_NULL)
+        {
+            RtlInitUnicodeString(&Stream, Fcb->Stream);
+            ASSERT(Name.Length > Stream.Length + sizeof(WCHAR));
+            Name.Length -= Stream.Length + sizeof(WCHAR);
+            ASSERT(Name.Buffer[Name.Length / sizeof(WCHAR)] == L':');
+            if (Action == FILE_ACTION_ADDED_STREAM || Action == FILE_ACTION_REMOVED_STREAM ||
+                Action == FILE_ACTION_MODIFIED_STREAM)
+                StreamName = (PSTRING)&Stream;
+        }
+        LastPart = wcsrchr(Name.Buffer, L'\\');
+        ASSERT(LastPart != NULL && LastPart[1] != UNICODE_NULL);
+        Offset = (USHORT)((LastPart + 1 - Name.Buffer) * sizeof(WCHAR));
+        FsRtlNotifyFullReportChange(Vcb->NotifySync, &Vcb->NotifyList,
+                                    (PSTRING)&Name, Offset, StreamName, NULL,
+                                    Filter, Action, NULL);
+    }
+    ExReleaseResourceLite(&Vcb->DirResource);
+}
+
+VOID
+NtfsReportDataChange(PNTFS_FCB Fcb, ULONG Filter)
+{
+    ULONG Action = FILE_ACTION_MODIFIED;
+
+    ASSERT((Filter & ~(FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE)) == 0);
+    if (Fcb->Stream[0] != UNICODE_NULL)
+    {
+        Filter = ((Filter & FILE_NOTIFY_CHANGE_SIZE) ? FILE_NOTIFY_CHANGE_STREAM_SIZE : 0) |
+                 ((Filter & FILE_NOTIFY_CHANGE_LAST_WRITE) ? FILE_NOTIFY_CHANGE_STREAM_WRITE : 0);
+        Action = FILE_ACTION_MODIFIED_STREAM;
+    }
+    NtfsReportChange(Fcb, Filter, Action);
+}
+
+VOID
 NtfsNotifyDirectoryDeleted(PNTFS_FCB Fcb)
 {
     PNTFS_VCB Vcb = Fcb->Vcb;

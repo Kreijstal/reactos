@@ -405,6 +405,179 @@ Cleanup:
     check_status(NtfsKmtDeleteTree(Dir), STATUS_SUCCESS);
 }
 
+/* Use a fresh open for each mask: the notify package remembers the first
+ * completion filter for an open, including between successful completions. */
+#define expect_change(Filter, Operation, Action, Name) \
+    do { \
+        Watch = OpenDirectory(Dir, FALSE); \
+        if (Watch != NULL) \
+        { \
+            check_status(StartNotify(Watch, Filter, FALSE, 1024, FALSE, &Request), STATUS_PENDING); \
+            check_status((Operation), STATUS_SUCCESS); \
+            CheckSingle(Request, Action, Name); Request = NULL; \
+            ZwClose(Watch); Watch = NULL; \
+        } \
+    } while (0)
+
+static VOID
+CancelUnchanged(PNOTIFY_REQUEST Request)
+{
+    if (Request != NULL)
+    {
+        ok_eq_long(KeReadStateEvent(&Request->Event), 0);
+        IoCancelIrp(Request->Irp);
+        WaitNotify(Request, STATUS_CANCELLED);
+        FreeNotify(Request);
+    }
+}
+
+START_TEST(NtfsChangeData)
+{
+    WCHAR Root[MAX_PATH], Dir[MAX_PATH], Path[MAX_PATH], StreamPath[MAX_PATH], Implicit[MAX_PATH];
+    HANDLE File = NULL, Stream = NULL, Watch = NULL;
+    PNOTIFY_REQUEST Request = NULL;
+    FILE_BASIC_INFORMATION Basic;
+    FILE_END_OF_FILE_INFORMATION End;
+    FILE_ZERO_DATA_INFORMATION Zero;
+    IO_STATUS_BLOCK IoStatus;
+    SECURITY_DESCRIPTOR Sd;
+    UCHAR EaBuffer[32];
+    PFILE_FULL_EA_INFORMATION Ea = (PFILE_FULL_EA_INFORMATION)EaBuffer;
+    USHORT Compression = COMPRESSION_FORMAT_LZNT1;
+    NTSTATUS Status;
+
+    if (!NtfsKmtFindVolume(Root, NULL)) return;
+    Status = NtfsKmtPrepareDirectory(Root, L"KMT_NTFS_CHANGE_DATA", Dir);
+    check_status(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, L"data.bin");
+    NtfsKmtJoin(StreamPath, RTL_NUMBER_OF(StreamPath), Dir, L"data.bin:extra");
+    check_status(NtfsKmtCreateFileWithData(Path, "abc", 3), STATUS_SUCCESS);
+    check_status(NtfsKmtOpen(&File, Path, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE), STATUS_SUCCESS);
+    if (File == NULL) goto DataCleanup;
+
+    /* A create naming a stream on a missing file also creates its base name. */
+    NtfsKmtJoin(Implicit, RTL_NUMBER_OF(Implicit), Dir, L"new.bin:extra");
+    expect_change(FILE_NOTIFY_CHANGE_FILE_NAME, NtfsKmtCreateFileWithData(Implicit, "new", 3),
+                  FILE_ACTION_ADDED, L"new.bin");
+
+    expect_change(FILE_NOTIFY_CHANGE_LAST_WRITE, NtfsKmtWrite(File, 0, "d", 1, NULL),
+                  FILE_ACTION_MODIFIED, L"data.bin");
+    expect_change(FILE_NOTIFY_CHANGE_SIZE, NtfsKmtWrite(File, 3, "e", 1, NULL),
+                  FILE_ACTION_MODIFIED, L"data.bin");
+    End.EndOfFile.QuadPart = 2;
+    expect_change(FILE_NOTIFY_CHANGE_SIZE,
+                  ZwSetInformationFile(File, &IoStatus, &End, sizeof(End), FileEndOfFileInformation),
+                  FILE_ACTION_MODIFIED, L"data.bin");
+
+    /* Overwrites and zero-byte writes do not change the stream's size. */
+    Watch = OpenDirectory(Dir, FALSE);
+    if (Watch != NULL)
+    {
+        check_status(StartNotify(Watch, FILE_NOTIFY_CHANGE_SIZE, FALSE, 1024, FALSE, &Request), STATUS_PENDING);
+        check_status(NtfsKmtWrite(File, 0, "f", 1, NULL), STATUS_SUCCESS);
+        check_status(NtfsKmtWrite(File, 0, "", 0, NULL), STATUS_SUCCESS);
+        CancelUnchanged(Request); Request = NULL;
+        ZwClose(Watch); Watch = NULL;
+    }
+
+    RtlZeroMemory(&Basic, sizeof(Basic));
+    Basic.FileAttributes = FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE;
+    expect_change(FILE_NOTIFY_CHANGE_ATTRIBUTES,
+                  ZwSetInformationFile(File, &IoStatus, &Basic, sizeof(Basic), FileBasicInformation),
+                  FILE_ACTION_MODIFIED, L"data.bin");
+    Watch = OpenDirectory(Dir, FALSE);
+    if (Watch != NULL)
+    {
+        check_status(StartNotify(Watch, FILE_NOTIFY_CHANGE_ATTRIBUTES, FALSE, 1024, FALSE, &Request), STATUS_PENDING);
+        check_status(ZwSetInformationFile(File, &IoStatus, &Basic, sizeof(Basic), FileBasicInformation), STATUS_SUCCESS);
+        CancelUnchanged(Request); Request = NULL;
+        ZwClose(Watch); Watch = NULL;
+    }
+    RtlZeroMemory(&Basic, sizeof(Basic));
+    KeQuerySystemTime(&Basic.CreationTime);
+    expect_change(FILE_NOTIFY_CHANGE_CREATION,
+                  ZwSetInformationFile(File, &IoStatus, &Basic, sizeof(Basic), FileBasicInformation),
+                  FILE_ACTION_MODIFIED, L"data.bin");
+    RtlZeroMemory(&Basic, sizeof(Basic));
+    KeQuerySystemTime(&Basic.LastAccessTime);
+    expect_change(FILE_NOTIFY_CHANGE_LAST_ACCESS,
+                  ZwSetInformationFile(File, &IoStatus, &Basic, sizeof(Basic), FileBasicInformation),
+                  FILE_ACTION_MODIFIED, L"data.bin");
+    RtlZeroMemory(&Basic, sizeof(Basic));
+    KeQuerySystemTime(&Basic.LastWriteTime);
+    expect_change(FILE_NOTIFY_CHANGE_LAST_WRITE,
+                  ZwSetInformationFile(File, &IoStatus, &Basic, sizeof(Basic), FileBasicInformation),
+                  FILE_ACTION_MODIFIED, L"data.bin");
+
+    RtlZeroMemory(EaBuffer, sizeof(EaBuffer));
+    Ea->EaNameLength = 1;
+    Ea->EaValueLength = 1;
+    Ea->EaName[0] = 'N'; Ea->EaName[1] = 0; Ea->EaName[2] = 'V';
+    expect_change(FILE_NOTIFY_CHANGE_EA,
+                  ZwSetEaFile(File, &IoStatus, Ea, FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName) + 3),
+                  FILE_ACTION_MODIFIED, L"data.bin");
+    Ea->EaName[2] = 'W';
+    expect_change(FILE_NOTIFY_CHANGE_ATTRIBUTES,
+                  ZwSetEaFile(File, &IoStatus, Ea, FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName) + 3),
+                  FILE_ACTION_MODIFIED, L"data.bin");
+    check_status(RtlCreateSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION), STATUS_SUCCESS);
+    check_status(RtlSetDaclSecurityDescriptor(&Sd, TRUE, NULL, FALSE), STATUS_SUCCESS);
+    expect_change(FILE_NOTIFY_CHANGE_SECURITY, ZwSetSecurityObject(File, DACL_SECURITY_INFORMATION, &Sd),
+                  FILE_ACTION_MODIFIED, L"data.bin");
+
+    expect_change(FILE_NOTIFY_CHANGE_ATTRIBUTES,
+                  NtfsKmtFsctl(File, FSCTL_SET_COMPRESSION, &Compression, sizeof(Compression), NULL, 0, NULL),
+                  FILE_ACTION_MODIFIED, L"data.bin");
+    Zero.FileOffset.QuadPart = 0; Zero.BeyondFinalZero.QuadPart = 1;
+    expect_change(FILE_NOTIFY_CHANGE_LAST_WRITE,
+                  NtfsKmtFsctl(File, FSCTL_SET_ZERO_DATA, &Zero, sizeof(Zero), NULL, 0, NULL),
+                  FILE_ACTION_MODIFIED, L"data.bin");
+
+    /* Named-stream records carry file:stream and the separate stream action. */
+    expect_change(FILE_NOTIFY_CHANGE_STREAM_NAME,
+                  NtfsKmtCreate(&Stream, NULL, StreamPath, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                FILE_CREATE, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL),
+                  FILE_ACTION_ADDED_STREAM, L"data.bin:extra");
+    if (Stream != NULL)
+    {
+        expect_change(FILE_NOTIFY_CHANGE_STREAM_SIZE, NtfsKmtWrite(Stream, 0, "xyz", 3, NULL),
+                      FILE_ACTION_MODIFIED_STREAM, L"data.bin:extra");
+        expect_change(FILE_NOTIFY_CHANGE_STREAM_WRITE, NtfsKmtWrite(Stream, 0, "q", 1, NULL),
+                      FILE_ACTION_MODIFIED_STREAM, L"data.bin:extra");
+        End.EndOfFile.QuadPart = 1;
+        expect_change(FILE_NOTIFY_CHANGE_STREAM_SIZE,
+                      ZwSetInformationFile(Stream, &IoStatus, &End, sizeof(End), FileEndOfFileInformation),
+                      FILE_ACTION_MODIFIED_STREAM, L"data.bin:extra");
+        /* The ordinary FILE_NAME filter ignores stream writes. */
+        Watch = OpenDirectory(Dir, FALSE);
+        if (Watch != NULL)
+        {
+            check_status(StartNotify(Watch, FILE_NOTIFY_CHANGE_FILE_NAME, FALSE, 1024, FALSE, &Request), STATUS_PENDING);
+            check_status(NtfsKmtWrite(Stream, 0, "r", 1, NULL), STATUS_SUCCESS);
+            CancelUnchanged(Request); Request = NULL;
+            ZwClose(Watch); Watch = NULL;
+        }
+        ZwClose(Stream); Stream = NULL;
+    }
+    expect_change(FILE_NOTIFY_CHANGE_STREAM_NAME, NtfsKmtDelete(StreamPath),
+                  FILE_ACTION_REMOVED_STREAM, L"data.bin:extra");
+    ZwClose(File); File = NULL;
+    expect_change(FILE_NOTIFY_CHANGE_SIZE,
+                  NtfsKmtCreate(&File, NULL, Path, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                FILE_OVERWRITE, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL),
+                  FILE_ACTION_MODIFIED, L"data.bin");
+
+DataCleanup:
+    if (Request != NULL) { IoCancelIrp(Request->Irp); FreeNotify(Request); }
+    if (Watch != NULL) ZwClose(Watch);
+    if (Stream != NULL) ZwClose(Stream);
+    if (File != NULL) ZwClose(File);
+    check_status(NtfsKmtDeleteTree(Dir), STATUS_SUCCESS);
+}
+
 static NTSTATUS NTAPI
 RemoveCompletion(PDEVICE_OBJECT Device, PIRP Irp, PVOID Context)
 {

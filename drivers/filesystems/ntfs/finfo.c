@@ -1285,10 +1285,12 @@ NTSTATUS
 NtfsSetBasicInformation(PDEVICE_EXTENSION DeviceExt,
                         PNTFS_FCB Fcb,
                         BOOLEAN CaseSensitive,
-                        PFILE_BASIC_INFORMATION BasicInfo)
+                        PFILE_BASIC_INFORMATION BasicInfo,
+                        PULONG NotifyFilter)
 {
     PFILE_RECORD_HEADER FileRecord;
     PSTANDARD_INFORMATION StdInfo;
+    ULONG OldAttributes;
     NTSTATUS Status;
 
     DPRINT("NtfsSetBasicInformation(%p, %p, %p)\n", DeviceExt, Fcb, BasicInfo);
@@ -1316,6 +1318,7 @@ NtfsSetBasicInformation(PDEVICE_EXTENSION DeviceExt,
         return STATUS_INVALID_PARAMETER;
     }
 
+    OldAttributes = StdInfo->FileAttribute;
     if (BasicInfo->CreationTime.QuadPart > 0)
         StdInfo->CreationTime = BasicInfo->CreationTime.QuadPart;
 
@@ -1354,6 +1357,17 @@ NtfsSetBasicInformation(PDEVICE_EXTENSION DeviceExt,
     {
         DPRINT1("Failed to refresh the duplicated information for %wS (Status %lx)\n",
                 Fcb->ObjectName, Status);
+    }
+    else
+    {
+        if (BasicInfo->CreationTime.QuadPart > 0)
+            *NotifyFilter |= FILE_NOTIFY_CHANGE_CREATION;
+        if (BasicInfo->LastAccessTime.QuadPart > 0)
+            *NotifyFilter |= FILE_NOTIFY_CHANGE_LAST_ACCESS;
+        if (BasicInfo->LastWriteTime.QuadPart > 0)
+            *NotifyFilter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
+        if (OldAttributes != StdInfo->FileAttribute)
+            *NotifyFilter |= FILE_NOTIFY_CHANGE_ATTRIBUTES;
     }
 
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
@@ -2423,6 +2437,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     PDEVICE_OBJECT DeviceObject;
     BOOLEAN NeedDirResource;
     LONGLONG OldSize;
+    ULONG NotifyFilter = 0;
     NTSTATUS Status = STATUS_NOT_IMPLEMENTED;
 
     DPRINT("NtfsSetInformation(%p)\n", IrpContext);
@@ -2481,7 +2496,8 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             Status = NtfsSetBasicInformation(DeviceExt,
                                              Fcb,
                                              BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
-                                             (PFILE_BASIC_INFORMATION)SystemBuffer);
+                                             (PFILE_BASIC_INFORMATION)SystemBuffer,
+                                             &NotifyFilter);
             ExReleaseResourceLite(&DeviceExt->IndexResource);
             KeLeaveCriticalRegion();
             break;
@@ -2565,13 +2581,27 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     }
 
     if (NT_SUCCESS(Status))
+    {
         NtfsJournalSetInformation(DeviceExt, Fcb, FileInformationClass, OldSize);
+        if ((FileInformationClass == FileEndOfFileInformation ||
+             FileInformationClass == FileAllocationInformation) &&
+            OldSize != Fcb->RFCB.FileSize.QuadPart)
+            NotifyFilter |= FILE_NOTIFY_CHANGE_SIZE;
+    }
 
     ExReleaseResourceLite(&Fcb->PagingIoResource);
     ExReleaseResourceLite(&Fcb->MainResource);
 
     if (NeedDirResource)
         ExReleaseResourceLite(&DeviceExt->DirResource);
+
+    if (NotifyFilter != 0)
+    {
+        if (FileInformationClass == FileBasicInformation)
+            NtfsReportChange(Fcb, NotifyFilter, FILE_ACTION_MODIFIED);
+        else
+            NtfsReportDataChange(Fcb, NotifyFilter);
+    }
 
     if (NT_SUCCESS(Status) && FileInformationClass == FileDispositionInformation &&
         NtfsFCBIsDirectory(Fcb) && (Fcb->Flags & FCB_DELETE_PENDING))

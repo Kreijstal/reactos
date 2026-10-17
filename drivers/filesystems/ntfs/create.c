@@ -1060,7 +1060,11 @@ NtfsOpenExistingFile(
 
     Status = NtfsFinishOpen(DeviceExt, FileObject, Stack);
     if (NT_SUCCESS(Status))
+    {
         Irp->IoStatus.Information = Information;
+        if (Information == FILE_SUPERSEDED || Information == FILE_OVERWRITTEN)
+            NtfsReportDataChange(Fcb, FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE);
+    }
 
     return Status;
 }
@@ -1341,6 +1345,8 @@ NtfsOpenBaseOfStream(
 
     Status = NtfsOpenFile(DeviceExt, Path->Buffer, CaseSensitive, BaseFcb, &ParentFcb, NULL);
     ASSERT(NT_SUCCESS(Status));
+    NtfsReportPathChange(DeviceExt, (*BaseFcb)->PathName,
+                          FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_ADDED);
 
     return Status;
 }
@@ -1422,7 +1428,10 @@ NtfsOpenStream(
 
         Status = NtfsFinishOpen(DeviceExt, Stack->FileObject, Stack);
         if (NT_SUCCESS(Status))
+        {
             Irp->IoStatus.Information = FILE_CREATED;
+            NtfsReportChange(Fcb, FILE_NOTIFY_CHANGE_STREAM_NAME, FILE_ACTION_ADDED_STREAM);
+        }
 
         return Status;
     }

@@ -1072,6 +1072,8 @@ NtfsReparsePointRequest(PDEVICE_EXTENSION DeviceExt,
     PNTFS_FCB Fcb = Stack->FileObject->FsContext;
     PVOID Buffer = Irp->AssociatedIrp.SystemBuffer;
     ULONG Copied;
+    ULONG OldAttributes;
+    BOOLEAN AttributesChanged;
     NTSTATUS Status;
 
     /* No buffer to return the data in reaches no further */
@@ -1088,6 +1090,7 @@ NtfsReparsePointRequest(PDEVICE_EXTENSION DeviceExt,
         return STATUS_MEDIA_WRITE_PROTECTED;
 
     ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
+    OldAttributes = Fcb->Entry.FileAttributes;
 
     switch (Code)
     {
@@ -1113,7 +1116,11 @@ NtfsReparsePointRequest(PDEVICE_EXTENSION DeviceExt,
     if (NT_SUCCESS(Status) && Code != FSCTL_GET_REPARSE_POINT)
         NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_REPARSE_POINT_CHANGE);
 
+    AttributesChanged = NT_SUCCESS(Status) && Code != FSCTL_GET_REPARSE_POINT &&
+                        OldAttributes != Fcb->Entry.FileAttributes;
     ExReleaseResourceLite(&Fcb->MainResource);
+    if (AttributesChanged)
+        NtfsReportChange(Fcb, FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_ACTION_MODIFIED);
 
     return Status;
 }
@@ -1474,6 +1481,8 @@ NtfsSparseRequest(PDEVICE_EXTENSION DeviceExt,
     PFILE_ALLOCATED_RANGE_BUFFER Ranges;
     BOOLEAN SetSparse = TRUE;
     ULONG Returned;
+    ULONG OldAttributes;
+    BOOLEAN DataChanged = FALSE, AttributesChanged;
     NTSTATUS Status;
 
     if (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
@@ -1526,13 +1535,18 @@ NtfsSparseRequest(PDEVICE_EXTENSION DeviceExt,
     /* Paging I/O maps the runs too; keep it out while they change */
     ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
     ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
+    OldAttributes = Fcb->Entry.FileAttributes;
 
     /* These workers change data and mappings through the volume cache. */
     Status = NtfsFlushFileCache(Stack->FileObject, TRUE);
     if (NT_SUCCESS(Status))
     {
         if (Code == FSCTL_SET_ZERO_DATA)
+        {
             Status = NtfsSetZeroData(DeviceExt, Fcb, &Zero);
+            DataChanged = NT_SUCCESS(Status) && Zero.FileOffset.QuadPart < Zero.BeyondFinalZero.QuadPart &&
+                          Zero.FileOffset.QuadPart < Fcb->RFCB.FileSize.QuadPart;
+        }
         else
             Status = NtfsSetSparse(DeviceExt, Fcb, SetSparse);
     }
@@ -1545,7 +1559,12 @@ NtfsSparseRequest(PDEVICE_EXTENSION DeviceExt,
                           NtfsUsnDataReason(Fcb, USN_REASON_DATA_OVERWRITE) : USN_REASON_BASIC_INFO_CHANGE);
     }
 
+    AttributesChanged = NT_SUCCESS(Status) && OldAttributes != Fcb->Entry.FileAttributes;
     ExReleaseResourceLite(&Fcb->MainResource);
+    if (AttributesChanged)
+        NtfsReportChange(Fcb, FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_ACTION_MODIFIED);
+    if (DataChanged)
+        NtfsReportDataChange(Fcb, FILE_NOTIFY_CHANGE_LAST_WRITE);
 
     return Status;
 }
@@ -1564,6 +1583,8 @@ NtfsCompressionRequest(PDEVICE_EXTENSION DeviceExt,
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
     PNTFS_FCB Fcb = Stack->FileObject->FsContext;
     USHORT Format;
+    ULONG OldAttributes;
+    BOOLEAN AttributesChanged;
     NTSTATUS Status;
 
     if (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
@@ -1592,6 +1613,7 @@ NtfsCompressionRequest(PDEVICE_EXTENSION DeviceExt,
 
     ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
     ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
+    OldAttributes = Fcb->Entry.FileAttributes;
     Status = NtfsFlushFileCache(Stack->FileObject, TRUE);
     if (NT_SUCCESS(Status))
         Status = NtfsSetCompression(DeviceExt, Fcb, Format);
@@ -1600,7 +1622,10 @@ NtfsCompressionRequest(PDEVICE_EXTENSION DeviceExt,
     if (NT_SUCCESS(Status))
         NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_COMPRESSION_CHANGE);
 
+    AttributesChanged = NT_SUCCESS(Status) && OldAttributes != Fcb->Entry.FileAttributes;
     ExReleaseResourceLite(&Fcb->MainResource);
+    if (AttributesChanged)
+        NtfsReportChange(Fcb, FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_ACTION_MODIFIED);
 
     return Status;
 }

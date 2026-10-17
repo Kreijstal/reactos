@@ -81,6 +81,7 @@ KMT_TESTFUNC Test_NtfsInfoClasses;
 KMT_TESTFUNC Test_NtfsLockRemove;
 KMT_TESTFUNC Test_NtfsLocks;
 KMT_TESTFUNC Test_NtfsNotify;
+KMT_TESTFUNC Test_NtfsChangeData;
 KMT_TESTFUNC Test_NtfsWatchRemove;
 KMT_TESTFUNC Test_NtfsLinks;
 KMT_TESTFUNC Test_NtfsObjectId;
@@ -208,6 +209,7 @@ const KMT_TEST TestList[] =
     { "NtfsLockRemove",                      Test_NtfsLockRemove },
     { "NtfsLocks",                           Test_NtfsLocks },
     { "NtfsNotify",                          Test_NtfsNotify },
+    { "NtfsChangeData",                      Test_NtfsChangeData },
     { "NtfsWatchRemove",                    Test_NtfsWatchRemove },
     { "NtfsLinks",                           Test_NtfsLinks },
     { "NtfsObjectId",                        Test_NtfsObjectId },

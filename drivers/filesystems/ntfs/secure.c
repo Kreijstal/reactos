@@ -882,6 +882,9 @@ NtfsSetSecurity(PNTFS_IRP_CONTEXT IrpContext)
 
     ExReleaseResourceLite(&Fcb->MainResource);
 
+    if (NT_SUCCESS(Status))
+        NtfsReportChange(Fcb, FILE_NOTIFY_CHANGE_SECURITY, FILE_ACTION_MODIFIED);
+
     return Status;
 }
 

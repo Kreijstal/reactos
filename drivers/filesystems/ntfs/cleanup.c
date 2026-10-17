@@ -254,6 +254,8 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
                     NtfsReportPathChange(DeviceExt, Fcb->PathName,
                                           NtfsFCBIsDirectory(Fcb) ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
                                           FILE_ACTION_REMOVED);
+                else
+                    NtfsReportChange(Fcb, FILE_NOTIFY_CHANGE_STREAM_NAME, FILE_ACTION_REMOVED_STREAM);
                 NtfsRemoveFCBFromTable(DeviceExt, Fcb);
             }
 
