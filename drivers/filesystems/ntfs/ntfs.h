@@ -218,6 +218,7 @@ typedef struct
     NPAGED_LOOKASIDE_LIST FcbLookasideList;
     NPAGED_LOOKASIDE_LIST AttrCtxtLookasideList;
     BOOLEAN EnableWriteSupport;
+    BOOLEAN ShutdownStarted;
 } NTFS_GLOBAL_DATA, *PNTFS_GLOBAL_DATA;
 
 
@@ -1048,6 +1049,10 @@ NtfsWriteDiskCached(PDEVICE_EXTENSION Vcb,
                     LONGLONG StartingOffset,
                     ULONG Length,
                     const PUCHAR Buffer);
+
+/* shutdown.c */
+NTSTATUS
+NtfsShutdown(PNTFS_IRP_CONTEXT IrpContext);
 
 /* flush.c */
 NTSTATUS

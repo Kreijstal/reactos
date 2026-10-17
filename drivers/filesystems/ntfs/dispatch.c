@@ -133,6 +133,10 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
             Status = NtfsFileSystemControl(IrpContext);
             break;
 
+        case IRP_MJ_SHUTDOWN:
+            Status = NtfsShutdown(IrpContext);
+            break;
+
         case IRP_MJ_FLUSH_BUFFERS:
             Status = NtfsFlushBuffers(IrpContext);
             break;

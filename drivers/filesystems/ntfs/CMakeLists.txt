@@ -27,6 +27,7 @@ list(APPEND SOURCE
     reparse.c
     rw.c
     secure.c
+    shutdown.c
     sparse.c
     usnjrnl.c
     volinfo.c
