@@ -136,6 +136,55 @@ ReadKey(HANDLE File, LONGLONG Offset, ULONG Key)
     return ZwReadFile(File, NULL, NULL, NULL, &IoStatus, &Byte, 1, &Position, &Key);
 }
 
+static
+VOID
+TestQueuedOwners(HANDLE A, HANDLE B, HANDLE C)
+{
+    PLOCK_REQUEST One = NULL, Two = NULL, Other = NULL;
+    NTSTATUS Status;
+
+    Status = Lock(A, IRP_MN_LOCK, 64, 8, 0, TRUE);
+    check_status(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    check_status(StartLock(B, IRP_MN_LOCK, 64, 8, 1, SL_EXCLUSIVE_LOCK, &One), STATUS_PENDING);
+    check_status(StartLock(B, IRP_MN_LOCK, 64, 8, 2, SL_EXCLUSIVE_LOCK, &Two), STATUS_PENDING);
+    check_status(StartLock(C, IRP_MN_LOCK, 64, 8, 0, SL_EXCLUSIVE_LOCK, &Other), STATUS_PENDING);
+    check_status(Lock(B, IRP_MN_UNLOCK_ALL_BY_KEY, 0, 0, 1, FALSE), STATUS_SUCCESS);
+    if (One != NULL)
+        check_status(FinishLock(One), STATUS_CANCELLED);
+    if (Two != NULL)
+        ok_eq_long(KeReadStateEvent(&Two->Event), 0);
+    if (Other != NULL)
+        ok_eq_long(KeReadStateEvent(&Other->Event), 0);
+    check_status(Lock(B, IRP_MN_UNLOCK_ALL, 0, 0, 0, FALSE), STATUS_SUCCESS);
+    if (Two != NULL)
+        check_status(FinishLock(Two), STATUS_CANCELLED);
+    if (Other != NULL)
+        ok_eq_long(KeReadStateEvent(&Other->Event), 0);
+    check_status(Lock(A, IRP_MN_UNLOCK_SINGLE, 64, 8, 0, FALSE), STATUS_SUCCESS);
+    if (Other != NULL)
+    {
+        check_status(FinishLock(Other), STATUS_SUCCESS);
+        check_status(Lock(C, IRP_MN_UNLOCK_SINGLE, 64, 8, 0, FALSE), STATUS_SUCCESS);
+    }
+
+    check_status(Lock(A, IRP_MN_LOCK, 64, 8, 0, TRUE), STATUS_SUCCESS);
+    check_status(StartLock(B, IRP_MN_LOCK, 64, 8, 0, SL_EXCLUSIVE_LOCK, &One), STATUS_PENDING);
+    check_status(StartLock(C, IRP_MN_LOCK, 64, 8, 0, SL_EXCLUSIVE_LOCK, &Other), STATUS_PENDING);
+    check_status(Lock(A, IRP_MN_UNLOCK_SINGLE, 64, 8, 0, FALSE), STATUS_SUCCESS);
+    if (One != NULL)
+        check_status(FinishLock(One), STATUS_SUCCESS);
+    if (Other != NULL)
+        ok_eq_long(KeReadStateEvent(&Other->Event), 0);
+    check_status(Lock(B, IRP_MN_UNLOCK_SINGLE, 64, 8, 0, FALSE), STATUS_SUCCESS);
+    if (Other != NULL)
+    {
+        check_status(FinishLock(Other), STATUS_SUCCESS);
+        check_status(Lock(C, IRP_MN_UNLOCK_SINGLE, 64, 8, 0, FALSE), STATUS_SUCCESS);
+    }
+}
+
 START_TEST(NtfsLocks)
 {
     WCHAR Root[MAX_PATH], Path[MAX_PATH], Alias[MAX_PATH], Stream[MAX_PATH];
@@ -305,6 +354,8 @@ START_TEST(NtfsLocks)
         check_status(FinishLock(Pending), STATUS_CANCELLED);
     }
     check_status(Lock(A, IRP_MN_UNLOCK_SINGLE, 64, 8, 0, FALSE), STATUS_SUCCESS);
+
+    TestQueuedOwners(A, B, C);
 
     check_status(Lock(A, IRP_MN_LOCK, 64, 8, 0, TRUE), STATUS_SUCCESS);
     Status = StartLock(B, IRP_MN_LOCK, 64, 8, 0, SL_EXCLUSIVE_LOCK, &Pending);
