@@ -1775,6 +1775,7 @@ NtfsCreateEmptyFileRecord(PDEVICE_EXTENSION DeviceExt)
     FileRecord->Ntfs.UsaCount = (FileRecord->BytesAllocated / DeviceExt->NtfsInfo.BytesPerSector) + 1;
 
     // setup other file record fields
+    /* AddNewMftEntry replaces this initial value when reusing an old slot. */
     FileRecord->SequenceNumber = 1;
     FileRecord->AttributeOffset = FileRecord->Ntfs.UsaOffset + (2 * FileRecord->Ntfs.UsaCount);
     FileRecord->AttributeOffset = ALIGN_UP_BY(FileRecord->AttributeOffset, ATTR_RECORD_ALIGNMENT);
