@@ -129,6 +129,29 @@ NtfsPnp(PNTFS_IRP_CONTEXT IrpContext)
         return STATUS_NOT_SUPPORTED;
 
     Vcb = IrpContext->DeviceObject->DeviceExtension;
+    switch (IrpContext->MinorFunction)
+    {
+        case IRP_MN_QUERY_REMOVE_DEVICE:
+        case IRP_MN_CANCEL_REMOVE_DEVICE:
+        case IRP_MN_REMOVE_DEVICE:
+        case IRP_MN_SURPRISE_REMOVAL:
+        case IRP_MN_EJECT:
+            break;
+
+        default:
+            /* FsRtlNotifyVolumeEvent can ask for TargetDeviceRelation while
+             * its caller already owns IoResource shared. Only removal needs
+             * exclusive ownership; upgrading here would deadlock dismount.
+             * Shared ownership still keeps storage alive through completion. */
+            ExAcquireResourceSharedLite(&Vcb->IoResource, TRUE);
+            if ((Vcb->Flags & VCB_DEVICE_REMOVED) || Vcb->StorageDevice == NULL)
+                Status = STATUS_DEVICE_REMOVED;
+            else
+                Status = NtfsForwardIrpSynchronous(Vcb->StorageDevice, Irp);
+            ExReleaseResourceLite(&Vcb->IoResource);
+            return Status;
+    }
+
     ExAcquireResourceExclusiveLite(&Vcb->IoResource, TRUE);
     ExAcquireResourceExclusiveLite(&Vcb->DirResource, TRUE);
     StorageDevice = Vcb->StorageDevice;
