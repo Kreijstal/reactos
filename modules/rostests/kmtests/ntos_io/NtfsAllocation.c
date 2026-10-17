@@ -113,6 +113,21 @@ TestCrowdedGrowth(PCWSTR Root, ULONG StreamCount)
     for (j = 0; j < sizeof(ReadBack); j++) if (ReadBack[j] != 0) Zero = FALSE;
     ok(Zero, "newly initialized allocation is not zero\n");
 
+    /* NTFS truncates to the cluster-rounded allocation, unlike FAT's
+     * byte-exact allocation shrink (MS-FSA 2.1.5.15.1, footnote 178). */
+    Status = Reserve(File, 2 * (ULONGLONG)ClusterSize + 1);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtQueryInfo(File, &After, sizeof(After), FileStandardInformation, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(After.EndOfFile.QuadPart, 3 * (ULONGLONG)ClusterSize);
+    ok_eq_longlong(After.AllocationSize.QuadPart, 3 * (ULONGLONG)ClusterSize);
+    Status = Reserve(File, 3 * (ULONGLONG)ClusterSize - 1);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtQueryInfo(File, &After, sizeof(After), FileStandardInformation, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(After.EndOfFile.QuadPart, 3 * (ULONGLONG)ClusterSize);
+    ok_eq_longlong(After.AllocationSize.QuadPart, 3 * (ULONGLONG)ClusterSize);
+
     Status = SetSize(File, 1);
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status)) goto Cleanup;
