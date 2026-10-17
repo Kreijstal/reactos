@@ -125,6 +125,7 @@ typedef struct
     ULONG BitmapSize;
     RTL_BITMAP ClusterBitmap;
     ULONGLONG FreeClusterCount;
+    BOOLEAN DeferVolumeBitmapWrites; /* only during extend, with BitmapResource exclusive */
 
     KSPIN_LOCK FcbListLock;
     LIST_ENTRY FcbListHead;
@@ -2415,6 +2416,9 @@ NtfsLoadVolumeBitmap(
 VOID
 NtfsFreeVolumeBitmap(
     _In_ PDEVICE_EXTENSION DeviceExt);
+
+NTSTATUS
+NtfsExtendVolumeBitmap(PDEVICE_EXTENSION Vcb, ULONG NewClusterCount, PBOOLEAN MetadataTouched);
 
 NTSTATUS
 NtfsWriteVolumeBitmap(

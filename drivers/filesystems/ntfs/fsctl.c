@@ -446,6 +446,8 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     NTSTATUS Status;
     BOOLEAN Lookaside = FALSE;
     BOOLEAN MftResources = FALSE;
+    GET_LENGTH_INFORMATION VolumeLength;
+    ULONG LengthSize = sizeof(VolumeLength);
 
     DPRINT("NtfsMountVolume() called\n");
 
@@ -562,9 +564,13 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
 
     Fcb->Flags = FCB_IS_VOLUME_STREAM;
 
-    Fcb->RFCB.FileSize.QuadPart = Vcb->NtfsInfo.SectorCount * Vcb->NtfsInfo.BytesPerSector;
-    Fcb->RFCB.ValidDataLength.QuadPart = Vcb->NtfsInfo.SectorCount * Vcb->NtfsInfo.BytesPerSector;
-    Fcb->RFCB.AllocationSize.QuadPart = Vcb->NtfsInfo.SectorCount * Vcb->NtfsInfo.BytesPerSector; /* Correct? */
+    Status = NtfsDeviceIoControl(Vcb->StorageDevice, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0,
+                                  &VolumeLength, &LengthSize, FALSE);
+    if (!NT_SUCCESS(Status))
+        goto ByeBye;
+    Fcb->RFCB.FileSize = VolumeLength.Length;
+    Fcb->RFCB.ValidDataLength = VolumeLength.Length;
+    Fcb->RFCB.AllocationSize = VolumeLength.Length;
 
 //    Fcb->Entry.ExtentLocationL = 0;
 //    Fcb->Entry.DataLengthL = DeviceExt->CdInfo.VolumeSpaceSize * BLOCKSIZE;
@@ -707,11 +713,13 @@ GetNfsVolumeData(PDEVICE_EXTENSION DeviceExt,
     if (Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(NTFS_VOLUME_DATA_BUFFER))
         return STATUS_BUFFER_TOO_SMALL;
 
+    ExAcquireResourceSharedLite(&DeviceExt->BitmapResource, TRUE);
     DataBuffer->VolumeSerialNumber.QuadPart = DeviceExt->NtfsInfo.SerialNumber;
     DataBuffer->NumberSectors.QuadPart = DeviceExt->NtfsInfo.SectorCount;
     DataBuffer->TotalClusters.QuadPart = DeviceExt->NtfsInfo.ClusterCount;
     DataBuffer->FreeClusters.QuadPart = NtfsGetFreeClusters(DeviceExt);
     DataBuffer->TotalReserved.QuadPart = 0LL; // FIXME
+    ExReleaseResourceLite(&DeviceExt->BitmapResource);
     DataBuffer->BytesPerSector = DeviceExt->NtfsInfo.BytesPerSector;
     DataBuffer->BytesPerCluster = DeviceExt->NtfsInfo.BytesPerCluster;
     DataBuffer->BytesPerFileRecordSegment = DeviceExt->NtfsInfo.BytesPerFileRecord;
@@ -2060,6 +2068,124 @@ NtfsMarkVolumeDirty(PDEVICE_EXTENSION DeviceExt,
     return NtfsSetVolumeFlags(DeviceExt, NTFS_VOLUME_FLAG_DIRTY);
 }
 
+static NTSTATUS
+NtfsFlushVolumeStream(PDEVICE_EXTENSION Vcb)
+{
+    IO_STATUS_BLOCK IoStatus;
+
+    CcFlushCache(Vcb->StreamFileObject->SectionObjectPointer, NULL, 0, &IoStatus);
+    if (!NT_SUCCESS(IoStatus.Status))
+        return IoStatus.Status;
+    return NtfsFlushDevice(Vcb->StorageDevice);
+}
+
+/* FSCTL_EXTEND_VOLUME supplies the new partition-relative sector count.
+ * NTFS keeps the last sector (the backup boot sector) outside that count in
+ * its allocation geometry: the BPB stores NumberOfSectors - 1. */
+static NTSTATUS
+NtfsExtendVolume(PDEVICE_EXTENSION Vcb, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PNTFS_FCB Fcb = Stack->FileObject->FsContext, StreamFcb;
+    GET_LENGTH_INFORMATION Length;
+    ULONG LengthSize = sizeof(Length);
+    ULONG SectorSize = Vcb->NtfsInfo.BytesPerSector;
+    ULONGLONG NumberOfSectors, NewClusters;
+    PBOOT_SECTOR BootSector = NULL;
+    BOOLEAN PrimaryTouched = FALSE, MetadataTouched = FALSE;
+    NTSTATUS Status;
+
+    if (!(Fcb->Flags & FCB_IS_VOLUME))
+        return STATUS_INVALID_PARAMETER;
+    Status = NtfsCaptureFsctlInput(Irp, &NumberOfSectors, sizeof(NumberOfSectors));
+    if (!NT_SUCCESS(Status))
+        return Status;
+    if (!NtfsGlobalData->EnableWriteSupport)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+    if (!SeSinglePrivilegeCheck(RtlConvertLongToLuid(SE_MANAGE_VOLUME_PRIVILEGE), Irp->RequestorMode))
+        return STATUS_PRIVILEGE_NOT_HELD;
+
+    ExAcquireResourceExclusiveLite(&Vcb->DirResource, TRUE);
+    ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
+    Status = NtfsDeviceIoControl(Vcb->StorageDevice, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0,
+                                  &Length, &LengthSize, FALSE);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    ASSERT(SectorSize != 0 && Vcb->NtfsInfo.SectorsPerCluster != 0);
+    if (NumberOfSectors <= Vcb->NtfsInfo.SectorCount + 1 ||
+        NumberOfSectors - (Vcb->NtfsInfo.SectorCount + 1) < Vcb->NtfsInfo.SectorsPerCluster ||
+        NumberOfSectors > (ULONGLONG)Length.Length.QuadPart / SectorSize)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto Cleanup;
+    }
+    NewClusters = (NumberOfSectors - 1) / Vcb->NtfsInfo.SectorsPerCluster;
+    if (NewClusters <= Vcb->NtfsInfo.ClusterCount || NewClusters > MAXULONG)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto Cleanup;
+    }
+    BootSector = ExAllocatePoolWithTag(NonPagedPool, SectorSize, TAG_NTFS);
+    if (BootSector == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+    Status = NtfsReadDiskCached(Vcb, 0, SectorSize, (PUCHAR)BootSector);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    BootSector->EBPB.SectorCount = NumberOfSectors - 1;
+
+    /* The internal stream represents raw partition I/O. Expand its cache
+     * view before writing the new backup sector; allocation remains bounded
+     * by the old ClusterBitmap until the final publication below. */
+    StreamFcb = Vcb->StreamFileObject->FsContext;
+    ExAcquireResourceExclusiveLite(&StreamFcb->MainResource, TRUE);
+    StreamFcb->RFCB.FileSize = Length.Length;
+    StreamFcb->RFCB.AllocationSize = Length.Length;
+    StreamFcb->RFCB.ValidDataLength = Length.Length;
+    CcSetFileSizes(Vcb->StreamFileObject, (PCC_FILE_SIZES)&StreamFcb->RFCB.AllocationSize);
+    ExReleaseResourceLite(&StreamFcb->MainResource);
+
+    ExAcquireResourceExclusiveLite(&Vcb->MftAllocationResource, TRUE);
+    ExAcquireResourceExclusiveLite(&Vcb->BitmapResource, TRUE);
+    Status = NtfsWriteDiskCached(Vcb, (NumberOfSectors - 1) * SectorSize,
+                                  SectorSize, (PUCHAR)BootSector);
+    if (NT_SUCCESS(Status))
+        Status = NtfsFlushVolumeStream(Vcb);
+    if (NT_SUCCESS(Status))
+        Status = NtfsExtendVolumeBitmap(Vcb, (ULONG)NewClusters, &MetadataTouched);
+    if (NT_SUCCESS(Status))
+        Status = NtfsFlushVolumeStream(Vcb);
+    if (NT_SUCCESS(Status))
+    {
+        PrimaryTouched = TRUE;
+        Status = NtfsWriteDiskCached(Vcb, 0, SectorSize, (PUCHAR)BootSector);
+    }
+    if (NT_SUCCESS(Status))
+        Status = NtfsFlushVolumeStream(Vcb);
+    if (NT_SUCCESS(Status))
+    {
+        RtlInitializeBitMap(&Vcb->ClusterBitmap, Vcb->BitmapBuffer, (ULONG)NewClusters);
+        Vcb->FreeClusterCount = RtlNumberOfClearBits(&Vcb->ClusterBitmap);
+        Vcb->NtfsInfo.ClusterCount = NewClusters;
+        Vcb->NtfsInfo.SectorCount = NumberOfSectors - 1;
+        Fcb->RFCB.FileSize.QuadPart = (NumberOfSectors - 1) * SectorSize;
+        Fcb->RFCB.AllocationSize = Fcb->RFCB.FileSize;
+        Fcb->RFCB.ValidDataLength = Fcb->RFCB.FileSize;
+    }
+    if (!NT_SUCCESS(Status) && (PrimaryTouched || MetadataTouched))
+        NtfsMarkVolumeCorrupt(Vcb);
+    ExReleaseResourceLite(&Vcb->BitmapResource);
+    ExReleaseResourceLite(&Vcb->MftAllocationResource);
+Cleanup:
+    if (BootSector != NULL)
+        ExFreePoolWithTag(BootSector, TAG_NTFS);
+    ExReleaseResourceLite(&Fcb->MainResource);
+    ExReleaseResourceLite(&Vcb->DirResource);
+    return Status;
+}
+
 static
 NTSTATUS
 NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
@@ -2075,7 +2201,6 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
     DeviceExt = DeviceObject->DeviceExtension;
     switch (Stack->Parameters.FileSystemControl.FsControlCode)
     {
-        case FSCTL_EXTEND_VOLUME:
         //case FSCTL_GET_RETRIEVAL_POINTER_BASE:
         //case FSCTL_LOOKUP_STREAM_FROM_CLUSTER:
         case FSCTL_MARK_HANDLE:
@@ -2084,6 +2209,10 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
             UNIMPLEMENTED;
             DPRINT1("Unimplemented user request: %x\n", Stack->Parameters.FileSystemControl.FsControlCode);
             Status = STATUS_NOT_IMPLEMENTED;
+            break;
+
+        case FSCTL_EXTEND_VOLUME:
+            Status = NtfsExtendVolume(DeviceExt, Irp);
             break;
 
         case FSCTL_LOCK_VOLUME:
