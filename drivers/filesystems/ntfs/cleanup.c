@@ -178,7 +178,7 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
 
         ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
 
-        if (!(DeviceExt->Flags & VCB_DEVICE_REMOVED))
+        if (!(DeviceExt->Flags & (VCB_DEVICE_REMOVED | VCB_VOLUME_READ_ONLY)))
             NtfsApplyDeleteOnClose(DeviceExt, Fcb, FileObject);
 
         NtfsUncountOpen(DeviceExt, Fcb, FileObject);
@@ -203,7 +203,7 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
          * manager drops its pages while there are still clusters to write them back to. */
         if (Fcb->OpenHandleCount == 0 &&
             BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING) &&
-            !(DeviceExt->Flags & VCB_DEVICE_REMOVED))
+            !(DeviceExt->Flags & (VCB_DEVICE_REMOVED | VCB_VOLUME_READ_ONLY)))
         {
             DeletePending = TRUE;
 
@@ -218,7 +218,7 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
         if (!DeletePending &&
             ((FileObject->Flags & FO_FILE_MODIFIED) ||
              (((PNTFS_CCB)FileObject->FsContext2)->Flags & CCB_UPDATE_CHANGE_TIME)) &&
-            !(DeviceExt->Flags & (VCB_VOLUME_DISMOUNTED | VCB_DEVICE_REMOVED)))
+            !(DeviceExt->Flags & (VCB_VOLUME_DISMOUNTED | VCB_DEVICE_REMOVED | VCB_VOLUME_READ_ONLY)))
         {
             NTSTATUS Status = NtfsStampWriteTimes(DeviceExt, Fcb, FileObject);
             if (!NT_SUCCESS(Status))
@@ -229,7 +229,7 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
         if (Fcb->OpenHandleCount == 0 &&
             !DeletePending &&
             !NtfsFCBIsDirectory(Fcb) &&
-            !(DeviceExt->Flags & (VCB_VOLUME_DISMOUNTED | VCB_DEVICE_REMOVED)) &&
+            !(DeviceExt->Flags & (VCB_VOLUME_DISMOUNTED | VCB_DEVICE_REMOVED | VCB_VOLUME_READ_ONLY)) &&
             Fcb->RFCB.AllocationSize.QuadPart > (LONGLONG)ROUND_UP(Fcb->RFCB.FileSize.QuadPart, DeviceExt->NtfsInfo.BytesPerCluster))
         {
             NTSTATUS Status;
@@ -325,7 +325,7 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
 
         /* The last handle closes the file for the change journal */
         if (Fcb->OpenHandleCount == 0 && !DeletePending && Fcb->UsnReasons != 0 &&
-            !(DeviceExt->Flags & VCB_DEVICE_REMOVED))
+            !(DeviceExt->Flags & (VCB_DEVICE_REMOVED | VCB_VOLUME_READ_ONLY)))
             NtfsPostUsnClose(DeviceExt, Fcb, 0);
 
         if (Fcb->OpenHandleCount != 0)

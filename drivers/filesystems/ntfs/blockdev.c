@@ -102,6 +102,9 @@ NtfsWriteDiskCached(PDEVICE_EXTENSION Vcb,
     if (Vcb->Flags & VCB_DEVICE_REMOVED)
         return STATUS_DEVICE_REMOVED;
 
+    if (Vcb->Flags & VCB_VOLUME_READ_ONLY)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+
     if (Vcb->StreamFileObject == NULL ||
         Vcb->StreamFileObject->PrivateCacheMap == NULL)
     {

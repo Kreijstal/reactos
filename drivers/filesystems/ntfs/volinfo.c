@@ -548,7 +548,7 @@ NtfsGetFsAttributeInformation(PDEVICE_EXTENSION DeviceExt,
     FsAttributeInfo->FileSystemAttributes |= FILE_SUPPORTS_EXTENDED_ATTRIBUTES | FILE_SUPPORTS_SPARSE_FILES |
                                                  FILE_FILE_COMPRESSION;
     /* Writes are refused everywhere unless write support was enabled */
-    if (!NtfsGlobalData->EnableWriteSupport)
+    if (!NtfsGlobalData->EnableWriteSupport || (DeviceExt->Flags & VCB_VOLUME_READ_ONLY))
         FsAttributeInfo->FileSystemAttributes |= FILE_READ_ONLY_VOLUME;
     FsAttributeInfo->MaximumComponentNameLength = NTFS_MAX_NAME_LENGTH;
 
