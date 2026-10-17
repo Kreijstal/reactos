@@ -559,8 +559,8 @@ int chk_load_upcase(CHK_CTX *c, NTFS_CHK_RESULT *res)
         free(val);
     chk_add_issue(res, CHK_ERR_UPCASE_BAD, size, 0, 0);
     {
-        extern void ntfs_upcase_table_build(WCHAR *uc, ULONG uc_len);
-        ntfs_upcase_table_build(c->UpCase, 65536);
+        extern void NtfsChkBuildUpcase(WCHAR *uc, ULONG uc_len);
+        NtfsChkBuildUpcase(c->UpCase, 65536);
     }
     return 0;
 }

@@ -2,174 +2,315 @@
  * COPYRIGHT:   See COPYING in the top level directory
  * PROJECT:     ReactOS NTFS FS library
  * FILE:        lib/fslib/ntfslib/ntfslib.c
- * PURPOSE:     NTFS format and chkdsk implementation
- * PROGRAMMERS: Pierre Schweitzer (original stub)
- *              winmkntfs contributors (format implementation)
- * LICENSE:     GPL-2.0-or-later
+ * PURPOSE:     NTFS lib
+ * PROGRAMMERS: Pierre Schweitzer, Klachkov Valery
  */
 
-#include <ndk/umtypes.h>
-#include <ndk/iofuncs.h>
-#include <ndk/obfuncs.h>
-#include <ndk/rtlfuncs.h>
-#include <fmifs/fmifs.h>
+/* INCLUDES ******************************************************************/
 
-#include "mkntfs.h"
-#include "chkdsk.h"
+#include "ntfslib.h"
 
 #define NDEBUG
 #include <debug.h>
 
-/* ============================================================
- * I/O adapter: bridges MKNTFS_IO callbacks to NtWriteFile/NtReadFile
- * ============================================================ */
 
-typedef struct _NTFS_FORMAT_CONTEXT {
-    HANDLE FileHandle;
-    PFMIFSCALLBACK Callback;
-    ULONG Percent;
-} NTFS_FORMAT_CONTEXT;
+/* GLOBALS *******************************************************************/
 
-#define SECTOR_SIZE 512
+// The single, shared instance of the format state (declared extern in the header).
+NTFS_FORMAT_DATA NtfsFormatData;
 
-static int
-NtfsFormatWrite(void *ctx, ULONGLONG offset, const void *buf, ULONG length)
+
+/* FUNCTIONS *****************************************************************/
+
+NTSTATUS
+NtfsWriteFormatBytes(ULONGLONG ByteOffset, PVOID Buffer, ULONG Length)
 {
-    NTFS_FORMAT_CONTEXT *fctx = (NTFS_FORMAT_CONTEXT *)ctx;
-    IO_STATUS_BLOCK IoStatusBlock;
-    LARGE_INTEGER FileOffset;
+    LARGE_INTEGER Offset;
+    IO_STATUS_BLOCK Iosb;
     NTSTATUS Status;
-    ULONG AlignedLength;
 
-    /* Direct disk I/O requires sector-aligned offset and length */
-    AlignedLength = (length + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
+    Offset.QuadPart = (LONGLONG)ByteOffset;
+    Status = NtWriteFile(DISK_HANDLE, NULL, NULL, NULL, &Iosb,
+                         Buffer, Length, &Offset, NULL);
+    if (NT_SUCCESS(Status) && Iosb.Information != Length)
+        Status = STATUS_DEVICE_DATA_ERROR;
+    return Status;
+}
 
-    if (AlignedLength != length || (offset & (SECTOR_SIZE - 1)))
+VOID
+NtfsGetSystemTimeAsFileTime(OUT PFILETIME lpFileTime)
+{
+    LARGE_INTEGER SystemTime;
+
+    do
     {
-        /* Unaligned: read-modify-write */
-        ULONGLONG AlignedOffset = offset & ~(ULONGLONG)(SECTOR_SIZE - 1);
-        ULONG PrePad = (ULONG)(offset - AlignedOffset);
-        ULONG TotalLen = (PrePad + length + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
-        PUCHAR TempBuf;
+        SystemTime.HighPart = SharedUserData->SystemTime.High1Time;
+        SystemTime.LowPart = SharedUserData->SystemTime.LowPart;
+    }
+    while (SystemTime.HighPart != SharedUserData->SystemTime.High2Time);
 
-        TempBuf = RtlAllocateHeap(RtlGetProcessHeap(), 0, TotalLen);
-        if (!TempBuf) return -1;
+    lpFileTime->dwLowDateTime = SystemTime.LowPart;
+    lpFileTime->dwHighDateTime = SystemTime.HighPart;
+}
 
-        /* Read existing sector data */
-        FileOffset.QuadPart = (LONGLONG)AlignedOffset;
-        Status = NtReadFile(fctx->FileHandle, NULL, NULL, NULL,
-                            &IoStatusBlock, TempBuf, TotalLen,
-                            &FileOffset, NULL);
-        if (!NT_SUCCESS(Status))
-            RtlZeroMemory(TempBuf, TotalLen);
+BYTE
+GetSectorsPerCluster(VOID)
+{
+    // Default NTFS cluster size selection based on the volume size,
+    // mirroring the classic Windows defaults (for 512-byte sectors):
+    //   <= 512 MB : 512 B, <= 1 GB : 1 KB, <= 2 GB : 2 KB, else 4 KB.
+    ULONGLONG Size = DISK_LEN->Length.QuadPart;
+    ULONG     Bps  = BYTES_PER_SECTOR;
+    ULONG     ClusterBytes;
 
-        /* Overlay new data */
-        RtlCopyMemory(TempBuf + PrePad, buf, length);
+    if (Size <= (512ULL * 1024 * 1024))
+        ClusterBytes = 512;
+    else if (Size <= (1024ULL * 1024 * 1024))
+        ClusterBytes = 1024;
+    else if (Size <= (2048ULL * 1024 * 1024))
+        ClusterBytes = 2048;
+    else
+        ClusterBytes = 4096;
 
-        /* Write back */
-        Status = NtWriteFile(fctx->FileHandle, NULL, NULL, NULL,
-                             &IoStatusBlock, TempBuf, TotalLen,
-                             &FileOffset, NULL);
-        RtlFreeHeap(RtlGetProcessHeap(), 0, TempBuf);
+    if (ClusterBytes < Bps)
+        ClusterBytes = Bps;
+
+    return (BYTE)(ClusterBytes / Bps);
+}
+
+//
+// Encodes a record size (MFT record / index record) the way the NTFS boot
+// sector expects it: a positive value is a count of clusters per record; a
+// negative value -n means the record size is 2^n bytes (used when the record
+// is smaller than a cluster).
+//
+static
+CHAR
+EncodeRecordSize(IN ULONG RecordBytes,
+                 IN ULONG ClusterBytes)
+{
+    if (RecordBytes >= ClusterBytes)
+    {
+        return (CHAR)(RecordBytes / ClusterBytes);
     }
     else
     {
-        FileOffset.QuadPart = (LONGLONG)offset;
-        Status = NtWriteFile(fctx->FileHandle, NULL, NULL, NULL,
-                             &IoStatusBlock, (PVOID)buf, length,
-                             &FileOffset, NULL);
-    }
+        CHAR  Log = 0;
+        ULONG Value = RecordBytes;
 
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("NtWriteFile failed at offset 0x%I64x, length %lu: 0x%08x\n",
-                offset, length, Status);
-        return -1;
+        while (Value > 1)
+        {
+            Value >>= 1;
+            Log++;
+        }
+
+        return (CHAR)(-Log);
     }
-    return 0;
 }
 
-static int
-NtfsFormatRead(void *ctx, ULONGLONG offset, void *buf, ULONG length)
+#define CEIL_DIV(a, b) (((a) + (b) - 1) / (b))
+
+NTSTATUS
+ComputeLayout(IN ULONG ClusterSize)
 {
-    NTFS_FORMAT_CONTEXT *fctx = (NTFS_FORMAT_CONTEXT *)ctx;
-    IO_STATUS_BLOCK IoStatusBlock;
-    LARGE_INTEGER FileOffset;
-    NTSTATUS Status;
+    ULONG     Bps = BYTES_PER_SECTOR;
+    ULONGLONG VolumeBytes;
+    ULONGLONG VolumeSectors;
+    ULONG     Spc;
+    ULONG     C;
+    ULONGLONG Lcn;
 
-    if ((length & (SECTOR_SIZE - 1)) || (offset & (SECTOR_SIZE - 1)))
+    if (Bps < 512 || Bps > 4096 || (Bps & (Bps - 1)) != 0 ||
+        (ClusterSize != 0 && (ClusterSize < Bps || ClusterSize > 65536 ||
+                              (ClusterSize & (ClusterSize - 1)) != 0)))
+        return STATUS_INVALID_PARAMETER;
+
+    VolumeBytes   = DISK_LEN->Length.QuadPart;
+    VolumeSectors = VolumeBytes / Bps;
+
+    // Need at least the backup boot sector plus something to format.
+    if (VolumeSectors < 2)
+        return STATUS_INVALID_PARAMETER;
+
+    // Sectors per cluster
+    if (ClusterSize != 0)
     {
-        /* Unaligned read */
-        ULONGLONG AlignedOffset = offset & ~(ULONGLONG)(SECTOR_SIZE - 1);
-        ULONG PrePad = (ULONG)(offset - AlignedOffset);
-        ULONG TotalLen = (PrePad + length + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
-        PUCHAR TempBuf;
-
-        TempBuf = RtlAllocateHeap(RtlGetProcessHeap(), 0, TotalLen);
-        if (!TempBuf) return -1;
-
-        FileOffset.QuadPart = (LONGLONG)AlignedOffset;
-        Status = NtReadFile(fctx->FileHandle, NULL, NULL, NULL,
-                            &IoStatusBlock, TempBuf, TotalLen,
-                            &FileOffset, NULL);
-        if (NT_SUCCESS(Status))
-            RtlCopyMemory(buf, TempBuf + PrePad, length);
-
-        RtlFreeHeap(RtlGetProcessHeap(), 0, TempBuf);
+        Spc = ClusterSize / Bps;
+        if (Spc == 0)
+            Spc = 1;
     }
     else
     {
-        FileOffset.QuadPart = (LONGLONG)offset;
-        Status = NtReadFile(fctx->FileHandle, NULL, NULL, NULL,
-                            &IoStatusBlock, buf, length,
-                            &FileOffset, NULL);
+        Spc = GetSectorsPerCluster();
     }
 
-    if (!NT_SUCCESS(Status))
+    LAYOUT.SectorsPerCluster = Spc;
+    LAYOUT.BytesPerCluster   = Spc * Bps;
+    C = LAYOUT.BytesPerCluster;
+
+    // The last sector holds the backup boot sector and is not addressable.
+    LAYOUT.TotalSectors = VolumeSectors - 1;
+    LAYOUT.ClusterCount = LAYOUT.TotalSectors / Spc;
+    if (LAYOUT.ClusterCount == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    LAYOUT.ClustersPerMftRecord   = EncodeRecordSize(MFT_RECORD_SIZE, C);
+    LAYOUT.ClustersPerIndexRecord = EncodeRecordSize(INDEX_RECORD_SIZE, C);
+
+    //
+    // Metadata sizes (in clusters)
+    //
+
+    // $Boot is exactly the first 8192 bytes of the volume.
+    LAYOUT.BootClusters = (ULONG)CEIL_DIV(8192ULL, (ULONGLONG)C);
+
+    // $MFT: reserve a large MFT.
+    ULONGLONG MftBytes = VolumeBytes / 128;
+
+    if (MftBytes < (4ULL * 1024 * 1024))
+        MftBytes = 4ULL * 1024 * 1024;     // 4 MB min (~4096 records)
+    if (MftBytes > (32ULL * 1024 * 1024))
+        MftBytes = 32ULL * 1024 * 1024;    // 32 MB cap (~32768 records)
+
+    LAYOUT.MftAllocRecords = (ULONG)(MftBytes / MFT_RECORD_SIZE);
+    LAYOUT.MftClusters = (ULONG)CEIL_DIV((ULONGLONG)LAYOUT.MftAllocRecords * MFT_RECORD_SIZE, (ULONGLONG)C);
+
+    // $MFTMirr: the first four system records.
+    LAYOUT.MftMirrClusters = (ULONG)CEIL_DIV((ULONGLONG)MFT_MIRR_COUNT * MFT_RECORD_SIZE, (ULONGLONG)C);
+
+    // $LogFile: ~0.78% of the volume, clamped to [256 KB, 64 MB].
     {
-        DPRINT1("NtReadFile failed at offset 0x%I64x, length %lu: 0x%08x\n",
-                offset, length, Status);
-        return -1;
+        ULONGLONG LogBytes = VolumeBytes / 128;
+
+        if (LogBytes < (256ULL * 1024))
+            LogBytes = 256ULL * 1024;
+        if (LogBytes > (64ULL * 1024 * 1024))
+            LogBytes = 64ULL * 1024 * 1024;
+
+        LAYOUT.LogFileClusters = (ULONG)CEIL_DIV(LogBytes, (ULONGLONG)C);
     }
-    return 0;
+
+    // $Bitmap: one bit per cluster. The stream length must be a multiple of
+    // 8 bytes (NTFS tracks the bitmap in 64-bit groups). If it isn't, the OS
+    // rounds it up on first write and zero-fills the gap, leaving phantom
+    // trailing clusters marked free. Round up here; WriteMetafiles matches.
+    {
+        ULONGLONG BitmapBytes = CEIL_DIV(LAYOUT.ClusterCount, 8ULL);
+        BitmapBytes = (BitmapBytes + 7) & ~7ULL;
+        LAYOUT.BitmapClusters = (ULONG)CEIL_DIV(BitmapBytes, (ULONGLONG)C);
+    }
+
+    // $UpCase: 128 KB (65536 UTF-16 entries).
+    LAYOUT.UpCaseClusters = (ULONG)CEIL_DIV(128ULL * 1024, (ULONGLONG)C);
+
+    // $AttrDef: reserve 4 KB (the attribute-definition table is ~2.5 KB).
+    LAYOUT.AttrDefClusters = (ULONG)CEIL_DIV(4096ULL, (ULONGLONG)C);
+
+    // $MFT's own allocation bitmap: one bit per reserved MFT record.
+    {
+        ULONGLONG MftBmpBytes = CEIL_DIV((ULONGLONG)LAYOUT.MftAllocRecords, 8ULL);
+        LAYOUT.MftBitmapClusters = (ULONG)CEIL_DIV(MftBmpBytes, (ULONGLONG)C);
+    }
+
+    // Root directory $I30 index: one INDX block.
+    LAYOUT.RootIdxClusters = (ULONG)CEIL_DIV((ULONGLONG)INDEX_RECORD_SIZE, (ULONGLONG)C);
+
+    // $Secure:$SDS: the complete descriptor set and its mirror 256 KiB later.
+    LAYOUT.SdsClusters = (ULONG)CEIL_DIV((ULONGLONG)NTFS_SDS_MIRROR +
+                                        NtfsGetDefaultSdsLength(), (ULONGLONG)C);
+
+    // $Secure:$SDH: one INDX block (large view index).
+    LAYOUT.SdhIdxClusters = (ULONG)CEIL_DIV((ULONGLONG)INDEX_RECORD_SIZE, (ULONGLONG)C);
+
+    // $Extend / TxF payload streams (contents zero-initialized on a fresh volume;
+    // chkdsk validates the metadata, not the CLFS log data).
+    LAYOUT.TopsTClusters   = (ULONG)CEIL_DIV(1024ULL * 1024,     (ULONGLONG)C);  // 1 MiB
+    LAYOUT.BlfClusters     = (ULONG)CEIL_DIV(64ULL * 1024,       (ULONGLONG)C);  // 64 KiB
+    LAYOUT.Cont1Clusters   = (ULONG)CEIL_DIV(2ULL * 1024 * 1024, (ULONGLONG)C);  // 2 MiB
+    LAYOUT.Cont2Clusters   = (ULONG)CEIL_DIV(2ULL * 1024 * 1024, (ULONGLONG)C);  // 2 MiB
+    LAYOUT.DeletedIdxClusters = (ULONG)CEIL_DIV(64ULL * 1024,    (ULONGLONG)C);  // 64 KiB
+
+    //
+    // Placement: everything contiguous from the start of the volume.
+    //
+    Lcn = 0;
+    LAYOUT.BootLcn      = Lcn; Lcn += LAYOUT.BootClusters;
+    LAYOUT.MftLcn       = Lcn; Lcn += LAYOUT.MftClusters;
+    LAYOUT.MftMirrLcn   = Lcn; Lcn += LAYOUT.MftMirrClusters;
+    LAYOUT.LogFileLcn   = Lcn; Lcn += LAYOUT.LogFileClusters;
+    LAYOUT.BitmapLcn    = Lcn; Lcn += LAYOUT.BitmapClusters;
+    LAYOUT.UpCaseLcn    = Lcn; Lcn += LAYOUT.UpCaseClusters;
+    LAYOUT.AttrDefLcn   = Lcn; Lcn += LAYOUT.AttrDefClusters;
+    LAYOUT.MftBitmapLcn = Lcn; Lcn += LAYOUT.MftBitmapClusters;
+    LAYOUT.RootIdxLcn   = Lcn; Lcn += LAYOUT.RootIdxClusters;
+    LAYOUT.SdsLcn       = Lcn; Lcn += LAYOUT.SdsClusters;
+    LAYOUT.SdhIdxLcn    = Lcn; Lcn += LAYOUT.SdhIdxClusters;
+    LAYOUT.TopsTLcn     = Lcn; Lcn += LAYOUT.TopsTClusters;
+    LAYOUT.BlfLcn       = Lcn; Lcn += LAYOUT.BlfClusters;
+    LAYOUT.Cont1Lcn     = Lcn; Lcn += LAYOUT.Cont1Clusters;
+    LAYOUT.Cont2Lcn     = Lcn; Lcn += LAYOUT.Cont2Clusters;
+    LAYOUT.DeletedIdxLcn = Lcn; Lcn += LAYOUT.DeletedIdxClusters;
+    LAYOUT.FirstFreeLcn = Lcn;
+
+    // The volume must be large enough to hold the metadata (plus slack).
+    if (LAYOUT.FirstFreeLcn + 16 >= LAYOUT.ClusterCount)
+    {
+        DPRINT1("Volume too small for NTFS: need %I64u clusters, have %I64u\n",
+                LAYOUT.FirstFreeLcn + 16, LAYOUT.ClusterCount);
+        return STATUS_DISK_FULL;
+    }
+
+    // Volume serial number
+    {
+        ULONG Seed = NtGetTickCount();
+        ULONG Hi   = RtlRandom(&Seed);
+        ULONG Lo   = RtlRandom(&Seed);
+        LAYOUT.SerialNumber = ((ULONGLONG)Hi << 32) | (ULONGLONG)Lo;
+    }
+
+    return STATUS_SUCCESS;
 }
 
-static int
-NtfsFormatFlush(void *ctx)
+//
+// Invalidates the primary and backup BPBs (the latter one sector past the
+// addressable area). Called first, right after lock/dismount: from that moment
+// the volume reads as RAW, so an interrupted format cannot leave a partially
+// recognizable mix of stale and new metadata. The new boot sector is written
+// last, once all metadata is complete.
+//
+static
+NTSTATUS
+InvalidateStaleBootSectors(VOID)
 {
-    NTFS_FORMAT_CONTEXT *fctx = (NTFS_FORMAT_CONTEXT *)ctx;
-    IO_STATUS_BLOCK IoStatusBlock;
+    NTSTATUS        Status;
+    LARGE_INTEGER   Offset;
+    PBYTE           Sector;
+    ULONG           Bps = BYTES_PER_SECTOR;
 
-    NtFlushBuffersFile(fctx->FileHandle, &IoStatusBlock);
-    return 0;
+    Sector = RtlAllocateHeap(RtlGetProcessHeap(), 0, Bps);
+    if (!Sector)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    RtlZeroMemory(Sector, Bps);
+    /* Invalidate the BPB while retaining the disk boot signature. */
+    Sector[510] = 0x55;
+    Sector[511] = 0xAA;
+
+    // Primary boot sector
+    Offset.QuadPart = 0LL;
+    Status = NtfsWriteFormatBytes(Offset.QuadPart, Sector, Bps);
+
+    // Backup boot sector
+    if (NT_SUCCESS(Status))
+    {
+        Offset.QuadPart = (LONGLONG)TOTAL_SECTORS * Bps;
+        Status = NtfsWriteFormatBytes(Offset.QuadPart, Sector, Bps);
+    }
+
+    FREE(Sector);
+
+    return Status;
 }
-
-/* ============================================================
- * chkdsk message sink: forward core text to the fmifs callback
- *
- * The checker emits chkdsk-style stage banners and a final summary through
- * NTFS_CHK_OPTIONS.Message.  We forward each line as an OUTPUT command with a
- * TEXTOUTPUT payload, exactly the shape autochk/chkdsk.exe's ChkdskCallback
- * consumes (Command == OUTPUT, Argument == PTEXTOUTPUT).
- * ============================================================ */
-
-static void
-NtfsChkMessage(void *ctx, const char *msg)
-{
-    NTFS_FORMAT_CONTEXT *cctx = (NTFS_FORMAT_CONTEXT *)ctx;
-    TEXTOUTPUT Output;
-
-    if (cctx == NULL || cctx->Callback == NULL || msg == NULL)
-        return;
-
-    Output.Lines = 1;
-    Output.Output = (PCHAR)msg;
-    cctx->Callback(OUTPUT, 0, (PVOID)&Output);
-}
-
-/* ============================================================
- * NtfsFormat - PULIB_FORMAT implementation
- * ============================================================ */
 
 BOOLEAN
 NTAPI
@@ -182,359 +323,194 @@ NtfsFormat(
     IN PUNICODE_STRING Label,
     IN ULONG ClusterSize)
 {
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    DISK_GEOMETRY DiskGeometry;
-    IO_STATUS_BLOCK Iosb;
-    HANDLE FileHandle;
-    PARTITION_INFORMATION_EX PartitionInfo;
-    NTSTATUS Status, LockStatus;
-    NTFS_FORMAT_CONTEXT FormatContext;
-    MKNTFS_IO Io;
-    MKNTFS_PARAMS Params;
-    ULONGLONG PartitionLength;
-    int Result;
-    BOOLEAN VolumeLocked = FALSE;
+    HANDLE                 DiskHandle;
+    OBJECT_ATTRIBUTES      Attributes;
+    IO_STATUS_BLOCK        Iosb;
+    GET_LENGTH_INFORMATION LengthInformation;
+    DISK_GEOMETRY          DiskGeometry;
+    NTSTATUS               Status;
+    BOOLEAN                Result = FALSE;
+    BOOLEAN                VolumeLocked = FALSE;
 
-    DPRINT("NtfsFormat(DriveRoot '%wZ')\n", DriveRoot);
+    DPRINT1("NtfsFormat(DriveRoot '%wZ')\n", DriveRoot);
 
+    // We always perform a quick format (metadata only); the volume body is
+    // not zeroed.
+    UNREFERENCED_PARAMETER(QuickFormat);
     UNREFERENCED_PARAMETER(BackwardCompatible);
     UNREFERENCED_PARAMETER(MediaType);
 
-    /* Report 0% progress */
-    if (Callback != NULL)
-    {
-        ULONG Percent = 0;
-        Callback(PROGRESS, 0, (PVOID)&Percent);
-    }
+    InitializeObjectAttributes(&Attributes, DriveRoot, 0, NULL, NULL);
 
-    /* Open the partition */
-    InitializeObjectAttributes(&ObjectAttributes,
-                               DriveRoot,
-                               0,
-                               NULL,
-                               NULL);
-
-    Status = NtOpenFile(&FileHandle,
+    // Open volume
+    Status = NtOpenFile(&DiskHandle,
                         FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE,
-                        &ObjectAttributes,
+                        &Attributes,
                         &Iosb,
                         FILE_SHARE_READ,
                         FILE_SYNCHRONOUS_IO_ALERT);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("NtOpenFile() failed with status 0x%08x\n", Status);
+        DPRINT1("NtOpenFile() failed with status 0x%.08x\n", Status);
         return FALSE;
     }
 
-    /* Query disk geometry */
-    Status = NtDeviceIoControlFile(FileHandle,
-                                   NULL, NULL, NULL,
+    // Get length info
+    Status = NtDeviceIoControlFile(DiskHandle,
+                                   NULL,
+                                   NULL,
+                                   NULL,
+                                   &Iosb,
+                                   IOCTL_DISK_GET_LENGTH_INFO,
+                                   NULL,
+                                   0,
+                                   &LengthInformation,
+                                   sizeof(GET_LENGTH_INFORMATION));
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("IOCTL_DISK_GET_LENGTH_INFO failed with status 0x%.08x\n", Status);
+        NtClose(DiskHandle);
+        return FALSE;
+    }
+
+    // Get disk geometry
+    Status = NtDeviceIoControlFile(DiskHandle,
+                                   NULL,
+                                   NULL,
+                                   NULL,
                                    &Iosb,
                                    IOCTL_DISK_GET_DRIVE_GEOMETRY,
-                                   NULL, 0,
+                                   NULL,
+                                   0,
                                    &DiskGeometry,
-                                   sizeof(DISK_GEOMETRY));
+                                   sizeof(DiskGeometry));
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("IOCTL_DISK_GET_DRIVE_GEOMETRY failed: 0x%08x\n", Status);
-        NtClose(FileHandle);
+        DPRINT1("IOCTL_DISK_GET_DRIVE_GEOMETRY failed with status 0x%.08x\n", Status);
+        NtClose(DiskHandle);
         return FALSE;
     }
 
-    /* Query partition info */
-    if (DiskGeometry.MediaType == FixedMedia)
+    // Initialize progress bar
+    if (Callback)
     {
-        Status = NtDeviceIoControlFile(FileHandle,
-                                       NULL, NULL, NULL,
-                                       &Iosb,
-                                       IOCTL_DISK_GET_PARTITION_INFO_EX,
-                                       NULL, 0,
-                                       &PartitionInfo,
-                                       sizeof(PARTITION_INFORMATION_EX));
-        if (!NT_SUCCESS(Status))
-        {
-            DPRINT1("IOCTL_DISK_GET_PARTITION_INFO_EX failed: 0x%08x\n", Status);
-            NtClose(FileHandle);
-            return FALSE;
-        }
-        PartitionLength = (ULONGLONG)PartitionInfo.PartitionLength.QuadPart;
+        ULONG pc = 0;
+        Callback(PROGRESS, 0, (PVOID)&pc);
+    }
+
+    // Setup global data
+    DISK_HANDLE = DiskHandle;
+    DISK_GEO    = &DiskGeometry;
+    DISK_LEN    = &LengthInformation;
+    LABEL       = Label;
+
+
+    NtfsFormatData.HiddenSectors = 0;
+    PARTITION_INFORMATION_EX PartitionInfo;
+    NTSTATUS PartStatus =
+        NtDeviceIoControlFile(DiskHandle, NULL, NULL, NULL, &Iosb,
+                              IOCTL_DISK_GET_PARTITION_INFO_EX,
+                              NULL, 0,
+                              &PartitionInfo, sizeof(PartitionInfo));
+    if (NT_SUCCESS(PartStatus) && DiskGeometry.BytesPerSector != 0)
+    {
+        NtfsFormatData.HiddenSectors =
+                (ULONG)(PartitionInfo.StartingOffset.QuadPart / DiskGeometry.BytesPerSector);
     }
     else
     {
-        PartitionLength =
-            (ULONGLONG)DiskGeometry.Cylinders.QuadPart *
-            (ULONGLONG)DiskGeometry.TracksPerCylinder *
-            (ULONGLONG)DiskGeometry.SectorsPerTrack *
-            (ULONGLONG)DiskGeometry.BytesPerSector;
+        DPRINT1("IOCTL_DISK_GET_PARTITION_INFO_EX failed (0x%.08x); HiddenSectors=0\n", PartStatus);
     }
 
-    DPRINT("Partition length: %I64u bytes, sector size: %lu\n",
-           PartitionLength, DiskGeometry.BytesPerSector);
-
-    /* Lock volume */
-    LockStatus = NtFsControlFile(FileHandle,
-                                 NULL, NULL, NULL,
-                                 &Iosb,
-                                 FSCTL_LOCK_VOLUME,
-                                 NULL, 0, NULL, 0);
-    if (!NT_SUCCESS(LockStatus))
+    // Capture a single timestamp used for every record, so a file's timestamps
+    // match the copies stored in its parent directory's index entries.
     {
-        DPRINT1("WARNING: Failed to lock volume: 0x%x\n", LockStatus);
-        NtClose(FileHandle);
-        return FALSE;
+        LARGE_INTEGER SystemTime;
+        KeQuerySystemTime(&SystemTime);
+        NtfsFormatData.FormatTime = (ULONGLONG)SystemTime.QuadPart;
     }
+
+    // Compute the on-disk layout (cluster size, metadata placement, serial)
+    Status = ComputeLayout(ClusterSize);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ComputeLayout() failed with status 0x%.08x\n", Status);
+        goto end;
+    }
+
+    Status = NtFsControlFile(DiskHandle, NULL, NULL, NULL, &Iosb,
+                             FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0);
+    if (!NT_SUCCESS(Status))
+        goto end;
     VolumeLocked = TRUE;
 
-    /* Set up I/O callbacks */
-    FormatContext.FileHandle = FileHandle;
-    FormatContext.Callback = Callback;
-    FormatContext.Percent = 0;
+    Status = NtFsControlFile(DiskHandle, NULL, NULL, NULL, &Iosb,
+                             FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0);
+    if (!NT_SUCCESS(Status))
+        goto end;
 
-    Io.context = &FormatContext;
-    Io.write = NtfsFormatWrite;
-    Io.read = NtfsFormatRead;
-    Io.flush = NtfsFormatFlush;
-
-    /* Set up format parameters */
-    RtlZeroMemory(&Params, sizeof(Params));
-    Params.sector_size = DiskGeometry.BytesPerSector;
-    Params.total_sectors = PartitionLength / DiskGeometry.BytesPerSector;
-    Params.cluster_size = ClusterSize; /* 0 = auto */
-    if (DiskGeometry.MediaType == FixedMedia)
-        Params.hidden_sectors = (ULONG)(PartitionInfo.StartingOffset.QuadPart / DiskGeometry.BytesPerSector);
-
-    /* Convert volume label */
-    if (Label != NULL && Label->Length > 0)
-    {
-        Params.label = Label->Buffer;
-    }
-
-    /* Format! */
-    Result = mkntfs_format(&Io, &Params);
-
-    /* Report 100% progress */
-    if (Callback != NULL)
-    {
-        ULONG Percent = 100;
-        Callback(PROGRESS, 0, (PVOID)&Percent);
-    }
-
-    /* Dismount and unlock */
-    if (VolumeLocked)
-    {
-        LockStatus = NtFsControlFile(FileHandle,
-                                     NULL, NULL, NULL,
-                                     &Iosb,
-                                     FSCTL_DISMOUNT_VOLUME,
-                                     NULL, 0, NULL, 0);
-        if (!NT_SUCCESS(LockStatus))
-        {
-            DPRINT1("Failed to dismount volume: 0x%x\n", LockStatus);
-            Result = -1;
-        }
-
-        LockStatus = NtFsControlFile(FileHandle,
-                                     NULL, NULL, NULL,
-                                     &Iosb,
-                                     FSCTL_UNLOCK_VOLUME,
-                                     NULL, 0, NULL, 0);
-        if (!NT_SUCCESS(LockStatus))
-        {
-            DPRINT1("Failed to unlock volume: 0x%x\n", LockStatus);
-        }
-    }
-
-    NtClose(FileHandle);
-
-    DPRINT("NtfsFormat() done. Result: %d\n", Result);
-    return (Result == 0);
-}
-
-BOOLEAN
-NTAPI
-NtfsChkdsk(
-    IN PUNICODE_STRING DriveRoot,
-    IN PFMIFSCALLBACK Callback,
-    IN BOOLEAN FixErrors,
-    IN BOOLEAN Verbose,
-    IN BOOLEAN CheckOnlyIfDirty,
-    IN BOOLEAN ScanDrive,
-    IN PVOID pUnknown1,
-    IN PVOID pUnknown2,
-    IN PVOID pUnknown3,
-    IN PVOID pUnknown4,
-    IN PULONG ExitStatus)
-{
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    IO_STATUS_BLOCK Iosb;
-    HANDLE FileHandle;
-    NTSTATUS Status, LockStatus;
-    NTFS_FORMAT_CONTEXT IoContext;
-    MKNTFS_IO Io;
-    NTFS_CHK_OPTIONS Options;
-    NTFS_CHK_RESULT *Result;
-    ACCESS_MASK Access;
-    BOOLEAN VolumeLocked = FALSE;
-    BOOLEAN RepairDeclined = FALSE;
-    int Rc;
-
-    UNREFERENCED_PARAMETER(ScanDrive);
-    UNREFERENCED_PARAMETER(pUnknown1);
-    UNREFERENCED_PARAMETER(pUnknown2);
-    UNREFERENCED_PARAMETER(pUnknown3);
-    UNREFERENCED_PARAMETER(pUnknown4);
-
-    DPRINT("NtfsChkdsk(DriveRoot '%wZ', Fix %u, OnlyIfDirty %u)\n",
-           DriveRoot, FixErrors, CheckOnlyIfDirty);
-
-    if (Callback != NULL)
-    {
-        ULONG Percent = 0;
-        Callback(PROGRESS, 0, (PVOID)&Percent);
-    }
-
-    /* Keep the checker result off the stack; it owns a heap-grown issue list,
-     * so zero it here and release it through NtfsChkFreeResult() on every exit
-     * path -- including the ones taken before NtfsChkVolume() zeroes it. */
-    Result = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(NTFS_CHK_RESULT));
-    if (Result == NULL)
-    {
-        *ExitStatus = (ULONG)STATUS_INSUFFICIENT_RESOURCES;
-        return FALSE;
-    }
-    RtlZeroMemory(Result, sizeof(NTFS_CHK_RESULT));
-
-    /* Open read-only unless we intend to repair. */
-    Access = FILE_GENERIC_READ | SYNCHRONIZE;
-    if (FixErrors)
-        Access |= FILE_GENERIC_WRITE;
-
-    InitializeObjectAttributes(&ObjectAttributes, DriveRoot, 0, NULL, NULL);
-    Status = NtOpenFile(&FileHandle,
-                        Access,
-                        &ObjectAttributes,
-                        &Iosb,
-                        FILE_SHARE_READ | FILE_SHARE_WRITE,
-                        FILE_SYNCHRONOUS_IO_ALERT);
+    // Kill any stale boot sectors FIRST: the volume reads as RAW from here on,
+    // so no partially-formatted state is ever recognizable as a filesystem.
+    Status = InvalidateStaleBootSectors();
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("NtfsChkdsk: NtOpenFile() failed 0x%08x\n", Status);
-        NtfsChkFreeResult(Result);
-        RtlFreeHeap(RtlGetProcessHeap(), 0, Result);
-        *ExitStatus = (ULONG)Status;
-        return FALSE;
+        DPRINT1("InvalidateStaleBootSectors() failed with status 0x%.08x\n", Status);
+        goto end;
     }
 
-    /* Lock the volume for an exclusive offline check when repairing. */
-    if (FixErrors)
+    Status = NtFlushBuffersFile(DiskHandle, &Iosb);
+    if (!NT_SUCCESS(Status))
+        goto end;
+
+    // Create metafiles
+    Status = WriteMetafiles();
+    if (!NT_SUCCESS(Status))
     {
-        LockStatus = NtFsControlFile(FileHandle, NULL, NULL, NULL, &Iosb,
-                                     FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0);
-        if (NT_SUCCESS(LockStatus))
-        {
-            VolumeLocked = TRUE;
-        }
-        else
-        {
-            /*
-             * Downgrade to a read-only check.  Repairing without the lock is
-             * not merely "unsafe", it is actively destructive: every write
-             * below goes through NtWriteFile on the volume handle, i.e. raw
-             * sectors, while the mounted driver holds its own cached copies of
-             * the very structures being rewritten ($MFT records, $Bitmap,
-             * index blocks).  The two write back on independent schedules and
-             * overwrite each other, so a repair pass can both undo itself and
-             * corrupt structures that were intact -- which is why repeated
-             * passes on a live volume never converge, each one reporting a
-             * different issue count and repairing hundreds of entries forever.
-             *
-             * A volume that cannot be locked simply cannot be repaired online;
-             * this is why Windows' chkdsk answers "Cannot lock current drive"
-             * and offers to run at next boot instead of proceeding.  Report the
-             * damage and leave the dirty flag set (NtfsChkVolume only clears it
-             * for a converged repair run) so the volume is checked offline
-             * rather than silently forgotten.
-             */
-            DPRINT1("NtfsChkdsk: could not lock volume (0x%x); checking read-only, "
-                    "repairs need an offline run\n", LockStatus);
-            FixErrors = FALSE;
-            RepairDeclined = TRUE;
-        }
+        DPRINT1("WriteMetafiles() failed with status 0x%.08x\n", Status);
+        goto end;
     }
 
-    IoContext.FileHandle = FileHandle;
-    IoContext.Callback = Callback;
-    IoContext.Percent = 0;
+    Status = NtFlushBuffersFile(DiskHandle, &Iosb);
+    if (!NT_SUCCESS(Status))
+        goto end;
 
-    Io.context = &IoContext;
-    Io.write = NtfsFormatWrite;
-    Io.read = NtfsFormatRead;
-    Io.flush = NtfsFormatFlush;
-
-    RtlZeroMemory(&Options, sizeof(Options));
-    Options.FixErrors = (FixErrors != FALSE);
-    Options.Verbose = (Verbose != FALSE);
-    Options.CheckOnlyIfDirty = (CheckOnlyIfDirty != FALSE);
-    /* Forward the checker's stage banners + summary to autochk/chkdsk.exe via
-     * the fmifs callback (OUTPUT/TEXTOUTPUT).  IoContext already carries the
-     * PFMIFSCALLBACK, so it doubles as the message-sink context. */
-    if (Callback != NULL)
+    // Write the boot sector LAST - only now, with all metadata complete behind
+    // it, does the volume become recognizable as NTFS.
+    Status = WriteBootSector();
+    if (!NT_SUCCESS(Status))
     {
-        Options.Message = NtfsChkMessage;
-        Options.MessageCtx = &IoContext;
+        DPRINT1("WriteBootSector() failed with status 0x%.08x\n", Status);
+        goto end;
     }
 
-    Rc = NtfsChkVolume(&Io, &Options, Result);
+    Status = NtFlushBuffersFile(DiskHandle, &Iosb);
+    if (!NT_SUCCESS(Status))
+        goto end;
 
-    DPRINT("NtfsChkdsk: exit=%d scanned=%lu inuse=%lu issues=%lu repaired=%lu dirty=%d\n",
-           Result->ExitStatus, Result->RecordsScanned, Result->RecordsInUse,
-           Result->IssueCount, Result->RepairedCount, Result->WasDirty);
+    Result = TRUE;
+    DPRINT1("NtfsFormat() completed successfully\n");
+
+end:
 
     if (VolumeLocked)
-    {
-        NtFsControlFile(FileHandle, NULL, NULL, NULL, &Iosb,
-                        FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0);
-        NtFsControlFile(FileHandle, NULL, NULL, NULL, &Iosb,
+        NtFsControlFile(DiskHandle, NULL, NULL, NULL, &Iosb,
                         FSCTL_UNLOCK_VOLUME, NULL, 0, NULL, 0);
-    }
-    NtClose(FileHandle);
 
-    if (Callback != NULL)
+    // Close the volume handle
+    NtClose(DiskHandle);
+
+    // Clear global data structure
+    DISK_HANDLE = NULL;
+    DISK_GEO    = NULL;
+    DISK_LEN    = NULL;
+    LABEL       = NULL;
+
+    // Update progress bar
+    if (Callback)
     {
-        ULONG Percent = 100;
-        Callback(PROGRESS, 0, (PVOID)&Percent);
+        BOOL success = Result;
+        Callback(DONE, 0, (PVOID)&success);
     }
 
-    /*
-     * ExitStatus is an NTSTATUS, not a chkdsk.exe process exit code: that is
-     * what VfatChkdsk writes and what every consumer reads back
-     * (autochk's dirty test, chkdsk.exe's "run chkdsk again" hint, and the
-     * Status that fmifs!Chkdsk hands to the DONE callback).  Writing the 0..3
-     * exit convention here made the dirty verdict indistinguishable from
-     * STATUS_SUCCESS, so autochk checked the volume and then never repaired it.
-     *
-     *   Result->ExitStatus: 0 = nothing wrong, 2 = everything found was fixed,
-     *                       1 = uncorrected damage remains.
-     */
-    if (Rc < 0 || Result->ExitStatus == 1)
-        *ExitStatus = (ULONG)STATUS_DISK_CORRUPT_ERROR;
-    else
-        *ExitStatus = (ULONG)STATUS_SUCCESS;
-
-    /* `recorded` is the number of issues the repair stages could actually see.
-     * It equals `issues` unless the issue list hit CHK_ISSUES_MAX or failed to
-     * grow, which is the one case where a repair run cannot converge no matter
-     * how often it is repeated -- worth spotting straight from the log. */
-    DPRINT1("NtfsChkdsk: %wZ Fix %u OnlyIfDirty %u -> rc %d, issues %lu, "
-            "recorded %lu, repaired %lu, dirty %u, ExitStatus 0x%08lx%s\n",
-            DriveRoot, FixErrors, CheckOnlyIfDirty, Rc, Result->IssueCount,
-            Result->IssueRecorded,
-            Result->RepairedCount, Result->WasDirty, *ExitStatus,
-            RepairDeclined ? " [read-only: volume in use, repairs need an offline run]" : "");
-
-    NtfsChkFreeResult(Result);
-    RtlFreeHeap(RtlGetProcessHeap(), 0, Result);
-
-    /* TRUE means the check itself completed (see ExitStatus for the verdict). */
-    return (Rc >= 0);
+    return Result;
 }

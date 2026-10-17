@@ -102,6 +102,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/NtfsLocks.c
     ntos_io/NtfsNotify.c
     ntos_io/NtfsLogFile.c
+    ntos_io/NtfsFormat.c
     ntos_io/NtfsLinks.c
     ntos_io/NtfsObjectId.c
     ntos_io/NtfsQuota.c
@@ -222,6 +223,7 @@ list(APPEND KMTEST_SOURCE
     ntos_io/IoReadWrite_user.c
     ntos_io/NtfsDirIndex_user.c
     ntos_io/NtfsFeatures_user.c
+    ntos_io/NtfsFormat_user.c
     ntos_kd/NtSystemDebugControl.c
     ntos_mm/MmMapLockedPagesSpecifyCache_user.c
     ntos_mm/MmPageoutSysView_user.c
