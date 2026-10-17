@@ -493,6 +493,19 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     ExInitializeResourceLite(&Vcb->BitmapResource);
     KeInitializeSpinLock(&Vcb->FcbListLock);
 
+    InitializeListHead(&Vcb->NotifyList);
+    _SEH2_TRY
+    {
+        FsRtlNotifyInitializeSync(&Vcb->NotifySync);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+        goto ByeBye;
+
     NewDeviceObject->Vpb = DeviceToMount->Vpb;
     Vcb->Vpb = NewDeviceObject->Vpb;
 
@@ -623,6 +636,8 @@ ByeBye:
 
         if (Vcb != NULL)
         {
+            if (Vcb->NotifySync != NULL)
+                FsRtlNotifyUninitializeSync(&Vcb->NotifySync);
             NtfsUninitializeFcbHash(Vcb);
             NtfsFreeVolumeBitmap(Vcb);
         }

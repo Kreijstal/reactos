@@ -391,9 +391,15 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
     FileInformationClass = Stack->Parameters.QueryDirectory.FileInformationClass;
     FileIndex = Stack->Parameters.QueryDirectory.FileIndex;
 
+    /* Match create, cleanup, rename and notification completion: volume
+     * directory resource first, then the FCB resource. */
+    if (!ExAcquireResourceExclusiveLite(&DeviceExtension->DirResource,
+                                        BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
+        return STATUS_PENDING;
     if (!ExAcquireResourceSharedLite(&Fcb->MainResource,
                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
+        ExReleaseResourceLite(&DeviceExtension->DirResource);
         return STATUS_PENDING;
     }
 
@@ -409,6 +415,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
             if (!Ccb->DirectorySearchPattern)
             {
                 ExReleaseResourceLite(&Fcb->MainResource);
+                ExReleaseResourceLite(&DeviceExtension->DirResource);
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
 
@@ -423,6 +430,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
         if (!Ccb->DirectorySearchPattern)
         {
             ExReleaseResourceLite(&Fcb->MainResource);
+            ExReleaseResourceLite(&DeviceExtension->DirResource);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
@@ -453,18 +461,11 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
     if (FoundName == NULL)
     {
         ExReleaseResourceLite(&Fcb->MainResource);
+        ExReleaseResourceLite(&DeviceExtension->DirResource);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     DPRINT("Buffer=%p tofind=%S\n", Buffer, Ccb->DirectorySearchPattern);
-
-    if (!ExAcquireResourceExclusiveLite(&DeviceExtension->DirResource,
-                                        BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
-    {
-        ExFreePoolWithTag(FoundName, TAG_NTFS);
-        ExReleaseResourceLite(&Fcb->MainResource);
-        return STATUS_PENDING;
-    }
 
     Written = 0;
     while (Status == STATUS_SUCCESS && Offset < BufferLength)
@@ -584,8 +585,8 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
     }
 
     ExFreePoolWithTag(FoundName, TAG_NTFS);
-    ExReleaseResourceLite(&DeviceExtension->DirResource);
     ExReleaseResourceLite(&Fcb->MainResource);
+    ExReleaseResourceLite(&DeviceExtension->DirResource);
 
     return Status;
 }
@@ -608,8 +609,7 @@ NtfsDirectoryControl(PNTFS_IRP_CONTEXT IrpContext)
             break;
 
         case IRP_MN_NOTIFY_CHANGE_DIRECTORY:
-            DPRINT1("IRP_MN_NOTIFY_CHANGE_DIRECTORY\n");
-            Status = STATUS_NOT_IMPLEMENTED;
+            Status = NtfsNotifyChangeDirectory(IrpContext);
             break;
 
         default:

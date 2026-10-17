@@ -173,6 +173,7 @@ NtfsReplaceFCBPath(
         Fcb->PathNameHash = NtfsComputePathNameHash(Path);
     }
     Fcb->PathName = Path;
+    RtlInitUnicodeString(&Fcb->NotifyName, Path);
     Fcb->ObjectName = wcsrchr(Path, L'\\');
     if (Fcb->ObjectName == NULL)
         Fcb->ObjectName = Path;

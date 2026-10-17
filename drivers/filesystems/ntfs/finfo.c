@@ -2205,6 +2205,9 @@ NtfsSetRenameInformation(
     if (!NT_SUCCESS(Status))
         goto Quit;
 
+    NtfsReportPathChange(DeviceExt, Fcb->PathName,
+                          NtfsFCBIsDirectory(Fcb) ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
+                          FILE_ACTION_RENAMED_OLD_NAME);
     NtfsRenameFcbs(DeviceExt, RenamedFcbs);
     RenamedFcbs = NULL;
     Fcb->ParentMFTIndex = TargetDirMft;
@@ -2213,6 +2216,9 @@ NtfsSetRenameInformation(
     Fcb->Entry.NameType = NewValue->NameType;
 
     NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_RENAME_NEW_NAME);
+    NtfsReportPathChange(DeviceExt, Fcb->PathName,
+                          NtfsFCBIsDirectory(Fcb) ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
+                          FILE_ACTION_RENAMED_NEW_NAME);
 
 Quit:
     NtfsFreeRenamedFcbs(RenamedFcbs);
@@ -2341,6 +2347,7 @@ NtfsSetLinkInformation(
         if (NT_SUCCESS(Status))
         {
             NtfsSetLinkCount(DeviceExt, Fcb->MFTIndex, FileRecord->LinkCount);
+            NtfsReportPathChange(DeviceExt, NewPath, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_ADDED);
         }
         else if (NT_SUCCESS(ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord)) &&
                  NT_SUCCESS(NtfsRemoveFileNameAttribute(DeviceExt, FileRecord, TargetDirMft, &NewName)))
@@ -2565,6 +2572,10 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
 
     if (NeedDirResource)
         ExReleaseResourceLite(&DeviceExt->DirResource);
+
+    if (NT_SUCCESS(Status) && FileInformationClass == FileDispositionInformation &&
+        NtfsFCBIsDirectory(Fcb) && (Fcb->Flags & FCB_DELETE_PENDING))
+        NtfsNotifyDirectoryDeleted(Fcb);
 
     if (NT_SUCCESS(Status))
         Irp->IoStatus.Information =

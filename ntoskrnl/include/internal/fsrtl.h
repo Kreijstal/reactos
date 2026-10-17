@@ -67,6 +67,8 @@ typedef struct _REAL_NOTIFY_SYNC
     FAST_MUTEX FastMutex;
     ULONG_PTR OwningThread;
     ULONG OwnerCount;
+    LONG References;
+    LIST_ENTRY Completions;
 } REAL_NOTIFY_SYNC, * PREAL_NOTIFY_SYNC;
 
 //
