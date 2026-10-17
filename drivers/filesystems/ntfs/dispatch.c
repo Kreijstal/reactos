@@ -62,7 +62,13 @@ NtfsReadOnlyMutation(PNTFS_IRP_CONTEXT Context)
     switch (Context->MajorFunction)
     {
         case IRP_MJ_WRITE:
-            return TRUE;
+        {
+            PNTFS_FCB Fcb = Context->FileObject->FsContext;
+            PDEVICE_EXTENSION Vcb = Context->DeviceObject->DeviceExtension;
+
+            ASSERT(Fcb != NULL);
+            return !((Vcb->Flags & VCB_VOLUME_DISMOUNTED) && (Fcb->Flags & FCB_IS_VOLUME));
+        }
         case IRP_MJ_SET_INFORMATION:
             switch (Context->Stack->Parameters.SetFile.FileInformationClass)
             {
