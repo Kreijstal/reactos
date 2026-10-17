@@ -3014,7 +3014,7 @@ IoCheckQuerySetFileInformation(IN FILE_INFORMATION_CLASS FileInformationClass,
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 NTSTATUS
 NTAPI
@@ -3022,8 +3022,38 @@ IoCheckQuotaBufferValidity(IN PFILE_QUOTA_INFORMATION QuotaBuffer,
                            IN ULONG QuotaLength,
                            OUT PULONG ErrorOffset)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    ULONG Offset = 0, Size, Next;
+    PFILE_QUOTA_INFORMATION Entry;
+#ifdef _WIN64
+    const ULONG Alignment = sizeof(ULONGLONG);
+#else
+    const ULONG Alignment = sizeof(ULONG);
+#endif
+
+    PAGED_CODE();
+
+    for (;;)
+    {
+        Entry = (PVOID)((PUCHAR)QuotaBuffer + Offset);
+        if (QuotaLength < FIELD_OFFSET(FILE_QUOTA_INFORMATION, Sid) +
+                          FIELD_OFFSET(SID, SubAuthority))
+            break;
+        if (Entry->SidLength > QuotaLength - FIELD_OFFSET(FILE_QUOTA_INFORMATION, Sid) ||
+            Entry->SidLength < FIELD_OFFSET(SID, SubAuthority) ||
+            !RtlValidSid(&Entry->Sid) || RtlLengthSid(&Entry->Sid) != Entry->SidLength)
+            break;
+        Size = FIELD_OFFSET(FILE_QUOTA_INFORMATION, Sid) + Entry->SidLength;
+        Next = Entry->NextEntryOffset;
+        if (Next == 0)
+            return STATUS_SUCCESS;
+        if (Next < Size || Next >= QuotaLength || (Next & (Alignment - 1)))
+            break;
+        Offset += Next;
+        QuotaLength -= Next;
+    }
+
+    *ErrorOffset = Offset;
+    return STATUS_QUOTA_LIST_INCONSISTENT;
 }
 
 /*
