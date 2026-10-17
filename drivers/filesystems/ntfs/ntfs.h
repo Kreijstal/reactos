@@ -188,6 +188,13 @@ typedef struct
     /* External file objects, including those retained by MM after cleanup.
      * DirResource serializes attachment and close. Internal streams do not
      * count, and deleting a pathname does not hide a live file object. */
+    /* Restart inspection is read-only; emission is disabled by default. */
+    BOOLEAN LogFileDirty;
+    BOOLEAN LogFileVersionUnsupported;
+    USHORT LogFileMajorVersion;
+    USHORT LogFileMinorVersion;
+    ULONGLONG LogFileLsn;
+
     ULONG FileObjectCount;
 
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION, NTFS_VCB, *PNTFS_VCB;
@@ -197,6 +204,7 @@ typedef struct
 #define VCB_VOLUME_DISMOUNTED    0x0002
 #define VCB_QUERY_REMOVE_PENDING 0x0004
 #define VCB_DEVICE_REMOVED       0x0008
+#define VCB_VOLUME_READ_ONLY     0x0010
 
 /* A final file-object cleanup can run attached to the system process when
  * closing a kernel handle. Retain every process that submitted locks through
@@ -1635,6 +1643,9 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
 
 NTSTATUS
 NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext);
+
+NTSTATUS
+NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb);
 
 /* fsctl.c */
 

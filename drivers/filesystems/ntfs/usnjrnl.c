@@ -336,7 +336,7 @@ NtfsCheckpointUsnJournal(PDEVICE_EXTENSION Vcb)
     NTSTATUS Status;
 
     if (!NtfsGlobalData->EnableWriteSupport || Vcb->UsnJournalMftIndex == 0 ||
-        (Vcb->Flags & VCB_DEVICE_REMOVED))
+        (Vcb->Flags & (VCB_DEVICE_REMOVED | VCB_VOLUME_READ_ONLY)))
         return STATUS_SUCCESS;
     ExAcquireResourceExclusiveLite(&Vcb->UsnResource, TRUE);
     Status = NtfsTrimUsnJournalLocked(Vcb, TRUE);

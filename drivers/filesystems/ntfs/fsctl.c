@@ -596,6 +596,13 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
         goto ByeBye;
 
 
+    Status = NtfsLfsCheckCleanShutdown(Vcb);
+    if (!NT_SUCCESS(Status) || Vcb->LogFileVersionUnsupported)
+    {
+        Vcb->Flags |= VCB_VOLUME_READ_ONLY;
+        DPRINT1("Mounting read-only: $LogFile requires recovery or an unsupported format (%lx)\n", Status);
+    }
+
     NtfsFindObjectIdIndex(Vcb);
     NtfsInitializeSecurity(Vcb);
     NtfsLoadUsnJournal(Vcb);
@@ -2009,6 +2016,8 @@ NtfsMarkVolumeCorrupt(PDEVICE_EXTENSION Vcb)
 {
     NTSTATUS Status;
 
+    if (Vcb->Flags & VCB_VOLUME_READ_ONLY)
+        return;
     Status = NtfsSetVolumeFlags(Vcb, NTFS_VOLUME_FLAG_DIRTY);
     SetFlag(Vcb->NtfsInfo.Flags, NTFS_VOLUME_FLAG_DIRTY);
     if (!NT_SUCCESS(Status))

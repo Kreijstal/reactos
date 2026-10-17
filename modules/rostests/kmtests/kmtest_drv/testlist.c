@@ -86,6 +86,7 @@ KMT_TESTFUNC Test_NtfsRename;
 KMT_TESTFUNC Test_NtfsNotify;
 KMT_TESTFUNC Test_NtfsChangeData;
 KMT_TESTFUNC Test_NtfsWatchRemove;
+KMT_TESTFUNC Test_NtfsLogFile;
 KMT_TESTFUNC Test_NtfsLinks;
 KMT_TESTFUNC Test_NtfsObjectId;
 KMT_TESTFUNC Test_NtfsQuota;
@@ -217,6 +218,7 @@ const KMT_TEST TestList[] =
     { "NtfsNotify",                          Test_NtfsNotify },
     { "NtfsChangeData",                      Test_NtfsChangeData },
     { "NtfsWatchRemove",                    Test_NtfsWatchRemove },
+    { "NtfsLogFile",                         Test_NtfsLogFile },
     { "NtfsLinks",                           Test_NtfsLinks },
     { "NtfsObjectId",                        Test_NtfsObjectId },
     { "NtfsQuota",                           Test_NtfsQuota },

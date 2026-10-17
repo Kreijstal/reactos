@@ -1134,6 +1134,9 @@ NtfsAuthorizeOpen(PDEVICE_EXTENSION Vcb, PNTFS_FCB Fcb, PIRP Irp,
     if (!NT_SUCCESS(Status))
         return Status;
 
+    if ((Desired & MAXIMUM_ALLOWED) && (Vcb->Flags & VCB_VOLUME_READ_ONLY))
+        Granted &= ~(FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA |
+                     FILE_WRITE_ATTRIBUTES | FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER);
     if ((Desired & MAXIMUM_ALLOWED) && (Fcb->Entry.FileAttributes & NTFS_FILE_TYPE_READ_ONLY))
         Granted &= ~(FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_DELETE_CHILD);
     if (Desired & ~(Granted | MAXIMUM_ALLOWED))
@@ -1289,6 +1292,9 @@ NtfsCreateNewFile(
     PNTFS_FCB Fcb, UnusedParent;
     ULONG Attributes, SecurityId;
     NTSTATUS Status;
+
+    if (DeviceExt->Flags & VCB_VOLUME_READ_ONLY)
+        return STATUS_MEDIA_WRITE_PROTECTED;
 
     if (!NtfsGlobalData->EnableWriteSupport)
     {
@@ -1497,6 +1503,12 @@ NtfsOpenBaseOfStream(
         return Status;
     }
 
+    if (DeviceExt->Flags & VCB_VOLUME_READ_ONLY)
+    {
+        NtfsReleaseFCB(DeviceExt, ParentFcb);
+        return STATUS_MEDIA_WRITE_PROTECTED;
+    }
+
     if (!NtfsGlobalData->EnableWriteSupport)
     {
         NtfsReleaseFCB(DeviceExt, ParentFcb);
@@ -1601,6 +1613,12 @@ NtfsOpenStream(
         {
             NtfsReleaseFCB(DeviceExt, BaseFcb);
             return Status;
+        }
+
+        if (DeviceExt->Flags & VCB_VOLUME_READ_ONLY)
+        {
+            NtfsReleaseFCB(DeviceExt, BaseFcb);
+            return STATUS_MEDIA_WRITE_PROTECTED;
         }
 
         if (!BaseCreated)
@@ -1792,6 +1810,12 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
     NTSTATUS Status;
 
     DPRINT("NtfsCreateFile(%p, %p) called\n", DeviceObject, IrpContext);
+
+    if ((DeviceExt->Flags & VCB_VOLUME_READ_ONLY) &&
+        ((Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF) || (Options & FILE_DELETE_ON_CLOSE) ||
+         (DesiredAccess & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA |
+                           FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC | WRITE_OWNER))))
+        return STATUS_MEDIA_WRITE_PROTECTED;
 
     ASSERT(DeviceExt);
 

@@ -56,6 +56,56 @@ NtfsQueueRequest(PNTFS_IRP_CONTEXT IrpContext)
     return STATUS_PENDING;
 }
 
+static BOOLEAN
+NtfsReadOnlyMutation(PNTFS_IRP_CONTEXT Context)
+{
+    switch (Context->MajorFunction)
+    {
+        case IRP_MJ_WRITE:
+            return TRUE;
+        case IRP_MJ_SET_INFORMATION:
+            switch (Context->Stack->Parameters.SetFile.FileInformationClass)
+            {
+                case FileBasicInformation:
+                case FileAllocationInformation:
+                case FileEndOfFileInformation:
+                case FileLinkInformation:
+                case FileDispositionInformation:
+                case FileRenameInformation:
+                    return TRUE;
+                default:
+                    return FALSE;
+            }
+        case IRP_MJ_SET_VOLUME_INFORMATION:
+        case IRP_MJ_SET_SECURITY:
+        case IRP_MJ_SET_EA:
+        case IRP_MJ_SET_QUOTA:
+            return TRUE;
+        case IRP_MJ_FILE_SYSTEM_CONTROL:
+            if (Context->MinorFunction != IRP_MN_USER_FS_REQUEST) return FALSE;
+            switch (Context->Stack->Parameters.FileSystemControl.FsControlCode)
+            {
+                case FSCTL_EXTEND_VOLUME:
+                case FSCTL_MOVE_FILE:
+                case FSCTL_SET_REPARSE_POINT:
+                case FSCTL_DELETE_REPARSE_POINT:
+                case FSCTL_SET_OBJECT_ID:
+                case FSCTL_SET_OBJECT_ID_EXTENDED:
+                case FSCTL_CREATE_OR_GET_OBJECT_ID:
+                case FSCTL_DELETE_OBJECT_ID:
+                case FSCTL_SET_COMPRESSION:
+                case FSCTL_SET_SPARSE:
+                case FSCTL_SET_ZERO_DATA:
+                case FSCTL_CREATE_USN_JOURNAL:
+                case FSCTL_DELETE_USN_JOURNAL:
+                case FSCTL_WRITE_USN_CLOSE_RECORD:
+                case FSCTL_MARK_VOLUME_DIRTY:
+                    return TRUE;
+            }
+    }
+    return FALSE;
+}
+
 static
 NTSTATUS
 NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
@@ -121,6 +171,15 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
         }
     }
 
+    if (IrpContext->DeviceObject != NtfsGlobalData->DeviceObject &&
+        (((PDEVICE_EXTENSION)IrpContext->DeviceObject->DeviceExtension)->Flags & VCB_VOLUME_READ_ONLY) &&
+        NtfsReadOnlyMutation(IrpContext))
+    {
+        Status = STATUS_MEDIA_WRITE_PROTECTED;
+        Irp->IoStatus.Information = 0;
+        goto Complete;
+    }
+
     if (IrpContext->DeviceObject != NtfsGlobalData->DeviceObject && NtfsQuotaOperation(IrpContext))
     {
         Vcb = IrpContext->DeviceObject->DeviceExtension;
@@ -160,7 +219,7 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
         }
         QuotaResource = &Vcb->QuotaResource;
         if (Vcb->QuotaTracking && Vcb->QuotaRebuildRequired && NtfsGlobalData->EnableWriteSupport &&
-            !(Vcb->Flags & VCB_DEVICE_REMOVED))
+            !(Vcb->Flags & (VCB_DEVICE_REMOVED | VCB_VOLUME_READ_ONLY)))
         {
             Status = NtfsRebuildQuota(Vcb);
             if (!NT_SUCCESS(Status)) goto Complete;
@@ -279,7 +338,7 @@ Complete:
     {
         PNTFS_FCB Fcb = IrpContext->FileObject != NULL ? IrpContext->FileObject->FsContext : NULL;
         if (Vcb->QuotaTracking && NtfsGlobalData->EnableWriteSupport &&
-            !(Vcb->Flags & VCB_DEVICE_REMOVED) && Fcb != NULL &&
+            !(Vcb->Flags & (VCB_DEVICE_REMOVED | VCB_VOLUME_READ_ONLY)) && Fcb != NULL &&
             !(Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)) &&
             !(IrpContext->Flags & IRPCONTEXT_QUEUE))
         {
