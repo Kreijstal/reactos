@@ -341,7 +341,7 @@ IncreaseMftSize(PDEVICE_EXTENSION Vcb, BOOLEAN CanWait)
     DPRINT("IncreaseMftSize(%p, %s)\n", Vcb, CanWait ? "TRUE" : "FALSE");
 
     // We need exclusive access to the mft while we change its size
-    if (!ExAcquireResourceExclusiveLite(&(Vcb->DirResource), CanWait))
+    if (!ExAcquireResourceExclusiveLite(&(Vcb->MftAllocationResource), CanWait))
     {
         return STATUS_CANT_WAIT;
     }
@@ -351,6 +351,7 @@ IncreaseMftSize(PDEVICE_EXTENSION Vcb, BOOLEAN CanWait)
     if (!BlankFileRecord)
     {
         DPRINT1("Error: Unable to create empty file record!\n");
+        ExReleaseResourceLite(&Vcb->MftAllocationResource);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -363,7 +364,7 @@ IncreaseMftSize(PDEVICE_EXTENSION Vcb, BOOLEAN CanWait)
     {
         DPRINT1("ERROR: Couldn't find $BITMAP attribute of Mft!\n");
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BlankFileRecord);
-        ExReleaseResourceLite(&(Vcb->DirResource));
+        ExReleaseResourceLite(&(Vcb->MftAllocationResource));
         return Status;
     }
 
@@ -394,7 +395,7 @@ IncreaseMftSize(PDEVICE_EXTENSION Vcb, BOOLEAN CanWait)
     {
         DPRINT1("ERROR: Unable to allocate memory for bitmap attribute!\n");
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BlankFileRecord);
-        ExReleaseResourceLite(&(Vcb->DirResource));
+        ExReleaseResourceLite(&(Vcb->MftAllocationResource));
         ReleaseAttributeContext(BitmapContext);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -412,7 +413,7 @@ IncreaseMftSize(PDEVICE_EXTENSION Vcb, BOOLEAN CanWait)
     {
         DPRINT1("ERROR: Bytes read != Bitmap size!\n");
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BlankFileRecord);
-        ExReleaseResourceLite(&(Vcb->DirResource));
+        ExReleaseResourceLite(&(Vcb->MftAllocationResource));
         ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
         ReleaseAttributeContext(BitmapContext);
         return STATUS_INVALID_PARAMETER;
@@ -424,7 +425,7 @@ IncreaseMftSize(PDEVICE_EXTENSION Vcb, BOOLEAN CanWait)
     {
         DPRINT1("ERROR: Failed to set size of $MFT data attribute!\n");
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BlankFileRecord);
-        ExReleaseResourceLite(&(Vcb->DirResource));
+        ExReleaseResourceLite(&(Vcb->MftAllocationResource));
         ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
         ReleaseAttributeContext(BitmapContext);
         return Status;
@@ -437,7 +438,7 @@ IncreaseMftSize(PDEVICE_EXTENSION Vcb, BOOLEAN CanWait)
     {
         DPRINT1("ERROR: Couldn't find $BITMAP attribute of Mft!\n");
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BlankFileRecord);
-        ExReleaseResourceLite(&(Vcb->DirResource));
+        ExReleaseResourceLite(&(Vcb->MftAllocationResource));
         return Status;
     }
 
@@ -455,7 +456,7 @@ IncreaseMftSize(PDEVICE_EXTENSION Vcb, BOOLEAN CanWait)
         {
             DPRINT1("ERROR: Failed to set size of bitmap attribute!\n");
             ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BlankFileRecord);
-            ExReleaseResourceLite(&(Vcb->DirResource));
+            ExReleaseResourceLite(&(Vcb->MftAllocationResource));
             ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
             ReleaseAttributeContext(BitmapContext);
             return Status;
@@ -470,7 +471,7 @@ IncreaseMftSize(PDEVICE_EXTENSION Vcb, BOOLEAN CanWait)
     {
         DPRINT1("ERROR: Failed to update $MFT file record!\n");
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BlankFileRecord);
-        ExReleaseResourceLite(&(Vcb->DirResource));
+        ExReleaseResourceLite(&(Vcb->MftAllocationResource));
         ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
         ReleaseAttributeContext(BitmapContext);
         return Status;
@@ -481,7 +482,7 @@ IncreaseMftSize(PDEVICE_EXTENSION Vcb, BOOLEAN CanWait)
     if (!NT_SUCCESS(Status))
     {
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BlankFileRecord);
-        ExReleaseResourceLite(&(Vcb->DirResource));
+        ExReleaseResourceLite(&(Vcb->MftAllocationResource));
         ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
         ReleaseAttributeContext(BitmapContext);
         DPRINT1("ERROR: Couldn't write to bitmap attribute of $MFT!\n");
@@ -496,7 +497,7 @@ IncreaseMftSize(PDEVICE_EXTENSION Vcb, BOOLEAN CanWait)
         {
             DPRINT1("ERROR: Failed to write blank file record!\n");
             ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BlankFileRecord);
-            ExReleaseResourceLite(&(Vcb->DirResource));
+            ExReleaseResourceLite(&(Vcb->MftAllocationResource));
             ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
             ReleaseAttributeContext(BitmapContext);
             return Status;
@@ -508,7 +509,7 @@ IncreaseMftSize(PDEVICE_EXTENSION Vcb, BOOLEAN CanWait)
 
     // Cleanup
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BlankFileRecord);
-    ExReleaseResourceLite(&(Vcb->DirResource));
+    ExReleaseResourceLite(&(Vcb->MftAllocationResource));
     ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
     ReleaseAttributeContext(BitmapContext);
 
@@ -577,40 +578,35 @@ InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
     PNTFS_ATTR_RECORD Destination = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
     PNTFS_ATTR_RECORD NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Destination + Destination->Length);
     PNTFS_ATTR_RECORD FinalAttribute;
+    PNTFS_ATTR_RECORD NewContextRecord = NULL;
     ULONG OldAttributeLength = Destination->Length;
     ULONG OldValueLength = Destination->Resident.ValueLength;
+    ULONG NewAttributeLength;
     ULONG NextAttributeOffset;
-
-    DPRINT("InternalSetResidentAttributeLength( %p, %p, %p, %lu, %lu )\n", DeviceExt, AttrContext, FileRecord, AttrOffset, DataSize);
+    ULONG TrailingSize;
 
     ASSERT(!AttrContext->pRecord->IsNonResident);
+    ASSERT(FileRecord->BytesInUse >= AttrOffset + OldAttributeLength);
 
-    // Update ValueLength Field
-    Destination->Resident.ValueLength = DataSize;
+    /* Preflight the complete record before changing either copy. */
+    if (DataSize > DeviceExt->NtfsInfo.BytesPerFileRecord)
+        return STATUS_BUFFER_OVERFLOW;
+    NewAttributeLength = ALIGN_UP_BY(DataSize + Destination->Resident.ValueOffset,
+                                     ATTR_RECORD_ALIGNMENT);
+    NextAttributeOffset = AttrOffset + NewAttributeLength;
+    TrailingSize = FileRecord->BytesInUse - AttrOffset - OldAttributeLength;
+    if (NextAttributeOffset + TrailingSize > DeviceExt->NtfsInfo.BytesPerFileRecord)
+        return STATUS_BUFFER_OVERFLOW;
 
-    // Calculate the record length and end marker offset
-    Destination->Length = ALIGN_UP_BY(DataSize + AttrContext->pRecord->Resident.ValueOffset, ATTR_RECORD_ALIGNMENT);
-    NextAttributeOffset = AttrOffset + Destination->Length;
-
-    // Ensure NextAttributeOffset is aligned to an 8-byte boundary
-    ASSERT(NextAttributeOffset % ATTR_RECORD_ALIGNMENT == 0);
-
-    // Will the new attribute be larger than the old one?
-    if (Destination->Length > OldAttributeLength)
+    if (NewAttributeLength > OldAttributeLength)
     {
-        // Free the old copy of the attribute in the context, as it will be the wrong length
-        ExFreePoolWithTag(AttrContext->pRecord, TAG_NTFS);
-
-        // Create a new copy of the attribute record for the context
-        AttrContext->pRecord = ExAllocatePoolWithTag(NonPagedPool, Destination->Length, TAG_NTFS);
-        if (!AttrContext->pRecord)
-        {
-            DPRINT1("Unable to allocate memory for attribute!\n");
+        NewContextRecord = ExAllocatePoolWithTag(NonPagedPool, NewAttributeLength, TAG_NTFS);
+        if (NewContextRecord == NULL)
             return STATUS_INSUFFICIENT_RESOURCES;
-        }
-        RtlZeroMemory((PVOID)((ULONG_PTR)AttrContext->pRecord + OldAttributeLength), Destination->Length - OldAttributeLength);
-        RtlCopyMemory(AttrContext->pRecord, Destination, OldAttributeLength);
     }
+
+    Destination->Resident.ValueLength = DataSize;
+    Destination->Length = NewAttributeLength;
 
     // Are there attributes after this one that need to be moved?
     if (NextAttribute->Type != AttributeEnd)
@@ -631,9 +627,12 @@ InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
                       DataSize - OldValueLength);
     }
 
-    // Update pRecord's length
-    AttrContext->pRecord->Length = Destination->Length;
-    AttrContext->pRecord->Resident.ValueLength = DataSize;
+    if (NewContextRecord != NULL)
+    {
+        ExFreePoolWithTag(AttrContext->pRecord, TAG_NTFS);
+        AttrContext->pRecord = NewContextRecord;
+    }
+    RtlCopyMemory(AttrContext->pRecord, Destination, Destination->Length);
 
     // set the file record end
     SetFileRecordEnd(FileRecord, FinalAttribute, FILE_RECORD_END);
@@ -648,6 +647,32 @@ InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
 *   Pointer to a file record. Must be a full record at least
 *   Fcb->Vcb->NtfsInfo.BytesPerFileRecord bytes large, not just the header.
 */
+/* A run-list resize can move its attribute while this operation still owns
+ * the original record buffer. Commit the current owner, not the old slot. */
+NTSTATUS
+NtfsCommitAttributeContext(PDEVICE_EXTENSION Vcb,
+                           PNTFS_ATTR_CONTEXT Context,
+                           PFILE_RECORD_HEADER Record)
+{
+    PFILE_RECORD_HEADER Holder;
+    PNTFS_ATTR_RECORD Attribute;
+    ULONG Offset;
+    NTSTATUS Status;
+
+    Status = NtfsResolveAttributeHolder(Vcb, Context, Record, &Holder, &Offset);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    if (Holder != Record)
+    {
+        Attribute = (PNTFS_ATTR_RECORD)((PUCHAR)Holder + Offset);
+        ASSERT(Attribute->Length == Context->pRecord->Length);
+        RtlCopyMemory(Attribute, Context->pRecord, Attribute->Length);
+    }
+    Status = UpdateFileRecord(Vcb, Context->FileMFTIndex & NTFS_MFT_MASK, Holder);
+    NtfsReleaseAttributeHolder(Vcb, Record, Holder);
+    return Status;
+}
+
 NTSTATUS
 SetAttributeDataLength(PFILE_OBJECT FileObject,
                        PNTFS_FCB Fcb,
@@ -703,7 +728,7 @@ SetAttributeDataLength(PFILE_OBJECT FileObject,
     //NtfsDumpFileAttributes(Fcb->Vcb, FileRecord);
 
     // write the updated file record back to disk: the record that holds the attribute
-    Status = UpdateFileRecord(Fcb->Vcb, AttrContext->FileMFTIndex & NTFS_MFT_MASK, FileRecord);
+    Status = NtfsCommitAttributeContext(Fcb->Vcb, AttrContext, FileRecord);
 
     if (NT_SUCCESS(Status))
     {
@@ -842,7 +867,6 @@ NtfsSetAllocationSize(PFILE_OBJECT FileObject,
     ULONG BytesPerCluster = Vcb->NtfsInfo.BytesPerCluster;
     ULONGLONG DataSize = AttributeDataLength(AttrContext->pRecord);
     ULONGLONG Wanted;
-    PNTFS_ATTR_RECORD Destination;
     NTSTATUS Status = STATUS_SUCCESS;
 
     if (AllocationSize < DataSize)
@@ -872,7 +896,6 @@ NtfsSetAllocationSize(PFILE_OBJECT FileObject,
         return STATUS_SUCCESS;
 
     Wanted = ROUND_UP(AllocationSize, BytesPerCluster);
-    Destination = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
 
     if (Wanted > AttrContext->pRecord->NonResident.AllocatedSize)
     {
@@ -892,9 +915,7 @@ NtfsSetAllocationSize(PFILE_OBJECT FileObject,
     if (!NT_SUCCESS(Status))
         return Status;
 
-    Destination->NonResident.AllocatedSize = AttrContext->pRecord->NonResident.AllocatedSize;
-
-    Status = UpdateFileRecord(Vcb, AttrContext->FileMFTIndex & NTFS_MFT_MASK, FileRecord);
+    Status = NtfsCommitAttributeContext(Vcb, AttrContext, FileRecord);
     if (NT_SUCCESS(Status))
     {
         Fcb->RFCB.AllocationSize.QuadPart = AttrContext->pRecord->NonResident.AllocatedSize;
@@ -968,8 +989,8 @@ SetFileRecordEnd(PFILE_RECORD_HEADER FileRecord,
 * STATUS_SUCCESS on success, or the error from NtfsAllocateClusters() or AddRun().
 *
 * @remarks
-* AddRun() writes the file record for each run it adds, but the new AllocatedSize
-* only reaches the disk with the caller's next UpdateFileRecord().
+* AddRun() commits the mapping pairs and their allocation size together for each
+* successfully assigned run. The caller commits any change to the logical size.
 */
 NTSTATUS
 NtfsExtendAllocation(
@@ -981,7 +1002,6 @@ NtfsExtendAllocation(
 {
     NTSTATUS Status;
     ULONG BytesPerCluster = Vcb->NtfsInfo.BytesPerCluster;
-    PNTFS_ATTR_RECORD DestinationAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
     ULONGLONG ExistingClusters = AttrContext->pRecord->NonResident.AllocatedSize / BytesPerCluster;
     ULONGLONG TotalNeeded;
     ULONG ClustersNeeded;
@@ -1019,6 +1039,8 @@ NtfsExtendAllocation(
 
     while (ClustersNeeded > 0)
     {
+        ULONGLONG BeforeRun;
+
         Status = NtfsAllocateClusters(Vcb,
                                       DesiredCluster,
                                       ClustersNeeded,
@@ -1032,23 +1054,27 @@ NtfsExtendAllocation(
         }
 
         // now we need to add the clusters we allocated to the data run
+        BeforeRun = AttrContext->pRecord->NonResident.AllocatedSize;
         Status = AddRun(Vcb, AttrContext, AttrOffset, FileRecord, NextAssignedCluster, AssignedClusters);
         if (!NT_SUCCESS(Status))
         {
+            NTSTATUS RollbackStatus;
+
             DPRINT1("Error: Unable to add data run!\n");
+            if (AttrContext->pRecord->NonResident.AllocatedSize == BeforeRun)
+            {
+                RollbackStatus = NtfsFreeClusterRange(Vcb, NextAssignedCluster, AssignedClusters);
+                if (!NT_SUCCESS(RollbackStatus))
+                    DPRINT1("Couldn't release unlinked allocation (Status %lx)\n", RollbackStatus);
+            }
             return Status;
         }
 
-        /* AddRun() places the next run after HighestVCN only once the
-         * attribute owns clusters, so count these before looping */
-        AttrContext->pRecord->NonResident.AllocatedSize += (ULONGLONG)AssignedClusters * BytesPerCluster;
+        /* AddRun persisted the allocation size together with its mappings. */
 
         ClustersNeeded -= AssignedClusters;
         DesiredCluster = NextAssignedCluster + AssignedClusters;
     }
-
-    DestinationAttribute->NonResident.AllocatedSize = AttrContext->pRecord->NonResident.AllocatedSize;
-    DestinationAttribute->NonResident.HighestVCN = AttrContext->pRecord->NonResident.HighestVCN;
 
     return STATUS_SUCCESS;
 }
@@ -1213,9 +1239,10 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
                                   PLARGE_INTEGER DataSize)
 {
     NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN MasterContext = (AttrContext == Vcb->MFTContext);
     ULONG BytesPerCluster = Vcb->NtfsInfo.BytesPerCluster;
     ULONGLONG AllocationSize = ROUND_UP(DataSize->QuadPart, BytesPerCluster);
-    PNTFS_ATTR_RECORD DestinationAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
+    PNTFS_ATTR_RECORD DestinationAttribute;
     ULONG ExistingClusters = AttrContext->pRecord->NonResident.AllocatedSize / BytesPerCluster;
 
     ASSERT(AttrContext->pRecord->IsNonResident);
@@ -1231,7 +1258,17 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
     // do we need to increase the allocation size?
     else if (AttrContext->pRecord->NonResident.AllocatedSize < AllocationSize)
     {
-        Status = NtfsExtendAllocation(Vcb, AttrContext, AttrOffset, FileRecord, AllocationSize);
+        ULONGLONG ReserveSize = AllocationSize;
+
+        if (AttrContext->pRecord->Type == AttributeIndexAllocation)
+        {
+            ULONGLONG Ahead = min(max(AllocationSize, NTFS_GROW_AHEAD_MIN),
+                                  NTFS_GROW_AHEAD_MAX);
+            ReserveSize = ROUND_UP(AllocationSize + Ahead, BytesPerCluster);
+        }
+        Status = NtfsExtendAllocation(Vcb, AttrContext, AttrOffset, FileRecord, ReserveSize);
+        if (!NT_SUCCESS(Status) && ReserveSize != AllocationSize)
+            Status = NtfsExtendAllocation(Vcb, AttrContext, AttrOffset, FileRecord, AllocationSize);
         if (!NT_SUCCESS(Status))
             return Status;
     }
@@ -1240,15 +1277,30 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
     {
         // shrink allocation size
         ULONG ClustersToFree = ExistingClusters - (AllocationSize / BytesPerCluster);
+        ASSERT(ExistingClusters == AttrContext->pRecord->NonResident.HighestVCN + 1);
         Status = FreeClusters(Vcb, AttrContext, AttrOffset, FileRecord, ClustersToFree);
+        if (!NT_SUCCESS(Status))
+            return Status;
         AttrContext->pRecord->NonResident.AllocatedSize = AllocationSize;
     }
 
     // TODO: is the file compressed, encrypted, or sparse?
 
+    if (MasterContext)
+    {
+        KeEnterCriticalRegion();
+        ExAcquireResourceExclusiveLite(&Vcb->MftContextResource, TRUE);
+    }
     AttrContext->pRecord->NonResident.DataSize = DataSize->QuadPart;
     AttrContext->pRecord->NonResident.InitializedSize = DataSize->QuadPart;
 
+    if ((AttrContext->FileMFTIndex & NTFS_MFT_MASK) != FileRecord->MFTRecordNumber)
+    {
+        Status = NtfsCommitAttributeContext(Vcb, AttrContext, FileRecord);
+        goto UnlockContext;
+    }
+
+    DestinationAttribute = (PNTFS_ATTR_RECORD)((PUCHAR)FileRecord + AttrOffset);
     DestinationAttribute->NonResident.AllocatedSize = AttrContext->pRecord->NonResident.AllocatedSize;
     DestinationAttribute->NonResident.DataSize = DataSize->QuadPart;
     DestinationAttribute->NonResident.InitializedSize = DataSize->QuadPart;
@@ -1259,6 +1311,12 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
 
     DPRINT("Allocated Size: %I64u\n", DestinationAttribute->NonResident.AllocatedSize);
 
+UnlockContext:
+    if (MasterContext)
+    {
+        ExReleaseResourceLite(&Vcb->MftContextResource);
+        KeLeaveCriticalRegion();
+    }
     return Status;
 }
 
@@ -1292,6 +1350,12 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
 * falls, and an unnamed $DATA has the named ones behind it. Whatever follows it is moved to
 * follow the new, non-resident header.
 */
+static NTSTATUS
+NtfsMakeRoomToConvert(PDEVICE_EXTENSION Vcb,
+                      PNTFS_ATTR_CONTEXT AttrContext,
+                      PULONG AttrOffset,
+                      PFILE_RECORD_HEADER FileRecord);
+
 NTSTATUS
 ConvertResidentAttributeToNonResident(PDEVICE_EXTENSION Vcb,
                                       PNTFS_ATTR_CONTEXT AttrContext,
@@ -1317,12 +1381,11 @@ ConvertResidentAttributeToNonResident(PDEVICE_EXTENSION Vcb,
     // The size of a 0-length, non-resident attribute will be 0x41 + the size of the attribute name, aligned to an 8-byte boundary
     NewRecordLength = ALIGN_UP_BY(0x41 + (AttrContext->pRecord->NameLength * sizeof(WCHAR)), ATTR_RECORD_ALIGNMENT);
 
-    if (NewRecordLength > OldRecordLength &&
-        FileRecord->BytesInUse + (NewRecordLength - OldRecordLength) > Vcb->NtfsInfo.BytesPerFileRecord)
-    {
-        DPRINT1("ERROR: No room to convert attribute to non-resident!\n");
-        return STATUS_DISK_FULL;
-    }
+    Status = NtfsMakeRoomToConvert(Vcb, AttrContext, &AttrOffset, FileRecord);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Destination = (PNTFS_ATTR_RECORD)((PUCHAR)FileRecord + AttrOffset);
+    OldRecordLength = Destination->Length;
 
     // Is there existing data we need to back-up?
     AttribDataSize = AttrContext->pRecord->Resident.ValueLength;
@@ -1799,11 +1862,13 @@ NtfsMapAttributeRuns(PDEVICE_EXTENSION Vcb,
     }
     RtlZeroMemory(TempBuffer, Vcb->NtfsInfo.BytesPerFileRecord);
 
-    ConvertLargeMCBToDataRuns(&Context->DataRunsMCB,
-                              Context->pRecord->NonResident.HighestVCN + 1,
-                              TempBuffer,
-                              Vcb->NtfsInfo.BytesPerFileRecord,
-                              &UsedBufferSize);
+    Status = ConvertLargeMCBToDataRuns(&Context->DataRunsMCB,
+                                       Context->pRecord->NonResident.HighestVCN + 1,
+                                       TempBuffer,
+                                       Vcb->NtfsInfo.BytesPerFileRecord,
+                                       &UsedBufferSize);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
 
     DataRun = TempBuffer;
 
@@ -2461,8 +2526,8 @@ NtfsLoadUpCaseTable(PDEVICE_EXTENSION Vcb)
     return NtfsReadUpCaseTable(Vcb);
 }
 
-NTSTATUS
-ReadFileRecord(PDEVICE_EXTENSION Vcb,
+static NTSTATUS
+ReadFileRecordInternal(PDEVICE_EXTENSION Vcb,
                ULONGLONG index,
                PFILE_RECORD_HEADER file)
 {
@@ -2480,6 +2545,30 @@ ReadFileRecord(PDEVICE_EXTENSION Vcb,
     /* Apply update sequence array fixups. */
     DPRINT("Sequence number: %u\n", file->SequenceNumber);
     return FixupUpdateSequenceArray(Vcb, &file->Ntfs);
+}
+
+NTSTATUS
+ReadFileRecord(PDEVICE_EXTENSION Vcb, ULONGLONG Index, PFILE_RECORD_HEADER Record)
+{
+    NTSTATUS Status;
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceSharedLite(&Vcb->MftContextResource, TRUE);
+    _SEH2_TRY
+    {
+        Status = ReadFileRecordInternal(Vcb, Index, Record);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+        ExReleaseResourceLite(&Vcb->MftContextResource);
+        KeLeaveCriticalRegion();
+        _SEH2_YIELD(ExRaiseStatus(Status));
+    }
+    _SEH2_END;
+    ExReleaseResourceLite(&Vcb->MftContextResource);
+    KeLeaveCriticalRegion();
+    return Status;
 }
 
 
@@ -2916,8 +3005,8 @@ UpdateIndexEntryFileName(PDEVICE_EXTENSION Vcb,
 * STATUS_SUCCESSFUL on success. An error passed from WriteAttribute() otherwise.
 *
 */
-NTSTATUS
-UpdateFileRecord(PDEVICE_EXTENSION Vcb,
+static NTSTATUS
+UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
                  ULONGLONG MftIndex,
                  PFILE_RECORD_HEADER FileRecord)
 {
@@ -2959,6 +3048,30 @@ UpdateFileRecord(PDEVICE_EXTENSION Vcb,
 
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, WriteImage);
 
+    return Status;
+}
+
+NTSTATUS
+UpdateFileRecord(PDEVICE_EXTENSION Vcb, ULONGLONG Index, PFILE_RECORD_HEADER Record)
+{
+    NTSTATUS Status;
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceSharedLite(&Vcb->MftContextResource, TRUE);
+    _SEH2_TRY
+    {
+        Status = UpdateFileRecordInternal(Vcb, Index, Record);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+        ExReleaseResourceLite(&Vcb->MftContextResource);
+        KeLeaveCriticalRegion();
+        _SEH2_YIELD(ExRaiseStatus(Status));
+    }
+    _SEH2_END;
+    ExReleaseResourceLite(&Vcb->MftContextResource);
+    KeLeaveCriticalRegion();
     return Status;
 }
 
@@ -3020,8 +3133,8 @@ FixupUpdateSequenceArray(PDEVICE_EXTENSION Vcb,
 * STATUS_INSUFFICIENT_RESOURCES if we can't allocate enough memory for a copy of $Bitmap.
 * STATUS_CANT_WAIT if CanWait was FALSE and the function could not get immediate, exclusive access to the MFT.
 */
-NTSTATUS
-AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
+static NTSTATUS
+AddNewMftEntryInternal(PFILE_RECORD_HEADER FileRecord,
                PDEVICE_EXTENSION DeviceExt,
                PULONGLONG DestinationIndex,
                BOOLEAN CanWait)
@@ -3193,6 +3306,34 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
     return Status;
 }
 
+NTSTATUS
+AddNewMftEntry(PFILE_RECORD_HEADER Record, PDEVICE_EXTENSION Vcb, PULONGLONG Index, BOOLEAN CanWait)
+{
+    NTSTATUS Status;
+
+    KeEnterCriticalRegion();
+    if (!ExAcquireResourceExclusiveLite(&Vcb->MftAllocationResource, CanWait))
+    {
+        KeLeaveCriticalRegion();
+        return STATUS_CANT_WAIT;
+    }
+    _SEH2_TRY
+    {
+        Status = AddNewMftEntryInternal(Record, Vcb, Index, CanWait);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+        ExReleaseResourceLite(&Vcb->MftAllocationResource);
+        KeLeaveCriticalRegion();
+        _SEH2_YIELD(ExRaiseStatus(Status));
+    }
+    _SEH2_END;
+    ExReleaseResourceLite(&Vcb->MftAllocationResource);
+    KeLeaveCriticalRegion();
+    return Status;
+}
+
 /**
 * @name GetMaxIndexRootSize
 * @implemented
@@ -3278,6 +3419,43 @@ GetMaxIndexRootSize(PDEVICE_EXTENSION DeviceExt,
 * file which contains one FILENAME_ATTRIBUTE for a long name and another for the 8.3 name, will
 * get both attributes added to its parent directory.
 */
+/* Index growth may commit the temporarily shortened root. Restore its original
+ * record on failure; any newly orphaned allocations can then be reclaimed. */
+static VOID
+NtfsRestoreDirectoryRecord(PDEVICE_EXTENSION Vcb,
+                           ULONGLONG MftIndex,
+                           PFILE_RECORD_HEADER Record)
+{
+    NTSTATUS Status;
+
+    if (Record == NULL)
+        return;
+    Status = UpdateFileRecord(Vcb, MftIndex, Record);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("Unable to restore directory record %I64u: %lx\n", MftIndex, Status);
+}
+
+static NTSTATUS
+NtfsRefreshIndexRootContext(PDEVICE_EXTENSION Vcb,
+                            PFILE_RECORD_HEADER Record,
+                            PCWSTR IndexName,
+                            ULONG IndexNameLength,
+                            PNTFS_ATTR_CONTEXT *Context,
+                            PULONG Offset)
+{
+    PNTFS_ATTR_CONTEXT NewContext;
+    NTSTATUS Status;
+
+    Status = FindAttribute(Vcb, Record, AttributeIndexRoot, IndexName,
+                           IndexNameLength, &NewContext, Offset);
+    if (NT_SUCCESS(Status))
+    {
+        ReleaseAttributeContext(*Context);
+        *Context = NewContext;
+    }
+    return Status;
+}
+
 static
 NTSTATUS
 InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
@@ -3289,6 +3467,7 @@ InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
 {
     NTSTATUS Status = STATUS_SUCCESS;
     PFILE_RECORD_HEADER ParentFileRecord;
+    PFILE_RECORD_HEADER PristineRecord = NULL;
     PNTFS_ATTR_CONTEXT IndexRootContext;
     PINDEX_ROOT_ATTRIBUTE I30IndexRoot;
     ULONG IndexRootOffset;
@@ -3436,13 +3615,21 @@ InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
                                 + 0x18; // Size of dummy key with a VCN for a subnode
     ASSERT(MinIndexRootSize.QuadPart % ATTR_RECORD_ALIGNMENT == 0);
 
+    PristineRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (PristineRecord == NULL)
+    {
+        DestroyBTree(NewTree);
+        ReleaseAttributeContext(IndexRootContext);
+        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopyMemory(PristineRecord, ParentFileRecord, DeviceExt->NtfsInfo.BytesPerFileRecord);
+
     // Temporarily shrink the index root to it's minimal size
     AttributeLength = MinIndexRootSize.LowPart;
     AttributeLength += sizeof(INDEX_ROOT_ATTRIBUTE);
 
-
-    // FIXME: IndexRoot will probably be invalid until we're finished. If we fail before we finish, the directory will probably be toast.
-    // The potential for catastrophic data-loss exists!!! :)
 
     // Update the length of the attribute in the file record of the parent directory
     Status = InternalSetResidentAttributeLength(DeviceExt,
@@ -3457,11 +3644,17 @@ InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
         ReleaseAttributeContext(IndexRootContext);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineRecord);
+        if (PristineRecord != NULL)
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineRecord);
         return Status;
     }
 
     // Update the index allocation
     Status = UpdateIndexAllocation(DeviceExt, NewTree, I30IndexRoot->SizeOfEntry, ParentFileRecord);
+    if (NT_SUCCESS(Status))
+        Status = NtfsRefreshIndexRootContext(DeviceExt, ParentFileRecord, IndexName,
+                                             IndexNameLength, &IndexRootContext, &IndexRootOffset);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("ERROR: Failed to update index allocation from B-Tree!\n");
@@ -3469,6 +3662,9 @@ InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
         ReleaseAttributeContext(IndexRootContext);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineRecord);
+        if (PristineRecord != NULL)
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineRecord);
         return Status;
     }
 
@@ -3495,11 +3691,17 @@ InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
             ReleaseAttributeContext(IndexRootContext);
             ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
             ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+            NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineRecord);
+            if (PristineRecord != NULL)
+                ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineRecord);
             return Status;
         }
 
         // We need to update the index allocation once more
         Status = UpdateIndexAllocation(DeviceExt, NewTree, I30IndexRoot->SizeOfEntry, ParentFileRecord);
+        if (NT_SUCCESS(Status))
+            Status = NtfsRefreshIndexRootContext(DeviceExt, ParentFileRecord, IndexName,
+                                                 IndexNameLength, &IndexRootContext, &IndexRootOffset);
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("ERROR: Failed to update index allocation from B-Tree!\n");
@@ -3507,6 +3709,9 @@ InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
             ReleaseAttributeContext(IndexRootContext);
             ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
             ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+            NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineRecord);
+            if (PristineRecord != NULL)
+                ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineRecord);
             return Status;
         }
 
@@ -3523,6 +3728,9 @@ InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
         ReleaseAttributeContext(IndexRootContext);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineRecord);
+        if (PristineRecord != NULL)
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineRecord);
         return Status;
     }
 
@@ -3551,6 +3759,9 @@ InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
             ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
             ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
             DPRINT1("ERROR: Unable to set resident attribute length!\n");
+            NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineRecord);
+            if (PristineRecord != NULL)
+                ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineRecord);
             return Status;
         }
 
@@ -3566,6 +3777,9 @@ InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
         ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
         ReleaseAttributeContext(IndexRootContext);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineRecord);
+        if (PristineRecord != NULL)
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineRecord);
         return Status;
     }
 
@@ -3584,8 +3798,14 @@ InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
         ReleaseAttributeContext(IndexRootContext);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineRecord);
+        if (PristineRecord != NULL)
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineRecord);
         return Status;
     }
+
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineRecord);
+    PristineRecord = NULL;
 
     // re-read the parent file record, so we can dump it
     Status = ReadFileRecord(DeviceExt, DirectoryMftIndex, ParentFileRecord);
@@ -3602,6 +3822,9 @@ InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("ERROR: Couldn't re-create b-tree\n");
+            NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineRecord);
+            if (PristineRecord != NULL)
+                ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineRecord);
             return Status;
         }
 
@@ -4242,8 +4465,8 @@ NtfsVisitIndexEntries(PDEVICE_EXTENSION DeviceExt,
 * The record's sequence number is incremented before it's written back, so any file reference
 * still pointing at the old incarnation can be recognised as stale.
 */
-NTSTATUS
-FreeMftEntry(PDEVICE_EXTENSION DeviceExt,
+static NTSTATUS
+FreeMftEntryInternal(PDEVICE_EXTENSION DeviceExt,
              ULONGLONG MftIndex)
 {
     NTSTATUS Status;
@@ -4348,6 +4571,30 @@ FreeMftEntry(PDEVICE_EXTENSION DeviceExt,
     ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
     ReleaseAttributeContext(BitmapContext);
 
+    return Status;
+}
+
+NTSTATUS
+FreeMftEntry(PDEVICE_EXTENSION Vcb, ULONGLONG Index)
+{
+    NTSTATUS Status;
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&Vcb->MftAllocationResource, TRUE);
+    _SEH2_TRY
+    {
+        Status = FreeMftEntryInternal(Vcb, Index);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+        ExReleaseResourceLite(&Vcb->MftAllocationResource);
+        KeLeaveCriticalRegion();
+        _SEH2_YIELD(ExRaiseStatus(Status));
+    }
+    _SEH2_END;
+    ExReleaseResourceLite(&Vcb->MftAllocationResource);
+    KeLeaveCriticalRegion();
     return Status;
 }
 

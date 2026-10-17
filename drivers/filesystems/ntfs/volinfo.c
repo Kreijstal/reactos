@@ -220,6 +220,7 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
     PRTL_BITMAP Bitmap = &DeviceExt->ClusterBitmap;
     ULONG AssignedRun;
 
+    ASSERT(DesiredClusters != 0);
     DPRINT("NtfsAllocateClusters(%p, %lu, %lu, %p, %p)\n", DeviceExt, FirstDesiredCluster, DesiredClusters, FirstAssignedCluster, AssignedClusters);
 
     *AssignedClusters = 0;
@@ -250,20 +251,29 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
     }
     else
     {
-        // we can't get one contiguous run
-        *AssignedClusters = RtlFindNextForwardRunClear(Bitmap, FirstDesiredCluster, FirstAssignedCluster);
+        ULONG Cursor = FirstDesiredCluster;
+        ULONG Start, Count;
+
+        /* Minimize mapping pairs when the request needs several extents.
+         * Prefer the largest extent after the hint, so successive extensions
+         * can coalesce, rather than consuming every small hole in between. */
+        while (Cursor < Bitmap->SizeOfBitMap)
+        {
+            Count = RtlFindNextForwardRunClear(Bitmap, Cursor, &Start);
+            if (Count == 0)
+                break;
+            if (Count > *AssignedClusters)
+            {
+                *FirstAssignedCluster = Start;
+                *AssignedClusters = Count;
+            }
+            ASSERT(Start + Count > Cursor);
+            Cursor = Start + Count;
+        }
 
         if (*AssignedClusters == 0)
-        {
-            // we couldn't find any runs starting at DesiredFirstCluster
             *AssignedClusters = RtlFindLongestRunClear(Bitmap, FirstAssignedCluster);
-        }
-
-        if (*AssignedClusters == 0)
-        {
-            Status = STATUS_DISK_FULL;
-            goto Quit;
-        }
+        ASSERT(*AssignedClusters != 0);
 
         /* Hand out no more than was asked for, and mark it in use */
         *AssignedClusters = min(*AssignedClusters, DesiredClusters);
@@ -325,32 +335,6 @@ NtfsAllocateClusterRange(PDEVICE_EXTENSION DeviceExt,
         else
             RtlClearBits(Bitmap, FirstCluster, ClusterCount);
     }
-
-    ExReleaseResourceLite(&DeviceExt->BitmapResource);
-    KeLeaveCriticalRegion();
-
-    return Status;
-}
-
-/**
-* @name NtfsFreeClusterRange
-* @implemented
-*
-* Gives [FirstCluster, FirstCluster + ClusterCount) back to the volume.
-*/
-NTSTATUS
-NtfsFreeClusterRange(PDEVICE_EXTENSION DeviceExt,
-                     ULONG FirstCluster,
-                     ULONG ClusterCount)
-{
-    NTSTATUS Status;
-
-    KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite(&DeviceExt->BitmapResource, TRUE);
-
-    RtlClearBits(&DeviceExt->ClusterBitmap, FirstCluster, ClusterCount);
-    DeviceExt->FreeClusterCount += ClusterCount;
-    Status = NtfsWriteVolumeBitmap(DeviceExt, FirstCluster, ClusterCount);
 
     ExReleaseResourceLite(&DeviceExt->BitmapResource);
     KeLeaveCriticalRegion();

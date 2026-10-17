@@ -445,6 +445,7 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     PNTFS_VCB Vcb = NULL;
     NTSTATUS Status;
     BOOLEAN Lookaside = FALSE;
+    BOOLEAN MftResources = FALSE;
 
     DPRINT("NtfsMountVolume() called\n");
 
@@ -479,6 +480,10 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
 
     Vcb->Identifier.Type = NTFS_TYPE_VCB;
     Vcb->Identifier.Size = sizeof(NTFS_TYPE_VCB);
+
+    ExInitializeResourceLite(&Vcb->MftAllocationResource);
+    ExInitializeResourceLite(&Vcb->MftContextResource);
+    MftResources = TRUE;
 
     Status = NtfsGetVolumeData(DeviceToMount,
                                Vcb);
@@ -648,6 +653,11 @@ ByeBye:
             Vcb->UpCaseTable = NULL;
         }
 
+        if (MftResources)
+        {
+            ExDeleteResourceLite(&Vcb->MftContextResource);
+            ExDeleteResourceLite(&Vcb->MftAllocationResource);
+        }
         if (Lookaside)
         {
             ExDeleteResourceLite(&Vcb->BitmapResource);
