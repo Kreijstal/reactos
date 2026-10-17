@@ -167,6 +167,12 @@ typedef struct
      * IndexResource guards the latter. */
     ULONGLONG QuotaMftIndex;
     ULONG NextQuotaOwnerId;
+    /* Ordinary mutations take shared ownership while tracking is disabled,
+     * exclusive ownership while enabled. Taken before directory/FCB resources;
+     * paging I/O cannot change a stream's logical length and bypasses it. */
+    ERESOURCE QuotaResource;
+    BOOLEAN QuotaTracking;
+    BOOLEAN QuotaRebuildRequired;
 
     NPAGED_LOOKASIDE_LIST FileRecLookasideList;
 
@@ -2316,6 +2322,32 @@ NtfsQueryQuota(PNTFS_IRP_CONTEXT IrpContext);
 
 NTSTATUS
 NtfsSetQuota(PNTFS_IRP_CONTEXT IrpContext);
+
+BOOLEAN
+NtfsQuotaOperation(PNTFS_IRP_CONTEXT IrpContext);
+
+NTSTATUS
+NtfsUpdateFileQuota(PDEVICE_EXTENSION Vcb, ULONGLONG MftIndex);
+
+VOID
+NtfsReleaseFileQuota(PDEVICE_EXTENSION Vcb, PFILE_RECORD_HEADER Record);
+
+NTSTATUS
+NtfsDeleteUserFileLink(PDEVICE_EXTENSION Vcb,
+                       ULONGLONG MftIndex,
+                       ULONGLONG ParentIndex,
+                       PCUNICODE_STRING Name,
+                       BOOLEAN CaseSensitive,
+                       PUSHORT LinksLeft);
+
+NTSTATUS
+NtfsRebuildQuota(PDEVICE_EXTENSION Vcb);
+
+VOID
+NtfsInvalidateQuota(PDEVICE_EXTENSION Vcb);
+
+NTSTATUS
+NtfsCheckQuotaGrowth(PNTFS_IRP_CONTEXT IrpContext);
 
 NTSTATUS
 NtfsQueryFsControl(PDEVICE_EXTENSION Vcb,
