@@ -196,29 +196,13 @@ int chk_set_volume_flag(CHK_CTX *c, int setDirty, int markChkdsk)
  * not replayed over the just-repaired metadata on the next mount)
  * ============================================================ */
 
-/* Log page size: matches mkntfs's lfs_page_size and the driver's LfsPageSize
- * -- 4 KiB unless the cluster is larger, in which case the page tracks the
- * cluster.  One authority; keep in step with mkntfs.c:lfs_page_size. */
+/* LFS pages are independent of allocation cluster size. */
 static __inline ULONG chk_lfs_page_size(const CHK_CTX *c)
 {
-    return (c->BytesPerCluster > 4096) ? c->BytesPerCluster : 4096;
+    return 4096;
 }
 
-/* Reset $LogFile (MFT record 2) to the empty, dismounted-cleanly state.
- *
- * H8 rationale: we do NOT synthesize a speculative redo/undo record stream
- * (whose on-disk layout is not yet oracle-confirmed).  We only write the two
- * byte-identical CLEAN 'RSTR' restart pages -- the exact "empty log" landmark
- * mkntfs writes at format time (ntfs_build_rstr_page) and that the ReactOS
- * driver's NtfsLfsCheckCleanShutdown accepts.  This makes LFS replay a no-op,
- * which is precisely what `chkdsk /f` does after repairing metadata: it drops
- * the pending journal rather than replaying it.  The layout is unambiguous
- * (ntfs_types.h:NTFS_LFS_RESTART_AREA + NTFS_LFS_RESTART_FLAG_CLEAN, sourced
- * from libfsntfs and cross-checked against the driver parser), so this is the
- * Windows-correct SAFE subset -- not a guess.
- *
- * Idempotent: writing the CLEAN landmark twice yields the same bytes, and it
- * is only ever called when a repair was actually made. */
+/* Write two clean NTFS 1.1 restart pages after an offline repair. */
 int chk_stamp_logfile_clean(CHK_CTX *c, NTFS_CHK_RESULT *res)
 {
     UCHAR *rec = NULL, *page = NULL;
@@ -276,9 +260,9 @@ int chk_stamp_logfile_clean(CHK_CTX *c, NTFS_CHK_RESULT *res)
         return -1;
     }
 
-    /* Build one CLEAN RSTR page (USA already applied) and write it twice, at
-     * stream offsets 0 and pageSize -- byte-identical, exactly like mkntfs. */
-    ntfs_build_rstr_page(page, pageSize, c->BytesPerSector, dataSize);
+    /* Build one CLEAN RSTR page (USA already applied) and write it twice. */
+    if (NtfsBuildCleanRestart(page, pageSize, c->BytesPerSector, dataSize) != 0)
+        goto done;
 
     if (chk_stream_io(c->Io, runs, (ULONG)n, c->BytesPerCluster,
                       0, page, pageSize, 1) == 0 &&
@@ -290,6 +274,7 @@ int chk_stamp_logfile_clean(CHK_CTX *c, NTFS_CHK_RESULT *res)
                   pageSize);
     }
 
+done:
     free(page);
     free(rec);
     free(runs);
@@ -597,7 +582,7 @@ static int chk_encode_runlist(UCHAR *dst, ULONG cap,
         }
         else
         {
-            rl = ntfs_encode_run(tmp, runs[i].Len,
+            rl = NtfsChkEncodeRun(tmp, runs[i].Len,
                                  (LONGLONG)runs[i].Lcn - prevLcn);
             prevLcn = (LONGLONG)runs[i].Lcn;
             if ((ULONG)pos + rl >= cap)
@@ -1347,7 +1332,7 @@ static UCHAR *chk_rb_make_entry(CHK_CTX *c, ULONG targetRec, USHORT targetSeq,
         return NULL;
 
     e = (INDEX_ENTRY *)blob;
-    e->Data.Directory.IndexedFile = ntfs_mft_ref(targetRec, targetSeq);
+    e->Data.Directory.IndexedFile = NtfsChkMftReference(targetRec, targetSeq);
     e->Length = (USHORT)entryLen;
     e->KeyLength = (USHORT)keyLen;
     e->Flags = 0;
@@ -1543,7 +1528,7 @@ static int chk_rb_emit_small(CHK_CTX *c, UCHAR *rec, CHK_RB_ENT *ents, ULONG n,
     end->Length = sizeof(INDEX_ENTRY);
     end->Flags = INDEX_ENTRY_END;
 
-    if (!ntfs_add_resident_attr(nextInstance, (FILE_RECORD_HEADER *)rec,
+    if (!NtfsChkAddResidentAttribute(nextInstance, (FILE_RECORD_HEADER *)rec,
                                 AT_INDEX_ROOT, chk_i30_name, 4, val, valLen, 0))
         { free(val); return -1; }
     free(val);
@@ -1619,7 +1604,7 @@ typedef struct _CHK_RB_BLK {
  * root that fills the record -- and the two later inserts then fail, aborting
  * the whole rebuild and leaving the directory with no index at all.
  *
- * The sizes mirror ntfs_add_resident_attr() / ntfs_add_nonresident_attr()
+ * The sizes mirror NtfsChkAddResidentAttribute() / NtfsChkAddNonresidentAttribute()
  * exactly: header (0x18 resident, 0x40 non-resident), then the "$I30" name
  * 4-aligned, then the value, the whole attribute 8-aligned.  Sequential adds
  * fit iff their total is <= chk_rb_record_free(), which already accounts for
@@ -1637,7 +1622,7 @@ static int chk_rb_large_root_fits(CHK_CTX *c, UCHAR *rec,
     ULONG irLen = (ULONG)NTFS_ALIGN_UP(irVal + sizeof(INDEX_ROOT) + bodyLen, 8);
 
     /* $INDEX_ALLOCATION: non-resident, value = one mapping pair + terminator.
-     * ntfs_encode_run() writes into a 16-byte buffer, so bound it by that
+     * NtfsChkEncodeRun() writes into a 16-byte buffer, so bound it by that
      * rather than by the run we have not allocated yet. */
     ULONG iaRuns = (ULONG)NTFS_ALIGN_UP(0x40 + nameBytes, 4);
     ULONG iaLen  = (ULONG)NTFS_ALIGN_UP(iaRuns + 16 + 1, 8);
@@ -1934,14 +1919,14 @@ static int chk_rb_emit_large(CHK_CTX *c, UCHAR *rec, CHK_RB_ENT *ents, ULONG n,
         ir->Header.AllocatedSize = sizeof(INDEX_HEADER) + rootLen;
         ir->Header.Flags = 1;   /* large: has sub-nodes */
         memcpy(val + sizeof(INDEX_ROOT), rootBody, rootLen);
-        if (!ntfs_add_resident_attr(nextInstance, (FILE_RECORD_HEADER *)rec,
+        if (!NtfsChkAddResidentAttribute(nextInstance, (FILE_RECORD_HEADER *)rec,
                                     AT_INDEX_ROOT, chk_i30_name, 4, val, valLen, 0))
             { free(val); goto done; }
         free(val);
     }
 
     /* $INDEX_ALLOCATION (single run) covering every block. */
-    if (!ntfs_add_nonresident_attr(nextInstance, c->BytesPerCluster,
+    if (!NtfsChkAddNonresidentAttribute(nextInstance, c->BytesPerCluster,
                                    (FILE_RECORD_HEADER *)rec,
                                    AT_INDEX_ALLOCATION, chk_i30_name, 4,
                                    iaLcn, iaClusters,
@@ -1959,7 +1944,7 @@ static int chk_rb_emit_large(CHK_CTX *c, UCHAR *rec, CHK_RB_ENT *ents, ULONG n,
         for (b = 0; b < blockCount; b++)
             chk_bmp_set(bmp, b);
     }
-    if (!ntfs_add_resident_attr(nextInstance, (FILE_RECORD_HEADER *)rec,
+    if (!NtfsChkAddResidentAttribute(nextInstance, (FILE_RECORD_HEADER *)rec,
                                 AT_BITMAP, chk_i30_name, 4, bmp, bmpBytes, 0))
         goto done;
 
@@ -2594,9 +2579,9 @@ static int chk_orphan_rehome(CHK_CTX *c, ULONG recno, ULONGLONG foundRef,
         fnbuf = (FILE_NAME_ATTR *)calloc(1, fnBytes);
         if (!fnbuf)
             { free(rec); return -1; }
-        ntfs_make_file_name(fnbuf, foundRef, nm, (UCHAR)nlen,
+        NtfsChkBuildFileName(fnbuf, foundRef, nm, (UCHAR)nlen,
                             FILE_NAME_POSIX, fileAttrs, 0, 0, timeVal);
-        if (!ntfs_add_resident_attr(&nextInstance, h, AT_FILE_NAME, NULL, 0,
+        if (!NtfsChkAddResidentAttribute(&nextInstance, h, AT_FILE_NAME, NULL, 0,
                                     fnbuf, fnBytes, 0))
         {
             /* Record is too full for the fabricated name: leave the orphan
@@ -2729,12 +2714,12 @@ int chk_recover_orphans(CHK_CTX *c, NTFS_CHK_RESULT *res)
     foundSeq = (USHORT)(staleSeq + 1);
     if (foundSeq == 0)
         foundSeq = 1;
-    foundRef = ntfs_mft_ref(foundRec, foundSeq);
+    foundRef = NtfsChkMftReference(foundRec, foundSeq);
 
     /* Root reference: use root's live header sequence number for the back-ref. */
     {
         USHORT rootSeq = c->Rec[FILE_Root].SeqNumber;
-        rootRef = ntfs_mft_ref(FILE_Root, rootSeq ? rootSeq : 1);
+        rootRef = NtfsChkMftReference(FILE_Root, rootSeq ? rootSeq : 1);
     }
     chk_orphan_root_si(c, &rootSecId, &rootTime);
 
@@ -2750,7 +2735,7 @@ int chk_recover_orphans(CHK_CTX *c, NTFS_CHK_RESULT *res)
         FILE_NAME_ATTR *fn;
         ULONG fnBytes;
 
-        ntfs_init_file_record(h, c->MftRecordSize, c->BytesPerSector,
+        NtfsChkInitializeRecord(h, c->MftRecordSize, c->BytesPerSector,
                               foundSeq, FRH_IN_USE | FRH_DIRECTORY, foundRec);
         h->LinkCount = 1;
         nextInstance = h->NextAttributeId;
@@ -2763,7 +2748,7 @@ int chk_recover_orphans(CHK_CTX *c, NTFS_CHK_RESULT *res)
         si.AccessTime = rootTime;
         si.FileAttributes = FILE_ATTR_DUP_FILE_NAME_INDEX_PRESENT;
         si.SecurityId = rootSecId;
-        if (!ntfs_add_resident_attr(&nextInstance, h, AT_STANDARD_INFORMATION,
+        if (!NtfsChkAddResidentAttribute(&nextInstance, h, AT_STANDARD_INFORMATION,
                                     NULL, 0, &si, sizeof(si), 0))
             { free(rec); return -1; }
 
@@ -2773,11 +2758,11 @@ int chk_recover_orphans(CHK_CTX *c, NTFS_CHK_RESULT *res)
         fn = (FILE_NAME_ATTR *)calloc(1, fnBytes);
         if (!fn)
             { free(rec); return -1; }
-        ntfs_make_file_name(fn, rootRef, foundName, (UCHAR)foundNameLen,
+        NtfsChkBuildFileName(fn, rootRef, foundName, (UCHAR)foundNameLen,
                             FILE_NAME_POSIX,
                             FILE_ATTR_DUP_FILE_NAME_INDEX_PRESENT, 0, 0,
                             rootTime);
-        if (!ntfs_add_resident_attr(&nextInstance, h, AT_FILE_NAME, NULL, 0,
+        if (!NtfsChkAddResidentAttribute(&nextInstance, h, AT_FILE_NAME, NULL, 0,
                                     fn, fnBytes, 0))
             { free(fn); free(rec); return -1; }
         free(fn);
@@ -2801,7 +2786,7 @@ int chk_recover_orphans(CHK_CTX *c, NTFS_CHK_RESULT *res)
             ie = (INDEX_ENTRY *)(idx + sizeof(INDEX_ROOT));
             ie->Length = sizeof(INDEX_ENTRY);
             ie->Flags = INDEX_ENTRY_END;
-            if (!ntfs_add_resident_attr(&nextInstance, h, AT_INDEX_ROOT,
+            if (!NtfsChkAddResidentAttribute(&nextInstance, h, AT_INDEX_ROOT,
                                         chk_i30_name, 4, idx, sizeof(idx), 0))
                 { free(rec); return -1; }
         }
