@@ -135,6 +135,16 @@ HalpInitializeClock(VOID)
     /* Enable the timer interrupt */
     HalEnableSystemInterrupt(APIC_CLOCK_VECTOR, CLOCK_LEVEL, Latched);
 
+    /* The RTC may have asserted IRQ8 before its edge-triggered IOAPIC route
+     * was unmasked. Acknowledge that pending status after enabling the route
+     * so the next periodic interrupt produces a new edge. */
+    EFlags = __readeflags();
+    _disable();
+    HalpAcquireCmosSpinLock();
+    HalpReadCmos(RTC_REGISTER_C);
+    HalpReleaseCmosSpinLock();
+    __writeeflags(EFlags);
+
     DPRINT1("Clock initialized\n");
 }
 

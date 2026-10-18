@@ -1,83 +1,174 @@
 /*
- * COPYRIGHT:        See COPYING in the top level directory
- * PROJECT:          ReactOS kernel
- * FILE:             drivers/filesystem/ntfs/lock.c
- * PURPOSE:          NTFS filesystem driver - IRP_MJ_LOCK_CONTROL handler
- *
- * Byte-range file locks (LockFile / UnlockFile / LockFileEx). All four
- * minor codes (IRP_MN_LOCK, IRP_MN_UNLOCK_SINGLE, IRP_MN_UNLOCK_ALL,
- * IRP_MN_UNLOCK_ALL_BY_KEY) are dispatched through the FsRtl helper
- * FsRtlProcessFileLock, which uses the per-FCB FILE_LOCK state that
- * fcb.c initializes via FsRtlInitializeFileLock.
- *
- * FsRtlProcessFileLock owns the IRP from the moment we call it - it
- * either completes the IRP synchronously (most cases) or queues it
- * waiting for a conflicting lock to drop. Either way, NtfsDispatch
- * must NOT touch the IRP afterwards, so we clear IRPCONTEXT_COMPLETE
- * before returning so the post-switch IoCompleteRequest in dispatch.c
- * is skipped.
- *
- * Note that just registering the lock IRP isn't enough to actually
- * enforce locks against concurrent reads / writes - those have to
- * consult the FILE_LOCK via FsRtlCheckLockForReadAccess /
- * FsRtlCheckLockForWriteAccess in NtfsRead / NtfsWrite. That part is
- * also done as part of this change so byte-range locks behave the way
- * Win32 callers expect.
+ * PROJECT:     ReactOS NTFS filesystem driver
+ * LICENSE:     GPL-2.0-or-later
+ * PURPOSE:     Byte-range locks shared by every path to a data stream
  */
-
-/* INCLUDES *****************************************************************/
 
 #include "ntfs.h"
 
 #define NDEBUG
 #include <debug.h>
 
-/* FUNCTIONS ****************************************************************/
+NTSTATUS
+NTAPI
+NtfsCompleteLockIrp(PVOID Context, PIRP Irp)
+{
+    PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
+    PNTFS_FCB Fcb = FileObject->FsContext;
+    NTSTATUS Status = Irp->IoStatus.Status;
+
+    UNREFERENCED_PARAMETER(Context);
+    ASSERT(Fcb != NULL);
+    if (Fcb->Vcb->Flags & VCB_DEVICE_REMOVED)
+        Status = STATUS_DEVICE_REMOVED;
+    Irp->IoStatus.Status = Status;
+    IoCompleteRequest(Irp, IO_DISK_INCREMENT);
+    return Status;
+}
+
+/* Called with removal owning IoResource and DirResource exclusively. Close
+ * from a completed waiter can reenter, so pin one context at a time and restart
+ * the list search after completion instead of retaining an unpinned next link. */
+VOID
+NtfsRemoveFileLocks(PNTFS_VCB Vcb)
+{
+    PNTFS_FILE_LOCK FileLock, Found;
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+
+    for (;;)
+    {
+        Found = NULL;
+        KeAcquireSpinLock(&Vcb->FcbListLock, &OldIrql);
+        for (Entry = Vcb->FileLockList.Flink; Entry != &Vcb->FileLockList; Entry = Entry->Flink)
+        {
+            FileLock = CONTAINING_RECORD(Entry, NTFS_FILE_LOCK, ListEntry);
+            if (!FileLock->Removed)
+            {
+                FileLock->Removed = TRUE;
+                FileLock->References++;
+                Found = FileLock;
+                break;
+            }
+        }
+        KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
+        if (Found == NULL)
+            break;
+        ExAcquireResourceExclusiveLite(&Found->Resource, TRUE);
+        FsRtlUninitializeFileLock(&Found->Lock);
+        /* Cleanup and final close still use a valid, empty FILE_LOCK. */
+        FsRtlInitializeFileLock(&Found->Lock, NtfsCompleteLockIrp, NULL);
+        ExReleaseResourceLite(&Found->Resource);
+        NtfsReleaseFileLock(Found);
+    }
+}
+
+BOOLEAN
+NtfsCheckFileLock(PNTFS_FCB Fcb,
+                  PIRP Irp,
+                  PLARGE_INTEGER Offset,
+                  ULONG Length,
+                  BOOLEAN Write)
+{
+    PNTFS_FILE_LOCK FileLock = Fcb->FileLock;
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    LARGE_INTEGER LockLength;
+    BOOLEAN Allowed;
+
+    /* Mapped access is not subject to byte locks. Its paging requests must
+     * still populate and write back pages intersecting locked ranges. */
+    if ((Irp->Flags & IRP_PAGING_IO) || Length == 0)
+        return TRUE;
+    ASSERT(FileLock != NULL);
+    LockLength.QuadPart = Length;
+
+    /* FsRtl's current range table needs external serialization, including
+     * lookup. The resource belongs to the stream, not a hard-link path. */
+    ExAcquireResourceExclusiveLite(&FileLock->Resource, TRUE);
+    if (Write)
+    {
+        Allowed = FsRtlFastCheckLockForWrite(&FileLock->Lock, Offset, &LockLength,
+                                            Stack->Parameters.Write.Key, Stack->FileObject,
+                                            IoGetRequestorProcess(Irp));
+    }
+    else
+    {
+        Allowed = FsRtlFastCheckLockForRead(&FileLock->Lock, Offset, &LockLength,
+                                           Stack->Parameters.Read.Key, Stack->FileObject,
+                                           IoGetRequestorProcess(Irp));
+    }
+    ExReleaseResourceLite(&FileLock->Resource);
+    return Allowed;
+}
+
+/* FileLock->Resource serializes this list, including across hard-link FCBs. */
+static
+NTSTATUS
+NtfsRememberLockOwner(PFILE_OBJECT FileObject, PEPROCESS Process)
+{
+    PNTFS_CCB Ccb = FileObject->FsContext2;
+    PNTFS_LOCK_OWNER Owner;
+
+    ASSERT(Ccb != NULL);
+    for (Owner = Ccb->LockOwners; Owner != NULL; Owner = Owner->Next)
+    {
+        if (Owner->Process == Process)
+            return STATUS_SUCCESS;
+    }
+    Owner = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Owner), TAG_CCB);
+    if (Owner == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    Owner->Process = Process;
+    if (Process != NULL)
+        ObReferenceObject(Process);
+    Owner->Next = Ccb->LockOwners;
+    Ccb->LockOwners = Owner;
+    return STATUS_SUCCESS;
+}
 
 NTSTATUS
 NtfsLockControl(PNTFS_IRP_CONTEXT IrpContext)
 {
-    PIRP Irp = IrpContext->Irp;
     PFILE_OBJECT FileObject = IrpContext->FileObject;
     PNTFS_FCB Fcb;
+    PNTFS_VCB Vcb;
+    PNTFS_FILE_LOCK FileLock;
     NTSTATUS Status;
 
-    DPRINT("NtfsLockControl(): MinorFunction=%u\n", IrpContext->MinorFunction);
-
-    if (FileObject == NULL || FileObject->FsContext == NULL)
-    {
-        Irp->IoStatus.Information = 0;
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    Fcb = (PNTFS_FCB)FileObject->FsContext;
-
-    /* Locks only make sense on file streams, not directories or the
-     * volume stream. Reject anything else with the conventional
-     * status fastfat returns. */
-    if (Fcb->Identifier.Type != NTFS_TYPE_FCB)
-    {
-        Irp->IoStatus.Information = 0;
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    if (NtfsFCBIsDirectory(Fcb) || BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME_STREAM))
-    {
-        Irp->IoStatus.Information = 0;
+    IrpContext->Irp->IoStatus.Information = 0;
+    if (IrpContext->DeviceObject == NtfsGlobalData->DeviceObject || FileObject == NULL)
         return STATUS_INVALID_DEVICE_REQUEST;
+    Fcb = FileObject->FsContext;
+    ASSERT(Fcb != NULL && Fcb->Identifier.Type == NTFS_TYPE_FCB);
+    if (NtfsFCBIsDirectory(Fcb))
+        return STATUS_INVALID_PARAMETER;
+    if (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
+        return STATUS_INVALID_DEVICE_REQUEST;
+    if (FileObject->Flags & FO_CLEANUP_COMPLETE)
+        return STATUS_FILE_CLOSED;
+
+    Vcb = Fcb->Vcb;
+    /* Completion may close the last file object. Keep the same ordering as
+     * cleanup/removal, including any recursive close from the callback. */
+    ExAcquireResourceExclusiveLite(&Vcb->DirResource, TRUE);
+    FileLock = Fcb->FileLock;
+    ASSERT(FileLock != NULL);
+    /* Completion can release the last file-object/FCB reference before the
+     * helper returns. Keep the shared lock and its resource alive separately. */
+    NtfsReferenceFileLock(FileLock);
+    ExAcquireResourceExclusiveLite(&FileLock->Resource, TRUE);
+    if (IrpContext->MinorFunction == IRP_MN_LOCK)
+    {
+        Status = NtfsRememberLockOwner(FileObject, IoGetRequestorProcess(IrpContext->Irp));
+        if (!NT_SUCCESS(Status))
+            goto Unlock;
+        FileObject->LockOperation = TRUE;
     }
-
-    /* Hand the IRP to FsRtl. From here on the IRP is owned by the
-     * lock package - it will be completed (synchronously, in the
-     * common case) before this call returns, or queued waiting for
-     * a conflicting lock. Either way, the dispatch loop in
-     * dispatch.c must not touch it. */
-    Status = FsRtlProcessFileLock(&Fcb->FileLock, Irp, NULL);
-
-    /* Tell the dispatch loop the IRP is gone. */
     IrpContext->Flags &= ~IRPCONTEXT_COMPLETE;
-
+    Status = FsRtlProcessFileLock(&FileLock->Lock, IrpContext->Irp, NULL);
+Unlock:
+    ExReleaseResourceLite(&FileLock->Resource);
+    NtfsReleaseFileLock(FileLock);
+    ExReleaseResourceLite(&Vcb->DirResource);
     return Status;
 }
-
-/* EOF */

@@ -56,25 +56,33 @@ NtfsCloseFile(PDEVICE_EXTENSION DeviceExt,
         return STATUS_SUCCESS;
     }
 
-    /* Do NOT clear FsContext or SectionObjectPointer here.  The memory manager
-     * may still issue paging I/O (dirty page writeback) through this FileObject
-     * after IRP_MJ_CLOSE.  Clearing FsContext causes ASSERT(Fcb) failures in
-     * NtfsRead/NtfsWrite.  Clearing SectionObjectPointer breaks the MM's
-     * Segment->FileObject->SectionObjectPointer->DataSectionObject invariant.
-     * FsContext2 (CCB) is safe to clear since paging I/O doesn't use it. */
     FileObject->FsContext2 = NULL;
+    FileObject->FsContext = NULL;
 
-    // External FO's (created outside the FSD) carry a FileName.  Some FO's are
-    // created with IoCreateStreamFileObject() inside the FSD and have no
-    // FileName; the internal cache stream FO is one of those but is flagged
-    // NTFS_CCB_FLAG_COUNTED by NtfsFCBInitializeCache, which took an FCB
-    // reference to pin the FCB (and its SectionObjectPointers) for as long as
-    // MM references the stream FO.  Drop exactly the one reference this FO
-    // holds in either case.
-    if (FileObject->FileName.Buffer ||
-        BooleanFlagOn(Ccb->Flags, NTFS_CCB_FLAG_COUNTED))
+    /* SectionObjectPointer is deliberately left alone. Mm reaches the file's section object
+     * pointers through it for as long as a section exists, which outlasts the handle. */
+
+    if (Ccb->Flags & CCB_EXTERNAL_FILE_OBJECT)
     {
+        ASSERT(DeviceExt->FileObjectCount > 0);
+        DeviceExt->FileObjectCount--;
+    }
+
+    if (Ccb->Flags & CCB_FCB_REFERENCE)
+    {
+        /* Both an external open and an internal cache stream own a reference.
+         * MM keeps the stream file object alive until its sections are gone. */
         NtfsReleaseFCB(DeviceExt, Fcb);
+    }
+
+    while (Ccb->LockOwners != NULL)
+    {
+        PNTFS_LOCK_OWNER Owner = Ccb->LockOwners;
+
+        Ccb->LockOwners = Owner->Next;
+        if (Owner->Process != NULL)
+            ObDereferenceObject(Owner->Process);
+        ExFreePoolWithTag(Owner, TAG_CCB);
     }
 
     if (Ccb->DirectorySearchPattern)
@@ -109,28 +117,15 @@ NtfsClose(PNTFS_IRP_CONTEXT IrpContext)
     FileObject = IrpContext->FileObject;
     DeviceExtension = DeviceObject->DeviceExtension;
 
-    if (FileObject == NULL)
-    {
-        IrpContext->Irp->IoStatus.Information = 0;
-        return STATUS_SUCCESS;
-    }
-
-    DPRINT("NtfsClose(%p)\n", FileObject);
     if (!ExAcquireResourceExclusiveLite(&DeviceExtension->DirResource,
                                         BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
-        DPRINT("INSTRUMENT: NtfsClose DirResource CANT_WAIT\n");
         return NtfsMarkIrpContextForQueue(IrpContext);
     }
-    DPRINT("INSTRUMENT: NtfsClose DirResource acquired\n");
+
     Status = NtfsCloseFile(DeviceExtension, FileObject);
-    DPRINT("NtfsClose: NtfsCloseFile returned 0x%lx\n", Status);
 
     ExReleaseResourceLite(&DeviceExtension->DirResource);
-    DPRINT("NtfsClose: DirResource released\n");
-
-    /* Debug: verify IRQL is back to PASSIVE after close */
-    ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
 
     if (Status == STATUS_PENDING)
     {

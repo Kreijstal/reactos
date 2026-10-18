@@ -185,6 +185,153 @@ TestUnalignedReads(
     }
 }
 
+/* Exercise a transfer larger than a VACB and an overwrite crossing its edge.
+ * Reopen through cached and noncached handles after an explicit flush. */
+static
+VOID
+TestCacheBoundaries(
+    _In_ PCWSTR Dir)
+{
+    WCHAR Path[MAX_PATH];
+    HANDLE Handle;
+    NTSTATUS Status;
+    ULONG Pass;
+    const ULONG Size = 3 * 256 * KB + 123;
+    const ULONG Edge = 256 * KB - 513;
+
+    NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, L"cache-boundary.bin");
+    Status = NtfsKmtCreate(&Handle, NULL, Path, GENERIC_READ | GENERIC_WRITE, 0,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_CREATE,
+                           FILE_NON_DIRECTORY_FILE, NULL, 0, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    Status = WritePattern(Handle, 0, Size, 20);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ReadCheck(Handle, 0, Size, STATUS_SUCCESS, Size, 20, "large cached transfer");
+    Status = WritePattern(Handle, Edge, 4096, 21);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ReadCheck(Handle, Edge, 4096, STATUS_SUCCESS, 4096, 21, "overwrite across cache boundary");
+    Status = NtfsKmtFlush(Handle);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ZwClose(Handle);
+
+    for (Pass = 0; Pass < 2; Pass++)
+    {
+        Status = NtfsKmtCreate(&Handle, NULL, Path, GENERIC_READ, 0,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN,
+                               FILE_NON_DIRECTORY_FILE | (Pass ? FILE_NO_INTERMEDIATE_BUFFERING : 0),
+                               NULL, 0, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            continue;
+        ReadCheck(Handle, 0, 4096, STATUS_SUCCESS, 4096, 20, "head after cache flush");
+        ReadCheck(Handle, 256 * KB, 3072, STATUS_SUCCESS, 3072, 21, "overwritten range after cache flush");
+        ReadCheck(Handle, 512 * KB, 4096, STATUS_SUCCESS, 4096, 20, "next cache view after flush");
+        ZwClose(Handle);
+    }
+}
+
+/* A mapped section keeps its stream alive after the originating handle closes.
+ * Fault the pages only after close, churn other FCBs, then unmap and reuse the
+ * same name. No driver internals are inspected. */
+static
+VOID
+TestMappedLifetime(
+    _In_ PCWSTR Dir)
+{
+    WCHAR Path[MAX_PATH], Other[MAX_PATH];
+    HANDLE Handle, Section;
+    OBJECT_ATTRIBUTES Attributes;
+    PVOID View = NULL;
+    SIZE_T ViewSize = 0;
+    NTSTATUS Status;
+    ULONG Index;
+
+    NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, L"mapped.bin");
+    Status = NtfsKmtCreate(&Handle, NULL, Path, GENERIC_READ | GENERIC_WRITE, 0,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           FILE_CREATE, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    Status = WritePattern(Handle, 0, 8192, 30);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    InitializeObjectAttributes(&Attributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = ZwCreateSection(&Section, SECTION_MAP_READ | SECTION_MAP_WRITE, &Attributes, NULL,
+                              PAGE_READWRITE, SEC_COMMIT, Handle);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        ZwClose(Handle);
+        return;
+    }
+    Status = ZwMapViewOfSection(Section, NtCurrentProcess(), &View, 0, 0, NULL,
+                                 &ViewSize, ViewUnmap, 0, PAGE_READWRITE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ZwClose(Handle);
+    if (NT_SUCCESS(Status))
+    {
+        ok(NtfsKmtCheckPattern(View, 8192, 30, 0) == (SIZE_T)-1,
+           "mapped data changed after closing its file handle\n");
+        /* A normal read must see a dirty mapped write, including when its
+         * explicit flush is entered with the file's resource held shared. */
+        {
+            UCHAR Original = ((PUCHAR)View)[4097];
+            UCHAR Data = 0;
+            ULONG_PTR Read;
+
+            ((PUCHAR)View)[4097] = Original ^ 0x7F;
+            Status = NtfsKmtOpen(&Handle, Path, GENERIC_READ, FILE_NON_DIRECTORY_FILE);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            if (NT_SUCCESS(Status))
+            {
+                Status = NtfsKmtRead(Handle, 4097, &Data, 1, &Read);
+                ok_eq_hex(Status, STATUS_SUCCESS);
+                ok(Read == 1 && Data == (UCHAR)(Original ^ 0x7F), "read missed a mapped write\n");
+                ((PUCHAR)View)[4097] = Original;
+                Status = NtfsKmtRead(Handle, 4097, &Data, 1, &Read);
+                ok_eq_hex(Status, STATUS_SUCCESS);
+                ok(Read == 1 && Data == Original, "read missed a second mapped write\n");
+                ZwClose(Handle);
+            }
+        }
+        NtfsKmtJoin(Other, RTL_NUMBER_OF(Other), Dir, L"map-churn.bin");
+        for (Index = 0; Index < 32; Index++)
+        {
+            Status = NtfsKmtCreateFileWithData(Other, "churn", 5);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            if (!NT_SUCCESS(Status))
+                break;
+            Status = NtfsKmtDelete(Other);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+        }
+        ok(NtfsKmtCheckPattern(View, 8192, 30, 0) == (SIZE_T)-1,
+           "mapped data changed during FCB churn\n");
+        Status = ZwUnmapViewOfSection(NtCurrentProcess(), View);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+    }
+    ZwClose(Section);
+    Status = NtfsKmtDelete(Path);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtCreateFileWithData(Path, "new file", 8);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtOpen(&Handle, Path, GENERIC_READ, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        UCHAR Data[8];
+        ULONG_PTR Read;
+
+        Status = NtfsKmtRead(Handle, 0, Data, sizeof(Data), &Read);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok(Read == sizeof(Data) && RtlCompareMemory(Data, "new file", sizeof(Data)) == sizeof(Data),
+           "reused name returned data from the former section\n");
+        ZwClose(Handle);
+    }
+}
+
 static
 VOID
 TestGrowAndTruncate(
@@ -458,12 +605,12 @@ TestManyLinks(
 
 START_TEST(NtfsDataPath)
 {
+    IO_STATUS_BLOCK IoStatus;
     WCHAR Root[MAX_PATH];
     WCHAR Dir[MAX_PATH];
     NTSTATUS Status;
     HANDLE Handle;
     FILE_FS_SIZE_INFORMATION Size;
-    IO_STATUS_BLOCK IoStatus;
 
     if (!NtfsKmtFindVolume(Root, NULL))
     {
@@ -484,6 +631,8 @@ START_TEST(NtfsDataPath)
     }
 
     TestUnalignedReads(Dir);
+    TestCacheBoundaries(Dir);
+    TestMappedLifetime(Dir);
     TestGrowAndTruncate(Dir);
     TestManyStreams(Dir);
     TestManyLinks(Dir);

@@ -517,6 +517,53 @@ TestOpenById(
     ZwClose(DirHandle);
 }
 
+/* Recycled MFT slots must have a different file ID for each incarnation.
+ * The allocator need not choose the same slot; check its sequence when it does. */
+static VOID
+TestReusedFileIds(PCWSTR Dir)
+{
+    WCHAR Path[MAX_PATH];
+    ULONGLONG Ids[16], Id;
+    ULONG i, j, Previous, Reused = 0;
+    HANDLE Handle;
+    NTSTATUS Status;
+    USHORT Sequence;
+
+    NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, L"recycled.txt");
+    for (i = 0; i < RTL_NUMBER_OF(Ids); i++)
+    {
+        Handle = NULL;
+        Status = NtfsKmtCreate(&Handle, NULL, Path, FILE_READ_ATTRIBUTES | DELETE,
+                               FILE_ATTRIBUTE_NORMAL,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               FILE_CREATE, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status)) break;
+        Id = NtfsKmtQueryFileId(Handle);
+        ok(Id != 0, "file incarnation %lu has no ID\n", i);
+        Previous = MAXULONG;
+        for (j = 0; j < i; j++)
+        {
+            ok(Id != Ids[j], "incarnations %lu and %lu share ID %I64x\n", j, i, Id);
+            if ((Id & 0x0000FFFFFFFFFFFFULL) == (Ids[j] & 0x0000FFFFFFFFFFFFULL))
+                Previous = j;
+        }
+        if (Previous != MAXULONG)
+        {
+            Sequence = (USHORT)((Ids[Previous] >> 48) + 1);
+            if (Sequence == 0) Sequence = 1;
+            ok_eq_uint((USHORT)(Id >> 48), Sequence);
+            Reused++;
+        }
+        Ids[i] = Id;
+        ZwClose(Handle);
+        Status = NtfsKmtDelete(Path);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status)) break;
+    }
+    trace("Observed %lu reused MFT slots in %lu file incarnations\n", Reused, i);
+}
+
 START_TEST(NtfsCreateSemantics)
 {
     WCHAR Root[MAX_PATH];
@@ -540,6 +587,7 @@ START_TEST(NtfsCreateSemantics)
     TestDeleteSemantics(Dir);
     TestSharingAndCase(Dir);
     TestOpenById(Dir);
+    TestReusedFileIds(Dir);
 
     Status = NtfsKmtDeleteTree(Dir);
     ok_eq_hex(Status, STATUS_SUCCESS);
