@@ -91,6 +91,7 @@ dll/win32/atl80               # Synced to Wine-10.0
 dll/win32/atl100              # Synced to Wine-10.0
 dll/win32/avifil32            # Synced to Wine-10.0
 dll/win32/avrt                # Synced to Wine-10.0
+dll/win32/bcp47langs          # Synced to Wine-10.0
 dll/win32/bcrypt              # Synced to Wine-11.19
 dll/win32/bcryptprimitives    # Synced to Wine-10.0
 dll/win32/bluetoothapis       # Synced to Wine-10.0
@@ -110,6 +111,7 @@ dll/win32/cryptui             # Synced to Wine-10.0
 dll/win32/dbgeng              # Synced to Wine-10.0
 dll/win32/dbghelp             # Synced to WineStaging-5.16
 dll/win32/dciman32            # Synced to Wine-10.1-dev (b00c7619f1b)
+dll/win32/dcomp               # Synced to Wine-10.0
 dll/win32/dwmapi              # Synced to Wine-8.14
 dll/win32/faultrep            # Synced to Wine-10.0
 dll/win32/feclient            # Synced to Wine-10.0
@@ -236,6 +238,7 @@ dll/win32/sti                 # Synced to Wine-10.0
 dll/win32/sxs                 # Synced to Wine-10.0
 dll/win32/t2embed             # Synced to Wine-10.0
 dll/win32/tapi32              # Synced to Wine-10.0
+dll/win32/tbs                 # Synced to Wine-10.0
 dll/win32/traffic             # Synced to Wine-10.0
 dll/win32/twain_32            # Synced to Wine-10.0
 dll/win32/uiautomationcore    # Synced to Wine-10.0
@@ -247,6 +250,7 @@ dll/win32/uxtheme             # Forked
 dll/win32/vbscript            # Synced to Wine-10.0
 dll/win32/version             # Synced to WineStaging-4.18 (Requires kernelbase)
 dll/win32/vssapi              # Synced to WineStaging-4.18
+dll/win32/wevtapi             # Synced to Wine-10.0
 dll/win32/wbemdisp            # Synced to WineStaging-4.18
 dll/win32/wbemprox            # Synced to WineStaging-4.18
 dll/win32/windowscodecs       # Synced to Wine-10.0
@@ -376,31 +380,31 @@ regedit
   base/applications/regedit/regproc.c   # Synced to Wine-7.17
 
 user32 -
-  win32ss/user/user32/controls/button.c    # Synced to WineStaging-1.7.37
-  win32ss/user/user32/controls/combo.c     # Synced to WineStaging-1.7.37
-  win32ss/user/user32/controls/edit.c      # Synced to WineStaging-1.7.55
-  win32ss/user/user32/controls/icontitle.c # Synced to WineStaging-1.7.55
-  win32ss/user/user32/controls/listbox.c   # Synced to WineStaging-1.7.55
+  win32ss/user/user32/controls/button.c    # Synced to Wine-11.11
+  win32ss/user/user32/controls/combo.c     # Synced to Wine-11.11
+  win32ss/user/user32/controls/edit.c      # Synced to Wine-11.11
+  win32ss/user/user32/controls/icontitle.c # Synced to Wine-11.11
+  win32ss/user/user32/controls/listbox.c   # Synced to Wine-11.11
   win32ss/user/user32/controls/scrollbar.c # Forked
-  win32ss/user/user32/controls/static.c    # Synced to WineStaging-1.7.55
+  win32ss/user/user32/controls/static.c    # Synced to Wine-11.11
 
-  win32ss/user/user32/include/dde_private.h # Synced to WineStaging-1.7.55
+  win32ss/user/user32/include/dde_private.h # Synced to Wine-11.11
 
-  win32ss/user/user32/misc/dde.c           # Synced to WineStaging-1.7.55 (dde_misc.c)
-  win32ss/user/user32/misc/ddeclient.c     # Synced to WineStaging-1.7.55
-  win32ss/user/user32/misc/ddeserver.c     # Synced to WineStaging-1.7.55
+  win32ss/user/user32/misc/ddemisc.c       # Synced to Wine-11.11 (dde_misc.c)
+  win32ss/user/user32/misc/ddeclient.c     # Synced to Wine-11.11 (dde_client.c)
+  win32ss/user/user32/misc/ddeserver.c     # Synced to Wine-11.11 (dde_server.c)
   win32ss/user/user32/misc/exticon.c       # Synced to WineStaging-1.7.55
-  win32ss/user/user32/misc/resources.c     # Partially synced to WineStaging-1.7.55
+  win32ss/user/user32/misc/resources.c     # Partially synced to Wine-11.11
   win32ss/user/user32/misc/winhelp.c       # Last sync date unknown
 
   win32ss/user/user32/windows/cursoricon   # Forked from Wine-1.2-rc7
   win32ss/user/user32/windows/defwnd.c     # Forked
   win32ss/user/user32/windows/draw.c       # Forked at Wine-20020904 (uitools.c)
-  win32ss/user/user32/windows/mdi.c        # Synced to WineStaging-1.7.55
+  win32ss/user/user32/windows/mdi.c        # Synced to Wine-11.11
   win32ss/user/user32/windows/menu.c       # Forked
   win32ss/user/user32/windows/messagebox.c # Forked
   win32ss/user/user32/windows/rect.c       # Forked (uitools.c)
-  win32ss/user/user32/windows/spy.c        # Synced to WineStaging-1.7.55
+  win32ss/user/user32/windows/spy.c        # Synced to Wine-11.11
   win32ss/user/user32/windows/text.c       # Forked (lstr.c)
   win32ss/user/user32/windows/winpos.c     # Forked
 

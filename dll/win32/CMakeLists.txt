@@ -286,10 +286,14 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     add_subdirectory(dwmapi)
     #add_subdirectory(dxgi) #disabled, see dll/directx/wine
     add_subdirectory(ncrypt)
+    add_subdirectory(tbs)
+    add_subdirectory(wevtapi)
 endif()
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x603)
-   add_subdirectory(rtworkq)
+    add_subdirectory(bcp47langs)
+    add_subdirectory(dcomp)
+    add_subdirectory(rtworkq)
 endif()
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)

@@ -1021,6 +1021,9 @@ typedef struct _PFNCLIENT
     WNDPROC pfnDispatchDefWindowProc;
     WNDPROC pfnDispatchMessage;
     WNDPROC pfnMDIActivateDlgProc;
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    WNDPROC pfnFilteredProcessRedirectingWndProc;
+#endif
 #if ((defined(BUILD_WOW6432) && !defined(_WIN32K_)) && defined(_M_IX86))
     PADDER;
 #undef WNDPROC 
