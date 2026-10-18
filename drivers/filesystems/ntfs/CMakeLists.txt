@@ -1,17 +1,21 @@
 
+include_directories(${REACTOS_SOURCE_DIR}/sdk/include/reactos/drivers
+                    inc)
+
 list(APPEND SOURCE
     attrib.c
     blockdev.c
     btree.c
     cleanup.c
     close.c
-    compress.c
+    compressed.c
     create.c
     devctl.c
+    ea.c
     dirctl.c
     dispatch.c
-    ea.c
     fastio.c
+    flush.c
     fcb.c
     finfo.c
     fsctl.c
@@ -19,24 +23,26 @@ list(APPEND SOURCE
     lfslog.c
     lfsparse.c
     lock.c
-    lznt1.c
     mft.c
     misc.c
     ntfs.c
+    notify.c
     objid.c
     pnp.c
-    quota.c
+    quotas.c
     reparse.c
     rw.c
-    security.c
+    secure.c
     shutdown.c
-    usn.c
+    sparse.c
+    usnjrnl.c
     volinfo.c
     ntfs.h)
 
 add_library(ntfs MODULE ${SOURCE} ntfs.rc)
+
+add_definitions(-D__KERNEL__)
 set_module_type(ntfs kernelmodedriver)
 target_link_libraries(ntfs ${PSEH_LIB})
 add_importlibs(ntfs ntoskrnl hal)
-add_pch(ntfs ntfs.h SOURCE)
 add_cd_file(TARGET ntfs DESTINATION reactos/system32/drivers NO_CAB FOR all)

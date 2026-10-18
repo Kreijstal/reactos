@@ -26,6 +26,7 @@ KMT_TESTFUNC Test_ExTimer;
 KMT_TESTFUNC Test_ExUuid;
 KMT_TESTFUNC Test_FsRtlDissect;
 KMT_TESTFUNC Test_FsRtlExpression;
+KMT_TESTFUNC Test_FsRtlFileLock;
 KMT_TESTFUNC Test_FsRtlLegal;
 KMT_TESTFUNC Test_FsRtlMcb;
 KMT_TESTFUNC Test_FsRtlRemoveDotsFromPath;
@@ -77,11 +78,26 @@ KMT_TESTFUNC Test_NtfsDataPath;
 KMT_TESTFUNC Test_NtfsEa;
 KMT_TESTFUNC Test_NtfsFsctl;
 KMT_TESTFUNC Test_NtfsInfoClasses;
+KMT_TESTFUNC Test_NtfsLockRemove;
+KMT_TESTFUNC Test_NtfsLocks;
+KMT_TESTFUNC Test_NtfsAllocation;
+KMT_TESTFUNC Test_NtfsTimes;
+KMT_TESTFUNC Test_NtfsRename;
+KMT_TESTFUNC Test_NtfsNotify;
+KMT_TESTFUNC Test_NtfsChangeData;
+KMT_TESTFUNC Test_NtfsWatchRemove;
+KMT_TESTFUNC Test_NtfsLogFile;
+KMT_TESTFUNC Test_NtfsFormat;
 KMT_TESTFUNC Test_NtfsLinks;
 KMT_TESTFUNC Test_NtfsObjectId;
 KMT_TESTFUNC Test_NtfsQuota;
 KMT_TESTFUNC Test_NtfsReparse;
 KMT_TESTFUNC Test_NtfsSecurity;
+KMT_TESTFUNC Test_NtfsEject;
+KMT_TESTFUNC Test_NtfsRemove;
+KMT_TESTFUNC Test_NtfsPnp;
+KMT_TESTFUNC Test_NtfsSurpriseRemove;
+KMT_TESTFUNC Test_NtfsShutdown;
 KMT_TESTFUNC Test_NtfsSparse;
 KMT_TESTFUNC Test_NtfsStreams;
 KMT_TESTFUNC Test_NtfsUsn;
@@ -143,6 +159,7 @@ const KMT_TEST TestList[] =
     { "Example",                            Test_Example },
     { "FsRtlDissect",                       Test_FsRtlDissect },
     { "FsRtlExpression",                    Test_FsRtlExpression },
+    { "FsRtlFileLock",                       Test_FsRtlFileLock },
     { "FsRtlLegal",                         Test_FsRtlLegal },
     { "FsRtlMcb",                           Test_FsRtlMcb },
     { "FsRtlRemoveDotsFromPath",            Test_FsRtlRemoveDotsFromPath },
@@ -194,11 +211,26 @@ const KMT_TEST TestList[] =
     { "NtfsEa",                              Test_NtfsEa },
     { "NtfsFsctl",                           Test_NtfsFsctl },
     { "NtfsInfoClasses",                     Test_NtfsInfoClasses },
+    { "NtfsLockRemove",                      Test_NtfsLockRemove },
+    { "NtfsLocks",                           Test_NtfsLocks },
+    { "NtfsAllocation",                      Test_NtfsAllocation },
+    { "NtfsTimes",                           Test_NtfsTimes },
+    { "NtfsRename",                          Test_NtfsRename },
+    { "NtfsNotify",                          Test_NtfsNotify },
+    { "NtfsChangeData",                      Test_NtfsChangeData },
+    { "NtfsWatchRemove",                    Test_NtfsWatchRemove },
+    { "NtfsLogFile",                         Test_NtfsLogFile },
+    { "NtfsFormat",                   Test_NtfsFormat },
     { "NtfsLinks",                           Test_NtfsLinks },
     { "NtfsObjectId",                        Test_NtfsObjectId },
     { "NtfsQuota",                           Test_NtfsQuota },
     { "NtfsReparse",                         Test_NtfsReparse },
     { "NtfsSecurity",                        Test_NtfsSecurity },
+    { "NtfsEject",                           Test_NtfsEject },
+    { "NtfsRemove",                          Test_NtfsRemove },
+    { "NtfsPnp",                             Test_NtfsPnp },
+    { "NtfsSurpriseRemove",                  Test_NtfsSurpriseRemove },
+    { "NtfsShutdown",                        Test_NtfsShutdown },
     { "NtfsSparse",                          Test_NtfsSparse },
     { "NtfsStreams",                         Test_NtfsStreams },
     { "NtfsUsn",                             Test_NtfsUsn },

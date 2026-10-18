@@ -151,7 +151,7 @@ static void chk_check_attrlist(CHK_CTX *c, UCHAR *rec, ULONG recno,
         return;
     }
 
-    baseRef = ntfs_mft_ref(recno, h->SequenceNumber);
+    baseRef = NtfsChkMftReference(recno, h->SequenceNumber);
 
     pos = 0;
     while (pos + sizeof(ATTR_LIST_ENTRY) <= size)

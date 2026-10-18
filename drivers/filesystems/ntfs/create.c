@@ -27,6 +27,7 @@
 /* INCLUDES *****************************************************************/
 
 #include "ntfs.h"
+#include "security.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -48,56 +49,303 @@ static PCWSTR MftIdToName[] = {
 
 /* FUNCTIONS ****************************************************************/
 
+/**
+* @name NtfsBuildCreatePath
+*
+* Builds the volume-absolute path a create names: the file object's name, or that name
+* appended to the path of the directory its related file object is open on.
+*
+* @param FileObject
+* File object of the create.
+*
+* @param Path
+* Receives the path in a NUL-terminated pool buffer, which the caller frees with
+* ExFreePoolWithTag(..., TAG_NTFS).
+*
+* @return
+* STATUS_SUCCESS, STATUS_INVALID_PARAMETER if the name can't be relative to the related
+* file object, or STATUS_INSUFFICIENT_RESOURCES.
+*/
 static
 NTSTATUS
-NtfsMakeAbsoluteFilename(PFILE_OBJECT pFileObject,
-                         PWSTR pRelativeFileName,
-                         PWSTR *pAbsoluteFilename)
+NtfsBuildCreatePath(
+    _In_ PFILE_OBJECT FileObject,
+    _Out_ PUNICODE_STRING Path)
 {
-    PWSTR rcName;
-    PNTFS_FCB Fcb;
+    PCUNICODE_STRING Name = &FileObject->FileName;
+    PNTFS_FCB RelatedFcb = NULL;
+    SIZE_T PrefixLength = 0;
+    SIZE_T Length;
+    PWCHAR Buffer;
 
-    DPRINT("try related for %S\n", pRelativeFileName);
-    Fcb = pFileObject->FsContext;
-    ASSERT(Fcb);
-
-    if (Fcb->Flags & FCB_IS_VOLUME)
+    if (FileObject->RelatedFileObject != NULL)
     {
-        /* This is likely to be an opening by ID, return ourselves */
-        if (pRelativeFileName[0] == L'\\')
+        RelatedFcb = FileObject->RelatedFileObject->FsContext;
+        ASSERT(RelatedFcb != NULL);
+
+        if (BooleanFlagOn(RelatedFcb->Flags, FCB_IS_VOLUME))
         {
-            *pAbsoluteFilename = NULL;
-            return STATUS_SUCCESS;
+            /* A volume handle roots an absolute path */
+            if (Name->Length == 0 || Name->Buffer[0] != L'\\')
+                return STATUS_INVALID_PARAMETER;
+
+            RelatedFcb = NULL;
         }
-
-        return STATUS_INVALID_PARAMETER;
+        else if (Name->Length != 0 &&
+                 (!NtfsFCBIsDirectory(RelatedFcb) || Name->Buffer[0] == L'\\'))
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+        else
+        {
+            PrefixLength = wcslen(RelatedFcb->PathName);
+        }
     }
 
-    /* verify related object is a directory and target name
-       don't start with \. */
-    if (NtfsFCBIsDirectory(Fcb) == FALSE ||
-        pRelativeFileName[0] == L'\\')
-    {
-        return STATUS_INVALID_PARAMETER;
-    }
+    /* The prefix, a separator unless the prefix is the root or nothing is appended, the name */
+    Length = PrefixLength + 1 + Name->Length / sizeof(WCHAR);
+    if (Length >= MAXUSHORT / sizeof(WCHAR))
+        return STATUS_OBJECT_NAME_INVALID;
 
-    /* construct absolute path name */
-    ASSERT(wcslen (Fcb->PathName) + 1 + wcslen (pRelativeFileName) + 1 <= MAX_PATH);
-    rcName = ExAllocatePoolWithTag(NonPagedPool, MAX_PATH * sizeof(WCHAR), TAG_NTFS);
-    if (!rcName)
-    {
+    Buffer = ExAllocatePoolWithTag(NonPagedPool, (Length + 1) * sizeof(WCHAR), TAG_NTFS);
+    if (Buffer == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
+
+    Path->Buffer = Buffer;
+    Path->Length = 0;
+    Path->MaximumLength = (USHORT)((Length + 1) * sizeof(WCHAR));
+
+    if (RelatedFcb != NULL)
+    {
+        RtlCopyMemory(Buffer, RelatedFcb->PathName, PrefixLength * sizeof(WCHAR));
+        Path->Length = (USHORT)(PrefixLength * sizeof(WCHAR));
+
+        if (Name->Length != 0 && !NtfsFCBIsRoot(RelatedFcb))
+        {
+            Buffer[PrefixLength] = L'\\';
+            Path->Length += sizeof(WCHAR);
+        }
     }
 
-    wcscpy(rcName, Fcb->PathName);
-    if (!NtfsFCBIsRoot(Fcb))
-        wcscat (rcName, L"\\");
-    wcscat (rcName, pRelativeFileName);
-    *pAbsoluteFilename = rcName;
+    RtlCopyMemory((PUCHAR)Buffer + Path->Length, Name->Buffer, Name->Length);
+    Path->Length += Name->Length;
+    Buffer[Path->Length / sizeof(WCHAR)] = UNICODE_NULL;
 
     return STATUS_SUCCESS;
 }
 
+/**
+* @name NtfsCheckCreatePath
+*
+* Validates an absolute create path the way NTFS does (MS-FSA 2.1.5.1): every component
+* must be a legal NTFS name; only the last may name a stream. A trailing separator says the
+* caller wants a directory; it's cut off here and reported in TrailingBackslash.
+*
+* @return
+* STATUS_SUCCESS or STATUS_OBJECT_NAME_INVALID.
+*/
+static
+NTSTATUS
+NtfsCheckCreatePath(
+    _Inout_ PUNICODE_STRING Path,
+    _In_ ULONG Options,
+    _Out_ PBOOLEAN TrailingBackslash)
+{
+    UNICODE_STRING Remaining, Component;
+    USHORT i;
+
+    *TrailingBackslash = FALSE;
+
+    if (Path->Length == 0 || Path->Buffer[0] != L'\\')
+        return STATUS_OBJECT_NAME_INVALID;
+
+    /* The root directory */
+    if (Path->Length == sizeof(WCHAR))
+        return STATUS_SUCCESS;
+
+    if (Path->Buffer[Path->Length / sizeof(WCHAR) - 1] == L'\\')
+    {
+        if (BooleanFlagOn(Options, FILE_NON_DIRECTORY_FILE))
+            return STATUS_OBJECT_NAME_INVALID;
+
+        Path->Length -= sizeof(WCHAR);
+        Path->Buffer[Path->Length / sizeof(WCHAR)] = UNICODE_NULL;
+        *TrailingBackslash = TRUE;
+    }
+
+    Remaining.Buffer = Path->Buffer + 1;
+    Remaining.Length = Path->Length - sizeof(WCHAR);
+    Remaining.MaximumLength = Remaining.Length;
+
+    while (Remaining.Length != 0)
+    {
+        Component = Remaining;
+        for (i = 0; i < Remaining.Length / sizeof(WCHAR); i++)
+        {
+            if (Remaining.Buffer[i] == L'\\')
+                break;
+        }
+        Component.Length = i * sizeof(WCHAR);
+
+        if (Component.Length == Remaining.Length)
+        {
+            /* The last component: only its name part has to be a file name */
+            Remaining.Length = 0;
+            for (i = 0; i < Component.Length / sizeof(WCHAR); i++)
+            {
+                if (Component.Buffer[i] == L':')
+                {
+                    Component.Length = i * sizeof(WCHAR);
+                    break;
+                }
+            }
+        }
+        else
+        {
+            Remaining.Buffer += i + 1;
+            Remaining.Length -= Component.Length + sizeof(WCHAR);
+        }
+
+        if (!NtfsIsValidFileName(&Component))
+            return STATUS_OBJECT_NAME_INVALID;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsGetFinalComponent
+*
+* Returns the last component of an absolute path that isn't the root.
+*/
+static
+VOID
+NtfsGetFinalComponent(
+    _In_ PCUNICODE_STRING Path,
+    _Out_ PUNICODE_STRING FinalName)
+{
+    USHORT Index = Path->Length / sizeof(WCHAR);
+
+    ASSERT(Index > 1);
+
+    while (Path->Buffer[Index - 1] != L'\\')
+        Index--;
+
+    FinalName->Buffer = Path->Buffer + Index;
+    FinalName->Length = Path->Length - Index * sizeof(WCHAR);
+    FinalName->MaximumLength = FinalName->Length;
+}
+
+/* What the stream part of a create's last component names */
+typedef enum _NTFS_STREAM_KIND
+{
+    NtfsNoStream,           /* no stream part: the file itself */
+    NtfsNamedStream,        /* "file:name" or "file:name:$DATA" */
+    NtfsUnnamedDataStream,  /* "file::$DATA": the file's unnamed data, which a directory hasn't */
+    NtfsIndexStream         /* "dir::$INDEX_ALLOCATION" or "dir:$I30:$INDEX_ALLOCATION" */
+} NTFS_STREAM_KIND;
+
+/**
+* @name NtfsSplitStreamName
+*
+* Cuts the stream part off the last component of an absolute path (MS-FSA 2.1.5.1):
+* "name:stream:type", where the stream name may be empty and the type is $DATA unless given.
+*
+* @param Path
+* The path, NUL-terminated. Cut down to the file's path when it has a stream part.
+*
+* @param StreamName
+* Receives the stream name, pointing into Path's buffer past the new terminator.
+*
+* @param Kind
+* Receives what the stream part names.
+*
+* @return
+* STATUS_SUCCESS or STATUS_OBJECT_NAME_INVALID.
+*/
+static
+NTSTATUS
+NtfsSplitStreamName(
+    _Inout_ PUNICODE_STRING Path,
+    _Out_ PUNICODE_STRING StreamName,
+    _Out_ NTFS_STREAM_KIND *Kind)
+{
+    static const UNICODE_STRING DataType = RTL_CONSTANT_STRING(L"$DATA");
+    static const UNICODE_STRING IndexType = RTL_CONSTANT_STRING(L"$INDEX_ALLOCATION");
+    static const UNICODE_STRING IndexName = RTL_CONSTANT_STRING(L"$I30");
+    USHORT Count = Path->Length / sizeof(WCHAR);
+    USHORT Colon, i;
+    UNICODE_STRING Type = {0, 0, NULL};
+
+    RtlInitEmptyUnicodeString(StreamName, NULL, 0);
+    *Kind = NtfsNoStream;
+
+    for (Colon = Count; Colon > 0 && Path->Buffer[Colon - 1] != L'\\'; Colon--)
+        ;
+    while (Colon < Count && Path->Buffer[Colon] != L':')
+        Colon++;
+
+    if (Colon == Count)
+        return STATUS_SUCCESS;
+
+    StreamName->Buffer = Path->Buffer + Colon + 1;
+    for (i = Colon + 1; i < Count && Path->Buffer[i] != L':'; i++)
+        ;
+    StreamName->Length = (i - Colon - 1) * sizeof(WCHAR);
+    StreamName->MaximumLength = StreamName->Length;
+
+    if (i < Count)
+    {
+        Type.Buffer = Path->Buffer + i + 1;
+        Type.Length = (Count - i - 1) * sizeof(WCHAR);
+        Type.MaximumLength = Type.Length;
+    }
+
+    /* The file's path ends where its stream part starts */
+    Path->Length = Colon * sizeof(WCHAR);
+    Path->Buffer[Colon] = UNICODE_NULL;
+
+    if (Type.Buffer == NULL)
+    {
+        /* "file:" names nothing */
+        if (StreamName->Length == 0)
+            return STATUS_OBJECT_NAME_INVALID;
+    }
+    else if (RtlEqualUnicodeString(&Type, &IndexType, TRUE))
+    {
+        if (StreamName->Length != 0 && !RtlEqualUnicodeString(StreamName, &IndexName, TRUE))
+            return STATUS_OBJECT_NAME_INVALID;
+
+        *Kind = NtfsIndexStream;
+        return STATUS_SUCCESS;
+    }
+    else if (!RtlEqualUnicodeString(&Type, &DataType, TRUE))
+    {
+        /* Any other type (and a further ':') isn't a stream that can be opened */
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+
+    if (StreamName->Length == 0)
+    {
+        *Kind = NtfsUnnamedDataStream;
+        return STATUS_SUCCESS;
+    }
+
+    if (StreamName->Length > NTFS_MAX_NAME_LENGTH * sizeof(WCHAR) ||
+        FsRtlDoesNameContainWildCards(StreamName))
+    {
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+
+    for (i = 0; i < StreamName->Length / sizeof(WCHAR); i++)
+    {
+        if (StreamName->Buffer[i] == UNICODE_NULL || StreamName->Buffer[i] == L'/')
+            return STATUS_OBJECT_NAME_INVALID;
+    }
+
+    *Kind = NtfsNamedStream;
+    return STATUS_SUCCESS;
+}
 
 static
 NTSTATUS
@@ -108,18 +356,27 @@ NtfsMoonWalkID(PDEVICE_EXTENSION DeviceExt,
     NTSTATUS Status;
     PFILE_RECORD_HEADER MftRecord;
     PFILENAME_ATTRIBUTE FileName;
-    UCHAR SpillNameBuf[NTFS_FOUND_NAME_SIZE];
-    WCHAR FullPath[MAX_PATH];
-    ULONG WritePosition = MAX_PATH - 1;
+    PWCHAR FullPath;
+    ULONG WritePosition;
 
     DPRINT("NtfsMoonWalkID(%p, %I64x, %p)\n", DeviceExt, Id, OutPath);
 
-    RtlZeroMemory(FullPath, sizeof(FullPath));
-    MftRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
-    if (MftRecord == NULL)
+    /* The path is assembled backwards from the end of a buffer as long as any path can be */
+    FullPath = ExAllocatePoolWithTag(NonPagedPool, NTFS_MAX_PATH_LENGTH * sizeof(WCHAR), TAG_NTFS);
+    if (FullPath == NULL)
     {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+
+    MftRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (MftRecord == NULL)
+    {
+        ExFreePoolWithTag(FullPath, TAG_NTFS);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    WritePosition = NTFS_MAX_PATH_LENGTH - 1;
+    FullPath[WritePosition] = UNICODE_NULL;
 
     while (TRUE)
     {
@@ -134,8 +391,7 @@ NtfsMoonWalkID(PDEVICE_EXTENSION DeviceExt,
             break;
         }
 
-        FileName = GetBestFileNameFromRecord(DeviceExt, MftRecord,
-                                             (PFILENAME_ATTRIBUTE)SpillNameBuf);
+        FileName = GetBestFileNameFromRecord(DeviceExt, MftRecord);
         if (FileName == NULL)
         {
             DPRINT1("$FILE_NAME attribute not found for %I64x\n", Id);
@@ -143,11 +399,15 @@ NtfsMoonWalkID(PDEVICE_EXTENSION DeviceExt,
             break;
         }
 
+        if (WritePosition < FileName->NameLength + 1U)
+        {
+            Status = STATUS_OBJECT_NAME_INVALID;
+            break;
+        }
+
         WritePosition -= FileName->NameLength;
-        ASSERT(WritePosition < MAX_PATH);
         RtlCopyMemory(FullPath + WritePosition, FileName->Name, FileName->NameLength * sizeof(WCHAR));
         WritePosition -= 1;
-        ASSERT(WritePosition < MAX_PATH);
         FullPath[WritePosition] = L'\\';
 
         Id = FileName->DirectoryFileReferenceNumber & NTFS_MFT_MASK;
@@ -157,17 +417,18 @@ NtfsMoonWalkID(PDEVICE_EXTENSION DeviceExt,
 
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, MftRecord);
 
-    if (!NT_SUCCESS(Status))
-        return Status;
-
-    OutPath->Length = (MAX_PATH - WritePosition - 1) * sizeof(WCHAR);
-    OutPath->MaximumLength = (MAX_PATH - WritePosition) * sizeof(WCHAR);
-    OutPath->Buffer = ExAllocatePoolWithTag(NonPagedPool, OutPath->MaximumLength, TAG_NTFS);
-    if (OutPath->Buffer == NULL)
+    if (NT_SUCCESS(Status))
     {
-        return STATUS_INSUFFICIENT_RESOURCES;
+        OutPath->Length = (USHORT)((NTFS_MAX_PATH_LENGTH - WritePosition - 1) * sizeof(WCHAR));
+        OutPath->MaximumLength = OutPath->Length + sizeof(WCHAR);
+        OutPath->Buffer = ExAllocatePoolWithTag(NonPagedPool, OutPath->MaximumLength, TAG_NTFS);
+        if (OutPath->Buffer == NULL)
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        else
+            RtlCopyMemory(OutPath->Buffer, FullPath + WritePosition, OutPath->MaximumLength);
     }
-    RtlCopyMemory(OutPath->Buffer, FullPath + WritePosition, OutPath->MaximumLength);
+
+    ExFreePoolWithTag(FullPath, TAG_NTFS);
 
     return Status;
 }
@@ -175,7 +436,6 @@ NtfsMoonWalkID(PDEVICE_EXTENSION DeviceExt,
 static
 NTSTATUS
 NtfsOpenFileById(PDEVICE_EXTENSION DeviceExt,
-                 PFILE_OBJECT FileObject,
                  ULONGLONG MftId,
                  PNTFS_FCB * FoundFCB)
 {
@@ -183,7 +443,7 @@ NtfsOpenFileById(PDEVICE_EXTENSION DeviceExt,
     PNTFS_FCB FCB;
     PFILE_RECORD_HEADER MftRecord;
 
-    DPRINT("NtfsOpenFileById(%p, %p, %I64x, %p)\n", DeviceExt, FileObject, MftId, FoundFCB);
+    DPRINT("NtfsOpenFileById(%p, %I64x, %p)\n", DeviceExt, MftId, FoundFCB);
 
     ASSERT(MftId < NTFS_FILE_FIRST_USER_FILE);
     if (MftId > 0xb) /* No entries are used yet beyond this */
@@ -228,320 +488,1301 @@ NtfsOpenFileById(PDEVICE_EXTENSION DeviceExt,
 
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, MftRecord);
 
-    Status = NtfsAttachFCBToFileObject(DeviceExt,
-                                       FCB,
-                                       FileObject);
     *FoundFCB = FCB;
 
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsOpenFile
+*
+* Finds the FCB of an absolute path, from the FCB table or from the disk.
+*
+* @param FoundFcb
+* Receives the FCB, referenced, on success.
+*
+* @param ParentFcb
+* Receives the FCB of the directory that would hold the file, referenced, when the
+* last component is all that's missing (STATUS_OBJECT_NAME_NOT_FOUND); NULL otherwise.
+*
+* @param ReparseOffset
+* With STATUS_REPARSE, receives the number of characters of FileName up to the end of
+* the reparse point the walk ran into, whose FCB FoundFcb receives.
+*/
+static
+NTSTATUS
+NtfsOpenFile(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PCWSTR FileName,
+    _In_ BOOLEAN CaseSensitive,
+    _Out_ PNTFS_FCB *FoundFcb,
+    _Out_ PNTFS_FCB *ParentFcb,
+    _Out_opt_ PULONG ReparseOffset)
+{
+    PNTFS_FCB Parent = NULL;
+    PNTFS_FCB Fcb;
+    ULONG Offset = 0;
+    NTSTATUS Status;
+
+    DPRINT("NtfsOpenFile(%p, %S, %s)\n", DeviceExt, FileName, CaseSensitive ? "TRUE" : "FALSE");
+
+    *FoundFcb = NULL;
+    *ParentFcb = NULL;
+
+    Fcb = NtfsGrabFCBFromTable(DeviceExt, FileName);
+    if (Fcb != NULL)
+    {
+        *FoundFcb = Fcb;
+        return STATUS_SUCCESS;
+    }
+
+    Status = NtfsGetFCBForFile(DeviceExt, &Parent, &Fcb, FileName, CaseSensitive, &Offset);
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+    {
+        *ParentFcb = Parent;
+        return Status;
+    }
+
+    if (Parent != NULL)
+        NtfsReleaseFCB(DeviceExt, Parent);
+
+    /* A walk that ran into a reparse point returns it, with where the rest of the path
+     * starts. A caller that can't follow it finds no path. */
+    if (Status == STATUS_REPARSE)
+    {
+        if (ReparseOffset == NULL)
+        {
+            NtfsReleaseFCB(DeviceExt, Fcb);
+            return STATUS_OBJECT_PATH_NOT_FOUND;
+        }
+
+        *ReparseOffset = Offset;
+    }
+
+    if (NT_SUCCESS(Status))
+        *FoundFcb = Fcb;
+
     return Status;
 }
 
-/*
- * FUNCTION: Opens a file
- */
+/**
+* @name NtfsCountOpen
+*
+* Counts a successful open in its FCB's and its volume's open handle counts. The
+* cleanup of the handle takes it back; a volume can only be locked by its only handle.
+*/
+static
+VOID
+NtfsCountOpen(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PNTFS_FCB Fcb,
+    _In_ PFILE_OBJECT FileObject)
+{
+    PNTFS_CCB Ccb = FileObject->FsContext2;
+
+    Fcb->OpenHandleCount++;
+    DeviceExt->OpenHandleCount++;
+    Ccb->Flags |= CCB_COUNTED;
+}
+
+/**
+* @name NtfsGrantShareAccess
+*
+* Records a new open of Fcb against its share access, or fails it with a
+* sharing violation.
+*/
 static
 NTSTATUS
-NtfsOpenFile(PDEVICE_EXTENSION DeviceExt,
-             PFILE_OBJECT FileObject,
-             PWSTR FileName,
-             BOOLEAN CaseSensitive,
-             BOOLEAN VolumeAbsolute,
-             PNTFS_FCB * FoundFCB)
+NtfsGrantShareAccess(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PNTFS_FCB Fcb,
+    _In_ PFILE_OBJECT FileObject,
+    _In_ PIO_STACK_LOCATION Stack)
 {
-    PNTFS_FCB ParentFcb;
+    ACCESS_MASK DesiredAccess = 0;
+    ULONG ShareAccess = Stack->Parameters.Create.ShareAccess;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    if (Stack->Parameters.Create.SecurityContext != NULL)
+        DesiredAccess = Stack->Parameters.Create.SecurityContext->DesiredAccess;
+
+    if (Fcb->OpenHandleCount > 0)
+    {
+        Status = IoCheckShareAccess(DesiredAccess,
+                                    ShareAccess,
+                                    FileObject,
+                                    &Fcb->ShareAccess,
+                                    TRUE);
+    }
+    else
+    {
+        IoSetShareAccess(DesiredAccess,
+                         ShareAccess,
+                         FileObject,
+                         &Fcb->ShareAccess);
+    }
+
+    if (NT_SUCCESS(Status))
+        NtfsCountOpen(DeviceExt, Fcb, FileObject);
+
+    return Status;
+}
+
+/**
+* @name NtfsOpenTargetDirectory
+*
+* Serves SL_OPEN_TARGET_DIRECTORY, the open the I/O manager does ahead of a
+* rename: opens the parent of the named file, reports whether the final
+* component exists, and leaves only that component in the file object's name,
+* where the rename reads it.
+*
+* @param DeviceExt
+* Volume being opened on.
+*
+* @param FileObject
+* File object of the create, naming the rename target.
+*
+* @param CaseSensitive
+* TRUE for POSIX semantics.
+*
+* @param Information
+* Receives FILE_EXISTS or FILE_DOES_NOT_EXIST for the final component.
+*
+* @return
+* STATUS_SUCCESS with the directory attached to FileObject, or an error.
+*/
+static
+NTSTATUS
+NtfsOpenTargetDirectory(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PFILE_OBJECT FileObject,
+    _In_ BOOLEAN CaseSensitive,
+    _Out_ PULONG_PTR Information)
+{
+    UNICODE_STRING Path;
+    UNICODE_STRING FinalName;
+    PCWSTR DirectoryPath;
+    PWSTR LastSeparator;
+    ULONGLONG ExistingMft;
+    ULONG FirstEntry = 0;
+    PNTFS_FCB ParentFcb = NULL;
     PNTFS_FCB Fcb;
     NTSTATUS Status;
-    PWSTR AbsFileName = NULL;
 
-    DPRINT("NtfsOpenFile(%p, %p, %S, %s, %p)\n",
-            DeviceExt,
-            FileObject,
-            FileName,
-            CaseSensitive ? "TRUE" : "FALSE",
-            FoundFCB);
+    *Information = 0;
 
-    *FoundFCB = NULL;
+    if (FileObject->FileName.Length == 0)
+        return STATUS_OBJECT_NAME_INVALID;
 
-    /* An open-by-file-ID name has already been resolved to a volume-absolute
-     * path; its RelatedFileObject only located the volume (Windows accepts
-     * any handle on it, directory or not) and takes no part in the walk. */
-    if (FileObject->RelatedFileObject && !VolumeAbsolute)
+    Status = NtfsBuildCreatePath(FileObject, &Path);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* A trailing separator names nothing */
+    while (Path.Length > sizeof(WCHAR) && Path.Buffer[Path.Length / sizeof(WCHAR) - 1] == L'\\')
     {
-        DPRINT("Converting relative filename to absolute filename\n");
-
-        Status = NtfsMakeAbsoluteFilename(FileObject->RelatedFileObject,
-                                          FileName,
-                                          &AbsFileName);
-        if (AbsFileName) FileName = AbsFileName;
-        if (!NT_SUCCESS(Status))
-        {
-            return Status;
-        }
+        Path.Length -= sizeof(WCHAR);
+        Path.Buffer[Path.Length / sizeof(WCHAR)] = UNICODE_NULL;
     }
 
-    //FIXME: Get canonical path name (remove .'s, ..'s and extra separators)
+    LastSeparator = wcsrchr(Path.Buffer, L'\\');
+    if (LastSeparator == NULL || LastSeparator[1] == UNICODE_NULL)
+    {
+        ExFreePoolWithTag(Path.Buffer, TAG_NTFS);
+        return STATUS_OBJECT_NAME_INVALID;
+    }
 
-    DPRINT("PathName to open: %S\n", FileName);
+    RtlInitUnicodeString(&FinalName, LastSeparator + 1);
 
-    /*  try first to find an existing FCB in memory  */
-    DPRINT("Checking for existing FCB in memory\n");
-    Fcb = NtfsGrabFCBFromTable(DeviceExt,
-                               FileName);
+    /* Cut the path down to the directory */
+    if (LastSeparator == Path.Buffer)
+    {
+        DirectoryPath = L"\\";
+    }
+    else
+    {
+        *LastSeparator = UNICODE_NULL;
+        DirectoryPath = Path.Buffer;
+    }
+
+    Fcb = NtfsGrabFCBFromTable(DeviceExt, DirectoryPath);
     if (Fcb == NULL)
     {
-        DPRINT("No existing FCB found, making a new one if file exists.\n");
-        Status = NtfsGetFCBForFile(DeviceExt,
-                                   &ParentFcb,
-                                   &Fcb,
-                                   FileName,
-                                   CaseSensitive);
+        ULONG ReparseOffset;
+
+        Status = NtfsGetFCBForFile(DeviceExt, &ParentFcb, &Fcb, DirectoryPath, CaseSensitive, &ReparseOffset);
         if (ParentFcb != NULL)
+            NtfsReleaseFCB(DeviceExt, ParentFcb);
+
+        /* A rename target behind a reparse point isn't followed */
+        if (Status == STATUS_REPARSE)
         {
-            NtfsReleaseFCB(DeviceExt,
-                           ParentFcb);
+            NtfsReleaseFCB(DeviceExt, Fcb);
+            Status = STATUS_OBJECT_PATH_NOT_FOUND;
         }
 
         if (!NT_SUCCESS(Status))
         {
-            DPRINT("Could not make a new FCB, status: %x\n", Status);
-
-            if (AbsFileName)
-                ExFreePoolWithTag(AbsFileName, TAG_NTFS);
-
-            return Status;
+            ExFreePoolWithTag(Path.Buffer, TAG_NTFS);
+            return (Status == STATUS_OBJECT_NAME_NOT_FOUND) ? STATUS_OBJECT_PATH_NOT_FOUND : Status;
         }
     }
 
-    DPRINT("Attaching FCB to fileObject\n");
-    Status = NtfsAttachFCBToFileObject(DeviceExt,
-                                       Fcb,
-                                       FileObject);
-
-    if (AbsFileName)
-        ExFreePool(AbsFileName);
-
-    *FoundFCB = Fcb;
-
-    return Status;
-}
-
-static
-NTSTATUS
-NtfsOpenTargetDirectory(PDEVICE_EXTENSION DeviceExt,
-                        PFILE_OBJECT FileObject,
-                        PWSTR FileName,
-                        BOOLEAN CaseSensitive,
-                        BOOLEAN VolumeAbsolute,
-                        PNTFS_FCB *ParentFcb,
-                        PULONG IoInformation)
-{
-    NTSTATUS Status;
-    PWSTR AbsFileName = NULL;
-    PNTFS_FCB TargetFcb = NULL;
-
-    *ParentFcb = NULL;
-    *IoInformation = 0;
-
-    if (FileObject->RelatedFileObject && !VolumeAbsolute)
+    if (!NtfsFCBIsDirectory(Fcb))
     {
-        Status = NtfsMakeAbsoluteFilename(FileObject->RelatedFileObject,
-                                          FileName,
-                                          &AbsFileName);
-        if (!NT_SUCCESS(Status))
-            return Status;
-
-        if (AbsFileName != NULL)
-            FileName = AbsFileName;
+        NtfsReleaseFCB(DeviceExt, Fcb);
+        ExFreePoolWithTag(Path.Buffer, TAG_NTFS);
+        return STATUS_OBJECT_PATH_NOT_FOUND;
     }
 
-    if (wcscmp(FileName, L"\\") == 0)
+    Status = NtfsFindMftRecord(DeviceExt, Fcb->MFTIndex, &FinalName, &FirstEntry, FALSE, CaseSensitive, &ExistingMft, NULL);
+    *Information = NT_SUCCESS(Status) ? FILE_EXISTS : FILE_DOES_NOT_EXIST;
+
+    Status = NtfsAttachFCBToFileObject(DeviceExt, Fcb, FileObject);
+    if (!NT_SUCCESS(Status))
     {
-        if (AbsFileName != NULL)
-            ExFreePoolWithTag(AbsFileName, TAG_NTFS);
-        return STATUS_INVALID_PARAMETER;
+        NtfsReleaseFCB(DeviceExt, Fcb);
+        ExFreePoolWithTag(Path.Buffer, TAG_NTFS);
+        return Status;
     }
 
-    Status = NtfsGetFCBForFile(DeviceExt,
-                               ParentFcb,
-                               &TargetFcb,
-                               FileName,
-                               CaseSensitive);
-    if (NT_SUCCESS(Status))
-    {
-        if (*ParentFcb == NULL)
-        {
-            Status = STATUS_INVALID_PARAMETER;
-        }
-        else
-        {
-            *IoInformation = FILE_EXISTS;
-            Status = STATUS_SUCCESS;
-        }
-    }
-    else if (Status == STATUS_OBJECT_NAME_NOT_FOUND && *ParentFcb != NULL)
-    {
-        *IoInformation = FILE_DOES_NOT_EXIST;
-        Status = STATUS_SUCCESS;
-    }
+    /* The final component is a suffix of the original name, so it fits */
+    ASSERT(FinalName.Length <= FileObject->FileName.Length);
+    RtlMoveMemory(FileObject->FileName.Buffer, FinalName.Buffer, FinalName.Length);
+    FileObject->FileName.Length = FinalName.Length;
 
-    if (TargetFcb != NULL)
-        NtfsReleaseFCB(DeviceExt, TargetFcb);
+    ExFreePoolWithTag(Path.Buffer, TAG_NTFS);
 
-    if (AbsFileName != NULL)
-        ExFreePoolWithTag(AbsFileName, TAG_NTFS);
-
-    return Status;
+    return STATUS_SUCCESS;
 }
 
 
 /**
-* @name NtfsCreateStream
-* @implemented
+* @name NtfsCheckCreateParameters
 *
-* Creates a named $DATA attribute (alternate data stream) for the file named
-* by the plain part of FileObject->FileName.  If the base file itself does
-* not exist it is created first (Windows semantics: FILE_CREATE of
-* "newfile:stream" creates the base file AND the stream in one call).  The
-* new stream is resident and empty; growth happens through the ordinary
-* SetAttributeDataLength machinery once the caller re-opens and writes.
-*
-* FileObject->FileName must be the normalized "path\\file:stream" form
-* produced by NtfsParseStreamPath; it is temporarily trimmed to the plain
-* file part (both the base lookup and NtfsCreateFileRecord->AddFileName
-* consume it) and restored - including the colon - before returning, so the
-* caller's recursive re-open sees the full stream name again.
+* Rejects option and disposition combinations no open can satisfy (MS-FSA 2.1.5.1).
 */
 static
 NTSTATUS
-NtfsCreateStream(PDEVICE_EXTENSION DeviceExt,
-                 PFILE_OBJECT FileObject,
-                 PUNICODE_STRING StreamName,
-                 BOOLEAN CaseSensitive,
-                 ULONG FileAttributes,
-                 BOOLEAN CanWait)
+NtfsCheckCreateParameters(
+    _In_ ULONG Disposition,
+    _In_ ULONG Options,
+    _In_ ACCESS_MASK DesiredAccess)
 {
+    if (Disposition > FILE_MAXIMUM_DISPOSITION)
+        return STATUS_INVALID_PARAMETER;
+
+    if (BooleanFlagOn(Options, FILE_DIRECTORY_FILE) &&
+        BooleanFlagOn(Options, FILE_NON_DIRECTORY_FILE))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* A directory can only be created or opened */
+    if (BooleanFlagOn(Options, FILE_DIRECTORY_FILE) &&
+        Disposition != FILE_CREATE &&
+        Disposition != FILE_OPEN &&
+        Disposition != FILE_OPEN_IF)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (BooleanFlagOn(Options, FILE_DELETE_ON_CLOSE) &&
+        !BooleanFlagOn(DesiredAccess, DELETE))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+static
+BOOLEAN
+NtfsDispositionOverwrites(
+    _In_ ULONG Disposition)
+{
+    return (Disposition == FILE_OVERWRITE ||
+            Disposition == FILE_OVERWRITE_IF ||
+            Disposition == FILE_SUPERSEDE);
+}
+
+/**
+* @name NtfsCheckExistingFile
+*
+* Decides whether an open of a file that exists may go ahead (MS-FSA 2.1.5.1.2): the
+* disposition, the type the caller asked for, a pending delete and the read-only attribute.
+*/
+static
+NTSTATUS
+NtfsCheckExistingFile(
+    _In_ PNTFS_FCB Fcb,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ ULONG Options,
+    _In_ ULONG Disposition,
+    _In_ BOOLEAN TrailingBackslash)
+{
+    BOOLEAN IsDirectory = NtfsFCBIsDirectory(Fcb);
+    BOOLEAN ReadOnly = BooleanFlagOn(Fcb->Entry.FileAttributes, NTFS_FILE_TYPE_READ_ONLY);
+
+    if (Disposition == FILE_CREATE)
+        return STATUS_OBJECT_NAME_COLLISION;
+
+    if (BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING))
+        return STATUS_DELETE_PENDING;
+
+    if (BooleanFlagOn(Options, FILE_NON_DIRECTORY_FILE) && IsDirectory)
+        return STATUS_FILE_IS_A_DIRECTORY;
+
+    if (BooleanFlagOn(Options, FILE_DIRECTORY_FILE) && !IsDirectory)
+        return STATUS_NOT_A_DIRECTORY;
+
+    /* A trailing separator names a directory */
+    if (TrailingBackslash && !IsDirectory)
+        return STATUS_OBJECT_NAME_INVALID;
+
+    if (BooleanFlagOn(Options, FILE_DELETE_ON_CLOSE) &&
+        (ReadOnly || NtfsFCBIsRoot(Fcb)))
+    {
+        return STATUS_CANNOT_DELETE;
+    }
+
+    /* The read-only attribute forbids changing a file's data, not a directory's */
+    if (ReadOnly && !IsDirectory &&
+        (BooleanFlagOn(DesiredAccess, FILE_WRITE_DATA | FILE_APPEND_DATA) ||
+         NtfsDispositionOverwrites(Disposition)))
+    {
+        return STATUS_ACCESS_DENIED;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsOverwriteFile
+*
+* Truncates the unnamed data stream of an existing file for FILE_OVERWRITE(_IF) and
+* FILE_SUPERSEDE.
+*/
+static
+NTSTATUS
+NtfsOverwriteFile(
+    _In_ PNTFS_FCB Fcb,
+    _In_ PFILE_OBJECT FileObject)
+{
+    PFILE_RECORD_HEADER FileRecord;
+    PNTFS_ATTR_CONTEXT DataContext = NULL;
+    ULONG DataAttributeOffset;
+    LARGE_INTEGER Zero;
     NTSTATUS Status;
-    USHORT SavedLength;
-    ULONG ColonIndex;
-    PWSTR BaseName;
-    PWSTR AbsName = NULL;
-    PNTFS_FCB BaseFcb = NULL;
-    PNTFS_FCB ParentFcb = NULL;
-    PFILE_RECORD_HEADER FileRecord = NULL;
 
-    ASSERT(StreamName->Length != 0);
-    ASSERT(FileObject->FileName.Length > StreamName->Length);
-
-    /* Trim "path\file:stream" to "path\file" for the duration. */
-    SavedLength = FileObject->FileName.Length;
-    ColonIndex = (SavedLength - StreamName->Length) / sizeof(WCHAR) - 1;
-    ASSERT(FileObject->FileName.Buffer[ColonIndex] == L':');
-    FileObject->FileName.Length = (USHORT)(ColonIndex * sizeof(WCHAR));
-    FileObject->FileName.Buffer[ColonIndex] = UNICODE_NULL;
-
-    /* Resolve the base file (handling relative opens like NtfsOpenFile). */
-    BaseName = FileObject->FileName.Buffer;
-    if (FileObject->RelatedFileObject)
+    if (!NtfsGlobalData->EnableWriteSupport)
     {
-        Status = NtfsMakeAbsoluteFilename(FileObject->RelatedFileObject,
-                                          BaseName,
-                                          &AbsName);
-        if (!NT_SUCCESS(Status))
-            goto Cleanup;
-
-        if (AbsName != NULL)
-            BaseName = AbsName;
+        DPRINT1("NTFS write-support is EXPERIMENTAL and is disabled by default!\n");
+        return STATUS_ACCESS_DENIED;
     }
 
-    BaseFcb = NtfsGrabFCBFromTable(DeviceExt, BaseName);
-    if (BaseFcb == NULL)
-    {
-        Status = NtfsGetFCBForFile(DeviceExt, &ParentFcb, &BaseFcb, BaseName, CaseSensitive);
-        if (ParentFcb != NULL)
-        {
-            NtfsReleaseFCB(DeviceExt, ParentFcb);
-            ParentFcb = NULL;
-        }
-
-        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
-        {
-            /* The base file doesn't exist either - create it along with the
-             * stream, as Windows does. */
-            Status = NtfsCreateFileRecord(DeviceExt,
-                                          FileObject,
-                                          CaseSensitive,
-                                          FileAttributes,
-                                          CanWait);
-            if (!NT_SUCCESS(Status))
-                goto Cleanup;
-
-            Status = NtfsGetFCBForFile(DeviceExt, &ParentFcb, &BaseFcb, BaseName, CaseSensitive);
-            if (ParentFcb != NULL)
-            {
-                NtfsReleaseFCB(DeviceExt, ParentFcb);
-                ParentFcb = NULL;
-            }
-        }
-
-        if (!NT_SUCCESS(Status))
-        {
-            BaseFcb = NULL;
-            goto Cleanup;
-        }
-    }
-
-    if (NtfsFCBIsDirectory(BaseFcb))
-    {
-        /* NTFS allows named $DATA streams on directories, but this driver's
-         * directory FCBs have no data-stream cache plumbing, so directory
-         * ADS is explicitly out of scope - fail the name cleanly. */
-        Status = STATUS_OBJECT_NAME_INVALID;
-        goto Cleanup;
-    }
-
-    /* Insert the (empty, resident) named $DATA attribute. */
-    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    FileRecord = ExAllocateFromNPagedLookasideList(&Fcb->Vcb->FileRecLookasideList);
     if (FileRecord == NULL)
-    {
-        Status = STATUS_INSUFFICIENT_RESOURCES;
-        goto Cleanup;
-    }
+        return STATUS_INSUFFICIENT_RESOURCES;
 
-    Status = ReadFileRecord(DeviceExt, BaseFcb->MFTIndex, FileRecord);
-    if (!NT_SUCCESS(Status))
-        goto Cleanup;
+    Zero.QuadPart = 0;
 
-    Status = AddDataStream(DeviceExt,
-                           FileRecord,
-                           StreamName->Buffer,
-                           (USHORT)(StreamName->Length / sizeof(WCHAR)));
-    if (!NT_SUCCESS(Status))
-        goto Cleanup;
+    ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
 
-    Status = UpdateFileRecord(DeviceExt, BaseFcb->MFTIndex, FileRecord);
+    Status = ReadFileRecord(Fcb->Vcb, Fcb->MFTIndex, FileRecord);
     if (NT_SUCCESS(Status))
     {
-        /* The base FCB may cache a copy of the record without the stream. */
-        NtfsInvalidateCachedFileRecord(BaseFcb);
+        Status = FindAttribute(Fcb->Vcb, FileRecord, AttributeData, Fcb->Stream, wcslen(Fcb->Stream), &DataContext, &DataAttributeOffset);
     }
 
-Cleanup:
-    if (FileRecord != NULL)
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    /* Only the record holding the stream changes; read it if that isn't the base */
+    if (NT_SUCCESS(Status) && (DataContext->FileMFTIndex & NTFS_MFT_MASK) != Fcb->MFTIndex)
+    {
+        Status = ReadFileRecord(Fcb->Vcb, DataContext->FileMFTIndex & NTFS_MFT_MASK, FileRecord);
+        if (!NT_SUCCESS(Status))
+            ReleaseAttributeContext(DataContext);
+    }
 
-    if (BaseFcb != NULL)
-        NtfsReleaseFCB(DeviceExt, BaseFcb);
+    if (NT_SUCCESS(Status))
+    {
+        Status = SetAttributeDataLength(FileObject, Fcb, DataContext, DataAttributeOffset, FileRecord, &Zero);
+        ReleaseAttributeContext(DataContext);
+    }
 
-    if (AbsName != NULL)
-        ExFreePoolWithTag(AbsName, TAG_NTFS);
+    ExReleaseResourceLite(&Fcb->MainResource);
 
-    /* Restore the full "path\file:stream" name for the re-open. */
-    FileObject->FileName.Buffer[ColonIndex] = L':';
-    FileObject->FileName.Length = SavedLength;
+    ExFreeToNPagedLookasideList(&Fcb->Vcb->FileRecLookasideList, FileRecord);
 
     return Status;
 }
 
+/**
+* @name NtfsFinishOpen
+*
+* Last step of every successful open: records the open against the file's share access
+* and remembers FILE_DELETE_ON_CLOSE for the handle's cleanup. Closes the file object if
+* the share access doesn't allow the open.
+*/
+static
+NTSTATUS
+NtfsFinishOpen(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PFILE_OBJECT FileObject,
+    _In_ PIO_STACK_LOCATION Stack)
+{
+    PNTFS_CCB Ccb = FileObject->FsContext2;
+    NTSTATUS Status;
+
+    Status = NtfsGrantShareAccess(DeviceExt, FileObject->FsContext, FileObject, Stack);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT("Sharing violation opening '%wZ'\n", &FileObject->FileName);
+        NtfsCloseFile(DeviceExt, FileObject);
+        return Status;
+    }
+
+    if (BooleanFlagOn(Stack->Parameters.Create.Options, FILE_DELETE_ON_CLOSE))
+        Ccb->Flags |= CCB_DELETE_ON_CLOSE;
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsReparseOpen
+*
+* Answers an open that reached a reparse point it isn't to open itself: STATUS_REPARSE with
+* the tag, and the reparse data for the I/O manager to act on. A mount point it follows by
+* putting its target in front of the part of the name not parsed yet; any other tag goes
+* to whoever handles it, or fails with STATUS_IO_REPARSE_TAG_NOT_HANDLED. Consumes the
+* reference on Fcb.
+*
+* @param UnparsedBytes
+* Bytes at the end of the file object's name past the reparse point.
+*
+* @param UnparsedHasSeparator
+* Whether those bytes start with a path separator.
+*/
+static
+NTSTATUS
+NtfsReparseOpen(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PIRP Irp,
+    _In_ PNTFS_FCB Fcb,
+    _In_ ULONG UnparsedBytes,
+    _In_ BOOLEAN UnparsedHasSeparator)
+{
+    PREPARSE_DATA_BUFFER ReparseData;
+    NTSTATUS Status;
+
+    Status = NtfsReadFCBAttribute(DeviceExt, Fcb, AttributeReparsePoint, L"", 0, (PVOID *)&ReparseData);
+    NtfsReleaseFCB(DeviceExt, Fcb);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* A target naming a directory with a trailing separator takes the rest without one */
+    if (ReparseData->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT && UnparsedHasSeparator)
+    {
+        PCWSTR Target = (PCWSTR)((ULONG_PTR)ReparseData->MountPointReparseBuffer.PathBuffer +
+                                 ReparseData->MountPointReparseBuffer.SubstituteNameOffset);
+        USHORT TargetLength = ReparseData->MountPointReparseBuffer.SubstituteNameLength / sizeof(WCHAR);
+
+        if (TargetLength != 0 && Target[TargetLength - 1] == L'\\')
+            UnparsedBytes -= sizeof(WCHAR);
+    }
+
+    ASSERT(UnparsedBytes < MAXUSHORT);
+    ReparseData->Reserved = (USHORT)UnparsedBytes;
+
+    Irp->Tail.Overlay.AuxiliaryBuffer = (PVOID)ReparseData;
+    Irp->IoStatus.Information = ReparseData->ReparseTag;
+
+    return STATUS_REPARSE;
+}
+
+static KPROCESSOR_MODE
+NtfsCreateAccessMode(PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    return (Stack->Flags & SL_FORCE_ACCESS_CHECK) ? UserMode : Irp->RequestorMode;
+}
+
+static NTSTATUS
+NtfsCheckParentAccess(PDEVICE_EXTENSION Vcb,
+                       ULONGLONG Parent,
+                       PACCESS_STATE AccessState,
+                       ACCESS_MASK Desired,
+                       KPROCESSOR_MODE Mode)
+{
+    ACCESS_MASK Granted;
+
+    if ((AccessState->Flags & TOKEN_HAS_RESTORE_PRIVILEGE) &&
+        !(Desired & ~(FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD)))
+        return STATUS_SUCCESS;
+    return NtfsCheckAccess(Vcb, Parent, AccessState, Desired, 0, Mode, &Granted);
+}
+
+/* A cached target FCB does not authorize its ancestors. Check the path before
+ * consulting the FCB table when the effective token lacks traverse bypass. */
+static NTSTATUS
+NtfsCheckCreateTraverse(PDEVICE_EXTENSION Vcb,
+                         PCUNICODE_STRING Path,
+                         PACCESS_STATE AccessState,
+                         KPROCESSOR_MODE Mode,
+                         BOOLEAN CaseSensitive)
+{
+    ULONGLONG Parent = NTFS_FILE_ROOT, Index;
+    ULONG Position = 1, End = Path->Length / sizeof(WCHAR), Next;
+    UNICODE_STRING Name;
+    PFILE_RECORD_HEADER Record;
+    PSTANDARD_INFORMATION Info;
+    ACCESS_MASK Granted;
+    BOOLEAN Directory, Reparse;
+    NTSTATUS Status;
+
+    if (Mode == KernelMode || (AccessState->Flags & TOKEN_HAS_TRAVERSE_PRIVILEGE) ||
+        (AccessState->PreviouslyGrantedAccess & FILE_TRAVERSE))
+        return STATUS_SUCCESS;
+    while (Position < End)
+    {
+        Status = NtfsCheckAccess(Vcb, Parent, AccessState, FILE_TRAVERSE, 0, Mode, &Granted);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        for (Next = Position; Next < End && Path->Buffer[Next] != L'\\'; Next++)
+            ;
+        if (Next == End)
+            return STATUS_SUCCESS;
+        if (Next == Position)
+        {
+            Position++;
+            continue;
+        }
+        Name.Buffer = Path->Buffer + Position;
+        Name.Length = Name.MaximumLength = (USHORT)((Next - Position) * sizeof(WCHAR));
+        Status = NtfsLookupFileAt(Vcb, &Name, CaseSensitive, &Record, &Index, Parent);
+        if (!NT_SUCCESS(Status))
+            return Status == STATUS_OBJECT_NAME_NOT_FOUND ? STATUS_OBJECT_PATH_NOT_FOUND : Status;
+        Info = GetStandardInformationFromRecord(Vcb, Record);
+        ASSERT(Info != NULL);
+        Reparse = BooleanFlagOn(Info->FileAttribute, FILE_ATTRIBUTE_REPARSE_POINT);
+        Directory = BooleanFlagOn(Record->Flags, FRH_DIRECTORY);
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+        /* The I/O manager reparses the redirected path with the same access
+         * state. Do not interpret a reparse point's contents as an index. */
+        if (Reparse)
+            return STATUS_SUCCESS;
+        if (!Directory)
+            return STATUS_OBJECT_PATH_NOT_FOUND;
+        Parent = Index;
+        Position = Next + 1;
+    }
+    return STATUS_SUCCESS;
+}
+
+/* A parent can independently authorize deletion and reading attributes
+ * (MS-FSA 2.1.5.1.2.1), even when the file's DACL denies those rights. */
+static NTSTATUS
+NtfsCheckOpenAccess(PDEVICE_EXTENSION Vcb,
+                     PNTFS_FCB Fcb,
+                     PACCESS_STATE AccessState,
+                     ACCESS_MASK Desired,
+                     ACCESS_MASK Previous,
+                     KPROCESSOR_MODE Mode,
+                     PACCESS_MASK Granted)
+{
+    ACCESS_MASK ParentGranted = 0;
+    NTSTATUS Status;
+
+    Status = NtfsCheckAccess(Vcb, Fcb->MFTIndex, AccessState, Desired, Previous, Mode, Granted);
+    if ((Status == STATUS_ACCESS_DENIED || NT_SUCCESS(Status)) &&
+        (Desired & (DELETE | MAXIMUM_ALLOWED)) &&
+        (!NT_SUCCESS(Status) || !(*Granted & DELETE)) &&
+        NT_SUCCESS(NtfsCheckParentAccess(Vcb, Fcb->ParentMFTIndex, AccessState, FILE_DELETE_CHILD, Mode)))
+        ParentGranted |= DELETE;
+    if ((Status == STATUS_ACCESS_DENIED || NT_SUCCESS(Status)) &&
+        (Desired & (FILE_READ_ATTRIBUTES | MAXIMUM_ALLOWED)) &&
+        (!NT_SUCCESS(Status) || !(*Granted & FILE_READ_ATTRIBUTES)) &&
+        NT_SUCCESS(NtfsCheckParentAccess(Vcb, Fcb->ParentMFTIndex, AccessState, FILE_LIST_DIRECTORY, Mode)))
+        ParentGranted |= FILE_READ_ATTRIBUTES;
+    if (ParentGranted != 0)
+        Status = NtfsCheckAccess(Vcb, Fcb->MFTIndex, AccessState, Desired & ~ParentGranted,
+                                  Previous | ParentGranted, Mode, Granted);
+    return Status;
+}
+
+static NTSTATUS
+NtfsAuthorizeOpen(PDEVICE_EXTENSION Vcb, PNTFS_FCB Fcb, PIRP Irp,
+                   PIO_STACK_LOCATION Stack, BOOLEAN ExistingStream)
+{
+    PIO_SECURITY_CONTEXT Security = Stack->Parameters.Create.SecurityContext;
+    PACCESS_STATE AccessState = Security->AccessState;
+    KPROCESSOR_MODE Mode = NtfsCreateAccessMode(Irp, Stack);
+    ULONG Disposition = Stack->Parameters.Create.Options >> 24;
+    ACCESS_MASK Desired = AccessState->RemainingDesiredAccess;
+    ACCESS_MASK Granted = 0, Extra = 0;
+    NTSTATUS Status;
+
+    if (!ExistingStream)
+        Extra = FILE_WRITE_DATA;
+    else if (Disposition == FILE_SUPERSEDE || Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF)
+    {
+        Extra = (Disposition == FILE_SUPERSEDE) ? DELETE : FILE_WRITE_DATA;
+        if (Fcb->Stream[0] == UNICODE_NULL)
+            Extra |= FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
+    }
+    Desired |= Extra & ~AccessState->PreviouslyGrantedAccess;
+    Status = NtfsCheckOpenAccess(Vcb, Fcb, AccessState, Desired,
+                                  AccessState->PreviouslyGrantedAccess, Mode, &Granted);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if ((Desired & MAXIMUM_ALLOWED) && (Vcb->Flags & VCB_VOLUME_READ_ONLY))
+        Granted &= ~(FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA |
+                     FILE_WRITE_ATTRIBUTES | FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER);
+    if ((Desired & MAXIMUM_ALLOWED) && (Fcb->Entry.FileAttributes & NTFS_FILE_TYPE_READ_ONLY))
+        Granted &= ~(FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_DELETE_CHILD);
+    if (Desired & ~(Granted | MAXIMUM_ALLOWED))
+        return STATUS_ACCESS_DENIED;
+    AccessState->PreviouslyGrantedAccess = Granted;
+    AccessState->RemainingDesiredAccess = 0;
+    Security->DesiredAccess = Granted;
+    return STATUS_SUCCESS;
+}
+
+/* Creating a new file grants the requested access before its new DACL takes
+ * effect on subsequent opens (MS-FSA 2.1.5.1.1). */
+static VOID
+NtfsGrantCreatedAccess(PIO_STACK_LOCATION Stack)
+{
+    PIO_SECURITY_CONTEXT Security = Stack->Parameters.Create.SecurityContext;
+    PACCESS_STATE AccessState = Security->AccessState;
+    ACCESS_MASK Desired = AccessState->RemainingDesiredAccess;
+
+    AccessState->PreviouslyGrantedAccess |= Desired & ~MAXIMUM_ALLOWED;
+    if (Desired & MAXIMUM_ALLOWED)
+        AccessState->PreviouslyGrantedAccess |= FILE_ALL_ACCESS;
+    AccessState->RemainingDesiredAccess = 0;
+    Security->DesiredAccess = AccessState->PreviouslyGrantedAccess;
+}
+
+/**
+* @name NtfsOpenExistingFile
+*
+* Opens a file that exists, applying the disposition. Consumes the reference on Fcb.
+*/
+static
+NTSTATUS
+NtfsOpenExistingFile(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PIRP Irp,
+    _In_ PIO_STACK_LOCATION Stack,
+    _In_ PNTFS_FCB Fcb,
+    _In_ BOOLEAN TrailingBackslash,
+    _In_ ULONG UnparsedBytes)
+{
+    PFILE_OBJECT FileObject = Stack->FileObject;
+    ULONG Disposition = (Stack->Parameters.Create.Options >> 24) & 0xff;
+    ULONG Options = Stack->Parameters.Create.Options & FILE_VALID_OPTION_FLAGS;
+    ACCESS_MASK DesiredAccess = Stack->Parameters.Create.SecurityContext->DesiredAccess;
+    ULONG_PTR Information = FILE_OPENED;
+    NTSTATUS Status;
+
+    /* A reparse point is opened itself only with FILE_OPEN_REPARSE_POINT */
+    if (NtfsFCBIsReparsePoint(Fcb) && !BooleanFlagOn(Options, FILE_OPEN_REPARSE_POINT))
+        return NtfsReparseOpen(DeviceExt, Irp, Fcb, UnparsedBytes, TrailingBackslash);
+
+    Status = NtfsCheckExistingFile(Fcb, DesiredAccess, Options, Disposition, TrailingBackslash);
+    if (NT_SUCCESS(Status))
+        Status = NtfsAuthorizeOpen(DeviceExt, Fcb, Irp, Stack, TRUE);
+    if (NT_SUCCESS(Status))
+        Status = NtfsAttachFCBToFileObject(DeviceExt, Fcb, FileObject);
+
+    if (!NT_SUCCESS(Status))
+    {
+        if (Disposition == FILE_CREATE && Status == STATUS_OBJECT_NAME_COLLISION)
+            Irp->IoStatus.Information = FILE_EXISTS;
+
+        NtfsReleaseFCB(DeviceExt, Fcb);
+        return Status;
+    }
+
+    DesiredAccess = Stack->Parameters.Create.SecurityContext->DesiredAccess;
+
+    /* A file mapped as a running image can't be written or deleted */
+    if (!NtfsFCBIsDirectory(Fcb) &&
+        (BooleanFlagOn(DesiredAccess, FILE_WRITE_DATA) || BooleanFlagOn(Options, FILE_DELETE_ON_CLOSE)) &&
+        !MmFlushImageSection(&Fcb->SectionObjectPointers, MmFlushForWrite))
+    {
+        NtfsCloseFile(DeviceExt, FileObject);
+        return BooleanFlagOn(Options, FILE_DELETE_ON_CLOSE) ? STATUS_CANNOT_DELETE : STATUS_SHARING_VIOLATION;
+    }
+
+    if (NtfsDispositionOverwrites(Disposition))
+    {
+        /* Check the final granted rights before any destructive operation.
+         * DirResource keeps the share state fixed until FinishOpen commits it. */
+        Status = IoCheckShareAccess(DesiredAccess, Stack->Parameters.Create.ShareAccess,
+                                     FileObject, &Fcb->ShareAccess, FALSE);
+        if (!NT_SUCCESS(Status))
+        {
+            NtfsCloseFile(DeviceExt, FileObject);
+            return Status;
+        }
+        Status = NtfsOverwriteFile(Fcb, FileObject);
+        if (!NT_SUCCESS(Status))
+        {
+            NtfsCloseFile(DeviceExt, FileObject);
+            return Status;
+        }
+
+        Information = (Disposition == FILE_SUPERSEDE) ? FILE_SUPERSEDED : FILE_OVERWRITTEN;
+    }
+
+    Status = NtfsFinishOpen(DeviceExt, FileObject, Stack);
+    ASSERT(!NtfsDispositionOverwrites(Disposition) || NT_SUCCESS(Status));
+    if (NT_SUCCESS(Status))
+    {
+        Irp->IoStatus.Information = Information;
+        if (Information == FILE_SUPERSEDED || Information == FILE_OVERWRITTEN)
+            NtfsReportDataChange(Fcb, FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE);
+    }
+
+    return Status;
+}
+
+/**
+* @name NtfsNewFileAttributes
+*
+* The attributes a new file or directory starts with (MS-FSA 2.1.5.1.1): what the caller
+* asked for, less what can't be set; a file is also marked for archiving.
+*/
+static
+ULONG
+NtfsNewFileAttributes(
+    _In_ ULONG Requested,
+    _In_ BOOLEAN IsDirectory)
+{
+    ULONG Attributes = Requested & FILE_ATTRIBUTE_VALID_SET_FLAGS & ~FILE_ATTRIBUTE_NORMAL;
+
+    if (!IsDirectory)
+        Attributes |= FILE_ATTRIBUTE_ARCHIVE;
+
+    return Attributes;
+}
+
+/**
+* @name NtfsCreateNewFile
+*
+* Creates the file or directory a create names, in ParentFcb, and opens it.
+*/
+static
+NTSTATUS
+NtfsCreateNewFile(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PNTFS_IRP_CONTEXT IrpContext,
+    _In_ PNTFS_FCB ParentFcb,
+    _In_ PCUNICODE_STRING Path,
+    _In_ BOOLEAN TrailingBackslash)
+{
+    PIRP Irp = IrpContext->Irp;
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PFILE_OBJECT FileObject = Stack->FileObject;
+    ULONG Options = Stack->Parameters.Create.Options & FILE_VALID_OPTION_FLAGS;
+    BOOLEAN CaseSensitive = BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE);
+    BOOLEAN IsDirectory = BooleanFlagOn(Options, FILE_DIRECTORY_FILE);
+    UNICODE_STRING FinalName;
+    PNTFS_FCB Fcb, UnusedParent;
+    ULONG Attributes, SecurityId;
+    NTSTATUS Status;
+
+    if (DeviceExt->Flags & VCB_VOLUME_READ_ONLY)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+
+    if (!NtfsGlobalData->EnableWriteSupport)
+    {
+        DPRINT1("NTFS write-support is EXPERIMENTAL and is disabled by default!\n");
+        return STATUS_ACCESS_DENIED;
+    }
+
+    NtfsGetFinalComponent(Path, &FinalName);
+
+    /* Creating a stream means adding a named $DATA attribute to a
+     * record, which isn't implemented: the volume doesn't report
+     * FILE_NAMED_STREAMS. Answer the way a volume without named streams
+     * does, rather than making "file:stream" the name of a new file
+     * that no open could ever reach again. */
+    if (NtfsNameHasStreamPart(&FinalName))
+    {
+        DPRINT1("Creating stream '%wZ' is not supported\n", Path);
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+
+    /* A trailing separator names a directory */
+    if (TrailingBackslash && !IsDirectory)
+        return STATUS_OBJECT_NAME_INVALID;
+
+    Attributes = NtfsNewFileAttributes(Stack->Parameters.Create.FileAttributes, IsDirectory);
+
+    /* EAs given with the create go on the new file; a bad list fails it first */
+    if (Stack->Parameters.Create.EaLength != 0)
+    {
+        ULONG ErrorOffset;
+
+        Status = NtfsCheckEaList(Irp->AssociatedIrp.SystemBuffer, Stack->Parameters.Create.EaLength, &ErrorOffset);
+        if (!NT_SUCCESS(Status))
+        {
+            Irp->IoStatus.Information = ErrorOffset;
+            return Status;
+        }
+    }
+
+    if (BooleanFlagOn(Options, FILE_DELETE_ON_CLOSE) &&
+        BooleanFlagOn(Attributes, FILE_ATTRIBUTE_READONLY))
+    {
+        return STATUS_CANNOT_DELETE;
+    }
+
+    Status = NtfsCheckParentAccess(DeviceExt, ParentFcb->MFTIndex,
+                                    Stack->Parameters.Create.SecurityContext->AccessState,
+                                    IsDirectory ? FILE_ADD_SUBDIRECTORY : FILE_ADD_FILE,
+                                    NtfsCreateAccessMode(Irp, Stack));
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtfsAssignSecurity(DeviceExt,
+                                ParentFcb->MFTIndex,
+                                Stack->Parameters.Create.SecurityContext->AccessState,
+                                IsDirectory,
+                                &SecurityId);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    ASSERT(NtfsFCBIsDirectory(ParentFcb));
+    Status = NtfsCreateFileRecord(DeviceExt,
+                                  NtfsFileReference(ParentFcb),
+                                  &FinalName,
+                                  Attributes,
+                                  IsDirectory,
+                                  SecurityId,
+                                  CaseSensitive,
+                                  BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT),
+                                  NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ERROR: Couldn't create '%wZ' (Status %lx)\n", Path, Status);
+        return Status;
+    }
+
+    /* The caller holds DirResource exclusively, so the name is still there */
+    Status = NtfsOpenFile(DeviceExt, Path->Buffer, CaseSensitive, &Fcb, &UnusedParent, NULL);
+    ASSERT(NT_SUCCESS(Status));
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (Stack->Parameters.Create.EaLength != 0)
+    {
+        ULONG ErrorOffset;
+
+        Status = NtfsSetEas(DeviceExt, Fcb, Irp->AssociatedIrp.SystemBuffer, Stack->Parameters.Create.EaLength, &ErrorOffset);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Couldn't give '%wZ' its EAs (Status %lx)\n", Path, Status);
+            NtfsReleaseFCB(DeviceExt, Fcb);
+            return Status;
+        }
+    }
+
+    /* A file created in a compressed directory starts compressed (MS-FSA 2.1.5.1.1) */
+    if (NtfsFCBIsCompressed(ParentFcb))
+    {
+        Status = NtfsSetCompression(DeviceExt, Fcb, COMPRESSION_FORMAT_LZNT1);
+        if (!NT_SUCCESS(Status))
+        {
+            NtfsReleaseFCB(DeviceExt, Fcb);
+            return Status;
+        }
+    }
+
+    NtfsGrantCreatedAccess(Stack);
+    Status = NtfsAttachFCBToFileObject(DeviceExt, Fcb, FileObject);
+    if (!NT_SUCCESS(Status))
+    {
+        NtfsReleaseFCB(DeviceExt, Fcb);
+        return Status;
+    }
+
+    Status = NtfsFinishOpen(DeviceExt, FileObject, Stack);
+    if (NT_SUCCESS(Status))
+    {
+        Irp->IoStatus.Information = FILE_CREATED;
+        NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_FILE_CREATE);
+        NtfsReportPathChange(DeviceExt, Fcb->PathName,
+                              NtfsFCBIsDirectory(Fcb) ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
+                              FILE_ACTION_ADDED);
+    }
+
+    return Status;
+}
+
+/**
+* @name NtfsAddStream
+*
+* Adds an empty named data stream to the file BaseFcb is open on.
+*/
+static
+NTSTATUS
+NtfsAddStream(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PNTFS_FCB BaseFcb,
+    _In_ PCUNICODE_STRING StreamName)
+{
+    USHORT NameLength = StreamName->Length / sizeof(WCHAR);
+    PFILE_RECORD_HEADER FileRecord;
+    NTSTATUS Status;
+
+    if (!NtfsGlobalData->EnableWriteSupport)
+    {
+        DPRINT1("NTFS write-support is EXPERIMENTAL and is disabled by default!\n");
+        return STATUS_ACCESS_DENIED;
+    }
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    ExAcquireResourceExclusiveLite(&BaseFcb->MainResource, TRUE);
+
+    Status = ReadFileRecord(DeviceExt, BaseFcb->MFTIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+    {
+        /* Past what the base record holds, the stream goes into an extension record */
+        Status = NtfsAddResidentAttributeToFile(DeviceExt, FileRecord, AttributeData, StreamName->Buffer, NameLength, NULL, 0);
+    }
+
+    if (NT_SUCCESS(Status))
+        Status = UpdateFileRecord(DeviceExt, BaseFcb->MFTIndex, FileRecord);
+
+    ExReleaseResourceLite(&BaseFcb->MainResource);
+
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    return Status;
+}
+
+/**
+* @name NtfsOpenBaseOfStream
+*
+* Finds the file a stream create names, creating it first when it's missing and the
+* disposition creates. Created reports whether it did.
+*/
+static
+NTSTATUS
+NtfsOpenBaseOfStream(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PNTFS_IRP_CONTEXT IrpContext,
+    _In_ PCUNICODE_STRING Path,
+    _Out_ PNTFS_FCB *BaseFcb,
+    _Out_ PBOOLEAN Created,
+    _Out_ PULONG ReparseOffset)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(IrpContext->Irp);
+    ULONG Disposition = (Stack->Parameters.Create.Options >> 24) & 0xff;
+    BOOLEAN CaseSensitive = BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE);
+    UNICODE_STRING FinalName;
+    PNTFS_FCB ParentFcb;
+    ULONG SecurityId;
+    NTSTATUS Status;
+
+    *Created = FALSE;
+
+    Status = NtfsOpenFile(DeviceExt, Path->Buffer, CaseSensitive, BaseFcb, &ParentFcb, ReparseOffset);
+    if (Status != STATUS_OBJECT_NAME_NOT_FOUND)
+        return Status;
+
+    if (Disposition == FILE_OPEN || Disposition == FILE_OVERWRITE)
+    {
+        NtfsReleaseFCB(DeviceExt, ParentFcb);
+        return Status;
+    }
+
+    if (DeviceExt->Flags & VCB_VOLUME_READ_ONLY)
+    {
+        NtfsReleaseFCB(DeviceExt, ParentFcb);
+        return STATUS_MEDIA_WRITE_PROTECTED;
+    }
+
+    if (!NtfsGlobalData->EnableWriteSupport)
+    {
+        NtfsReleaseFCB(DeviceExt, ParentFcb);
+        return STATUS_ACCESS_DENIED;
+    }
+
+    NtfsGetFinalComponent(Path, &FinalName);
+    Status = NtfsCheckParentAccess(DeviceExt, ParentFcb->MFTIndex,
+                                    Stack->Parameters.Create.SecurityContext->AccessState,
+                                    FILE_ADD_FILE, NtfsCreateAccessMode(IrpContext->Irp, Stack));
+    if (!NT_SUCCESS(Status))
+    {
+        NtfsReleaseFCB(DeviceExt, ParentFcb);
+        return Status;
+    }
+    Status = NtfsAssignSecurity(DeviceExt,
+                                ParentFcb->MFTIndex,
+                                Stack->Parameters.Create.SecurityContext->AccessState,
+                                FALSE,
+                                &SecurityId);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtfsCreateFileRecord(DeviceExt,
+                                      NtfsFileReference(ParentFcb),
+                                      &FinalName,
+                                      NtfsNewFileAttributes(Stack->Parameters.Create.FileAttributes, FALSE),
+                                      FALSE,
+                                      SecurityId,
+                                      CaseSensitive,
+                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT),
+                                      NULL);
+    }
+    NtfsReleaseFCB(DeviceExt, ParentFcb);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    *Created = TRUE;
+
+    Status = NtfsOpenFile(DeviceExt, Path->Buffer, CaseSensitive, BaseFcb, &ParentFcb, NULL);
+    ASSERT(NT_SUCCESS(Status));
+    NtfsReportPathChange(DeviceExt, (*BaseFcb)->PathName,
+                          FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_ADDED);
+
+    return Status;
+}
+
+/**
+* @name NtfsOpenStream
+*
+* Opens, or creates, a named data stream of a file (MS-FSA 2.1.5.1). A stream is opened like
+* a file: the disposition applies to it, and creating one on a missing file creates the file.
+*
+* @param Path
+* Path of the file the stream belongs to.
+*
+* @param StreamName
+* Name of the stream.
+*/
+static
+NTSTATUS
+NtfsOpenStream(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PNTFS_IRP_CONTEXT IrpContext,
+    _In_ PCUNICODE_STRING Path,
+    _In_ PCUNICODE_STRING StreamName,
+    _In_ ULONG NameLength)
+{
+    PIRP Irp = IrpContext->Irp;
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG Disposition = (Stack->Parameters.Create.Options >> 24) & 0xff;
+    ULONG Options = Stack->Parameters.Create.Options & FILE_VALID_OPTION_FLAGS;
+    PNTFS_FCB BaseFcb, Fcb;
+    BOOLEAN BaseCreated;
+    ULONG ReparseOffset;
+    NTSTATUS Status;
+
+    /* A stream is never a directory */
+    if (BooleanFlagOn(Options, FILE_DIRECTORY_FILE))
+        return STATUS_NOT_A_DIRECTORY;
+
+    Status = NtfsOpenBaseOfStream(DeviceExt, IrpContext, Path, &BaseFcb, &BaseCreated, &ReparseOffset);
+    if (Status == STATUS_REPARSE)
+        return NtfsReparseOpen(DeviceExt, Irp, BaseFcb, (NameLength - ReparseOffset) * sizeof(WCHAR), TRUE);
+
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* The stream of a reparse point is past it, like a path through it */
+    if (NtfsFCBIsReparsePoint(BaseFcb) && !BooleanFlagOn(Options, FILE_OPEN_REPARSE_POINT))
+        return NtfsReparseOpen(DeviceExt, Irp, BaseFcb, NameLength * sizeof(WCHAR) - Path->Length, FALSE);
+
+    if (BooleanFlagOn(BaseFcb->Flags, FCB_DELETE_PENDING))
+    {
+        NtfsReleaseFCB(DeviceExt, BaseFcb);
+        return STATUS_DELETE_PENDING;
+    }
+
+    Status = NtfsMakeStreamFCB(DeviceExt, BaseFcb, StreamName, &Fcb);
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+    {
+        if (Disposition == FILE_OPEN || Disposition == FILE_OVERWRITE)
+        {
+            NtfsReleaseFCB(DeviceExt, BaseFcb);
+            return Status;
+        }
+
+        if (DeviceExt->Flags & VCB_VOLUME_READ_ONLY)
+        {
+            NtfsReleaseFCB(DeviceExt, BaseFcb);
+            return STATUS_MEDIA_WRITE_PROTECTED;
+        }
+
+        if (!BaseCreated)
+            Status = NtfsAuthorizeOpen(DeviceExt, BaseFcb, Irp, Stack, FALSE);
+        else
+        {
+            NtfsGrantCreatedAccess(Stack);
+            Status = STATUS_SUCCESS;
+        }
+        if (NT_SUCCESS(Status))
+            Status = NtfsAddStream(DeviceExt, BaseFcb, StreamName);
+        if (NT_SUCCESS(Status))
+            Status = NtfsMakeStreamFCB(DeviceExt, BaseFcb, StreamName, &Fcb);
+
+        NtfsReleaseFCB(DeviceExt, BaseFcb);
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        Status = NtfsAttachFCBToFileObject(DeviceExt, Fcb, Stack->FileObject);
+        if (!NT_SUCCESS(Status))
+        {
+            NtfsReleaseFCB(DeviceExt, Fcb);
+            return Status;
+        }
+
+        Status = NtfsFinishOpen(DeviceExt, Stack->FileObject, Stack);
+        if (NT_SUCCESS(Status))
+        {
+            Irp->IoStatus.Information = FILE_CREATED;
+            NtfsReportChange(Fcb, FILE_NOTIFY_CHANGE_STREAM_NAME, FILE_ACTION_ADDED_STREAM);
+        }
+
+        return Status;
+    }
+
+    NtfsReleaseFCB(DeviceExt, BaseFcb);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    ASSERT(!BaseCreated);
+
+    return NtfsOpenExistingFile(DeviceExt, Irp, Stack, Fcb, FALSE, 0);
+}
+
+/**
+* @name NtfsOpenVolume
+*
+* Opens the volume itself: a create with no name, absolute or relative to a volume handle.
+*/
+static
+NTSTATUS
+NtfsOpenVolume(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PIRP Irp,
+    _In_ PFILE_OBJECT FileObject,
+    _In_ ULONG Disposition,
+    _In_ ULONG Options)
+{
+    NTSTATUS Status;
+
+    if (Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF)
+        return STATUS_ACCESS_DENIED;
+
+    if (BooleanFlagOn(Options, FILE_DIRECTORY_FILE))
+        return STATUS_NOT_A_DIRECTORY;
+
+    Status = NtfsAttachFCBToFileObject(DeviceExt, DeviceExt->VolumeFcb, FileObject);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    DeviceExt->VolumeFcb->RefCount++;
+    NtfsCountOpen(DeviceExt, DeviceExt->VolumeFcb, FileObject);
+
+    Irp->IoStatus.Information = FILE_OPENED;
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsResolveFileId
+*
+* Turns a FILE_OPEN_BY_FILE_ID name, a file ID or an object ID, into the FCB of a system file
+* or the path of a user file.
+*/
+static
+NTSTATUS
+NtfsResolveFileId(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PFILE_OBJECT FileObject,
+    _Out_ PNTFS_FCB *Fcb,
+    _Out_ PUNICODE_STRING Path)
+{
+    ULONGLONG MftId;
+    NTSTATUS Status;
+
+    *Fcb = NULL;
+    Path->Buffer = NULL;
+
+    /* A file ID is 8 bytes, an object ID 16, which $O of $Extend\$ObjId maps to the file */
+    if (FileObject->FileName.Length == sizeof(ULONGLONG))
+    {
+        MftId = (*(PULONGLONG)FileObject->FileName.Buffer) & NTFS_MFT_MASK;
+    }
+    else if (FileObject->FileName.Length == RTL_FIELD_SIZE(FILE_OBJECTID_BUFFER, ObjectId))
+    {
+        Status = NtfsFindFileByObjectId(DeviceExt, (PUCHAR)FileObject->FileName.Buffer, &MftId);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+    else
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (MftId < NTFS_FILE_FIRST_USER_FILE)
+        return NtfsOpenFileById(DeviceExt, MftId, Fcb);
+
+    return NtfsMoonWalkID(DeviceExt, MftId, Path);
+}
+
+/**
+* @name NtfsApplyStreamKind
+*
+* A typed stream part of a create's path says which part of the file is wanted: "::$DATA"
+* the unnamed data stream, which a directory doesn't have, "::$INDEX_ALLOCATION" the
+* directory index, which only a directory has. That's what FILE_NON_DIRECTORY_FILE and
+* FILE_DIRECTORY_FILE ask for, so the create continues with that option.
+*/
+static
+NTSTATUS
+NtfsApplyStreamKind(
+    _Inout_ PIO_STACK_LOCATION Stack,
+    _In_ NTFS_STREAM_KIND StreamKind,
+    _In_ BOOLEAN TrailingBackslash,
+    _Inout_ PULONG Options)
+{
+    ULONG Wanted;
+
+    switch (StreamKind)
+    {
+        case NtfsNamedStream:
+            return TrailingBackslash ? STATUS_OBJECT_NAME_INVALID : STATUS_SUCCESS;
+
+        case NtfsUnnamedDataStream:
+            if (TrailingBackslash || BooleanFlagOn(*Options, FILE_DIRECTORY_FILE))
+                return STATUS_OBJECT_NAME_INVALID;
+            Wanted = FILE_NON_DIRECTORY_FILE;
+            break;
+
+        case NtfsIndexStream:
+            if (BooleanFlagOn(*Options, FILE_NON_DIRECTORY_FILE))
+                return STATUS_OBJECT_NAME_INVALID;
+            Wanted = FILE_DIRECTORY_FILE;
+            break;
+
+        default:
+            ASSERT(FALSE);
+            return STATUS_SUCCESS;
+    }
+
+    *Options |= Wanted;
+    Stack->Parameters.Create.Options |= Wanted;
+
+    return STATUS_SUCCESS;
+}
 
 /*
  * FUNCTION: Opens a file
@@ -551,42 +1792,30 @@ NTSTATUS
 NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
                PNTFS_IRP_CONTEXT IrpContext)
 {
-    PDEVICE_EXTENSION DeviceExt;
-    PIO_STACK_LOCATION Stack;
-    PFILE_OBJECT FileObject;
-    ULONG RequestedDisposition;
-    ULONG RequestedOptions;
-    BOOLEAN OpenTargetDir;
-    BOOLEAN TrailingBackslash = FALSE;
-    PNTFS_FCB Fcb = NULL;
-//    PWSTR FileName;
-    NTSTATUS Status;
-    UNICODE_STRING FullPath;
-    UNICODE_STRING StreamName;
-    NTFS_STREAM_TYPE StreamType = NtfsStreamTypeData;
+    PDEVICE_EXTENSION DeviceExt = DeviceObject->DeviceExtension;
     PIRP Irp = IrpContext->Irp;
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PFILE_OBJECT FileObject = Stack->FileObject;
+    ULONG Disposition = (Stack->Parameters.Create.Options >> 24) & 0xff;
+    ULONG Options = Stack->Parameters.Create.Options & FILE_VALID_OPTION_FLAGS;
+    BOOLEAN CaseSensitive = BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE);
+    ACCESS_MASK DesiredAccess = Stack->Parameters.Create.SecurityContext->DesiredAccess;
+    PNTFS_FCB Fcb = NULL, ParentFcb = NULL;
+    UNICODE_STRING Path = {0, 0, NULL};
+    UNICODE_STRING StreamName;
+    NTFS_STREAM_KIND StreamKind = NtfsNoStream;
+    BOOLEAN TrailingBackslash = FALSE;
+    ULONG NameLength = 0, ReparseOffset = 0;
+    ULONG_PTR Information = 0;
+    NTSTATUS Status;
 
     DPRINT("NtfsCreateFile(%p, %p) called\n", DeviceObject, IrpContext);
 
-    DeviceExt = DeviceObject->DeviceExtension;
     ASSERT(DeviceExt);
-    Stack = IoGetCurrentIrpStackLocation(Irp);
-    ASSERT(Stack);
 
-    DPRINT("NtfsCreateFile: FileName='%wZ', Disposition=%lu, Options=0x%lx\n",
-            &Stack->FileObject->FileName,
-            ((Stack->Parameters.Create.Options >> 24) & 0xff),
-            Stack->Parameters.Create.Options & FILE_VALID_OPTION_FLAGS);
-
-    RequestedDisposition = ((Stack->Parameters.Create.Options >> 24) & 0xff);
-    RequestedOptions = Stack->Parameters.Create.Options & FILE_VALID_OPTION_FLAGS;
-    OpenTargetDir = BooleanFlagOn(Stack->Flags, SL_OPEN_TARGET_DIRECTORY);
-//  PagingFileCreate = (Stack->Flags & SL_OPEN_PAGING_FILE) ? TRUE : FALSE;
-    if (RequestedOptions & FILE_DIRECTORY_FILE &&
-        RequestedDisposition == FILE_SUPERSEDE)
-    {
-        return STATUS_INVALID_PARAMETER;
-    }
+    Status = NtfsCheckCreateParameters(Disposition, Options, DesiredAccess);
+    if (!NT_SUCCESS(Status))
+        return Status;
 
     /* Deny create if the volume is locked */
     if (DeviceExt->Flags & VCB_VOLUME_LOCKED)
@@ -594,639 +1823,120 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
         return STATUS_ACCESS_DENIED;
     }
 
-    FileObject = Stack->FileObject;
+    /* Raw volume access is authorized by the device's security descriptor.
+     * Offline format/repair must be able to lock and dismount even when
+     * ordinary file mutations are refused by the log-recovery gate. */
+    if (!(Options & FILE_OPEN_BY_FILE_ID) && !(Stack->Flags & SL_OPEN_TARGET_DIRECTORY) &&
+        FileObject->FileName.Length == 0 &&
+        (FileObject->RelatedFileObject == NULL ||
+         BooleanFlagOn(((PNTFS_FCB)FileObject->RelatedFileObject->FsContext)->Flags, FCB_IS_VOLUME)))
+        return NtfsOpenVolume(DeviceExt, Irp, FileObject, Disposition, Options);
 
-    if ((RequestedOptions & FILE_OPEN_BY_FILE_ID) == FILE_OPEN_BY_FILE_ID)
+    if ((DeviceExt->Flags & VCB_VOLUME_READ_ONLY) &&
+        ((Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF) || (Options & FILE_DELETE_ON_CLOSE) ||
+         (DesiredAccess & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA |
+                           FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC | WRITE_OWNER))))
+        return STATUS_MEDIA_WRITE_PROTECTED;
+
+    /* The I/O manager opening a rename's destination directory */
+    if (Stack->Flags & SL_OPEN_TARGET_DIRECTORY)
     {
-        ULONGLONG MFTId;
-
-        if (FileObject->FileName.Length != sizeof(ULONGLONG))
+        if (Options & FILE_OPEN_BY_FILE_ID)
             return STATUS_INVALID_PARAMETER;
 
-        MFTId = (*(PULONGLONG)FileObject->FileName.Buffer) & NTFS_MFT_MASK;
-        if (MFTId < NTFS_FILE_FIRST_USER_FILE)
-        {
-            Status = NtfsOpenFileById(DeviceExt, FileObject, MFTId, &Fcb);
-        }
-        else
-        {
-            Status = NtfsMoonWalkID(DeviceExt, MFTId, &FullPath);
-        }
+        Status = NtfsBuildCreatePath(FileObject, &Path);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        Status = NtfsCheckCreateTraverse(DeviceExt, &Path, Stack->Parameters.Create.SecurityContext->AccessState,
+                                          NtfsCreateAccessMode(Irp, Stack), CaseSensitive);
+        ExFreePoolWithTag(Path.Buffer, TAG_NTFS);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        Status = NtfsOpenTargetDirectory(DeviceExt, FileObject, CaseSensitive, &Information);
+        if (!NT_SUCCESS(Status))
+            return Status;
 
+        Status = NtfsAuthorizeOpen(DeviceExt, FileObject->FsContext, Irp, Stack, TRUE);
+        if (NT_SUCCESS(Status))
+            Status = NtfsGrantShareAccess(DeviceExt, FileObject->FsContext, FileObject, Stack);
         if (!NT_SUCCESS(Status))
         {
+            NtfsCloseFile(DeviceExt, FileObject);
             return Status;
         }
 
-        DPRINT1("Open by ID: %I64x -> %wZ\n", (*(PULONGLONG)FileObject->FileName.Buffer) & NTFS_MFT_MASK, &FullPath);
-    }
-
-    /* A trailing backslash names a directory; drop it so the file object's
-     * stored name matches a plain open of that directory (a later
-     * FileNameInformation query or name compare must not see the separator).
-     * fastfat does the same in FatCommonCreate. Never touch the lone
-     * backslash of the volume root, and leave open-by-id names alone.
-     * Remember the strip: the separator promises a directory, so once the
-     * target resolves to anything else the open must fail with
-     * STATUS_OBJECT_NAME_INVALID (checked below, like fastfat's
-     * TrailingBackslash). */
-    if (!(RequestedOptions & FILE_OPEN_BY_FILE_ID) &&
-        FileObject->FileName.Length > sizeof(WCHAR) &&
-        FileObject->FileName.Buffer[FileObject->FileName.Length / sizeof(WCHAR) - 1] == L'\\')
-    {
-        FileObject->FileName.Length -= sizeof(WCHAR);
-        FileObject->FileName.Buffer[FileObject->FileName.Length / sizeof(WCHAR)] = UNICODE_NULL;
-        TrailingBackslash = TRUE;
-    }
-
-    /* Split and validate an alternate-data-stream suffix (":Stream[:$TYPE]")
-     * once, before any path walk.  This normalizes FileObject->FileName in
-     * place: the type suffix is stripped ("file::$DATA" == "file",
-     * "dir::$INDEX_ALLOCATION" == "dir"), so the FCB table key, the
-     * directory walk and the create path below all see at most one colon
-     * separating the file part from the stream name.  StreamType keeps the
-     * typed-open requirement ($INDEX_ALLOCATION demands a directory target,
-     * an explicit "::$DATA" a non-directory), enforced once the target has
-     * resolved.  Invalid stream syntax fails the create up front, like
-     * Windows. */
-    RtlInitEmptyUnicodeString(&StreamName, NULL, 0);
-    if (!(RequestedOptions & FILE_OPEN_BY_FILE_ID) &&
-        FileObject->FileName.Length != 0)
-    {
-        Status = NtfsParseStreamPath(&FileObject->FileName, &StreamName, &StreamType);
-        if (!NT_SUCCESS(Status))
-        {
-            return Status;
-        }
-
-        /* A "::$INDEX_ALLOCATION" open demands a directory target, which
-         * the FILE_NON_DIRECTORY_FILE option contradicts outright. */
-        if (StreamType == NtfsStreamTypeIndexAllocation &&
-            BooleanFlagOn(RequestedOptions, FILE_NON_DIRECTORY_FILE))
-        {
-            return STATUS_NOT_A_DIRECTORY;
-        }
-    }
-
-    if (OpenTargetDir)
-    {
-        ULONG IoInformation;
-
-        Status = NtfsOpenTargetDirectory(DeviceExt,
-                                         FileObject,
-                                         ((RequestedOptions & FILE_OPEN_BY_FILE_ID) ? FullPath.Buffer : FileObject->FileName.Buffer),
-                                         BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
-                                         BooleanFlagOn(RequestedOptions, FILE_OPEN_BY_FILE_ID),
-                                         &Fcb,
-                                         &IoInformation);
-
-        if (RequestedOptions & FILE_OPEN_BY_FILE_ID)
-        {
-            ExFreePoolWithTag(FullPath.Buffer, TAG_NTFS);
-        }
-
-        if (!NT_SUCCESS(Status))
-        {
-            return Status;
-        }
-
-        Status = NtfsAttachFCBToFileObject(DeviceExt,
-                                           Fcb,
-                                           FileObject);
-        if (!NT_SUCCESS(Status))
-        {
-            return Status;
-        }
-
-        /*
-         * For a target-directory open the file object now refers to the parent
-         * directory, so its name must read as that directory's name (matching a
-         * plain open of the same directory) rather than the full path that was
-         * requested. The opened parent FCB carries that path; copy it over the
-         * existing name buffer when it fits (the parent path is a prefix of the
-         * absolute request, and shorter than the relative leaf in practice).
-         */
-        {
-            USHORT ParentNameLength = (USHORT)(wcslen(Fcb->PathName) * sizeof(WCHAR));
-
-            if (ParentNameLength <= FileObject->FileName.MaximumLength)
-            {
-                RtlCopyMemory(FileObject->FileName.Buffer, Fcb->PathName, ParentNameLength);
-                FileObject->FileName.Length = ParentNameLength;
-            }
-        }
-
-        Fcb->OpenHandleCount++;
-        DeviceExt->OpenHandleCount++;
-        ((PNTFS_CCB)FileObject->FsContext2)->Flags |= NTFS_CCB_FLAG_COUNTED;
-        Irp->IoStatus.Information = IoInformation;
+        Irp->IoStatus.Information = Information;
         return STATUS_SUCCESS;
     }
 
-    /* A relative open with an empty name whose RootDirectory is an existing
-     * FILE (not the volume) is a reopen-by-handle: reopen the very same file
-     * with the newly requested access and options.  cygwin/msys2's unlink_nt
-     * uses this (init_reopen_attr) to retry a delete with FILE_DELETE_ON_CLOSE
-     * after a plain delete disposition returned STATUS_CANNOT_DELETE.  Resolve
-     * the related FCB and let the normal existing-file path below run so that
-     * share access, the image-section check and FILE_DELETE_ON_CLOSE all apply.
-     * Without this the open falls into the volume-open path and wrongly
-     * succeeds against the volume, so the in-use file is never moved aside
-     * (e.g. replacing a running msys-2.0.dll during pacman fails with
-     * "Can't create"). */
-    if (Fcb == NULL &&
-        FileObject->FileName.Length == 0 &&
-        FileObject->RelatedFileObject != NULL &&
-        FileObject->RelatedFileObject->FsContext != NULL &&
-        ((PNTFS_FCB)FileObject->RelatedFileObject->FsContext)->Identifier.Type == NTFS_TYPE_FCB &&
-        !BooleanFlagOn(((PNTFS_FCB)FileObject->RelatedFileObject->FsContext)->Flags, FCB_IS_VOLUME))
+    if (BooleanFlagOn(Options, FILE_OPEN_BY_FILE_ID))
     {
-        PNTFS_FCB RelatedFcb = FileObject->RelatedFileObject->FsContext;
+        Status = NtfsResolveFileId(DeviceExt, FileObject, &Fcb, &Path);
+        if (!NT_SUCCESS(Status))
+            return Status;
 
-        Fcb = NtfsGrabFCBFromTable(DeviceExt, RelatedFcb->PathName);
         if (Fcb != NULL)
-        {
-            Status = NtfsAttachFCBToFileObject(DeviceExt, Fcb, FileObject);
-            if (!NT_SUCCESS(Status))
-                return Status;
-        }
-    }
+            return NtfsOpenExistingFile(DeviceExt, Irp, Stack, Fcb, FALSE, 0);
 
-    /* This a open operation for the volume itself */
-    if (Fcb == NULL &&
-        FileObject->FileName.Length == 0 &&
-        (FileObject->RelatedFileObject == NULL || FileObject->RelatedFileObject->FsContext2 != NULL))
-    {
-        if (RequestedDisposition != FILE_OPEN &&
-            RequestedDisposition != FILE_OPEN_IF)
-        {
-            return STATUS_ACCESS_DENIED;
-        }
-
-        /* The volume is no directory - neither for FILE_DIRECTORY_FILE nor
-         * for a typed "::$INDEX_ALLOCATION" open of it. */
-        if ((RequestedOptions & FILE_DIRECTORY_FILE) ||
-            StreamType == NtfsStreamTypeIndexAllocation)
-        {
-            return STATUS_NOT_A_DIRECTORY;
-        }
-
-        if (OpenTargetDir)
-        {
-            return STATUS_INVALID_PARAMETER;
-        }
-
-        NtfsAttachFCBToFileObject(DeviceExt, DeviceExt->VolumeFcb, FileObject);
-        DeviceExt->VolumeFcb->RefCount++;
-        /* Volume opens must be counted: NtfsCleanupFile (FCB_IS_VOLUME branch)
-         * and NtfsCloseFile both decrement these on the corresponding cleanup/
-         * close, so without matching increments here both counters underflow.
-         * That breaks FSCTL_LOCK_VOLUME, whose check requires
-         * DeviceExt->OpenHandleCount == 1 (just the locking handle). */
-        DeviceExt->VolumeFcb->OpenHandleCount++;
-        DeviceExt->OpenHandleCount++;
-        ((PNTFS_CCB)FileObject->FsContext2)->Flags |= NTFS_CCB_FLAG_COUNTED;
-
-        Irp->IoStatus.Information = FILE_OPENED;
-        return STATUS_SUCCESS;
-    }
-
-    if (Fcb == NULL)
-    {
-        Status = NtfsOpenFile(DeviceExt,
-                              FileObject,
-                              ((RequestedOptions & FILE_OPEN_BY_FILE_ID) ? FullPath.Buffer : FileObject->FileName.Buffer),
-                              BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
-                              BooleanFlagOn(RequestedOptions, FILE_OPEN_BY_FILE_ID),
-                              &Fcb);
-
-        if (RequestedOptions & FILE_OPEN_BY_FILE_ID)
-        {
-            ExFreePoolWithTag(FullPath.Buffer, TAG_NTFS);
-        }
-    }
-
-    DPRINT("NtfsCreateFile: NtfsOpenFile returned Status=0x%lx, Fcb=%p\n", Status, Fcb);
-
-    if (NT_SUCCESS(Status))
-    {
-        /* The name carried a trailing backslash, which can only denote a
-         * directory; it resolved to something else, so the NAME is invalid
-         * (checked before any disposition handling, like Windows). */
-        if (TrailingBackslash && !NtfsFCBIsDirectory(Fcb))
-        {
-            NtfsCloseFile(DeviceExt, FileObject);
-            return STATUS_OBJECT_NAME_INVALID;
-        }
-
-        if (RequestedDisposition == FILE_CREATE)
-        {
-            Irp->IoStatus.Information = FILE_EXISTS;
-            NtfsCloseFile(DeviceExt, FileObject);
-            return STATUS_OBJECT_NAME_COLLISION;
-        }
-
-        /* Typed stream opens ([MS-FSCC] 2.1.5): "::$INDEX_ALLOCATION" names
-         * the directory index stream and demands a directory target, while
-         * an explicit default-stream "::$DATA" open demands a non-directory
-         * (a directory has no unnamed $DATA attribute).  Plain opens (no
-         * stream suffix) are unaffected. */
-        if (StreamType == NtfsStreamTypeIndexAllocation &&
-            !NtfsFCBIsDirectory(Fcb))
-        {
-            NtfsCloseFile(DeviceExt, FileObject);
-            return STATUS_NOT_A_DIRECTORY;
-        }
-
-        if (StreamType == NtfsStreamTypeDefaultData &&
-            NtfsFCBIsDirectory(Fcb))
-        {
-            NtfsCloseFile(DeviceExt, FileObject);
-            return STATUS_FILE_IS_A_DIRECTORY;
-        }
-
-        if (RequestedOptions & FILE_NON_DIRECTORY_FILE &&
-            NtfsFCBIsDirectory(Fcb))
-        {
-            NtfsCloseFile(DeviceExt, FileObject);
-            return STATUS_FILE_IS_A_DIRECTORY;
-        }
-
-        if (RequestedOptions & FILE_DIRECTORY_FILE &&
-            !NtfsFCBIsDirectory(Fcb))
-        {
-            NtfsCloseFile(DeviceExt, FileObject);
-            return STATUS_NOT_A_DIRECTORY;
-        }
-
-        /*
-         * If it is a reparse point & FILE_OPEN_REPARSE_POINT, then allow
-         * opening it as a normal file.  Otherwise, read the reparse data
-         * and hand it to the I/O manager with STATUS_REPARSE so the
-         * upper layer can resolve the reparse.
-         *
-         * Return STATUS_REPARSE for any reparse tag (mount point,
-         * symlink, third-party, etc.) - the tag goes into
-         * IoStatus.Information and the reparse data stays in
-         * Irp->Tail.Overlay.AuxiliaryBuffer for the I/O manager, which
-         * owns (and frees) that buffer once the reparse is handled.
-         * It is not our job to whitelist tags here.
-         */
-        if (NtfsFCBIsReparsePoint(Fcb) &&
-            ((RequestedOptions & FILE_OPEN_REPARSE_POINT) != FILE_OPEN_REPARSE_POINT))
-        {
-            PREPARSE_DATA_BUFFER ReparseData = NULL;
-
-            Status = NtfsReadFCBAttribute(DeviceExt, Fcb,
-                                          AttributeReparsePoint, L"", 0,
-                                          (PVOID *)&Irp->Tail.Overlay.AuxiliaryBuffer);
-            if (NT_SUCCESS(Status))
-            {
-                ReparseData = (PREPARSE_DATA_BUFFER)Irp->Tail.Overlay.AuxiliaryBuffer;
-                Irp->IoStatus.Information = ReparseData->ReparseTag;
-                Status = STATUS_REPARSE;
-            }
-            else
-            {
-                Irp->IoStatus.Information = 0;
-            }
-
-            NtfsCloseFile(DeviceExt, FileObject);
-            return Status;
-        }
-
-        if (RequestedDisposition == FILE_OVERWRITE ||
-            RequestedDisposition == FILE_OVERWRITE_IF ||
-            RequestedDisposition == FILE_SUPERSEDE)
-        {
-            PFILE_RECORD_HEADER fileRecord = NULL;
-            PNTFS_ATTR_CONTEXT dataContext = NULL;
-            ULONG DataAttributeOffset;
-            LARGE_INTEGER Zero;
-            Zero.QuadPart = 0;
-
-            /* Overwrite/supersede truncates on-disk state; refuse it on a
-             * volume the mount gate forced read-only (dirty or too-new
-             * $LogFile - see NtfsMountVolume).  IRP_MJ_CREATE is not
-             * covered by the NtfsDispatch read-only short-circuit, so the
-             * mutating dispositions are gated here. */
-            if (BooleanFlagOn(DeviceExt->Flags, VCB_VOLUME_READ_ONLY))
-            {
-                DPRINT("NTFS: refusing overwrite disposition on read-only volume\n");
-                NtfsCloseFile(DeviceExt, FileObject);
-                return STATUS_MEDIA_WRITE_PROTECTED;
-            }
-
-            if (!NtfsGlobalData->EnableWriteSupport)
-            {
-                DPRINT1("NTFS write-support is EXPERIMENTAL and is disabled by default!\n");
-                NtfsCloseFile(DeviceExt, FileObject);
-                return STATUS_ACCESS_DENIED;
-            }
-
-            // TODO: check for appropriate access
-
-            ExAcquireResourceExclusiveLite(&(Fcb->MainResource), TRUE);
-
-            fileRecord = ExAllocateFromNPagedLookasideList(&Fcb->Vcb->FileRecLookasideList);
-            if (fileRecord)
-            {
-
-                Status = ReadFileRecord(Fcb->Vcb,
-                                        Fcb->MFTIndex,
-                                        fileRecord);
-                if (!NT_SUCCESS(Status))
-                    goto DoneOverwriting;
-
-                // find the data attribute (the FCB's own stream - the unnamed
-                // one for a plain open, the named one for "file:stream") and
-                // set its length to 0
-                Status = FindAttribute(Fcb->Vcb, fileRecord, AttributeData, Fcb->Stream, wcslen(Fcb->Stream), &dataContext, &DataAttributeOffset);
-                if (!NT_SUCCESS(Status))
-                    goto DoneOverwriting;
-
-                Status = SetAttributeDataLength(FileObject, Fcb, dataContext, DataAttributeOffset, fileRecord, &Zero);
-            }
-            else
-            {
-                Status = STATUS_NO_MEMORY;
-            }
-
-        DoneOverwriting:
-            if (fileRecord)
-                ExFreeToNPagedLookasideList(&Fcb->Vcb->FileRecLookasideList, fileRecord);
-            if (dataContext)
-                ReleaseAttributeContext(dataContext);
-
-            ExReleaseResourceLite(&(Fcb->MainResource));
-
-            if (!NT_SUCCESS(Status))
-            {
-                NtfsCloseFile(DeviceExt, FileObject);
-                return Status;
-            }
-
-            if (RequestedDisposition == FILE_SUPERSEDE)
-            {
-                Irp->IoStatus.Information = FILE_SUPERSEDED;
-            }
-            else
-            {
-                Irp->IoStatus.Information = FILE_OVERWRITTEN;
-            }
-        }
+        DPRINT("Open by ID: %I64x -> %wZ\n", (*(PULONGLONG)FileObject->FileName.Buffer) & NTFS_MFT_MASK, &Path);
     }
     else
     {
-        if (RequestedDisposition == FILE_CREATE ||
-            RequestedDisposition == FILE_OPEN_IF ||
-            RequestedDisposition == FILE_OVERWRITE_IF ||
-            RequestedDisposition == FILE_SUPERSEDE)
+        Status = NtfsBuildCreatePath(FileObject, &Path);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    /* What follows a reparse point in the name is measured against the whole of it */
+    NameLength = Path.Length / sizeof(WCHAR);
+
+    Status = NtfsCheckCreatePath(&Path, Options, &TrailingBackslash);
+    if (NT_SUCCESS(Status))
+        Status = NtfsSplitStreamName(&Path, &StreamName, &StreamKind);
+
+    if (NT_SUCCESS(Status) && !(Options & FILE_OPEN_BY_FILE_ID))
+        Status = NtfsCheckCreateTraverse(DeviceExt, &Path, Stack->Parameters.Create.SecurityContext->AccessState,
+                                          NtfsCreateAccessMode(Irp, Stack), CaseSensitive);
+
+    if (NT_SUCCESS(Status) && StreamKind != NtfsNoStream)
+    {
+        Status = NtfsApplyStreamKind(Stack, StreamKind, TrailingBackslash, &Options);
+        if (NT_SUCCESS(Status) && StreamKind == NtfsNamedStream)
         {
-            /* A name with a trailing backslash can only create a
-             * directory. */
-            if (TrailingBackslash && !(RequestedOptions & FILE_DIRECTORY_FILE))
-            {
-                return STATUS_OBJECT_NAME_INVALID;
-            }
-
-            /* The file doesn't exist, so every disposition that reaches
-             * this branch would create it - a mutation the read-only
-             * mount gate must refuse (see the overwrite gate above). */
-            if (BooleanFlagOn(DeviceExt->Flags, VCB_VOLUME_READ_ONLY))
-            {
-                DPRINT("NTFS: refusing create disposition on read-only volume\n");
-                NtfsCloseFile(DeviceExt, FileObject);
-                return STATUS_MEDIA_WRITE_PROTECTED;
-            }
-
-            if (!NtfsGlobalData->EnableWriteSupport)
-            {
-                DPRINT1("NTFS write-support is EXPERIMENTAL and is disabled by default!\n");
-                NtfsCloseFile(DeviceExt, FileObject);
-                return STATUS_ACCESS_DENIED;
-            }
-
-            /* A typed "::$INDEX_ALLOCATION" create is meaningful only as a
-             * directory create: with FILE_DIRECTORY_FILE the (already
-             * stripped) name falls through to NtfsCreateDirectory below,
-             * exactly like Windows; without it there is nothing valid the
-             * name could create. */
-            if (StreamType == NtfsStreamTypeIndexAllocation &&
-                !(RequestedOptions & FILE_DIRECTORY_FILE))
-            {
-                return STATUS_OBJECT_NAME_INVALID;
-            }
-
-            /* An explicit default-$DATA open can create a file, never a
-             * directory. */
-            if (StreamType == NtfsStreamTypeDefaultData &&
-                RequestedOptions & FILE_DIRECTORY_FILE)
-            {
-                return STATUS_NOT_A_DIRECTORY;
-            }
-
-            if (StreamName.Length != 0)
-            {
-                /* A named stream can never be a directory. */
-                if (RequestedOptions & FILE_DIRECTORY_FILE)
-                {
-                    return STATUS_NOT_A_DIRECTORY;
-                }
-
-                /* Create the named $DATA attribute on the base file (creating
-                 * the base file too if it doesn't exist yet). */
-                Status = NtfsCreateStream(DeviceExt,
-                                          FileObject,
-                                          &StreamName,
-                                          BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
-                                          Stack->Parameters.Create.FileAttributes,
-                                          BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
-                DPRINT("NtfsCreateFile: NtfsCreateStream returned 0x%lx\n", Status);
-            }
-            // Was the user trying to create a directory?
-            else if (RequestedOptions & FILE_DIRECTORY_FILE)
-            {
-                DPRINT("NtfsCreateFile: Creating directory...\n");
-                // Create the directory on disk
-                Status = NtfsCreateDirectory(DeviceExt,
-                                             FileObject,
-                                             BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
-                                             Stack->Parameters.Create.FileAttributes,
-                                             BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
-                DPRINT("NtfsCreateFile: NtfsCreateDirectory returned 0x%lx\n", Status);
-            }
-            else
-            {
-                // Create the file record on disk
-                Status = NtfsCreateFileRecord(DeviceExt,
-                                              FileObject,
-                                              BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
-                                              Stack->Parameters.Create.FileAttributes,
-                                              BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
-                NTFS_TRACE("DRVIDX: top create record returned 0x%lx for %wZ\n",
-                        Status,
-                        &FileObject->FileName);
-            }
-
-            if (!NT_SUCCESS(Status))
-            {
-                DPRINT1("ERROR: Couldn't create file record! Status = 0x%lx\n", Status);
-                return Status;
-            }
-
-            // Before we open the file/directory we just created, we need to change the disposition (upper 8 bits of ULONG)
-            // from create to open, since we already created the file
-            Stack->Parameters.Create.Options = (ULONG)FILE_OPEN << 24 | RequestedOptions;
-
-            // Now we should be able to open the file using NtfsCreateFile()
-            DPRINT("NtfsCreateFile: Recursive call to re-open created file/dir\n");
-            NTFS_TRACE("DRVIDX: recursive open begin for %wZ\n", &FileObject->FileName);
-            Status = NtfsCreateFile(DeviceObject, IrpContext);
-            NTFS_TRACE("DRVIDX: recursive open returned 0x%lx for %wZ\n",
-                    Status,
-                    &FileObject->FileName);
-            if (NT_SUCCESS(Status))
-            {
-                // We need to change Irp->IoStatus.Information to reflect creation
-                Irp->IoStatus.Information = FILE_CREATED;
-            }
+            Status = NtfsOpenStream(DeviceExt, IrpContext, &Path, &StreamName, NameLength);
+            ExFreePoolWithTag(Path.Buffer, TAG_NTFS);
             return Status;
         }
     }
 
     if (NT_SUCCESS(Status))
+        Status = NtfsOpenFile(DeviceExt, Path.Buffer, CaseSensitive, &Fcb, &ParentFcb, &ReparseOffset);
+
+    if (Status == STATUS_REPARSE)
     {
-        ACCESS_MASK DesiredAccess;
-        ULONG ShareAccess;
+        Status = NtfsReparseOpen(DeviceExt, Irp, Fcb, (NameLength - ReparseOffset) * sizeof(WCHAR), TRUE);
+    }
+    else if (NT_SUCCESS(Status))
+    {
+        Status = NtfsOpenExistingFile(DeviceExt, Irp, Stack, Fcb, TrailingBackslash,
+                                      NameLength * sizeof(WCHAR) - Path.Length);
+    }
+    else if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+    {
+        ASSERT(ParentFcb != NULL);
 
-        DesiredAccess = Stack->Parameters.Create.SecurityContext != NULL
-            ? Stack->Parameters.Create.SecurityContext->DesiredAccess
-            : 0;
-        ShareAccess = Stack->Parameters.Create.ShareAccess;
-
-        /* Maintain SHARE_ACCESS so the MM filter callback can tell how
-         * many writers a file has, and so concurrent opens of the same
-         * file get the share-mode semantics callers depend on (e.g. the
-         * loader opens images with FILE_SHARE_READ|FILE_SHARE_DELETE and
-         * expects subsequent writers to be rejected).
-         *
-         * Hold Fcb->MainResource exclusive around the ShareAccess update.
-         * This is the same resource NtfsFilterCallbackAcquireForCreateSection
-         * acquires when MM probes for writers via
-         * PreAcquireForSectionSynchronization, and the same resource
-         * NtfsCleanupFile holds around IoRemoveShareAccess.  Without it the
-         * filter callback can observe a stale Writers count and grant /
-         * reject a section creation mid-update (issue #11 P1 follow-up).
-         *
-         * Lock order: DirResource (held by NtfsCreate) -> MainResource here.
-         * Matches NtfsCleanup -> NtfsCleanupFile.  The filter callback
-         * never acquires DirResource, so no AB-BA is possible. */
-        /* Like fastfat (and Windows): an open that intends to write the file
-         * or delete it on close cannot proceed while the file is mapped as a
-         * running executable image.  MmFlushImageSection(MmFlushForWrite)
-         * returns FALSE while any view of the image section is still mapped.
-         * A write open is then rejected with STATUS_SHARING_VIOLATION, a
-         * delete-on-close open with STATUS_CANNOT_DELETE.
-         *
-         * cygwin/msys2's unlink_nt depends on the delete-on-close case: when
-         * the plain delete disposition returns STATUS_CANNOT_DELETE it reopens
-         * the file with FILE_DELETE_ON_CLOSE, and only when THAT open also
-         * fails does it fall back to moving the in-use file into the recycle
-         * bin so a replacement can be created.  Without this check the
-         * delete-on-close open wrongly succeeds, the file is never moved aside,
-         * and replacing a running image (e.g. msys-2.0.dll during pacman -U)
-         * fails with "Can't create".  For a freshly created/superseded file
-         * there is no image section, so MmFlushImageSection returns TRUE and
-         * this is a no-op. */
-        if (Fcb->Identifier.Type == NTFS_TYPE_FCB &&
-            !BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME) &&
-            !NtfsFCBIsDirectory(Fcb) &&
-            (BooleanFlagOn(DesiredAccess, FILE_WRITE_DATA) ||
-             BooleanFlagOn(RequestedOptions, FILE_DELETE_ON_CLOSE)) &&
-            Fcb->SectionObjectPointers != NULL &&
-            !MmFlushImageSection(Fcb->SectionObjectPointers, MmFlushForWrite))
+        if (Disposition == FILE_CREATE ||
+            Disposition == FILE_OPEN_IF ||
+            Disposition == FILE_OVERWRITE_IF ||
+            Disposition == FILE_SUPERSEDE)
         {
-            Status = BooleanFlagOn(RequestedOptions, FILE_DELETE_ON_CLOSE)
-                     ? STATUS_CANNOT_DELETE : STATUS_SHARING_VIOLATION;
-            NtfsCloseFile(DeviceExt, FileObject);
-            return Status;
+            Status = NtfsCreateNewFile(DeviceExt, IrpContext, ParentFcb, &Path, TrailingBackslash);
         }
 
-        if (Fcb->Identifier.Type == NTFS_TYPE_FCB &&
-            !BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME))
-        {
-            ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
-            if (Fcb->OpenHandleCount == 0)
-            {
-                /* First open of this FCB - establish share access. */
-                IoSetShareAccess(DesiredAccess,
-                                 ShareAccess,
-                                 FileObject,
-                                 &Fcb->ShareAccess);
-            }
-            else
-            {
-                /* Subsequent open - must be compatible with existing
-                 * sharing.  IoCheckShareAccess validates and (when the
-                 * fourth argument is TRUE) updates the access counters
-                 * atomically. */
-                Status = IoCheckShareAccess(DesiredAccess,
-                                            ShareAccess,
-                                            FileObject,
-                                            &Fcb->ShareAccess,
-                                            TRUE);
-            }
-            ExReleaseResourceLite(&Fcb->MainResource);
-
-            if (!NT_SUCCESS(Status))
-            {
-                DPRINT1("NtfsCreateFile: share access conflict for FCB %p (Desired=0x%lx Share=0x%lx): 0x%lx\n",
-                        Fcb, DesiredAccess, ShareAccess, Status);
-                NtfsCloseFile(DeviceExt, FileObject);
-                return Status;
-            }
-        }
-
-        Fcb->OpenHandleCount++;
-        DeviceExt->OpenHandleCount++;
-        ((PNTFS_CCB)FileObject->FsContext2)->Flags |= NTFS_CCB_FLAG_COUNTED;
-
-        /* FILE_DELETE_ON_CLOSE: the file must be gone once the last handle is
-         * cleaned up. Mark the FCB delete-pending so NtfsCleanupFile removes the
-         * record and its $I30 entry, exactly as FileDispositionInformation does.
-         * Windows honours this disposition at create time; without it a
-         * delete-on-close open (cygwin/msys2 unlink, temp files) silently leaks
-         * the file and a later same-name create wrongly collides. Directories
-         * are not deletable through this driver yet, so leave them alone. */
-        if ((RequestedOptions & FILE_DELETE_ON_CLOSE) &&
-            Fcb->Identifier.Type == NTFS_TYPE_FCB &&
-            !BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME) &&
-            !NtfsFCBIsDirectory(Fcb))
-        {
-            SetFlag(Fcb->Flags, FCB_DELETE_PENDING);
-        }
+        NtfsReleaseFCB(DeviceExt, ParentFcb);
     }
 
-    /*
-     * Report the disposition outcome. A plain open reports FILE_OPENED, but the
-     * FILE_OVERWRITE(_IF)/FILE_SUPERSEDE path on an existing file already set
-     * Irp->IoStatus.Information to FILE_OVERWRITTEN / FILE_SUPERSEDED above;
-     * Windows preserves those, so only overwrite it for the plain-open case.
-     */
-    if (NT_SUCCESS(Status))
-    {
-        if (RequestedDisposition != FILE_OVERWRITE &&
-            RequestedDisposition != FILE_OVERWRITE_IF &&
-            RequestedDisposition != FILE_SUPERSEDE)
-        {
-            Irp->IoStatus.Information = FILE_OPENED;
-        }
-    }
-    else
-    {
-        Irp->IoStatus.Information = 0;
-    }
+    ExFreePoolWithTag(Path.Buffer, TAG_NTFS);
 
     return Status;
 }
@@ -1243,14 +1953,12 @@ NtfsCreate(PNTFS_IRP_CONTEXT IrpContext)
     if (DeviceObject == NtfsGlobalData->DeviceObject)
     {
         /* DeviceObject represents FileSystem instead of logical volume */
-        DPRINT1("NtfsCreate: Opening file system device object\n");
+        DPRINT("Opening file system\n");
         IrpContext->Irp->IoStatus.Information = FILE_OPENED;
         return STATUS_SUCCESS;
     }
 
     DeviceExt = DeviceObject->DeviceExtension;
-    DPRINT("NtfsCreate: Processing IRP for volume, FileName='%wZ'\n",
-            &IoGetCurrentIrpStackLocation(IrpContext->Irp)->FileObject->FileName);
 
     if (!(IrpContext->Flags & IRPCONTEXT_CANWAIT))
     {
@@ -1262,174 +1970,6 @@ NtfsCreate(PNTFS_IRP_CONTEXT IrpContext)
     Status = NtfsCreateFile(DeviceObject,
                             IrpContext);
     ExReleaseResourceLite(&DeviceExt->DirResource);
-
-    return Status;
-}
-
-/**
-* @name NtfsCreateDirectory()
-* @implemented
-*
-* Creates a file record for a new directory and saves it to the MFT. Adds the filename attribute of the
-* created directory to the parent directory's index.
-*
-* @param DeviceExt
-* Points to the target disk's DEVICE_EXTENSION
-*
-* @param FileObject
-* Pointer to a FILE_OBJECT describing the directory to be created
-*
-* @param CaseSensitive
-* Boolean indicating if the function should operate in case-sensitive mode. This will be TRUE
-* if an application created the folder with the FILE_FLAG_POSIX_SEMANTICS flag.
-*
-* @param CanWait
-* Boolean indicating if the function is allowed to wait for exclusive access to the master file table.
-* This will only be relevant if the MFT doesn't have any free file records and needs to be enlarged.
-*
-* @return
-* STATUS_SUCCESS on success.
-* STATUS_INSUFFICIENT_RESOURCES if unable to allocate memory for the file record.
-* STATUS_CANT_WAIT if CanWait was FALSE and the function needed to resize the MFT but
-* couldn't get immediate, exclusive access to it.
-*/
-NTSTATUS
-NtfsCreateDirectory(PDEVICE_EXTENSION DeviceExt,
-                    PFILE_OBJECT FileObject,
-                    BOOLEAN CaseSensitive,
-                    ULONG FileAttributes,
-                    BOOLEAN CanWait)
-{
-
-    NTSTATUS Status = STATUS_SUCCESS;
-    PFILE_RECORD_HEADER FileRecord;
-    PNTFS_ATTR_RECORD NextAttribute;
-    PFILENAME_ATTRIBUTE FilenameAttribute;
-    ULONGLONG ParentMftIndex;
-    ULONGLONG FileMftIndex;
-    ULONGLONG RawFileMftIndex;
-    PB_TREE Tree;
-    PINDEX_ROOT_ATTRIBUTE NewIndexRoot;
-    ULONG MaxIndexRootSize;
-    ULONG RootLength;
-
-    DPRINT("NtfsCreateFileRecord(%p, %p, %s, %s)\n",
-            DeviceExt,
-            FileObject,
-            CaseSensitive ? "TRUE" : "FALSE",
-            CanWait ? "TRUE" : "FALSE");
-
-    // Start with an empty file record
-    FileRecord = NtfsCreateEmptyFileRecord(DeviceExt);
-    if (!FileRecord)
-    {
-        DPRINT1("ERROR: Unable to allocate memory for file record!\n");
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    // Set the directory flag
-    FileRecord->Flags |= FRH_DIRECTORY;
-
-    // find where the first attribute will be added
-    NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
-
-    // add first attribute, $STANDARD_INFORMATION
-    AddStandardInformation(FileRecord, NextAttribute, FileAttributes);
-
-    // advance NextAttribute pointer to the next attribute
-    NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)NextAttribute + (ULONG_PTR)NextAttribute->Length);
-
-    // Add the $FILE_NAME attribute
-    Status = AddFileName(FileRecord, NextAttribute, DeviceExt, FileObject, CaseSensitive, FileAttributes, &ParentMftIndex);
-    if (!NT_SUCCESS(Status))
-    {
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
-        return Status;
-    }
-
-    // save a pointer to the filename attribute
-    FilenameAttribute = (PFILENAME_ATTRIBUTE)((ULONG_PTR)NextAttribute + NextAttribute->Resident.ValueOffset);
-
-    // advance NextAttribute pointer to the next attribute
-    NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)NextAttribute + (ULONG_PTR)NextAttribute->Length);
-
-    // Create an empty b-tree to represent our new index
-    Status = CreateEmptyBTree(&Tree);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("ERROR: Failed to create empty B-Tree!\n");
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
-        return Status;
-    }
-
-    // Calculate maximum size of index root
-    MaxIndexRootSize = DeviceExt->NtfsInfo.BytesPerFileRecord
-                       - ((ULONG_PTR)NextAttribute - (ULONG_PTR)FileRecord)
-                       - sizeof(ULONG) * 2;
-
-    // Create a new index record from the tree
-    Status = CreateIndexRootFromBTree(DeviceExt,
-                                      Tree,
-                                      MaxIndexRootSize,
-                                      &NewIndexRoot,
-                                      &RootLength);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("ERROR: Unable to create empty index root!\n");
-        DestroyBTree(Tree);
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
-        return Status;
-    }
-
-    // We're done with the B-Tree
-    DestroyBTree(Tree);
-
-    // add the $INDEX_ROOT attribute
-    Status = AddIndexRoot(DeviceExt, FileRecord, NextAttribute, NewIndexRoot, RootLength, L"$I30", 4);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("ERROR: Failed to add index root to new file record!\n");
-        ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
-        return Status;
-    }
-
-
-#ifndef NDEBUG
-    NtfsDumpFileRecord(DeviceExt, FileRecord);
-#endif
-
-    // Now that we've built the file record in memory, we need to store it in the MFT.
-    Status = AddNewMftEntry(FileRecord, DeviceExt, &FileMftIndex, CanWait);
-    if (NT_SUCCESS(Status))
-    {
-        RawFileMftIndex = FileMftIndex;
-
-        // The highest 2 bytes should be the sequence number, unless the parent happens to be root
-        if (FileMftIndex == NTFS_FILE_ROOT)
-            FileMftIndex = FileMftIndex + ((ULONGLONG)NTFS_FILE_ROOT << 48);
-        else
-            FileMftIndex = FileMftIndex + ((ULONGLONG)FileRecord->SequenceNumber << 48);
-
-        DPRINT("New File Reference: 0x%016I64x\n", FileMftIndex);
-
-        // Add the filename attribute to the filename-index of the parent directory
-        Status = NtfsAddFilenameToDirectory(DeviceExt,
-                                            ParentMftIndex,
-                                            FileMftIndex,
-                                            FilenameAttribute,
-                                            CaseSensitive);
-        if (!NT_SUCCESS(Status))
-        {
-            ClearFlag(FileRecord->Flags, FRH_IN_USE);
-            FileRecord->LinkCount = 0;
-            UpdateFileRecord(DeviceExt, RawFileMftIndex, FileRecord);
-            NtfsSetMftBitmapInUse(DeviceExt, RawFileMftIndex, FALSE, CanWait);
-        }
-    }
-
-    ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
-    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
     return Status;
 }
@@ -1474,6 +2014,7 @@ NtfsCreateEmptyFileRecord(PDEVICE_EXTENSION DeviceExt)
     FileRecord->Ntfs.UsaCount = (FileRecord->BytesAllocated / DeviceExt->NtfsInfo.BytesPerSector) + 1;
 
     // setup other file record fields
+    /* AddNewMftEntry replaces this initial value when reusing an old slot. */
     FileRecord->SequenceNumber = 1;
     FileRecord->AttributeOffset = FileRecord->Ntfs.UsaOffset + (2 * FileRecord->Ntfs.UsaCount);
     FileRecord->AttributeOffset = ALIGN_UP_BY(FileRecord->AttributeOffset, ATTR_RECORD_ALIGNMENT);
@@ -1492,21 +2033,84 @@ NtfsCreateEmptyFileRecord(PDEVICE_EXTENSION DeviceExt)
 
 
 /**
+* @name NtfsAddEmptyIndex
+*
+* Adds the empty $I30 $INDEX_ROOT of a new directory at the end of FileRecord.
+*/
+static
+NTSTATUS
+NtfsAddEmptyIndex(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _Inout_ PFILE_RECORD_HEADER FileRecord,
+    _In_ PNTFS_ATTR_RECORD AttributeAddress)
+{
+    PB_TREE Tree;
+    PINDEX_ROOT_ATTRIBUTE NewIndexRoot;
+    ULONG MaxIndexRootSize;
+    ULONG RootLength;
+    NTSTATUS Status;
+
+    Status = CreateEmptyBTree(&Tree);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ERROR: Failed to create empty B-Tree!\n");
+        return Status;
+    }
+
+    // Calculate maximum size of index root
+    MaxIndexRootSize = DeviceExt->NtfsInfo.BytesPerFileRecord
+                       - ((ULONG_PTR)AttributeAddress - (ULONG_PTR)FileRecord)
+                       - sizeof(ULONG) * 2;
+
+    Status = CreateIndexRootFromBTree(DeviceExt, Tree, MaxIndexRootSize, &NewIndexRoot, &RootLength);
+    DestroyBTree(Tree);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ERROR: Unable to create empty index root!\n");
+        return Status;
+    }
+
+    Status = AddIndexRoot(DeviceExt, FileRecord, AttributeAddress, NewIndexRoot, RootLength, L"$I30", 4);
+    ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
+
+    return Status;
+}
+
+/**
 * @name NtfsCreateFileRecord()
 * @implemented
 *
-* Creates a file record and saves it to the MFT. Adds the filename attribute of the
-* created file to the parent directory's index.
+* Creates the file record of a new file or directory, saves it to the MFT and adds its name
+* to the index of the directory it's created in.
 *
 * @param DeviceExt
 * Points to the target disk's DEVICE_EXTENSION
 *
-* @param FileObject
-* Pointer to a FILE_OBJECT describing the file to be created
+* @param ParentReference
+* File reference of the directory the file is created in.
+*
+* @param Name
+* Name of the new file, a single path component.
+*
+* @param FileAttributes
+* FILE_ATTRIBUTE_* flags the file starts with.
+*
+* @param IsDirectory
+* TRUE to create a directory (an empty $I30 index), FALSE for a file (an empty $DATA).
+*
+* @param SecurityId
+* The SecurityId of the file's descriptor in $Secure, from NtfsAssignSecurity().
+*
+* @param CaseSensitive
+* Boolean indicating if the function should operate in case-sensitive mode. This will be TRUE
+* if an application created the file with the FILE_FLAG_POSIX_SEMANTICS flag.
 *
 * @param CanWait
 * Boolean indicating if the function is allowed to wait for exclusive access to the master file table.
 * This will only be relevant if the MFT doesn't have any free file records and needs to be enlarged.
+*
+* @param FileReference
+* Optionally receives the file reference of the new file.
 *
 * @return
 * STATUS_SUCCESS on success.
@@ -1516,26 +2120,31 @@ NtfsCreateEmptyFileRecord(PDEVICE_EXTENSION DeviceExt)
 */
 NTSTATUS
 NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
-                     PFILE_OBJECT FileObject,
-                     BOOLEAN CaseSensitive,
+                     ULONGLONG ParentReference,
+                     PCUNICODE_STRING Name,
                      ULONG FileAttributes,
-                     BOOLEAN CanWait)
+                     BOOLEAN IsDirectory,
+                     ULONG SecurityId,
+                     BOOLEAN CaseSensitive,
+                     BOOLEAN CanWait,
+                     PULONGLONG NewFileReference)
 {
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS Status;
     PFILE_RECORD_HEADER FileRecord;
     PNTFS_ATTR_RECORD NextAttribute;
     PFILENAME_ATTRIBUTE FilenameAttribute;
-    ULONGLONG ParentMftIndex;
     ULONGLONG FileMftIndex;
-    ULONGLONG RawFileMftIndex;
+    ULONGLONG FileReference;
 
-    DPRINT("NtfsCreateFileRecord(%p, %p, %s, %s)\n",
-            DeviceExt,
-            FileObject,
-            CaseSensitive ? "TRUE" : "FALSE",
-            CanWait ? "TRUE" : "FALSE");
+    DPRINT("NtfsCreateFileRecord(%p, 0x%I64x, '%wZ', 0x%lx, %s, %s, %s)\n",
+           DeviceExt,
+           ParentReference,
+           Name,
+           FileAttributes,
+           IsDirectory ? "TRUE" : "FALSE",
+           CaseSensitive ? "TRUE" : "FALSE",
+           CanWait ? "TRUE" : "FALSE");
 
-    // allocate memory for file record
     FileRecord = NtfsCreateEmptyFileRecord(DeviceExt);
     if (!FileRecord)
     {
@@ -1543,19 +2152,24 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
+    if (IsDirectory)
+        FileRecord->Flags |= FRH_DIRECTORY;
+
     // find where the first attribute will be added
     NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
 
     // add first attribute, $STANDARD_INFORMATION
     AddStandardInformation(FileRecord, NextAttribute, FileAttributes);
+    ((PSTANDARD_INFORMATION)((ULONG_PTR)NextAttribute + NextAttribute->Resident.ValueOffset))->SecurityId = SecurityId;
 
     // advance NextAttribute pointer to the next attribute
     NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)NextAttribute + (ULONG_PTR)NextAttribute->Length);
 
     // Add the $FILE_NAME attribute
-    Status = AddFileName(FileRecord, NextAttribute, DeviceExt, FileObject, CaseSensitive, FileAttributes, &ParentMftIndex);
+    Status = AddFileName(FileRecord, NextAttribute, ParentReference, Name, CaseSensitive, FileAttributes);
     if (!NT_SUCCESS(Status))
     {
+        DPRINT1("ERROR: Failed to add the $FILE_NAME attribute for '%wZ'!\n", Name);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
         return Status;
     }
@@ -1566,8 +2180,17 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
     // advance NextAttribute pointer to the next attribute
     NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)NextAttribute + (ULONG_PTR)NextAttribute->Length);
 
-    // add the $DATA attribute
-    AddData(FileRecord, NextAttribute);
+    // a directory gets an empty index, a file an empty $DATA attribute
+    if (IsDirectory)
+        Status = NtfsAddEmptyIndex(DeviceExt, FileRecord, NextAttribute);
+    else
+        Status = AddData(FileRecord, NextAttribute);
+
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
 
 #ifndef NDEBUG
     // dump file record in memory (for debugging)
@@ -1578,55 +2201,28 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
     Status = AddNewMftEntry(FileRecord, DeviceExt, &FileMftIndex, CanWait);
     if (NT_SUCCESS(Status))
     {
-        RawFileMftIndex = FileMftIndex;
+        FileReference = FileMftIndex | ((ULONGLONG)FileRecord->SequenceNumber << 48);
 
-        // The highest 2 bytes should be the sequence number, unless the parent happens to be root
-        if (FileMftIndex == NTFS_FILE_ROOT)
-            FileMftIndex = FileMftIndex + ((ULONGLONG)NTFS_FILE_ROOT << 48);
-        else
-            FileMftIndex = FileMftIndex + ((ULONGLONG)FileRecord->SequenceNumber << 48);
-
-        DPRINT("New File Reference: 0x%016I64x\n", FileMftIndex);
+        DPRINT("New File Reference: 0x%016I64x\n", FileReference);
 
         // Add the filename attribute to the filename-index of the parent directory
         Status = NtfsAddFilenameToDirectory(DeviceExt,
-                                            ParentMftIndex,
-                                            FileMftIndex,
+                                            ParentReference & NTFS_MFT_MASK,
+                                            FileReference,
                                             FilenameAttribute,
                                             CaseSensitive);
         if (!NT_SUCCESS(Status))
         {
-            ClearFlag(FileRecord->Flags, FRH_IN_USE);
-            FileRecord->LinkCount = 0;
-            UpdateFileRecord(DeviceExt, RawFileMftIndex, FileRecord);
-            NtfsSetMftBitmapInUse(DeviceExt, RawFileMftIndex, FALSE, CanWait);
+            /* Nothing refers to the record, so give it back */
+            FreeMftEntry(DeviceExt, FileMftIndex);
         }
-        NTFS_TRACE_IF(ParentMftIndex == 27, "DRVIDX: create file add-name returned 0x%lx for %.*S\n",
-                    Status,
-                    FilenameAttribute->NameLength,
-                    FilenameAttribute->Name);
-
-        /* Emit a USN_REASON_FILE_CREATE record into the change journal
-         * if one is active on this volume.  Gated so un-journalled
-         * volumes stay on the fast path.  Kreijstal/reactos#33. */
-        if (NT_SUCCESS(Status) && DeviceExt->UsnJournalFcb != NULL)
+        else if (NewFileReference != NULL)
         {
-            ULONGLONG ParentRef = FilenameAttribute->DirectoryFileReferenceNumber;
-            (void)NtfsUsnEmitRecord(DeviceExt,
-                                    FileMftIndex,
-                                    ParentRef,
-                                    USN_REASON_FILE_CREATE,
-                                    0,
-                                    FilenameAttribute->Name,
-                                    FilenameAttribute->NameLength);
+            *NewFileReference = FileReference;
         }
     }
 
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
-    NTFS_TRACE_IF(ParentMftIndex == 27, "DRVIDX: create file record return 0x%lx for %.*S\n",
-                Status,
-                FilenameAttribute->NameLength,
-                FilenameAttribute->Name);
 
     return Status;
 }

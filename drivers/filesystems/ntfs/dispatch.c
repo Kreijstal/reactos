@@ -27,6 +27,8 @@
 /* INCLUDES *****************************************************************/
 
 #include "ntfs.h"
+#include <ntddstor.h>
+#include <ntdddisk.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -36,184 +38,6 @@ static LONG QueueCount = 0;
 /* FUNCTIONS ****************************************************************/
 
 static WORKER_THREAD_ROUTINE NtfsDoRequest;
-
-/*
- * IRP_MJ_QUERY_SECURITY handler.  Looks up the FCB from
- * IrpSp->FileObject->FsContext, reads the owning file record, calls the
- * NtfsGetSecurityFromRecord worker (security.c), and surfaces the result
- * back through the IRP.  Kreijstal/reactos#36 - per-file $SECURITY_DESCRIPTOR
- * (NOT \$Secure:$SDS, that's a follow-up slice).
- *
- * IoStatus contract:
- *   - success:  Information = bytes copied out.
- *   - overflow: Information = required length, Status = STATUS_BUFFER_OVERFLOW.
- *   - other:    Information = 0.
- */
-static
-NTSTATUS
-NtfsQuerySecurity(PNTFS_IRP_CONTEXT IrpContext)
-{
-    PIRP Irp = IrpContext->Irp;
-    PIO_STACK_LOCATION Stack = IrpContext->Stack;
-    PFILE_OBJECT FileObject = IrpContext->FileObject;
-    PNTFS_FCB Fcb;
-    PNTFS_VCB Vcb;
-    PFILE_RECORD_HEADER FileRecord = NULL;
-    PVOID OutBuffer;
-    ULONG OutLength;
-    ULONG LengthOut = 0;
-    NTSTATUS Status;
-
-    DPRINT("NtfsQuerySecurity(%p)\n", IrpContext);
-
-    if (FileObject == NULL || FileObject->FsContext == NULL)
-        return STATUS_INVALID_PARAMETER;
-
-    Fcb = (PNTFS_FCB)FileObject->FsContext;
-    if (Fcb->Identifier.Type != NTFS_TYPE_FCB)
-        return STATUS_INVALID_DEVICE_REQUEST;
-
-    Vcb = (PNTFS_VCB)IrpContext->DeviceObject->DeviceExtension;
-
-    /* For direct I/O IRPs the user buffer is owned by the caller - dereference
-     * via the Mdl when one was supplied, else the direct UserBuffer pointer.
-     * Mirrors btrfs's map_user_buffer helper. */
-    if (Irp->MdlAddress != NULL)
-    {
-        OutBuffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
-        if (OutBuffer == NULL)
-            return STATUS_INSUFFICIENT_RESOURCES;
-    }
-    else
-    {
-        OutBuffer = Irp->UserBuffer;
-    }
-    OutLength = Stack->Parameters.QuerySecurity.Length;
-
-    FileRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
-    if (FileRecord == NULL)
-        return STATUS_INSUFFICIENT_RESOURCES;
-
-    Status = ReadFileRecord(Vcb, Fcb->MFTIndex, FileRecord);
-    if (!NT_SUCCESS(Status))
-    {
-        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
-        return Status;
-    }
-
-    Status = NtfsGetSecurityFromRecord(Vcb, FileRecord, OutBuffer, OutLength, &LengthOut);
-
-    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
-
-    if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_OVERFLOW)
-        Irp->IoStatus.Information = LengthOut;
-    else
-        Irp->IoStatus.Information = 0;
-
-    return Status;
-}
-
-/*
- * IRP_MJ_SET_SECURITY handler.  The IO manager has already captured and
- * validated the caller-supplied SD; it arrives as a self-relative blob at
- * IrpSp->Parameters.SetSecurity.SecurityDescriptor.  We persist it into the
- * file's $SECURITY_DESCRIPTOR attribute via NtfsSetSecurityOnRecord.
- *
- * TODO (follow-up slice): honour SECURITY_INFORMATION flags (OWNER / GROUP /
- * DACL / SACL) by merging the incoming SD against the existing one instead
- * of wholesale replacement.
- */
-static
-NTSTATUS
-NtfsSetSecurity(PNTFS_IRP_CONTEXT IrpContext)
-{
-    PIRP Irp = IrpContext->Irp;
-    PIO_STACK_LOCATION Stack = IrpContext->Stack;
-    PFILE_OBJECT FileObject = IrpContext->FileObject;
-    PNTFS_FCB Fcb;
-    PNTFS_VCB Vcb;
-    PFILE_RECORD_HEADER FileRecord = NULL;
-    PSECURITY_DESCRIPTOR InSd;
-    ULONG InLength;
-    NTSTATUS Status;
-
-    DPRINT("NtfsSetSecurity(%p)\n", IrpContext);
-
-    if (FileObject == NULL || FileObject->FsContext == NULL)
-        return STATUS_INVALID_PARAMETER;
-
-    Fcb = (PNTFS_FCB)FileObject->FsContext;
-    if (Fcb->Identifier.Type != NTFS_TYPE_FCB)
-        return STATUS_INVALID_DEVICE_REQUEST;
-
-    Vcb = (PNTFS_VCB)IrpContext->DeviceObject->DeviceExtension;
-
-    InSd = Stack->Parameters.SetSecurity.SecurityDescriptor;
-    if (InSd == NULL)
-        return STATUS_INVALID_PARAMETER;
-
-    /* RtlLengthSecurityDescriptor returns the serialized byte count of a
-     * self-relative SD - the form the IO manager always gives us. */
-    InLength = RtlLengthSecurityDescriptor(InSd);
-    if (InLength == 0)
-        return STATUS_INVALID_SECURITY_DESCR;
-
-    /* Invalidate FCB-level MFT record cache: the on-disk record's
-     * $SECURITY_DESCRIPTOR slot is about to change. */
-    NtfsInvalidateCachedFileRecord(Fcb);
-
-    FileRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
-    if (FileRecord == NULL)
-        return STATUS_INSUFFICIENT_RESOURCES;
-
-    Status = ReadFileRecord(Vcb, Fcb->MFTIndex, FileRecord);
-    if (!NT_SUCCESS(Status))
-    {
-        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
-        return Status;
-    }
-
-    Status = NtfsSetSecurityOnRecord(Vcb, FileRecord, InSd, InLength);
-    if (NT_SUCCESS(Status))
-    {
-        Status = UpdateFileRecord(Vcb, Fcb->MFTIndex, FileRecord);
-    }
-
-    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
-
-    Irp->IoStatus.Information = 0;
-    return Status;
-}
-
-/*
- * Return TRUE when @p FsCtl is one of the FSCTL codes we currently honour
- * that MUTATE on-disk state.  Gate for IRP_MJ_FILE_SYSTEM_CONTROL on a
- * read-only-mounted volume (VCB_VOLUME_READ_ONLY): we still let queries
- * through (LOCK / UNLOCK / GET_REPARSE / GET_OBJECT_ID / GET_VOLUME_BITMAP
- * / GET_RETRIEVAL_POINTERS / DUMP_LOGFILE / the GET_NTFS_* diagnostics)
- * because they're how the caller inspects the volume that just got
- * forced into RO mode.  $LogFile Phase-1 gate, see Kreijstal/reactos#34.
- */
-static BOOLEAN
-NtfsFsctlMutatesVolume(ULONG FsCtl)
-{
-    switch (FsCtl)
-    {
-        case FSCTL_SET_REPARSE_POINT:
-        case FSCTL_DELETE_REPARSE_POINT:
-        case FSCTL_SET_OBJECT_ID:
-        case FSCTL_CREATE_OR_GET_OBJECT_ID:
-        case FSCTL_DELETE_OBJECT_ID:
-        case FSCTL_EXTEND_VOLUME:
-        case FSCTL_MOVE_FILE:
-        case FSCTL_CREATE_USN_JOURNAL:
-        case FSCTL_DELETE_USN_JOURNAL:
-        case FSCTL_MARK_HANDLE:
-            return TRUE;
-        default:
-            return FALSE;
-    }
-}
 
 static
 NTSTATUS
@@ -232,92 +56,179 @@ NtfsQueueRequest(PNTFS_IRP_CONTEXT IrpContext)
     return STATUS_PENDING;
 }
 
+static BOOLEAN
+NtfsReadOnlyMutation(PNTFS_IRP_CONTEXT Context)
+{
+    switch (Context->MajorFunction)
+    {
+        case IRP_MJ_WRITE:
+        {
+            PNTFS_FCB Fcb = Context->FileObject->FsContext;
+            PDEVICE_EXTENSION Vcb = Context->DeviceObject->DeviceExtension;
+
+            ASSERT(Fcb != NULL);
+            return !((Vcb->Flags & VCB_VOLUME_DISMOUNTED) && (Fcb->Flags & FCB_IS_VOLUME));
+        }
+        case IRP_MJ_SET_INFORMATION:
+            switch (Context->Stack->Parameters.SetFile.FileInformationClass)
+            {
+                case FileBasicInformation:
+                case FileAllocationInformation:
+                case FileEndOfFileInformation:
+                case FileLinkInformation:
+                case FileDispositionInformation:
+                case FileRenameInformation:
+                    return TRUE;
+                default:
+                    return FALSE;
+            }
+        case IRP_MJ_SET_VOLUME_INFORMATION:
+        case IRP_MJ_SET_SECURITY:
+        case IRP_MJ_SET_EA:
+        case IRP_MJ_SET_QUOTA:
+            return TRUE;
+        case IRP_MJ_FILE_SYSTEM_CONTROL:
+            if (Context->MinorFunction != IRP_MN_USER_FS_REQUEST) return FALSE;
+            switch (Context->Stack->Parameters.FileSystemControl.FsControlCode)
+            {
+                case FSCTL_EXTEND_VOLUME:
+                case FSCTL_MOVE_FILE:
+                case FSCTL_SET_REPARSE_POINT:
+                case FSCTL_DELETE_REPARSE_POINT:
+                case FSCTL_SET_OBJECT_ID:
+                case FSCTL_SET_OBJECT_ID_EXTENDED:
+                case FSCTL_CREATE_OR_GET_OBJECT_ID:
+                case FSCTL_DELETE_OBJECT_ID:
+                case FSCTL_SET_COMPRESSION:
+                case FSCTL_SET_SPARSE:
+                case FSCTL_SET_ZERO_DATA:
+                case FSCTL_CREATE_USN_JOURNAL:
+                case FSCTL_DELETE_USN_JOURNAL:
+                case FSCTL_WRITE_USN_CLOSE_RECORD:
+                case FSCTL_MARK_VOLUME_DIRTY:
+                    return TRUE;
+            }
+    }
+    return FALSE;
+}
+
 static
 NTSTATUS
 NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
 {
     PIRP Irp = IrpContext->Irp;
     NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    PNTFS_VCB Vcb;
+    PERESOURCE IoResource = NULL;
+    PERESOURCE QuotaResource = NULL;
     BOOLEAN PromotedTopLevel;
-#if NTFS_ENABLE_INVESTIGATION_TRACE
-    BOOLEAN TraceSetInfo;
-#endif
+    BOOLEAN QuotaExclusive;
 
     TRACE_(NTFS, "NtfsDispatch()\n");
 
     FsRtlEnterFileSystem();
 
-    /* Only this dispatch may clear TopLevelIrp at exit if it was the one
-     * that promoted the IRP to top-level.  When a nested NTFS dispatch
-     * runs (e.g. a paging IRP issued by Cc inside NtfsReadDiskCached),
-     * the inner dispatch must leave the outer caller's TopLevelIrp
-     * sentinel intact. */
     PromotedTopLevel = NtfsIsIrpTopLevel(Irp);
-#if NTFS_ENABLE_INVESTIGATION_TRACE
-    TraceSetInfo = (IrpContext->MajorFunction == IRP_MJ_SET_INFORMATION);
-#endif
 
-    /* $LogFile Phase-1 read-only enforcement (Kreijstal/reactos#34).
-     *
-     * When the mount path set VCB_VOLUME_READ_ONLY because the log was
-     * dirty, short-circuit every mutating major function here before it
-     * reaches the on-disk plumbing.  Query/read-shaped majors fall
-     * through to the normal switch so userspace can still inspect the
-     * volume; write-shaped majors return STATUS_MEDIA_WRITE_PROTECTED.
-     * For IRP_MJ_FILE_SYSTEM_CONTROL we defer per-FSCTL classification
-     * to NtfsFsctlMutatesVolume so read-only FSCTLs (GET_REPARSE_POINT,
-     * FSCTL_NTFS_DUMP_LOGFILE, ...) still work. */
-    if (IrpContext->DeviceObject != NULL &&
-        IrpContext->DeviceObject != NtfsGlobalData->DeviceObject)
+    /* Close and cleanup must remain possible after removal, including the
+     * closes generated by cache teardown. PnP owns the exclusive side. */
+    if (IrpContext->DeviceObject != NtfsGlobalData->DeviceObject &&
+        IrpContext->MajorFunction != IRP_MJ_PNP &&
+        IrpContext->MajorFunction != IRP_MJ_CLOSE &&
+        IrpContext->MajorFunction != IRP_MJ_CLEANUP &&
+        !(IrpContext->MajorFunction == IRP_MJ_DEVICE_CONTROL &&
+          (IrpContext->Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_STORAGE_EJECT_MEDIA ||
+           IrpContext->Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_DISK_EJECT_MEDIA)))
     {
-        PNTFS_VCB Vcb = (PNTFS_VCB)IrpContext->DeviceObject->DeviceExtension;
-        if (Vcb != NULL &&
-            Vcb->Identifier.Type == NTFS_TYPE_VCB &&
-            (Vcb->Flags & VCB_VOLUME_READ_ONLY) != 0)
+        Vcb = IrpContext->DeviceObject->DeviceExtension;
+        if (Vcb->Flags & (VCB_DEVICE_REMOVED | VCB_QUERY_REMOVE_PENDING))
         {
-            BOOLEAN Reject = FALSE;
-
-            switch (IrpContext->MajorFunction)
+            Status = (Vcb->Flags & VCB_DEVICE_REMOVED) ? STATUS_DEVICE_REMOVED : STATUS_DEVICE_NOT_READY;
+            Irp->IoStatus.Information = 0;
+            goto Complete;
+        }
+        IoResource = (Irp->Flags & IRP_PAGING_IO) ? &Vcb->PagingResource : &Vcb->IoResource;
+        if (!ExAcquireResourceSharedLite(IoResource,
+                                         BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
+        {
+            IoResource = NULL;
+            /* A posted request runs outside the caller's address space. */
+            if (IrpContext->MajorFunction == IRP_MJ_READ ||
+                IrpContext->MajorFunction == IRP_MJ_WRITE)
             {
-                case IRP_MJ_WRITE:
-                case IRP_MJ_SET_INFORMATION:
-                case IRP_MJ_SET_EA:
-                case IRP_MJ_SET_SECURITY:
-                case IRP_MJ_SET_VOLUME_INFORMATION:
-                case IRP_MJ_SET_QUOTA:
-                    Reject = TRUE;
-                    break;
-
-                case IRP_MJ_FILE_SYSTEM_CONTROL:
-                    if (IrpContext->Stack != NULL &&
-                        IrpContext->MinorFunction == IRP_MN_USER_FS_REQUEST &&
-                        NtfsFsctlMutatesVolume(
-                            IrpContext->Stack->Parameters.FileSystemControl.FsControlCode))
-                    {
-                        Reject = TRUE;
-                    }
-                    break;
-
-                default:
-                    break;
+                Status = NtfsLockUserBuffer(Irp, IrpContext->Stack->Parameters.Read.Length,
+                                            IrpContext->MajorFunction == IRP_MJ_READ ? IoWriteAccess : IoReadAccess);
+                if (!NT_SUCCESS(Status))
+                    goto Complete;
             }
+            Status = NtfsMarkIrpContextForQueue(IrpContext);
+            goto Complete;
+        }
+        if (Vcb->Flags & VCB_DEVICE_REMOVED)
+            Status = STATUS_DEVICE_REMOVED;
+        else if (Vcb->Flags & VCB_QUERY_REMOVE_PENDING)
+            Status = STATUS_DEVICE_NOT_READY;
+        else
+            Status = STATUS_SUCCESS;
+        if (!NT_SUCCESS(Status))
+        {
+            Irp->IoStatus.Information = 0;
+            goto Complete;
+        }
+    }
 
-            if (Reject)
+    if (IrpContext->DeviceObject != NtfsGlobalData->DeviceObject &&
+        (((PDEVICE_EXTENSION)IrpContext->DeviceObject->DeviceExtension)->Flags & VCB_VOLUME_READ_ONLY) &&
+        NtfsReadOnlyMutation(IrpContext))
+    {
+        Status = STATUS_MEDIA_WRITE_PROTECTED;
+        Irp->IoStatus.Information = 0;
+        goto Complete;
+    }
+
+    if (IrpContext->DeviceObject != NtfsGlobalData->DeviceObject && NtfsQuotaOperation(IrpContext))
+    {
+        Vcb = IrpContext->DeviceObject->DeviceExtension;
+        QuotaExclusive = Vcb->QuotaTracking ||
+                         IrpContext->MajorFunction == IRP_MJ_SET_VOLUME_INFORMATION ||
+                         IrpContext->MajorFunction == IRP_MJ_QUERY_QUOTA ||
+                         IrpContext->MajorFunction == IRP_MJ_SET_QUOTA;
+        if (QuotaExclusive && !(IrpContext->Flags & IRPCONTEXT_CANWAIT))
+        {
+            if (IrpContext->MajorFunction == IRP_MJ_WRITE)
             {
-                DPRINT1("NTFS: refusing mutating IRP on read-only-mounted volume "
-                        "(major=0x%x minor=0x%x)\n",
-                        IrpContext->MajorFunction, IrpContext->MinorFunction);
-                Status = STATUS_MEDIA_WRITE_PROTECTED;
-                Irp->IoStatus.Status = Status;
-                Irp->IoStatus.Information = 0;
-                IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                ExFreeToNPagedLookasideList(
-                    &NtfsGlobalData->IrpContextLookasideList, IrpContext);
-                if (PromotedTopLevel)
-                    IoSetTopLevelIrp(NULL);
-                FsRtlExitFileSystem();
-                return Status;
+                Status = NtfsLockUserBuffer(Irp, IrpContext->Stack->Parameters.Write.Length, IoReadAccess);
+                if (!NT_SUCCESS(Status)) goto Complete;
             }
+            Status = NtfsMarkIrpContextForQueue(IrpContext);
+            goto Complete;
+        }
+        for (;;)
+        {
+            BOOLEAN Acquired = QuotaExclusive ?
+                ExAcquireResourceExclusiveLite(&Vcb->QuotaResource, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)) :
+                ExAcquireResourceSharedLite(&Vcb->QuotaResource, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
+            if (!Acquired)
+            {
+                if (IrpContext->MajorFunction == IRP_MJ_WRITE)
+                {
+                    Status = NtfsLockUserBuffer(Irp, IrpContext->Stack->Parameters.Write.Length, IoReadAccess);
+                    if (!NT_SUCCESS(Status)) goto Complete;
+                }
+                Status = NtfsMarkIrpContextForQueue(IrpContext);
+                goto Complete;
+            }
+            if (QuotaExclusive || !Vcb->QuotaTracking)
+                break;
+            ExReleaseResourceLite(&Vcb->QuotaResource);
+            QuotaExclusive = TRUE;
+        }
+        QuotaResource = &Vcb->QuotaResource;
+        if (Vcb->QuotaTracking && Vcb->QuotaRebuildRequired && NtfsGlobalData->EnableWriteSupport &&
+            !(Vcb->Flags & (VCB_DEVICE_REMOVED | VCB_VOLUME_READ_ONLY)))
+        {
+            Status = NtfsRebuildQuota(Vcb);
+            if (!NT_SUCCESS(Status)) goto Complete;
         }
     }
 
@@ -383,121 +294,70 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
             Status = NtfsCreate(IrpContext);
             break;
 
-        case IRP_MJ_FLUSH_BUFFERS:
-            /* Flush cached data for the file */
-            if (IrpContext->FileObject)
-            {
-                PNTFS_FCB FlushFcb = (PNTFS_FCB)IrpContext->FileObject->FsContext;
-                PFILE_OBJECT FlushObject = IrpContext->FileObject;
-
-                /* A flush on a user-mode DASD handle (\??\C: opened as a
-                 * volume) has to flush the volume-stream cache, not the volume
-                 * FCB's own section.  Writes on that handle go through
-                 * NtfsWriteDiskCached(), i.e. into Vcb->StreamFileObject's
-                 * cache map; the volume FCB itself never gets a cache map, so
-                 * flushing its section is a silent no-op.  That made
-                 * NtFlushBuffersFile() on the raw volume report success while
-                 * committing nothing - chkdsk arms the dirty flag and flushes
-                 * precisely so an interrupted repair is re-detected, and that
-                 * flush had never once reached the disk. */
-                if (FlushFcb != NULL &&
-                    BooleanFlagOn(FlushFcb->Flags, FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
-                {
-                    PDEVICE_EXTENSION FlushVcb = IrpContext->DeviceObject->DeviceExtension;
-
-                    if (FlushVcb->StreamFileObject != NULL)
-                        FlushObject = FlushVcb->StreamFileObject;
-                }
-
-                CcFlushCache(FlushObject->SectionObjectPointer, NULL, 0, &IrpContext->Irp->IoStatus);
-                Status = IrpContext->Irp->IoStatus.Status;
-            }
-            else
-            {
-                Status = STATUS_SUCCESS;
-            }
-            IrpContext->Irp->IoStatus.Information = 0;
-            break;
-
         case IRP_MJ_FILE_SYSTEM_CONTROL:
             Status = NtfsFileSystemControl(IrpContext);
             break;
 
-        case IRP_MJ_SHUTDOWN:
-            /* Flush every mounted volume so that dirty cached writes
-             * (notably registry hive updates) actually reach the disk
-             * before the kernel finishes the shutdown. See shutdown.c. */
-            Status = NtfsShutdown(IrpContext);
-            break;
-
         case IRP_MJ_LOCK_CONTROL:
-            /* Byte-range file locks via FsRtlProcessFileLock against
-             * the per-FCB FILE_LOCK initialized in NtfsCreateFCB. The
-             * helper takes ownership of the IRP, so NtfsLockControl
-             * clears IRPCONTEXT_COMPLETE before returning. */
             Status = NtfsLockControl(IrpContext);
             break;
 
+        case IRP_MJ_PNP:
+            Status = NtfsPnp(IrpContext);
+            break;
+
+        case IRP_MJ_SHUTDOWN:
+            Status = NtfsShutdown(IrpContext);
+            break;
+
+        case IRP_MJ_FLUSH_BUFFERS:
+            Status = NtfsFlushBuffers(IrpContext);
+            break;
+
+        case IRP_MJ_QUERY_QUOTA:
+            Status = NtfsQueryQuota(IrpContext);
+            break;
+
+        case IRP_MJ_SET_QUOTA:
+            Status = NtfsSetQuota(IrpContext);
+            break;
+
         case IRP_MJ_QUERY_EA:
-            /* Read the on-disk $EA attribute and copy matching
-             * FILE_FULL_EA_INFORMATION entries into the user buffer.
-             * See ea.c. */
             Status = NtfsQueryEa(IrpContext);
             break;
 
         case IRP_MJ_SET_EA:
-            /* Validate the input list with IoCheckEaBufferValidity and
-             * write it back into the file's $EA attribute. Creating a
-             * brand-new $EA on a file that has none yet is not yet
-             * implemented (see ea.c TODO). */
             Status = NtfsSetEa(IrpContext);
             break;
 
-        case IRP_MJ_PNP:
-            /* Forward most PNP minor codes to the underlying storage
-             * device. NtfsPnp clears IRPCONTEXT_COMPLETE on the
-             * forwarded path so the dispatch loop below doesn't try
-             * to complete an IRP that the lower driver now owns. */
-            Status = NtfsPnp(IrpContext);
-            break;
-
         case IRP_MJ_QUERY_SECURITY:
-            /* Read the on-disk $SECURITY_DESCRIPTOR (or synthesise the
-             * default world-readable SD if absent) into the caller's
-             * buffer.  Kreijstal/reactos#36 - see security.c. */
             Status = NtfsQuerySecurity(IrpContext);
             break;
 
         case IRP_MJ_SET_SECURITY:
-            /* Write the supplied self-relative SD into the file's
-             * $SECURITY_DESCRIPTOR attribute.  Creation of a brand-new
-             * attribute is supported; in-place overwrite of same size
-             * is supported; resize is not yet (delete + re-set). */
-            if (!NtfsGlobalData->EnableWriteSupport)
-            {
-                DPRINT1("NTFS write-support is EXPERIMENTAL and is disabled by default!\n");
-                Status = STATUS_ACCESS_DENIED;
-            }
-            else
-            {
-                Status = NtfsSetSecurity(IrpContext);
-            }
-            break;
-
-        case IRP_MJ_QUERY_QUOTA:
-        case IRP_MJ_SET_QUOTA:
-            /* Disk quota (Kreijstal/reactos#37).  This slice plumbs the
-             * IRP_MJ slots so callers see a stable STATUS_NOT_SUPPORTED
-             * return code on un-quota'd volumes (and on quota'd volumes
-             * too -- the on-disk $Q/$O indexes are blocked on btree.c
-             * growing non-$I30 collation support; see quota.c banner).
-             * Windows drivers return STATUS_NOT_SUPPORTED on this major
-             * when they don't maintain quota, so this matches the
-             * expected shape. */
-            IrpContext->Irp->IoStatus.Information = 0;
-            Status = STATUS_NOT_SUPPORTED;
+            Status = NtfsSetSecurity(IrpContext);
             break;
     }
+
+Complete:
+    if (QuotaResource != NULL)
+    {
+        PNTFS_FCB Fcb = IrpContext->FileObject != NULL ? IrpContext->FileObject->FsContext : NULL;
+        if (Vcb->QuotaTracking && NtfsGlobalData->EnableWriteSupport &&
+            !(Vcb->Flags & (VCB_DEVICE_REMOVED | VCB_VOLUME_READ_ONLY)) && Fcb != NULL &&
+            !(Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)) &&
+            !(IrpContext->Flags & IRPCONTEXT_QUEUE))
+        {
+            NTSTATUS QuotaStatus = NtfsUpdateFileQuota(Vcb, Fcb->MFTIndex);
+            if (!NT_SUCCESS(QuotaStatus))
+            {
+                NtfsInvalidateQuota(Vcb);
+            }
+        }
+        ExReleaseResourceLite(QuotaResource);
+    }
+    if (IoResource != NULL)
+        ExReleaseResourceLite(IoResource);
 
     ASSERT((!(IrpContext->Flags & IRPCONTEXT_COMPLETE) && !(IrpContext->Flags & IRPCONTEXT_QUEUE)) ||
            ((IrpContext->Flags & IRPCONTEXT_COMPLETE) && !(IrpContext->Flags & IRPCONTEXT_QUEUE)) ||
@@ -505,12 +365,8 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
 
     if (IrpContext->Flags & IRPCONTEXT_COMPLETE)
     {
-        NTFS_TRACE_IF(TraceSetInfo, "REGSTALL: dispatch complete begin status=0x%lx info=%Iu\n",
-                    Status,
-                    Irp->IoStatus.Information);
         Irp->IoStatus.Status = Status;
         IoCompleteRequest(Irp, IrpContext->PriorityBoost);
-        NTFS_TRACE_IF(TraceSetInfo, "REGSTALL: dispatch complete done\n");
     }
 
     if (IrpContext->Flags & IRPCONTEXT_QUEUE)
@@ -528,7 +384,6 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
     if (PromotedTopLevel)
         IoSetTopLevelIrp(NULL);
     FsRtlExitFileSystem();
-    NTFS_TRACE_IF(TraceSetInfo, "REGSTALL: dispatch returning 0x%lx\n", Status);
 
     return Status;
 }
@@ -558,6 +413,7 @@ NtfsFsdDispatch(PDEVICE_OBJECT DeviceObject,
 {
     PNTFS_IRP_CONTEXT IrpContext = NULL;
     NTSTATUS Status;
+
     TRACE_(NTFS, "NtfsFsdDispatch()\n");
 
     IrpContext = NtfsAllocateIrpContext(DeviceObject, Irp);

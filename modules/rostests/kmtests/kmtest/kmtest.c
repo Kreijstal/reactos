@@ -94,6 +94,25 @@ CompareTestNames(
     return *Str1 - *Str2;
 }
 
+typedef struct _KMT_TEST_NAME
+{
+    PCSTR Name;
+    BOOLEAN User;
+} KMT_TEST_NAME, *PKMT_TEST_NAME;
+
+static INT __cdecl
+CompareTestEntries(const void *Left, const void *Right)
+{
+    const KMT_TEST_NAME *A = Left;
+    const KMT_TEST_NAME *B = Right;
+    INT Result = CompareTestNames(A->Name, B->Name);
+
+    /* A user wrapper determines visibility and is what RunTest dispatches. */
+    if (Result == 0 && A->User != B->User)
+        return A->User ? -1 : 1;
+    return Result;
+}
+
 /**
  * @name ListTests
  *
@@ -117,7 +136,9 @@ ListTests(
     DWORD BytesRead = BufferSize;
     PCSTR TestName;
     PCKMT_TEST TestEntry = TestList;
-    PCSTR NextTestName;
+    PCSTR NextTestName, Previous = NULL;
+    PKMT_TEST_NAME Names = NULL;
+    ULONG Count = 0, Index;
 
     puts("Valid test names:");
 
@@ -137,50 +158,45 @@ ListTests(
         BufferSize *= 2;
     }
 
-    // output test list plus user-mode tests
-    TestName = Buffer;
-    while (TestEntry->TestName || *TestName)
+    /* Registration tables need not be sorted. Sort the combined list before
+     * coalescing names shared by the kernel and its user-mode wrappers. */
+    for (TestEntry = TestList; TestEntry->TestName; ++TestEntry)
+        ++Count;
+    for (TestName = Buffer; *TestName; TestName += strlen(TestName) + 1)
+        ++Count;
+    Names = HeapAlloc(GetProcessHeap(), 0, Count * sizeof(*Names));
+    if (Names == NULL)
     {
-        if (!TestEntry->TestName)
-        {
-            NextTestName = TestName;
-            TestName += strlen(TestName) + 1;
-        }
-        else if (!*TestName)
-        {
-            NextTestName = TestEntry->TestName;
-            ++TestEntry;
-        }
-        else
-        {
-            INT Result = CompareTestNames(TestEntry->TestName, TestName);
-
-            if (Result == 0)
-            {
-                NextTestName = TestEntry->TestName;
-                TestName += strlen(TestName) + 1;
-                ++TestEntry;
-            }
-            else if (Result < 0)
-            {
-                NextTestName = TestEntry->TestName;
-                ++TestEntry;
-            }
-            else
-            {
-                NextTestName = TestName;
-                TestName += strlen(TestName) + 1;
-            }
-        }
-
+        Error = ERROR_NOT_ENOUGH_MEMORY;
+        goto cleanup;
+    }
+    Index = 0;
+    for (TestEntry = TestList; TestEntry->TestName; ++TestEntry)
+    {
+        Names[Index].Name = TestEntry->TestName;
+        Names[Index++].User = TRUE;
+    }
+    for (TestName = Buffer; *TestName; TestName += strlen(TestName) + 1)
+    {
+        Names[Index].Name = TestName;
+        Names[Index++].User = FALSE;
+    }
+    qsort(Names, Count, sizeof(*Names), CompareTestEntries);
+    for (Index = 0; Index < Count; ++Index)
+    {
+        NextTestName = Names[Index].Name;
+        if (Previous != NULL && CompareTestNames(Previous, NextTestName) == 0)
+            continue;
+        Previous = NextTestName;
         if (IncludeHidden && NextTestName[0] == '-')
             ++NextTestName;
-
         if (NextTestName[0] != '-')
             printf("    %s\n", NextTestName);
     }
 
 cleanup:
+    if (Names != NULL)
+        HeapFree(GetProcessHeap(), 0, Names);
     if (Buffer)
         HeapFree(GetProcessHeap(), 0, Buffer);
 

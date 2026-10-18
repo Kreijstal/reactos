@@ -2069,6 +2069,27 @@ NtQueryDirectoryFile(IN HANDLE FileHandle,
         }
         _SEH2_END;
     }
+    else if (FileName)
+    {
+        /* A kernel-mode caller's name needs no probing, but the file system
+         * still has to get it: the IRP carries its own copy either way */
+        AuxBuffer = ExAllocatePoolWithTag(NonPagedPool,
+                                          FileName->Length +
+                                          sizeof(UNICODE_STRING),
+                                          TAG_IOBUF);
+        if (!AuxBuffer) return STATUS_INSUFFICIENT_RESOURCES;
+        RtlCopyMemory((PVOID)((ULONG_PTR)AuxBuffer +
+                              sizeof(UNICODE_STRING)),
+                      FileName->Buffer,
+                      FileName->Length);
+
+        /* Setup the search pattern */
+        SearchPattern = (PUNICODE_STRING)AuxBuffer;
+        SearchPattern->Buffer = (PWCHAR)((ULONG_PTR)AuxBuffer +
+                                         sizeof(UNICODE_STRING));
+        SearchPattern->Length = FileName->Length;
+        SearchPattern->MaximumLength = FileName->Length;
+    }
 
     /* Check input parameters */
 
@@ -2077,7 +2098,10 @@ NtQueryDirectoryFile(IN HANDLE FileHandle,
 #define CHECK_LENGTH(class, struct)                      \
         case class:                                 \
             if (Length < sizeof(struct))                         \
+            {                                       \
+                if (AuxBuffer) ExFreePoolWithTag(AuxBuffer, TAG_IOBUF); \
                 return STATUS_INFO_LENGTH_MISMATCH; \
+            }                                       \
             break
         CHECK_LENGTH(FileDirectoryInformation, FILE_DIRECTORY_INFORMATION);
         CHECK_LENGTH(FileFullDirectoryInformation, FILE_FULL_DIR_INFORMATION);
@@ -2880,7 +2904,7 @@ NtQueryInformationFile(IN HANDLE FileHandle,
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 NTSTATUS
 NTAPI
@@ -2894,8 +2918,156 @@ NtQueryQuotaInformationFile(IN HANDLE FileHandle,
                             IN PSID StartSid OPTIONAL,
                             IN BOOLEAN RestartScan)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    PFILE_OBJECT FileObject;
+    PDEVICE_OBJECT DeviceObject;
+    PIO_STACK_LOCATION StackPtr;
+    PFILE_GET_QUOTA_INFORMATION Entry;
+    PVOID volatile AuxBuffer = NULL;
+    PSID CapturedStartSid = NULL;
+    SID SidHeader;
+    ULONG StartLength = 0, Remaining, Size, Next;
+    BOOLEAN LockedForSynch = FALSE;
+    PIRP Irp;
+    PMDL Mdl;
+    NTSTATUS Status;
+    PAGED_CODE();
+
+    _SEH2_TRY
+    {
+        if (PreviousMode != KernelMode)
+        {
+            ProbeForWriteIoStatusBlock(IoStatusBlock);
+            ProbeForWrite(Buffer, Length, sizeof(ULONG));
+        }
+        /* A SID list takes precedence over StartSid. Keep captured inputs
+         * alive until completion, including for asynchronous file objects. */
+        if (SidList != NULL)
+        {
+            if (SidListLength == 0) ExRaiseStatus(STATUS_QUOTA_LIST_INCONSISTENT);
+            if (PreviousMode != KernelMode)
+                ProbeForRead(SidList, SidListLength, sizeof(ULONG));
+            AuxBuffer = ExAllocatePoolWithTag(NonPagedPool, SidListLength, TAG_IOBUF);
+            if (AuxBuffer == NULL) ExRaiseStatus(STATUS_INSUFFICIENT_RESOURCES);
+            RtlCopyMemory((PVOID)AuxBuffer, SidList, SidListLength);
+            Entry = (PVOID)AuxBuffer;
+            Remaining = SidListLength;
+            for (;;)
+            {
+                if (Remaining < FIELD_OFFSET(FILE_GET_QUOTA_INFORMATION, Sid) +
+                                FIELD_OFFSET(SID, SubAuthority) ||
+                    Entry->SidLength > Remaining - FIELD_OFFSET(FILE_GET_QUOTA_INFORMATION, Sid) ||
+                    Entry->SidLength < FIELD_OFFSET(SID, SubAuthority) ||
+                    !RtlValidSid(&Entry->Sid) || RtlLengthSid(&Entry->Sid) != Entry->SidLength)
+                    ExRaiseStatus(STATUS_QUOTA_LIST_INCONSISTENT);
+                Size = FIELD_OFFSET(FILE_GET_QUOTA_INFORMATION, Sid) + Entry->SidLength;
+                Next = Entry->NextEntryOffset;
+                if (Next == 0) break;
+                if (Next < Size || Next >= Remaining || (Next & (sizeof(ULONG) - 1)))
+                    ExRaiseStatus(STATUS_QUOTA_LIST_INCONSISTENT);
+                Remaining -= Next;
+                Entry = (PVOID)((PUCHAR)Entry + Next);
+            }
+        }
+        else if (StartSid != NULL)
+        {
+            if (PreviousMode != KernelMode)
+                ProbeForRead(StartSid, FIELD_OFFSET(SID, SubAuthority), sizeof(ULONG));
+            RtlCopyMemory(&SidHeader, StartSid, FIELD_OFFSET(SID, SubAuthority));
+            if (SidHeader.Revision != SID_REVISION ||
+                SidHeader.SubAuthorityCount > SID_MAX_SUB_AUTHORITIES)
+                ExRaiseStatus(STATUS_INVALID_SID);
+            StartLength = RtlLengthRequiredSid(SidHeader.SubAuthorityCount);
+            if (PreviousMode != KernelMode)
+                ProbeForRead(StartSid, StartLength, sizeof(ULONG));
+            AuxBuffer = ExAllocatePoolWithTag(NonPagedPool, StartLength, TAG_IOBUF);
+            if (AuxBuffer == NULL) ExRaiseStatus(STATUS_INSUFFICIENT_RESOURCES);
+            RtlCopyMemory((PVOID)AuxBuffer, StartSid, StartLength);
+            CapturedStartSid = (PSID)AuxBuffer;
+            if (!RtlValidSid(CapturedStartSid) || RtlLengthSid(CapturedStartSid) != StartLength)
+                ExRaiseStatus(STATUS_INVALID_SID);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        if (AuxBuffer) ExFreePoolWithTag((PVOID)AuxBuffer, TAG_IOBUF);
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    Status = ObReferenceObjectByHandle(FileHandle, 0, IoFileObjectType,
+                                       PreviousMode, (PVOID *)&FileObject, NULL);
+    if (!NT_SUCCESS(Status)) goto FreeInputs;
+    if (FileObject->Flags & FO_SYNCHRONOUS_IO)
+    {
+        Status = IopLockFileObject(FileObject, PreviousMode);
+        if (!NT_SUCCESS(Status))
+        {
+            ObDereferenceObject(FileObject);
+            goto FreeInputs;
+        }
+        LockedForSynch = TRUE;
+    }
+    DeviceObject = IoGetRelatedDeviceObject(FileObject);
+    KeClearEvent(&FileObject->Event);
+    Irp = IoAllocateIrp(DeviceObject->StackSize, TRUE);
+    if (Irp == NULL)
+    {
+        if (LockedForSynch) IopUnlockFileObject(FileObject);
+        ObDereferenceObject(FileObject);
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto FreeInputs;
+    }
+    Irp->RequestorMode = PreviousMode;
+    Irp->UserIosb = IoStatusBlock;
+    Irp->UserEvent = NULL;
+    Irp->Tail.Overlay.Thread = PsGetCurrentThread();
+    Irp->Tail.Overlay.OriginalFileObject = FileObject;
+    Irp->Tail.Overlay.AuxiliaryBuffer = (PVOID)AuxBuffer;
+    Irp->Overlay.AsynchronousParameters.UserApcRoutine = NULL;
+    Irp->Overlay.AsynchronousParameters.UserApcContext = NULL;
+    Irp->UserBuffer = Buffer;
+    Irp->AssociatedIrp.SystemBuffer = NULL;
+    Irp->MdlAddress = NULL;
+    Irp->Flags = IRP_DEFER_IO_COMPLETION;
+    _SEH2_TRY
+    {
+        if ((DeviceObject->Flags & DO_BUFFERED_IO) && Length)
+        {
+            Irp->AssociatedIrp.SystemBuffer =
+                ExAllocatePoolWithQuotaTag(NonPagedPool, Length, TAG_IOBUF);
+            Irp->Flags |= IRP_BUFFERED_IO | IRP_DEALLOCATE_BUFFER | IRP_INPUT_OPERATION;
+        }
+        else if ((DeviceObject->Flags & DO_DIRECT_IO) && Length)
+        {
+            Mdl = IoAllocateMdl(Buffer, Length, FALSE, TRUE, Irp);
+            if (Mdl == NULL) ExRaiseStatus(STATUS_INSUFFICIENT_RESOURCES);
+            MmProbeAndLockPages(Mdl, PreviousMode, IoWriteAccess);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        IopCleanupAfterException(FileObject, Irp, NULL, NULL);
+        if (AuxBuffer) ExFreePoolWithTag((PVOID)AuxBuffer, TAG_IOBUF);
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    StackPtr = IoGetNextIrpStackLocation(Irp);
+    StackPtr->FileObject = FileObject;
+    StackPtr->MajorFunction = IRP_MJ_QUERY_QUOTA;
+    StackPtr->Parameters.QueryQuota.Length = Length;
+    StackPtr->Parameters.QueryQuota.SidList = SidList ? (PVOID)AuxBuffer : NULL;
+    StackPtr->Parameters.QueryQuota.SidListLength = SidList ? SidListLength : 0;
+    StackPtr->Parameters.QueryQuota.StartSid = CapturedStartSid;
+    StackPtr->Flags = (RestartScan ? SL_RESTART_SCAN : 0) |
+                      (ReturnSingleEntry ? SL_RETURN_SINGLE_ENTRY : 0) |
+                      (CapturedStartSid ? SL_INDEX_SPECIFIED : 0);
+    return IopPerformSynchronousRequest(DeviceObject, Irp, FileObject, TRUE,
+                                        PreviousMode, LockedForSynch, IopOtherTransfer);
+FreeInputs:
+    if (AuxBuffer) ExFreePoolWithTag((PVOID)AuxBuffer, TAG_IOBUF);
+    return Status;
 }
 
 /*
@@ -3278,7 +3450,7 @@ NtReadFileScatter(IN HANDLE FileHandle,
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 NTSTATUS
 NTAPI
@@ -3287,8 +3459,120 @@ NtSetEaFile(IN HANDLE FileHandle,
             IN PVOID EaBuffer,
             IN ULONG EaBufferSize)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PFILE_OBJECT FileObject;
+    PDEVICE_OBJECT DeviceObject;
+    PIO_STACK_LOCATION StackPtr;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    PVOID SystemBuffer = NULL;
+    BOOLEAN LockedForSynch = FALSE;
+    ULONG ErrorOffset;
+    PIRP Irp;
+    NTSTATUS Status;
+    PAGED_CODE();
+
+    /* The file system gets its own copy of the list, checked here first */
+    if (EaBufferSize == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    SystemBuffer = ExAllocatePoolWithTag(NonPagedPool, EaBufferSize, TAG_IOBUF);
+    if (!SystemBuffer)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    _SEH2_TRY
+    {
+        if (PreviousMode != KernelMode)
+        {
+            ProbeForWriteIoStatusBlock(IoStatusBlock);
+            ProbeForRead(EaBuffer, EaBufferSize, sizeof(ULONG));
+        }
+        RtlCopyMemory(SystemBuffer, EaBuffer, EaBufferSize);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ExFreePoolWithTag(SystemBuffer, TAG_IOBUF);
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    Status = IoCheckEaBufferValidity(SystemBuffer, EaBufferSize, &ErrorOffset);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(SystemBuffer, TAG_IOBUF);
+        _SEH2_TRY
+        {
+            IoStatusBlock->Status = Status;
+            IoStatusBlock->Information = ErrorOffset;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        return Status;
+    }
+
+    Status = ObReferenceObjectByHandle(FileHandle,
+                                       FILE_WRITE_EA,
+                                       IoFileObjectType,
+                                       PreviousMode,
+                                       (PVOID *)&FileObject,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(SystemBuffer, TAG_IOBUF);
+        return Status;
+    }
+
+    if (FileObject->Flags & FO_SYNCHRONOUS_IO)
+    {
+        Status = IopLockFileObject(FileObject, PreviousMode);
+        if (!NT_SUCCESS(Status))
+        {
+            ObDereferenceObject(FileObject);
+            ExFreePoolWithTag(SystemBuffer, TAG_IOBUF);
+            return Status;
+        }
+        LockedForSynch = TRUE;
+    }
+
+    DeviceObject = IoGetRelatedDeviceObject(FileObject);
+    KeClearEvent(&FileObject->Event);
+
+    Irp = IoAllocateIrp(DeviceObject->StackSize, TRUE);
+    if (!Irp)
+    {
+        if (LockedForSynch) IopUnlockFileObject(FileObject);
+        ObDereferenceObject(FileObject);
+        ExFreePoolWithTag(SystemBuffer, TAG_IOBUF);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Irp->RequestorMode = PreviousMode;
+    Irp->UserIosb = IoStatusBlock;
+    Irp->UserEvent = NULL;
+    Irp->Tail.Overlay.Thread = PsGetCurrentThread();
+    Irp->Tail.Overlay.OriginalFileObject = FileObject;
+    Irp->Overlay.AsynchronousParameters.UserApcRoutine = NULL;
+    Irp->Overlay.AsynchronousParameters.UserApcContext = NULL;
+    Irp->MdlAddress = NULL;
+    Irp->UserBuffer = EaBuffer;
+
+    /* The I/O manager frees the copy when the IRP completes */
+    Irp->AssociatedIrp.SystemBuffer = SystemBuffer;
+    Irp->Flags = IRP_BUFFERED_IO | IRP_DEALLOCATE_BUFFER | IRP_DEFER_IO_COMPLETION;
+
+    StackPtr = IoGetNextIrpStackLocation(Irp);
+    StackPtr->FileObject = FileObject;
+    StackPtr->MajorFunction = IRP_MJ_SET_EA;
+    StackPtr->Parameters.SetEa.Length = EaBufferSize;
+
+    return IopPerformSynchronousRequest(DeviceObject,
+                                        Irp,
+                                        FileObject,
+                                        TRUE,
+                                        PreviousMode,
+                                        LockedForSynch,
+                                        IopOtherTransfer);
 }
 
 /*
@@ -3779,7 +4063,7 @@ NtSetInformationFile(IN HANDLE FileHandle,
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 NTSTATUS
 NTAPI
@@ -3788,8 +4072,120 @@ NtSetQuotaInformationFile(IN HANDLE FileHandle,
                           IN PVOID Buffer,
                           IN ULONG BufferLength)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PFILE_OBJECT FileObject;
+    PDEVICE_OBJECT DeviceObject;
+    PIO_STACK_LOCATION StackPtr;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    PVOID SystemBuffer = NULL;
+    BOOLEAN LockedForSynch = FALSE;
+    ULONG ErrorOffset;
+    PIRP Irp;
+    NTSTATUS Status;
+    PAGED_CODE();
+
+    /* The file system gets its own copy of the list, checked here first */
+    if (BufferLength == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    SystemBuffer = ExAllocatePoolWithTag(NonPagedPool, BufferLength, TAG_IOBUF);
+    if (!SystemBuffer)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    _SEH2_TRY
+    {
+        if (PreviousMode != KernelMode)
+        {
+            ProbeForWriteIoStatusBlock(IoStatusBlock);
+            ProbeForRead(Buffer, BufferLength, sizeof(ULONG));
+        }
+        RtlCopyMemory(SystemBuffer, Buffer, BufferLength);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ExFreePoolWithTag(SystemBuffer, TAG_IOBUF);
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    Status = IoCheckQuotaBufferValidity(SystemBuffer, BufferLength, &ErrorOffset);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(SystemBuffer, TAG_IOBUF);
+        _SEH2_TRY
+        {
+            IoStatusBlock->Status = Status;
+            IoStatusBlock->Information = ErrorOffset;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        return Status;
+    }
+
+    Status = ObReferenceObjectByHandle(FileHandle,
+                                       FILE_WRITE_DATA,
+                                       IoFileObjectType,
+                                       PreviousMode,
+                                       (PVOID *)&FileObject,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(SystemBuffer, TAG_IOBUF);
+        return Status;
+    }
+
+    if (FileObject->Flags & FO_SYNCHRONOUS_IO)
+    {
+        Status = IopLockFileObject(FileObject, PreviousMode);
+        if (!NT_SUCCESS(Status))
+        {
+            ObDereferenceObject(FileObject);
+            ExFreePoolWithTag(SystemBuffer, TAG_IOBUF);
+            return Status;
+        }
+        LockedForSynch = TRUE;
+    }
+
+    DeviceObject = IoGetRelatedDeviceObject(FileObject);
+    KeClearEvent(&FileObject->Event);
+
+    Irp = IoAllocateIrp(DeviceObject->StackSize, TRUE);
+    if (!Irp)
+    {
+        if (LockedForSynch) IopUnlockFileObject(FileObject);
+        ObDereferenceObject(FileObject);
+        ExFreePoolWithTag(SystemBuffer, TAG_IOBUF);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Irp->RequestorMode = PreviousMode;
+    Irp->UserIosb = IoStatusBlock;
+    Irp->UserEvent = NULL;
+    Irp->Tail.Overlay.Thread = PsGetCurrentThread();
+    Irp->Tail.Overlay.OriginalFileObject = FileObject;
+    Irp->Overlay.AsynchronousParameters.UserApcRoutine = NULL;
+    Irp->Overlay.AsynchronousParameters.UserApcContext = NULL;
+    Irp->MdlAddress = NULL;
+    Irp->UserBuffer = Buffer;
+
+    /* The I/O manager frees the copy when the IRP completes */
+    Irp->AssociatedIrp.SystemBuffer = SystemBuffer;
+    Irp->Flags = IRP_BUFFERED_IO | IRP_DEALLOCATE_BUFFER | IRP_DEFER_IO_COMPLETION;
+
+    StackPtr = IoGetNextIrpStackLocation(Irp);
+    StackPtr->FileObject = FileObject;
+    StackPtr->MajorFunction = IRP_MJ_SET_QUOTA;
+    StackPtr->Parameters.SetQuota.Length = BufferLength;
+
+    return IopPerformSynchronousRequest(DeviceObject,
+                                        Irp,
+                                        FileObject,
+                                        TRUE,
+                                        PreviousMode,
+                                        LockedForSynch,
+                                        IopOtherTransfer);
 }
 
 /*

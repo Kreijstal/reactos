@@ -74,6 +74,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ex/ExUuid.c
     ntos_fsrtl/FsRtlDissect.c
     ntos_fsrtl/FsRtlExpression.c
+    ntos_fsrtl/FsRtlFileLock.c
     ntos_fsrtl/FsRtlLegal.c
     ntos_fsrtl/FsRtlMcb.c
     ntos_fsrtl/FsRtlTunnel.c
@@ -87,6 +88,9 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/IoMdl.c
     ntos_io/IoVolume.c
     ntos_io/FatPerf.c
+    ntos_io/NtfsAllocation.c
+    ntos_io/NtfsTimes.c
+    ntos_io/NtfsRename.c
     ntos_io/NtfsDirIndex.c
     ntos_io/NtfsCompression.c
     ntos_io/NtfsCreateSemantics.c
@@ -95,11 +99,17 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/NtfsFsctl.c
     ntos_io/NtfsInfoClasses.c
     ntos_io/NtfsKmt.c
+    ntos_io/NtfsLocks.c
+    ntos_io/NtfsNotify.c
+    ntos_io/NtfsLogFile.c
+    ntos_io/NtfsFormat.c
     ntos_io/NtfsLinks.c
     ntos_io/NtfsObjectId.c
     ntos_io/NtfsQuota.c
     ntos_io/NtfsReparse.c
     ntos_io/NtfsSecurity.c
+    ntos_io/NtfsPnp.c
+    ntos_io/NtfsShutdown.c
     ntos_io/NtfsSparse.c
     ntos_io/NtfsStreams.c
     ntos_io/NtfsUsn.c
@@ -213,6 +223,7 @@ list(APPEND KMTEST_SOURCE
     ntos_io/IoReadWrite_user.c
     ntos_io/NtfsDirIndex_user.c
     ntos_io/NtfsFeatures_user.c
+    ntos_io/NtfsFormat_user.c
     ntos_kd/NtSystemDebugControl.c
     ntos_mm/MmMapLockedPagesSpecifyCache_user.c
     ntos_mm/MmPageoutSysView_user.c

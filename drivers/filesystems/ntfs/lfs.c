@@ -1,91 +1,12 @@
 /*
- * COPYRIGHT:        See COPYING in the top level directory
- * PROJECT:          ReactOS kernel
- * FILE:             drivers/filesystems/ntfs/lfs.c
- * PURPOSE:          NTFS $LogFile Phase 2 slice 1: write-side LFS (Log File
- *                   Service) emission layer.  Kreijstal/reactos#34.
+ * PROJECT:     ReactOS NTFS driver
+ * LICENSE:     GPL-2.0-or-later (see COPYING)
+ * PURPOSE:     LFS restart/record emission (3857e1c02ad, 3203ef56e06)
  *
- * SCOPE (this file):
- *
- *   This is the WRITE side of the journal: it formats a single log record
- *   (header + redo + undo payload), assigns it an LSN, places it into an
- *   in-memory image of $LogFile:$DATA inside an RCRD page (applying the
- *   per-sector USA fixup exactly the way the on-disk format requires), and
- *   flips the restart area between the CLEAN and dirty landmarks.
- *
- *   It is a STANDALONE, unit-testable module: every function here operates
- *   purely on a caller-supplied LFS_WRITE_CONTEXT over a caller-owned byte
- *   buffer.  Nothing in this file performs disk I/O, and nothing here is
- *   wired into the live metadata write path (NtfsWriteDiskCached).  The
- *   live wiring (write-ahead ordering, $Volume::DIRTY handshake, recovery
- *   replay) is the next slice and is DELIBERATELY NOT implemented here -
- *   a half-working journal that races real metadata writes is worse than
- *   none (see issue scope).
- *
- * ON-DISK FORMAT AUTHORITY:
- *
- *   The byte layout this file emits is identical to what the in-tree
- *   formatter lays down (sdk/lib/fslib/ntfslib/mkntfs.c build_rstr_page)
- *   and what the Phase-0 parser (lfsparse.c) consumes:
- *
- *     RSTR page:  hdr @ 0x00, RestartOffset USHORT @ 0x10, USA @ 0x28,
- *                 NTFS_LFS_RESTART_AREA @ 0x40.
- *     RCRD page:  hdr @ 0x00, NextRecordOffset USHORT @ 0x22, USA @ 0x28,
- *                 first NTFS_LFS_RECORD_HEADER @ 0x30.
- *
- *   USA writer  == AddFixupArray (mft.c): increments USN, saves each
- *                  sector-tail USHORT into the USA, stamps the USN sentinel.
- *   USA reader  == FixupUpdateSequenceArray (mft.c): the parser side.
- *
- *   LSN encoding == Microsoft LFS: the high SeqNumberBits hold a sequence
- *   number; the low (64 - SeqNumberBits) bits hold the log-file byte offset
- *   divided by 8.  Layout authority: libfsntfs (forensic read library,
- *   safe to reference) + Microsoft public LFS documentation.  Linux ntfs3's
- *   fslog.c is GPL-2.0-only (NO code copy permitted); used only as a field
- *   cross-check.
- *
- * FORMAT FACTS CONFIRMED AGAINST ntfs-3g (/usr/include/ntfs-3g/logfile.h,
- * a documentation-only on-disk-layout header) - resolving the slice-1
- * unconfirmed assumptions:
- *
- *   (1) SeqNumberBits is NOT a constant.  It is derived from the $LogFile
- *       byte size as  67 - bit_length(FileSize)  (RESTART_AREA::seq_number_bits
- *       doc; libntfs-3g/logfile.c ntfs_check_restart_area).  See
- *       NtfsLfsSeqNumberBits.  Slice 1's hardcoded 0x2D only happened to be
- *       correct for the ~2-4 MiB default log.
- *
- *   (2) RedoOffset / UndoOffset in a record are measured from the START OF
- *       THE LOG RECORD (LOG_RECORD byte 0 == this_lsn), not from client-data
- *       start.  ntfs-3g's LOG_RECORD struct begins at the record start: a
- *       0x30-byte generic header, then the attribute-log fields 0x30..0x50,
- *       then lcn_list[0] / redo / undo data at 0x50 when lcns_to_follow == 0.
- *       Our NTFS_LFS_RECORD_HEADER is byte-identical (sizeof 0x50).  Slice 1
- *       wrote these client-data-relative; corrected to record-relative here.
- *
- *   (3) Multi-page continuation (LcnsToFollow > 0 array + a record larger
- *       than one page):
- *         - LcnsToFollow (USHORT @ 0x3E) counts LCN entries; when > 0 an
- *           array of LcnsToFollow * 8 bytes (leLCN) sits at record offset
- *           0x50, BEFORE the redo/undo payload (so RedoOffset/UndoOffset are
- *           pushed past the array).
- *         - A record whose ClientDataLength runs past the page's record area
- *           continues onto the next RCRD page.  The producer sets
- *           NTFS_LFS_RECORD_FLAG_MULTI_PAGE (0x0001) and the page header's
- *           PageCount / PagePosition (1-based index within the multi-page
- *           set); the continued tail resumes at the next page's
- *           LogPageDataOffset (right after RCRD header + USA, i.e. 0x40 for a
- *           4K/512 page).  RECORD_PAGE_HEADER carries NextRecordOffset and
- *           LastEndLsn so the reader can stitch tail onto head.
- *       This module EMITS single-page records only: it always sets
- *       LcnsToFollow = 0 and clears the MULTI_PAGE flag, and refuses
- *       (STATUS_LOG_FILE_FULL) any record that would not fit one page.  The
- *       multi-page emitter is a later slice; the format is documented here so
- *       it can be added without re-deriving the layout.
+ * Single-page codec only. Runtime logging remains disabled by default;
+ * recovery and NTFS transaction management are separate work.
  */
-
-/* INCLUDES *****************************************************************/
-
-#include "ntfs.h"
+#include "lfswrite.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -97,31 +18,12 @@
 #define LFS_RCRD_USA_OFFSET        0x28
 /* First record slot.  Must clear the USA, which for a 4K page / 512B sector
  * spans 0x28..0x39 (UsaCount = 9 words).  0x40 is 8-byte aligned and past
- * the USA; it also matches the parser's NextRecordOffset >= 0x28 contract. */
+ * the USA. */
 #define LFS_RCRD_FIRST_RECORD      0x40
-#define LFS_RCRD_NEXTREC_FIELD     0x22
+#define LFS_RCRD_NEXTREC_FIELD     0x18
 
 /* FUNCTIONS ****************************************************************/
 
-/**
- * @name NtfsLfsSeqNumberBits
- * @implemented
- *
- * Derive the restart area's SeqNumberBits from the $LogFile byte size.
- *
- * Microsoft / ntfs-3g formula (libntfs-3g/logfile.c ntfs_check_restart_area,
- * confirmed against /usr/include/ntfs-3g/logfile.h RESTART_AREA::seq_number_bits
- * doc comment "67 - the number of bits required to store the logfile size in
- * bytes"):
- *
- *     SeqNumberBits = 67 - bit_length(FileSize)
- *
- * where bit_length(x) is the number of significant bits in x
- * (floor(log2(x)) + 1).  The argument is the FULL byte size of $LogFile:$DATA,
- * NOT FileSize >> 3.  For the common ~2 MiB / 4 MiB default log this yields
- * 45 (0x2D), which is why the slice-1 hardcode happened to match those sizes;
- * it is wrong for every other log size, so we compute it here.
- */
 ULONG
 NtfsLfsSeqNumberBits(ULONGLONG FileSize)
 {
@@ -141,15 +43,6 @@ NtfsLfsSeqNumberBits(ULONGLONG FileSize)
     return 67 - Bits;
 }
 
-/**
- * @name NtfsLfsMakeLsn
- * @implemented
- *
- * Compose a 64-bit LSN from a sequence number and a log-file byte offset.
- * Microsoft LFS encoding: the low (64 - SeqNumberBits) bits carry the byte
- * offset right-shifted by 3 (LSNs are 8-byte granular); the high
- * SeqNumberBits carry the sequence number.
- */
 ULONGLONG
 NtfsLfsMakeLsn(ULONG SeqNumberBits, ULONGLONG SeqNumber, ULONG ByteOffset)
 {
@@ -173,13 +66,6 @@ NtfsLfsMakeLsn(ULONG SeqNumberBits, ULONGLONG SeqNumber, ULONG ByteOffset)
     return (SeqNumber << OffsetBits) | OffsetPart;
 }
 
-/**
- * @name NtfsLfsLsnToOffset
- * @implemented
- *
- * Recover the log-file byte offset from an LSN (inverse of MakeLsn for the
- * offset field).  Returns the byte offset; the sequence number is dropped.
- */
 ULONG
 NtfsLfsLsnToOffset(ULONG SeqNumberBits, ULONGLONG Lsn)
 {
@@ -194,14 +80,6 @@ NtfsLfsLsnToOffset(ULONG SeqNumberBits, ULONGLONG Lsn)
     return (ULONG)(OffsetPart << 3);
 }
 
-/**
- * @name NtfsLfsBuildRestartPage
- * @implemented
- *
- * Lay down one RSTR restart page into @p Page.  Byte-identical to mkntfs's
- * build_rstr_page so a driver- and a formatter-produced page agree, then
- * apply the USA via AddFixupArray so NtfsLfsParseRestartPage round-trips it.
- */
 NTSTATUS
 NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
                         PUCHAR Page,
@@ -235,21 +113,16 @@ NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
     RtlZeroMemory(Page, PageSize);
 
     Hdr = (PNTFS_RECORD_HEADER)Page;
-    Hdr->Type = NRH_RSTR_TYPE;
+    Hdr->Type = NTFS_LOG_RESTART_MAGIC;
     Hdr->UsaOffset = LFS_RSTR_USA_OFFSET;
     Hdr->UsaCount = UsaCount;
     Hdr->Lsn = 0;
 
-    /* RestartOffset @ 0x10 (the field the parser reads) and the libfsntfs
-     * mirror fields up to 0x1A.  AddFixupArray will set usa[0]; pre-seed it
-     * to 0 so the post-increment lands the sentinel at 1, matching mkntfs. */
-    *(USHORT *)(Page + 0x10) = LFS_RSTR_AREA_OFFSET;
-    *(USHORT *)(Page + 0x12) = (USHORT)PageSize;          /* SystemPageSize */
-    *(USHORT *)(Page + 0x14) = (USHORT)PageSize;          /* LogPageSize    */
-    *(USHORT *)(Page + 0x16) = LFS_RSTR_AREA_OFFSET;      /* RestartOffset  */
-    *(USHORT *)(Page + NTFS_LFS_RSTR_MAJOR_VERSION_OFFSET) =
-        NTFS_LFS_SUPPORTED_MAJOR_VERSION;                 /* MajorVersion   */
-    *(USHORT *)(Page + NTFS_LFS_RSTR_MINOR_VERSION_OFFSET) = 0; /* MinorVersion */
+    ((PNTFS_LOG_RESTART_HEADER)Page)->SystemPageSize = PageSize;
+    ((PNTFS_LOG_RESTART_HEADER)Page)->LogPageSize = PageSize;
+    ((PNTFS_LOG_RESTART_HEADER)Page)->RestartOffset = LFS_RSTR_AREA_OFFSET;
+    ((PNTFS_LOG_RESTART_HEADER)Page)->MajorVersion = 1;
+    ((PNTFS_LOG_RESTART_HEADER)Page)->MinorVersion = 1;
     *(USHORT *)(Page + LFS_RSTR_USA_OFFSET) = 0;          /* USN seed       */
 
     RtlZeroMemory(&Area, sizeof(Area));
@@ -265,7 +138,7 @@ NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
     Area.ClientInUseList     = NTFS_LFS_CLIENT_INDEX_NTFS;
     Area.Flags               = Clean ? NTFS_LFS_RESTART_FLAG_CLEAN : 0;
     Area.SeqNumberBits       = NtfsLfsSeqNumberBits(FileSize);
-    Area.RestartAreaLength   = (USHORT)sizeof(NTFS_LFS_RESTART_AREA);
+    Area.RestartAreaLength   = sizeof(NTFS_LFS_RESTART_AREA) + sizeof(NTFS_LFS_CLIENT_RECORD);
     Area.ClientArrayOffset   = (USHORT)sizeof(NTFS_LFS_RESTART_AREA);
     Area.FileSize            = FileSize;
     Area.LastLsnDataLength   = LastLsnDataLength;
@@ -275,10 +148,7 @@ NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
     Area.Reserved            = 0;
     RtlCopyMemory(Page + LFS_RSTR_AREA_OFFSET, &Area, sizeof(Area));
 
-    /* The LOG_CLIENT_RECORD for that slot.  Both restart LSNs are zero here:
-     * this builds either a fresh log or a CLEAN dismount landmark, and in both
-     * cases there is no checkpoint to resume from and nothing recovery still
-     * needs.  A checkpoint writer will fill them in. */
+    /* Client checkpoint tables are outside the single-page emitter. */
     ASSERT(LFS_RSTR_AREA_OFFSET + sizeof(NTFS_LFS_RESTART_AREA) == LFS_RSTR_CLIENT_OFFSET);
     if (LFS_RSTR_CLIENT_OFFSET + sizeof(NTFS_LFS_CLIENT_RECORD) > PageSize)
         return STATUS_INVALID_PARAMETER;
@@ -291,7 +161,7 @@ NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
         Client.ClientRestartLsn = 0;
         Client.PrevClient       = NTFS_LFS_CLIENT_NONE;
         Client.NextClient       = NTFS_LFS_CLIENT_NONE;
-        Client.SeqNumber        = 0;
+        Client.SeqNumber        = 1;
         Client.ClientNameLength = (ULONG)(sizeof(NTFS_LFS_CLIENT_NAME_NTFS) - sizeof(WCHAR));
         RtlCopyMemory(Client.ClientName, NTFS_LFS_CLIENT_NAME_NTFS,
                       Client.ClientNameLength);
@@ -304,12 +174,6 @@ NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
     return AddFixupArray(Vcb, Hdr);
 }
 
-/**
- * @internal
- * @brief  Lay down one empty RCRD page header (no records yet) into @p Page,
- *         then USA-stamp it.  WriteOffset bookkeeping in the context tracks
- *         the first free record slot at LFS_RCRD_FIRST_RECORD.
- */
 static NTSTATUS
 LfsBuildEmptyRcrdPage(PDEVICE_EXTENSION Vcb, PUCHAR Page, ULONG PageSize)
 {
@@ -328,26 +192,20 @@ LfsBuildEmptyRcrdPage(PDEVICE_EXTENSION Vcb, PUCHAR Page, ULONG PageSize)
     RtlZeroMemory(Page, PageSize);
 
     Hdr = (PNTFS_RECORD_HEADER)Page;
-    Hdr->Type = NRH_RCRD_TYPE;
+    Hdr->Type = 0x44524352;
     Hdr->UsaOffset = LFS_RCRD_USA_OFFSET;
     Hdr->UsaCount = UsaCount;
     Hdr->Lsn = 0;
 
-    /* NextRecordOffset @ 0x22: first record sits at 0x30. */
+    /* NextRecordOffset names free space, not the first log record. */
     *(USHORT *)(Page + LFS_RCRD_NEXTREC_FIELD) = LFS_RCRD_FIRST_RECORD;
+    *(USHORT *)(Page + 0x14) = 1; /* PageCount */
+    *(USHORT *)(Page + 0x16) = 1; /* PagePosition */
     *(USHORT *)(Page + LFS_RCRD_USA_OFFSET) = 0;          /* USN seed */
 
     return AddFixupArray(Vcb, Hdr);
 }
 
-/**
- * @name NtfsLfsInitWriteContext
- * @implemented
- *
- * Initialise an emission context: lay down both CLEAN RSTR copies, prime
- * the RCRD region with empty record pages, and set the write cursor to the
- * first record slot of the first RCRD page.
- */
 NTSTATUS
 NtfsLfsInitWriteContext(PDEVICE_EXTENSION Vcb,
                         PLFS_WRITE_CONTEXT Ctx,
@@ -367,8 +225,8 @@ NtfsLfsInitWriteContext(PDEVICE_EXTENSION Vcb,
         (PageSize % SectorSize) != 0)
         return STATUS_INVALID_PARAMETER;
 
-    /* Need at least two restart copies + two RCRD pages. */
-    if (ImageLength < PageSize * 4 || (ImageLength % PageSize) != 0)
+    /* LFS 1.1 reserves two restart pages and two tail-copy pages. */
+    if (ImageLength < PageSize * 6 || (ImageLength % PageSize) != 0)
         return STATUS_INVALID_PARAMETER;
 
     RtlZeroMemory(Ctx, sizeof(*Ctx));
@@ -376,10 +234,10 @@ NtfsLfsInitWriteContext(PDEVICE_EXTENSION Vcb,
     Ctx->ImageLength = ImageLength;
     Ctx->PageSize = PageSize;
     Ctx->SectorSize = SectorSize;
-    Ctx->FirstRcrdOffset = PageSize * 2;
+    Ctx->FirstRcrdOffset = PageSize * 4;
     Ctx->SeqNumberBits = NtfsLfsSeqNumberBits((ULONGLONG)ImageLength);
     Ctx->CurrentSeqNumber = 1;
-    Ctx->WriteOffset = PageSize * 2 + LFS_RCRD_FIRST_RECORD;
+    Ctx->WriteOffset = Ctx->FirstRcrdOffset + LFS_RCRD_FIRST_RECORD;
     Ctx->LastLsn = 0;
     Ctx->ClientId = 0;
 
@@ -401,19 +259,10 @@ NtfsLfsInitWriteContext(PDEVICE_EXTENSION Vcb,
     return STATUS_SUCCESS;
 }
 
-/**
- * @internal
- * @brief  Compute the on-disk byte geometry of a record from its redo/undo
- *         payload lengths.  Shared by Format and Emit so they never drift.
- *
- *   @p RedoAbs / @p UndoAbs : absolute byte offsets (from record start) of
- *                             the redo and undo payloads.
- *   @p ClientDataLength     : bytes after the 0x30 generic header.
- *   @p TotalLength          : full 8-byte-aligned record length.
- */
 static VOID
 LfsRecordGeometry(USHORT RedoLength,
                   USHORT UndoLength,
+                  USHORT LcnsToFollow,
                   PULONG RedoAbs,
                   PULONG UndoAbs,
                   PULONG ClientDataLength,
@@ -423,7 +272,8 @@ LfsRecordGeometry(USHORT RedoLength,
 
     /* Client data = NTFS sub-header (0x20) | redo | undo, redo first, both
      * 8-byte aligned.  Client data starts at the 0x30 generic-header end. */
-    R = ALIGN_UP_BY(NTFS_LFS_RECORD_HEADER_LENGTH + NTFS_LFS_ATTR_HEADER_LENGTH, 8);
+    R = ALIGN_UP_BY(NTFS_LFS_RECORD_HEADER_LENGTH + NTFS_LFS_ATTR_HEADER_LENGTH +
+                     (ULONG)LcnsToFollow * sizeof(LONGLONG), 8);
     U = ALIGN_UP_BY(R + RedoLength, 8);
 
     *RedoAbs = R;
@@ -432,14 +282,6 @@ LfsRecordGeometry(USHORT RedoLength,
     *TotalLength = ALIGN_UP_BY(NTFS_LFS_RECORD_HEADER_LENGTH + *ClientDataLength, 8);
 }
 
-/**
- * @name NtfsLfsFormatRecord
- * @implemented
- *
- * Serialise one log record (NTFS_LFS_RECORD_HEADER + redo payload + undo
- * payload) into @p Buffer.  No USA, no page placement - pure codec so a
- * unit test can compare bytes without a page container.
- */
 NTSTATUS
 NtfsLfsFormatRecord(PLFS_WRITE_CONTEXT Ctx,
                     const LFS_EMIT_PARAMS *Params,
@@ -456,9 +298,17 @@ NtfsLfsFormatRecord(PLFS_WRITE_CONTEXT Ctx,
     if (Ctx == NULL || Params == NULL || Buffer == NULL)
         return STATUS_INVALID_PARAMETER;
 
-    LfsRecordGeometry(Params->RedoLength, Params->UndoLength,
+    if ((Params->RedoLength != 0 && Params->RedoData == NULL) ||
+        (Params->UndoLength != 0 && Params->UndoData == NULL) ||
+        (Params->LcnsToFollow != 0 && Params->Lcns == NULL))
+        return STATUS_INVALID_PARAMETER;
+
+    LfsRecordGeometry(Params->RedoLength, Params->UndoLength, Params->LcnsToFollow,
                       &RedoAbs, &UndoAbs, &ClientDataLength, &TotalLength);
 
+    if (RedoAbs - NTFS_LFS_RECORD_HEADER_LENGTH > MAXUSHORT ||
+        UndoAbs - NTFS_LFS_RECORD_HEADER_LENGTH > MAXUSHORT)
+        return STATUS_INVALID_PARAMETER;
     if (BufferLength < TotalLength)
         return STATUS_BUFFER_TOO_SMALL;
 
@@ -469,33 +319,30 @@ NtfsLfsFormatRecord(PLFS_WRITE_CONTEXT Ctx,
     Rec->ClientPreviousLsn = Params->ClientPreviousLsn;
     Rec->ClientUndoNextLsn = Params->ClientUndoNextLsn;
     Rec->ClientDataLength = ClientDataLength;
-    Rec->ClientId = Ctx->ClientId;
-    Rec->Alignment = 0;
+    Rec->ClientId = 1; /* client sequence number */
+    Rec->Alignment = Ctx->ClientId; /* client array index */
     Rec->RecordType = NTFS_LFS_RECTYPE_NORMAL;
     Rec->TransactionId = Params->TransactionId;
     Rec->Flags = 0;
     Rec->RedoOperation = Params->RedoOperation;
     Rec->UndoOperation = Params->UndoOperation;
-    /* RedoOffset / UndoOffset are measured from the START OF THE LOG RECORD
-     * (the NTFS_LFS_RECORD_HEADER == ntfs-3g LOG_RECORD start at byte 0), NOT
-     * from the client-data start.  Confirmed against ntfs-3g
-     * /usr/include/ntfs-3g/logfile.h struct LOG_RECORD: this_lsn is at offset
-     * 0, the fixed header runs to 0x50 (lcn_list[0]), and redo_offset/
-     * undo_offset point at the redo/undo payload which, with lcns_to_follow==0,
-     * begins at 0x50.  Slice 1 wrote these client-data-relative (abs - 0x30);
-     * that is corrected here to be record-relative. */
-    Rec->RedoOffset = (USHORT)RedoAbs;
+    /* Offsets belong to the NTFS client record, which starts after the
+     * generic 0x30-byte LFS header. They exclude that generic header. */
+    Rec->RedoOffset = (USHORT)(RedoAbs - NTFS_LFS_RECORD_HEADER_LENGTH);
     Rec->RedoLength = Params->RedoLength;
-    Rec->UndoOffset = (USHORT)UndoAbs;
+    Rec->UndoOffset = (USHORT)(UndoAbs - NTFS_LFS_RECORD_HEADER_LENGTH);
     Rec->UndoLength = Params->UndoLength;
     Rec->TargetAttribute = Params->TargetAttribute;
-    Rec->LcnsToFollow = 0;
+    Rec->LcnsToFollow = Params->LcnsToFollow;
     Rec->RecordOffset = Params->RecordOffset;
     Rec->AttributeOffset = Params->AttributeOffset;
-    Rec->MftClusterIndex = 0;
-    Rec->Alignment2 = 0;
+    Rec->MftClusterIndex = Params->ClusterBlockOffset;
+    Rec->Alignment2 = Params->TargetBlockSize;
     Rec->TargetVcn = Params->TargetVcn;
 
+    if (Params->LcnsToFollow != 0)
+        RtlCopyMemory(Buffer + sizeof(*Rec), Params->Lcns,
+                       (ULONG)Params->LcnsToFollow * sizeof(LONGLONG));
     if (Params->RedoLength != 0 && Params->RedoData != NULL)
         RtlCopyMemory(Buffer + RedoAbs, Params->RedoData, Params->RedoLength);
     if (Params->UndoLength != 0 && Params->UndoData != NULL)
@@ -507,23 +354,6 @@ NtfsLfsFormatRecord(PLFS_WRITE_CONTEXT Ctx,
     return STATUS_SUCCESS;
 }
 
-/**
- * @name NtfsLfsEmitRecord
- * @implemented
- *
- * Emit one log record into the in-memory image at the write cursor.  Steps:
- *
- *   1. Compute the record's total length; if it would cross the current
- *      RCRD page boundary, advance the cursor to the next page (slice 1
- *      never splits a record across pages - the MULTI_PAGE flag and span
- *      logic is a later slice).
- *   2. Assign ThisLsn from the cursor's byte offset via NtfsLfsMakeLsn.
- *   3. Reverse the page USA (so we write over real payload bytes), format
- *      the record in place at the cursor, re-stamp the page USA.
- *   4. Advance the cursor (8-byte aligned), update LastLsn, and flip the
- *      restart copies to the dirty landmark (CurrentLsn = new LSN,
- *      LastLsnDataLength = the record's ClientDataLength).
- */
 NTSTATUS
 NtfsLfsEmitRecord(PLFS_WRITE_CONTEXT Ctx,
                   const LFS_EMIT_PARAMS *Params,
@@ -538,9 +368,14 @@ NtfsLfsEmitRecord(PLFS_WRITE_CONTEXT Ctx,
     if (Ctx == NULL || Ctx->Image == NULL || Params == NULL)
         return STATUS_INVALID_PARAMETER;
 
+    if ((Params->RedoLength != 0 && Params->RedoData == NULL) ||
+        (Params->UndoLength != 0 && Params->UndoData == NULL) ||
+        (Params->LcnsToFollow != 0 && Params->Lcns == NULL))
+        return STATUS_INVALID_PARAMETER;
+
     /* Use the same geometry helper Format uses so the range check before we
      * touch the page is exact. */
-    LfsRecordGeometry(Params->RedoLength, Params->UndoLength,
+    LfsRecordGeometry(Params->RedoLength, Params->UndoLength, Params->LcnsToFollow,
                       &RedoAbs, &UndoAbs, &ClientDataLength, &TotalLength);
 
     /* A single record must fit within one page's record area. */
@@ -555,12 +390,11 @@ NtfsLfsEmitRecord(PLFS_WRITE_CONTEXT Ctx,
     if (Ctx->WriteOffset + TotalLength > PageEnd)
     {
         PageBase = PageEnd;
-        /* Wrap the RCRD region back to the start if we ran off the end,
-         * bumping the sequence number (the log is a circular buffer). */
+        /* Recycling requires a transaction-aware checkpoint. Preserve
+         * every existing record until one has made reuse safe. */
         if (PageBase + Ctx->PageSize > Ctx->ImageLength)
         {
-            PageBase = Ctx->FirstRcrdOffset;
-            Ctx->CurrentSeqNumber++;
+            return STATUS_LOG_FILE_FULL;
         }
         Ctx->WriteOffset = PageBase + LFS_RCRD_FIRST_RECORD;
         PageEnd = PageBase + Ctx->PageSize;
@@ -602,10 +436,10 @@ NtfsLfsEmitRecord(PLFS_WRITE_CONTEXT Ctx,
             return Status;
         }
 
-        /* The 0x22 field is the FIRST-record offset (the parser reads it as
-         * such); the empty-page init already stamped it to 0x40, so leave it
-         * alone here.  The page header LSN tracks the last record written. */
         Hdr->Lsn = ThisLsn;
+        *(PULONG)(Page + 0x10) |= 1; /* a complete record ends on this page */
+        *(PULONGLONG)(Page + 0x20) = ThisLsn; /* LastEndLsn */
+        *(PUSHORT)(Page + LFS_RCRD_NEXTREC_FIELD) = (USHORT)(RecordEnd - PageBase);
 
         Status = AddFixupArray(&Shim, Hdr);
         if (!NT_SUCCESS(Status))
@@ -630,15 +464,6 @@ NtfsLfsEmitRecord(PLFS_WRITE_CONTEXT Ctx,
     return STATUS_SUCCESS;
 }
 
-/**
- * @name NtfsLfsWriteRestart
- * @implemented
- *
- * Rewrite both restart copies.  @p Clean selects the CLEAN landmark
- * (dismount): CurrentLsn = Ctx->LastLsn, LastLsnDataLength = 0.  When not
- * clean, the dirty landmark (LastLsnDataLength != 0) is preserved by the
- * emit path; this entry point is primarily the clean-dismount flush.
- */
 NTSTATUS
 NtfsLfsWriteRestart(PLFS_WRITE_CONTEXT Ctx,
                     PDEVICE_EXTENSION Vcb,

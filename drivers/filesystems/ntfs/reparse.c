@@ -1,20 +1,16 @@
 /*
- * COPYRIGHT:        See COPYING in the top level directory
- * PROJECT:          ReactOS kernel
- * FILE:             drivers/filesystem/ntfs/reparse.c
- * PURPOSE:          NTFS filesystem driver -- per-file $REPARSE_POINT round-trip
- *                   workers (set / get / delete).
- *
- * The on-disk $REPARSE_POINT attribute stores a 4-byte reparse tag, a 2-byte
- * reserved field (matches REPARSE_DATA_BUFFER's Reserved), a 2-byte data
- * length, and the variable-length body -- matching the REPARSE_POINT_ATTRIBUTE
- * struct in ntfs.h.  This slice only supports resident $REPARSE_POINT
- * attributes; non-resident is rejected with STATUS_NOT_IMPLEMENTED so callers
- * see a stable fallback instead of silent corruption.
- *
- * FRH flags:  NTFS_FILE_TYPE_REPARSE (0x400) in $STANDARD_INFORMATION tracks
- * "this file has a reparse point".  We set/clear it in lockstep with the
- * attribute so NtfsFCBIsReparsePoint stays consistent.
+ * PROJECT:     ReactOS NTFS driver
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     Reparse points: FSCTL_SET/GET/DELETE_REPARSE_POINT
+ * COPYRIGHT:   Copyright 2026 ReactOS Team
+ */
+
+/*
+ * A reparse point is a $REPARSE_POINT attribute holding the reparse buffer the way
+ * FSCTL_SET_REPARSE_POINT received it: a REPARSE_DATA_BUFFER for a Microsoft tag, a
+ * REPARSE_GUID_DATA_BUFFER (with its GUID) for any other. The file also carries
+ * FILE_ATTRIBUTE_REPARSE_POINT, and its $FILE_NAMEs the tag, where directory listings
+ * report it.
  */
 
 /* INCLUDES *****************************************************************/
@@ -26,185 +22,355 @@
 
 /* FUNCTIONS ****************************************************************/
 
-/* Toggle NTFS_FILE_TYPE_REPARSE in the $STANDARD_INFORMATION FileAttribute
- * field of @p FileRecord to match the new "has reparse point" state. */
-static VOID
-ReparseSyncFlagInStandardInfo(PDEVICE_EXTENSION Vcb,
-                              PFILE_RECORD_HEADER FileRecord,
-                              BOOLEAN HasReparse)
+/* Size of the reparse buffer header that goes with a tag */
+static
+ULONG
+NtfsReparseHeaderSize(ULONG Tag)
 {
-    PSTANDARD_INFORMATION Si = GetStandardInformationFromRecord(Vcb, FileRecord);
-
-    if (Si == NULL)
-        return;
-
-    if (HasReparse)
-        Si->FileAttribute |= NTFS_FILE_TYPE_REPARSE;
-    else
-        Si->FileAttribute &= ~NTFS_FILE_TYPE_REPARSE;
+    return IsReparseTagMicrosoft(Tag) ? REPARSE_DATA_BUFFER_HEADER_SIZE : REPARSE_GUID_DATA_BUFFER_HEADER_SIZE;
 }
 
+/**
+* @name NtfsValidateReparseBuffer
+*
+* Checks a reparse buffer handed to FSCTL_SET_REPARSE_POINT (MS-FSCC 2.1.2): the length
+* must be the header's plus ReparseDataLength, and the tag not a reserved one.
+*/
+static
 NTSTATUS
-NtfsSetReparsePointOnRecord(PNTFS_VCB Vcb,
-                            PFILE_RECORD_HEADER FileRecord,
-                            ULONG Tag,
-                            const VOID *Data,
-                            ULONG DataLength)
+NtfsValidateReparseBuffer(PREPARSE_DATA_BUFFER Buffer,
+                          ULONG Length)
 {
-    NTSTATUS Status;
-    PNTFS_ATTR_CONTEXT AttrCtx = NULL;
-    ULONG Needed;
-    PREPARSE_POINT_ATTRIBUTE Blob = NULL;
-
-    if (DataLength > 0xFFFFU)
+    if (Length < REPARSE_DATA_BUFFER_HEADER_SIZE || Length > MAXIMUM_REPARSE_DATA_BUFFER_SIZE)
         return STATUS_IO_REPARSE_DATA_INVALID;
 
-    /* Build the on-disk serialisation. */
-    Needed = FIELD_OFFSET(REPARSE_POINT_ATTRIBUTE, Data) + DataLength;
-    Blob = ExAllocatePoolWithTag(NonPagedPool, Needed, TAG_NTFS);
-    if (Blob == NULL)
-        return STATUS_INSUFFICIENT_RESOURCES;
-    Blob->ReparseTag = Tag;
-    Blob->DataLength = (USHORT)DataLength;
-    Blob->Reserved = 0;
-    if (DataLength != 0 && Data != NULL)
-        RtlCopyMemory(Blob->Data, Data, DataLength);
-
-    Status = FindAttribute(Vcb, FileRecord, AttributeReparsePoint,
-                           L"", 0, &AttrCtx, NULL);
-    if (NT_SUCCESS(Status))
+    if (Length < NtfsReparseHeaderSize(Buffer->ReparseTag) ||
+        Length != NtfsReparseHeaderSize(Buffer->ReparseTag) + Buffer->ReparseDataLength)
     {
-        ULONGLONG ExistingLength = AttributeDataLength(AttrCtx->pRecord);
-        ULONG Written = 0;
-
-        if ((ULONG)ExistingLength != Needed)
-        {
-            /* Resizing a resident $REPARSE_POINT requires InternalSetResidentAttributeLength
-             * + slot-packing; delete-then-set is the simple path. */
-            ReleaseAttributeContext(AttrCtx);
-            Status = NtfsDeleteReparsePointFromRecord(Vcb, FileRecord);
-            if (!NT_SUCCESS(Status))
-                goto Cleanup;
-
-            Status = AddResidentAttribute(Vcb, FileRecord, AttributeReparsePoint,
-                                          L"", 0, Blob, Needed);
-        }
-        else
-        {
-            Status = WriteAttribute(Vcb, AttrCtx, 0, (PUCHAR)Blob, Needed,
-                                    &Written, FileRecord);
-            ReleaseAttributeContext(AttrCtx);
-        }
-    }
-    else
-    {
-        if (Needed > Vcb->NtfsInfo.BytesPerFileRecord)
-        {
-            Status = STATUS_NOT_IMPLEMENTED;
-            goto Cleanup;
-        }
-        Status = AddResidentAttribute(Vcb, FileRecord, AttributeReparsePoint,
-                                      L"", 0, Blob, Needed);
+        return STATUS_IO_REPARSE_DATA_INVALID;
     }
 
-    if (NT_SUCCESS(Status))
-        ReparseSyncFlagInStandardInfo(Vcb, FileRecord, TRUE);
+    if (Buffer->ReparseTag == IO_REPARSE_TAG_RESERVED_ZERO ||
+        Buffer->ReparseTag == IO_REPARSE_TAG_RESERVED_ONE)
+    {
+        return STATUS_IO_REPARSE_TAG_INVALID;
+    }
 
-Cleanup:
-    if (Blob != NULL)
-        ExFreePoolWithTag(Blob, TAG_NTFS);
-    return Status;
+    return STATUS_SUCCESS;
 }
 
+/**
+* @name NtfsMatchReparsePoint
+*
+* A request to change or delete a reparse point has to name it: the same tag, and for a
+* non-Microsoft tag the same GUID.
+*/
+static
 NTSTATUS
-NtfsGetReparsePointFromRecord(PNTFS_VCB Vcb,
-                              PFILE_RECORD_HEADER FileRecord,
-                              PULONG TagOut,
-                              PVOID Buffer,
-                              ULONG BufferLength,
-                              PULONG LengthOut)
+NtfsMatchReparsePoint(PREPARSE_DATA_BUFFER Existing,
+                      PREPARSE_DATA_BUFFER Request)
 {
+    if (Existing->ReparseTag != Request->ReparseTag)
+        return STATUS_IO_REPARSE_TAG_MISMATCH;
+
+    if (!IsReparseTagMicrosoft(Request->ReparseTag) &&
+        !IsEqualGUID(&((PREPARSE_GUID_DATA_BUFFER)Existing)->ReparseGuid,
+                     &((PREPARSE_GUID_DATA_BUFFER)Request)->ReparseGuid))
+    {
+        return STATUS_REPARSE_ATTRIBUTE_CONFLICT;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsReadReparsePoint
+*
+* Reads the reparse buffer of a file into a pool buffer the caller frees.
+*
+* @return
+* STATUS_SUCCESS, STATUS_NOT_A_REPARSE_POINT for a file that isn't one, or an error.
+*/
+static
+NTSTATUS
+NtfsReadReparsePoint(PDEVICE_EXTENSION DeviceExt,
+                     PFILE_RECORD_HEADER FileRecord,
+                     PREPARSE_DATA_BUFFER *Buffer,
+                     PULONG Length)
+{
+    PNTFS_ATTR_CONTEXT AttrContext;
+    ULONGLONG AttrLength;
     NTSTATUS Status;
-    PNTFS_ATTR_CONTEXT AttrCtx = NULL;
-    ULONGLONG AttrLen;
-    PREPARSE_POINT_ATTRIBUTE Blob = NULL;
-    ULONG BlobLen;
 
-    if (LengthOut != NULL)
-        *LengthOut = 0;
+    *Buffer = NULL;
+    *Length = 0;
 
-    Status = FindAttribute(Vcb, FileRecord, AttributeReparsePoint,
-                           L"", 0, &AttrCtx, NULL);
+    Status = FindAttribute(DeviceExt, FileRecord, AttributeReparsePoint, L"", 0, &AttrContext, NULL);
     if (!NT_SUCCESS(Status))
         return STATUS_NOT_A_REPARSE_POINT;
 
-    AttrLen = AttributeDataLength(AttrCtx->pRecord);
-    if (AttrLen < FIELD_OFFSET(REPARSE_POINT_ATTRIBUTE, Data) ||
-        AttrLen > MAXULONG)
+    AttrLength = AttributeDataLength(AttrContext->pRecord);
+    if (AttrLength < REPARSE_DATA_BUFFER_HEADER_SIZE || AttrLength > MAXIMUM_REPARSE_DATA_BUFFER_SIZE)
     {
-        ReleaseAttributeContext(AttrCtx);
+        ReleaseAttributeContext(AttrContext);
         return STATUS_IO_REPARSE_DATA_INVALID;
     }
 
-    BlobLen = (ULONG)AttrLen;
-    Blob = ExAllocatePoolWithTag(NonPagedPool, BlobLen, TAG_NTFS);
-    if (Blob == NULL)
+    *Buffer = ExAllocatePoolWithTag(NonPagedPool, (ULONG)AttrLength, TAG_NTFS);
+    if (*Buffer == NULL)
     {
-        ReleaseAttributeContext(AttrCtx);
+        ReleaseAttributeContext(AttrContext);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    ReadAttribute(Vcb, AttrCtx, 0, (PCHAR)Blob, BlobLen);
-    ReleaseAttributeContext(AttrCtx);
+    if (ReadAttribute(DeviceExt, AttrContext, 0, (PCHAR)*Buffer, (ULONG)AttrLength) != AttrLength)
+    {
+        ExFreePoolWithTag(*Buffer, TAG_NTFS);
+        *Buffer = NULL;
+        ReleaseAttributeContext(AttrContext);
+        return STATUS_FILE_CORRUPT_ERROR;
+    }
 
-    if (TagOut != NULL)
-        *TagOut = Blob->ReparseTag;
+    ReleaseAttributeContext(AttrContext);
+    *Length = (ULONG)AttrLength;
 
-    if (LengthOut != NULL)
-        *LengthOut = Blob->DataLength;
+    return STATUS_SUCCESS;
+}
 
-    if (BufferLength < Blob->DataLength)
+/**
+* @name NtfsGetReparseTag
+*
+* The reparse tag of a file, 0 if it has none.
+*/
+ULONG
+NtfsGetReparseTag(PDEVICE_EXTENSION DeviceExt,
+                  PFILE_RECORD_HEADER FileRecord)
+{
+    PREPARSE_DATA_BUFFER Buffer;
+    ULONG Length, Tag;
+
+    if (!NT_SUCCESS(NtfsReadReparsePoint(DeviceExt, FileRecord, &Buffer, &Length)))
+        return 0;
+
+    Tag = Buffer->ReparseTag;
+    ExFreePoolWithTag(Buffer, TAG_NTFS);
+
+    return Tag;
+}
+
+/**
+* @name NtfsMarkReparsePoint
+*
+* Sets or clears FILE_ATTRIBUTE_REPARSE_POINT and the tag wherever the file keeps them:
+* $STANDARD_INFORMATION, its $FILE_NAME and the directory entry for it, and the FCB.
+* Writes the base record.
+*/
+static
+NTSTATUS
+NtfsMarkReparsePoint(PDEVICE_EXTENSION DeviceExt,
+                     PNTFS_FCB Fcb,
+                     PFILE_RECORD_HEADER FileRecord,
+                     ULONG Tag)
+{
+    PSTANDARD_INFORMATION StdInfo;
+    PFILENAME_ATTRIBUTE FileName;
+
+    StdInfo = GetStandardInformationFromRecord(DeviceExt, FileRecord);
+    FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
+    if (StdInfo == NULL || FileName == NULL)
+        return STATUS_FILE_CORRUPT_ERROR;
+
+    if (Tag != 0)
+    {
+        StdInfo->FileAttribute |= NTFS_FILE_TYPE_REPARSE;
+        Fcb->Entry.FileAttributes |= NTFS_FILE_TYPE_REPARSE;
+    }
+    else
+    {
+        StdInfo->FileAttribute &= ~NTFS_FILE_TYPE_REPARSE;
+        Fcb->Entry.FileAttributes &= ~NTFS_FILE_TYPE_REPARSE;
+    }
+
+    FileName->Extended.ReparseTag = Tag;
+    Fcb->Entry.Extended.ReparseTag = Tag;
+
+    return NtfsUpdateDuplicatedInformation(DeviceExt, FileRecord, Fcb->MFTIndex, NTFS_FILENAME_UPDATE_ATTRS, FALSE);
+}
+
+/**
+* @name NtfsWriteReparsePoint
+* @implemented
+*
+* Makes a file a reparse point, or replaces the data of the one it is (MS-FSA
+* 2.1.5.10.36). A mount point goes only on an empty directory. An existing reparse point
+* keeps its tag (STATUS_IO_REPARSE_TAG_MISMATCH otherwise) and, for a non-Microsoft tag,
+* its GUID (STATUS_REPARSE_ATTRIBUTE_CONFLICT).
+*
+* @param Buffer
+* The reparse buffer FSCTL_SET_REPARSE_POINT received, Length bytes long.
+*/
+NTSTATUS
+NtfsWriteReparsePoint(PDEVICE_EXTENSION DeviceExt,
+                      PNTFS_FCB Fcb,
+                      PREPARSE_DATA_BUFFER Buffer,
+                      ULONG Length)
+{
+    PREPARSE_DATA_BUFFER Existing = NULL;
+    PFILE_RECORD_HEADER FileRecord;
+    ULONG ExistingLength;
+    NTSTATUS Status;
+
+    Status = NtfsValidateReparseBuffer(Buffer, Length);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (Buffer->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT)
+    {
+        BOOLEAN Empty;
+
+        if (!NtfsFCBIsDirectory(Fcb))
+            return STATUS_NOT_A_DIRECTORY;
+
+        KeEnterCriticalRegion();
+        ExAcquireResourceSharedLite(&DeviceExt->IndexResource, TRUE);
+        Status = NtfsIsDirectoryEmpty(DeviceExt, Fcb->MFTIndex, &Empty);
+        ExReleaseResourceLite(&DeviceExt->IndexResource);
+        KeLeaveCriticalRegion();
+
+        if (NT_SUCCESS(Status) && !Empty)
+            Status = STATUS_DIRECTORY_NOT_EMPTY;
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtfsReadReparsePoint(DeviceExt, FileRecord, &Existing, &ExistingLength);
+        if (Status == STATUS_NOT_A_REPARSE_POINT)
+            Status = STATUS_SUCCESS;
+    }
+
+    if (NT_SUCCESS(Status) && Existing != NULL)
+        Status = NtfsMatchReparsePoint(Existing, Buffer);
+
+    if (NT_SUCCESS(Status))
+        Status = NtfsSetAttributeValue(DeviceExt, FileRecord, AttributeReparsePoint, NULL, 0, Buffer, Length);
+
+    if (NT_SUCCESS(Status))
+        Status = NtfsMarkReparsePoint(DeviceExt, Fcb, FileRecord, Buffer->ReparseTag);
+
+    if (Existing != NULL)
+        ExFreePoolWithTag(Existing, TAG_NTFS);
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    return Status;
+}
+
+/**
+* @name NtfsQueryReparsePoint
+* @implemented
+*
+* Copies the reparse buffer of a file into Output (MS-FSA 2.1.5.10.18). An Output that
+* holds only the header gets it with STATUS_BUFFER_OVERFLOW; one too small for the header
+* is STATUS_BUFFER_TOO_SMALL.
+*
+* @param Copied
+* Receives the bytes copied.
+*/
+NTSTATUS
+NtfsQueryReparsePoint(PDEVICE_EXTENSION DeviceExt,
+                      PNTFS_FCB Fcb,
+                      PVOID Output,
+                      ULONG OutputLength,
+                      PULONG Copied)
+{
+    PFILE_RECORD_HEADER FileRecord;
+    PREPARSE_DATA_BUFFER Buffer;
+    ULONG Length;
+    NTSTATUS Status;
+
+    *Copied = 0;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+        Status = NtfsReadReparsePoint(DeviceExt, FileRecord, &Buffer, &Length);
+
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (OutputLength < NtfsReparseHeaderSize(Buffer->ReparseTag))
     {
         Status = STATUS_BUFFER_TOO_SMALL;
-        goto Done;
+    }
+    else
+    {
+        *Copied = min(Length, OutputLength);
+        RtlCopyMemory(Output, Buffer, *Copied);
+        Status = (OutputLength < Length) ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
     }
 
-    if (Buffer != NULL && Blob->DataLength != 0)
-        RtlCopyMemory(Buffer, Blob->Data, Blob->DataLength);
+    ExFreePoolWithTag(Buffer, TAG_NTFS);
 
-    Status = STATUS_SUCCESS;
-
-Done:
-    ExFreePoolWithTag(Blob, TAG_NTFS);
     return Status;
 }
 
+/**
+* @name NtfsRemoveReparsePoint
+* @implemented
+*
+* Makes a reparse point an ordinary file or directory again (MS-FSA 2.1.5.10.8). Request
+* names the tag, and for a non-Microsoft tag the GUID, of the reparse point it deletes, and
+* carries no data.
+*/
 NTSTATUS
-NtfsDeleteReparsePointFromRecord(PNTFS_VCB Vcb,
-                                 PFILE_RECORD_HEADER FileRecord)
+NtfsRemoveReparsePoint(PDEVICE_EXTENSION DeviceExt,
+                       PNTFS_FCB Fcb,
+                       PREPARSE_DATA_BUFFER Request,
+                       ULONG Length)
 {
+    PREPARSE_DATA_BUFFER Existing = NULL;
+    PFILE_RECORD_HEADER FileRecord;
+    ULONG ExistingLength;
     NTSTATUS Status;
-    PNTFS_ATTR_CONTEXT AttrCtx = NULL;
-    ULONG AttrOffset = 0;
-    PNTFS_ATTR_RECORD Slot;
 
-    Status = FindAttribute(Vcb, FileRecord, AttributeReparsePoint,
-                           L"", 0, &AttrCtx, &AttrOffset);
-    if (!NT_SUCCESS(Status))
-        return STATUS_NOT_A_REPARSE_POINT;
-
-    if (AttrCtx->pRecord->IsNonResident || AttrCtx->MigratedToMFTIndex != 0)
+    if (Request == NULL || Length < REPARSE_DATA_BUFFER_HEADER_SIZE ||
+        Length != NtfsReparseHeaderSize(Request->ReparseTag) || Request->ReparseDataLength != 0)
     {
-        ReleaseAttributeContext(AttrCtx);
-        return STATUS_NOT_IMPLEMENTED;
+        return STATUS_IO_REPARSE_DATA_INVALID;
     }
 
-    Slot = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
-    Status = RemoveResidentAttribute(Vcb, FileRecord, Slot);
-    ReleaseAttributeContext(AttrCtx);
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+        Status = NtfsReadReparsePoint(DeviceExt, FileRecord, &Existing, &ExistingLength);
 
     if (NT_SUCCESS(Status))
-        ReparseSyncFlagInStandardInfo(Vcb, FileRecord, FALSE);
+        Status = NtfsMatchReparsePoint(Existing, Request);
+
+    if (NT_SUCCESS(Status))
+        Status = NtfsDeleteAttributeFromFile(DeviceExt, FileRecord, AttributeReparsePoint, L"", 0);
+
+    if (NT_SUCCESS(Status))
+        Status = NtfsMarkReparsePoint(DeviceExt, Fcb, FileRecord, 0);
+
+    if (Existing != NULL)
+        ExFreePoolWithTag(Existing, TAG_NTFS);
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
     return Status;
 }
 

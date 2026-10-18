@@ -1,155 +1,297 @@
 /*
- * COPYRIGHT:        See COPYING in the top level directory
- * PROJECT:          ReactOS kernel
- * FILE:             drivers/filesystem/ntfs/pnp.c
- * PURPOSE:          NTFS filesystem driver - IRP_MJ_PNP handler
- *
- * The I/O Manager sends IRP_MJ_PNP to the volume device for things like
- * IRP_MN_QUERY_DEVICE_RELATIONS / TargetDeviceRelation, which the Plug
- * and Play manager uses (via IopGetRelatedTargetDevice in
- * ntoskrnl/io/iomgr/device.c) to walk from a file object back to its
- * underlying physical device. The PnP manager asserts that the response
- * is non-NULL on success - see the ASSERT(DeviceRelations) at line 680
- * - so we cannot just acknowledge the IRP with STATUS_SUCCESS without
- * filling in the out parameters; that crashes text-mode setup as soon
- * as it tries to enumerate disks.
- *
- * fastfat handles a small set of removal-related minor codes itself
- * (QUERY_REMOVE_DEVICE / SURPRISE_REMOVAL / REMOVE_DEVICE /
- * CANCEL_REMOVE_DEVICE) and forwards every other minor code down to
- * the underlying disk driver via IoSkipCurrentIrpStackLocation +
- * IoCallDriver. We mirror that here. The disk driver knows the answers
- * to relations queries, capability queries, etc., and can fill in the
- * IRP correctly.
- *
- * The control device (NtfsGlobalData->DeviceObject) has no underlying
- * storage to forward to, so PNP IRPs that arrive on it (which mostly
- * shouldn't happen) get STATUS_NOT_SUPPORTED.
+ * PROJECT:     ReactOS NTFS filesystem driver
+ * LICENSE:     GPL-2.0-or-later
+ * PURPOSE:     Storage removal and PnP forwarding
  */
 
-/* INCLUDES *****************************************************************/
-
-#include "ntfs.h"
+#include "lfswrite.h"
 
 #define NDEBUG
 #include <debug.h>
 
-/* FUNCTIONS ****************************************************************/
-
-/*
- * Forward a PNP IRP down to the underlying storage device. After this
- * returns the IRP is owned by the disk driver (or already completed by
- * it). The caller must NOT touch the IRP afterwards and must clear
- * IRPCONTEXT_COMPLETE so NtfsDispatch doesn't try to complete it again.
- */
 static
 NTSTATUS
-NtfsForwardPnpIrp(PNTFS_VCB Vcb,
-                  PIRP Irp)
+NTAPI
+NtfsForwardCompletion(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
 {
-    IoSkipCurrentIrpStackLocation(Irp);
-    return IoCallDriver(Vcb->StorageDevice, Irp);
+    UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(Irp);
+    KeSetEvent(Context, IO_NO_INCREMENT, FALSE);
+    return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
-/*
- * Mark the volume so subsequent CREATE / READ / WRITE will refuse and
- * the FS knows the underlying device is going away. This is the bare
- * minimum response to a removal request - fastfat does much more
- * (volume lock, dismount, VPB swap) but for now we at least flag the
- * VCB and let the PnP manager / disk driver deal with the rest.
- */
+/* Keep ownership until the lower stack finishes. In particular, a query
+ * accepted here must be rolled back if a lower driver vetoes removal. */
+NTSTATUS
+NtfsForwardIrpSynchronous(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    KEVENT Event;
+    NTSTATUS Status;
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    IoCopyCurrentIrpStackLocationToNext(Irp);
+    IoSetCompletionRoutine(Irp, NtfsForwardCompletion, &Event, TRUE, TRUE, TRUE);
+    Status = IoCallDriver(DeviceObject, Irp);
+    if (Status == STATUS_PENDING)
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+    return Irp->IoStatus.Status;
+}
+
+/* IoResource and DirResource are held exclusive. A section retains its file
+ * object after cleanup, so handle counts alone do not establish quiescence. */
+static
+BOOLEAN
+NtfsVolumeIsBusy(PNTFS_VCB Vcb, ULONG AllowedHandles)
+{
+    PLIST_ENTRY Entry;
+    PNTFS_FCB Fcb;
+    KIRQL OldIrql;
+    BOOLEAN Busy = (Vcb->OpenHandleCount != AllowedHandles ||
+                    Vcb->FileObjectCount != AllowedHandles);
+
+    KeAcquireSpinLock(&Vcb->FcbListLock, &OldIrql);
+    for (Entry = Vcb->FcbListHead.Flink; !Busy && Entry != &Vcb->FcbListHead; Entry = Entry->Flink)
+    {
+        Fcb = CONTAINING_RECORD(Entry, NTFS_FCB, FcbListEntry);
+        if (Fcb->Flags & FCB_IS_VOLUME)
+            continue;
+        /* The internal cache stream is ours; any other reference can belong
+         * to a mapped file, an image, or an outstanding external file object. */
+        Busy = Fcb->RefCount > (Fcb->FileObject != NULL ? 1 : 0);
+    }
+    KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
+    return Busy;
+}
+
+static
+NTSTATUS
+NtfsPrepareForRemoval(PNTFS_VCB Vcb, ULONG AllowedHandles)
+{
+    if (Vcb->Flags & VCB_DEVICE_REMOVED)
+        return STATUS_DEVICE_REMOVED;
+    if (Vcb->Flags & VCB_QUERY_REMOVE_PENDING)
+        return STATUS_SUCCESS;
+    if (NtfsVolumeIsBusy(Vcb, AllowedHandles))
+        return STATUS_ACCESS_DENIED;
+    if (Vcb->Flags & VCB_VOLUME_DISMOUNTED)
+        return STATUS_SUCCESS;
+    {
+        NTSTATUS Status = NtfsFlushVolume(Vcb);
+        if (NT_SUCCESS(Status)) Status = NtfsLfsSuspendWriter(Vcb->LfsWriter);
+        return Status;
+    }
+}
+
 static
 VOID
-NtfsMarkVolumeForDismount(PNTFS_VCB Vcb)
+NtfsMarkDeviceRemoved(PNTFS_VCB Vcb)
 {
-    Vcb->Flags |= VCB_DISMOUNT_PENDING;
+    PFILE_OBJECT Stream;
+    PNTFS_FCB Fcb;
+    KIRQL OldIrql;
+
+    if (Vcb->Flags & VCB_DEVICE_REMOVED)
+        return;
+
+    /* An accepted query has already flushed; surprise removal cannot flush.
+     * Refuse new paging requests before waiting for ones already in flight.
+     * Those requests may recursively issue volume-stream paging I/O, which
+     * must fail instead of waiting behind the exclusive acquisition here. */
+    Vcb->Flags |= VCB_DEVICE_REMOVED;
+    Vcb->Flags &= ~VCB_QUERY_REMOVE_PENDING;
+    ExAcquireResourceExclusiveLite(&Vcb->PagingResource, TRUE);
+    ExReleaseResourceLite(&Vcb->PagingResource);
+    NtfsLfsDestroyWriter(Vcb->LfsWriter);
+    Vcb->LfsWriter = NULL;
+    NtfsRemoveFileLocks(Vcb);
+    FsRtlNotifyCleanupAll(Vcb->NotifySync, &Vcb->NotifyList);
+
+    Stream = Vcb->StreamFileObject;
+    if (Stream != NULL)
+    {
+        Fcb = Stream->FsContext;
+        CcPurgeCacheSection(Stream->SectionObjectPointer, NULL, 0, FALSE);
+        CcUninitializeCacheMap(Stream, NULL, NULL);
+        Vcb->StreamFileObject = NULL;
+        Fcb->FileObject = NULL;
+        ObDereferenceObject(Stream);
+    }
+
+    /* Retain the upstream VCB and outstanding FCBs for their old handles.
+     * Unlike a manual dismount, even raw volume I/O is now prohibited. */
+    IoAcquireVpbSpinLock(&OldIrql);
+    Vcb->Vpb->Flags &= ~(VPB_MOUNTED | VPB_DIRECT_WRITES_ALLOWED);
+    IoReleaseVpbSpinLock(OldIrql);
 }
 
 NTSTATUS
 NtfsPnp(PNTFS_IRP_CONTEXT IrpContext)
 {
-    PIRP Irp = IrpContext->Irp;
-    PIO_STACK_LOCATION Stack = IrpContext->Stack;
-    PDEVICE_OBJECT DeviceObject = IrpContext->DeviceObject;
     PNTFS_VCB Vcb;
+    PDEVICE_OBJECT StorageDevice;
+    PIRP Irp = IrpContext->Irp;
     NTSTATUS Status;
+    BOOLEAN WasPending;
 
-    DPRINT("NtfsPnp(%p): MinorFunction %u\n", DeviceObject, Stack->MinorFunction);
-
-    /* PNP doesn't apply to the control device - it has no underlying
-     * storage to forward to, and the I/O Manager normally doesn't send
-     * PNP IRPs there anyway. */
-    if (DeviceObject == NtfsGlobalData->DeviceObject)
-    {
-        Irp->IoStatus.Information = 0;
+    if (IrpContext->DeviceObject == NtfsGlobalData->DeviceObject)
         return STATUS_NOT_SUPPORTED;
-    }
 
-    /* Validate that this is one of our volume device objects. */
-    if (DeviceObject->DeviceExtension == NULL)
-    {
-        Irp->IoStatus.Information = 0;
-        return STATUS_INVALID_DEVICE_REQUEST;
-    }
-
-    Vcb = (PNTFS_VCB)DeviceObject->DeviceExtension;
-    if (Vcb->Identifier.Type != NTFS_TYPE_VCB)
-    {
-        Irp->IoStatus.Information = 0;
-        return STATUS_INVALID_DEVICE_REQUEST;
-    }
-
-    switch (Stack->MinorFunction)
+    Vcb = IrpContext->DeviceObject->DeviceExtension;
+    switch (IrpContext->MinorFunction)
     {
         case IRP_MN_QUERY_REMOVE_DEVICE:
-            /* The PnP manager is asking permission to remove the
-             * underlying device. We don't yet implement the volume
-             * lock / open-handle check that fastfat does, but for a
-             * fixed-disk install this code path effectively never
-             * fires. Forward the question to the disk driver - it
-             * will refuse if it has good reason. */
-            Status = NtfsForwardPnpIrp(Vcb, Irp);
-            IrpContext->Flags &= ~IRPCONTEXT_COMPLETE;
-            return Status;
-
-        case IRP_MN_SURPRISE_REMOVAL:
-        case IRP_MN_REMOVE_DEVICE:
-            /* Mark our VCB so further file operations refuse, then
-             * forward to the disk driver. After this point the device
-             * is gone whether we like it or not. */
-            NtfsMarkVolumeForDismount(Vcb);
-            Status = NtfsForwardPnpIrp(Vcb, Irp);
-            IrpContext->Flags &= ~IRPCONTEXT_COMPLETE;
-            return Status;
-
         case IRP_MN_CANCEL_REMOVE_DEVICE:
-            /* Removal was cancelled. Clear the dismount-pending flag
-             * we set in the prior QUERY_REMOVE and forward so the disk
-             * driver also knows. */
-            Vcb->Flags &= ~VCB_DISMOUNT_PENDING;
-            Status = NtfsForwardPnpIrp(Vcb, Irp);
-            IrpContext->Flags &= ~IRPCONTEXT_COMPLETE;
-            return Status;
-
-        case IRP_MN_QUERY_DEVICE_RELATIONS:
-            /* IopGetRelatedTargetDevice sends this with type
-             * TargetDeviceRelation to walk from a file back to its
-             * physical device. The disk driver fills in the
-             * DEVICE_RELATIONS for itself, so we must forward - not
-             * complete with STATUS_SUCCESS, which would leave
-             * DeviceRelations NULL and trip the assertion that broke
-             * the install before. */
-            Status = NtfsForwardPnpIrp(Vcb, Irp);
-            IrpContext->Flags &= ~IRPCONTEXT_COMPLETE;
-            return Status;
+        case IRP_MN_REMOVE_DEVICE:
+        case IRP_MN_SURPRISE_REMOVAL:
+        case IRP_MN_EJECT:
+            break;
 
         default:
-            /* Everything else (capability queries, ID queries, lock
-             * queries, etc.) is the disk driver's business. Forward. */
-            Status = NtfsForwardPnpIrp(Vcb, Irp);
-            IrpContext->Flags &= ~IRPCONTEXT_COMPLETE;
+            /* FsRtlNotifyVolumeEvent can ask for TargetDeviceRelation while
+             * its caller already owns IoResource shared. Only removal needs
+             * exclusive ownership; upgrading here would deadlock dismount.
+             * Shared ownership still keeps storage alive through completion. */
+            ExAcquireResourceSharedLite(&Vcb->IoResource, TRUE);
+            if ((Vcb->Flags & VCB_DEVICE_REMOVED) || Vcb->StorageDevice == NULL)
+                Status = STATUS_DEVICE_REMOVED;
+            else
+                Status = NtfsForwardIrpSynchronous(Vcb->StorageDevice, Irp);
+            ExReleaseResourceLite(&Vcb->IoResource);
             return Status;
     }
+
+    ExAcquireResourceExclusiveLite(&Vcb->IoResource, TRUE);
+    ExAcquireResourceExclusiveLite(&Vcb->DirResource, TRUE);
+    StorageDevice = Vcb->StorageDevice;
+    if (StorageDevice == NULL)
+    {
+        Status = (IrpContext->MinorFunction == IRP_MN_REMOVE_DEVICE ||
+                  IrpContext->MinorFunction == IRP_MN_CANCEL_REMOVE_DEVICE) ?
+                 STATUS_SUCCESS : STATUS_DEVICE_REMOVED;
+        goto Done;
+    }
+
+    /* REMOVE can make the lower object delete-pending before it completes. */
+    ObReferenceObject(StorageDevice);
+    switch (IrpContext->MinorFunction)
+    {
+        case IRP_MN_QUERY_REMOVE_DEVICE:
+        case IRP_MN_EJECT:
+            Status = NtfsPrepareForRemoval(Vcb, 0);
+            if (!NT_SUCCESS(Status))
+                break;
+            WasPending = BooleanFlagOn(Vcb->Flags, VCB_QUERY_REMOVE_PENDING);
+            Vcb->Flags |= VCB_QUERY_REMOVE_PENDING;
+            ExAcquireResourceExclusiveLite(&Vcb->PagingResource, TRUE);
+            ExReleaseResourceLite(&Vcb->PagingResource);
+            Status = NtfsForwardIrpSynchronous(StorageDevice, Irp);
+            if (!NT_SUCCESS(Status) && !WasPending)
+            {
+                Vcb->Flags &= ~VCB_QUERY_REMOVE_PENDING;
+                if (!NT_SUCCESS(NtfsLfsResumeWriter(Vcb->LfsWriter)))
+                {
+                    NtfsMarkVolumeCorrupt(Vcb);
+                    Vcb->Flags |= VCB_VOLUME_READ_ONLY;
+                }
+            }
+            else if (NT_SUCCESS(Status) && IrpContext->MinorFunction == IRP_MN_EJECT)
+            {
+                NtfsMarkDeviceRemoved(Vcb);
+                Vcb->StorageDevice = NULL;
+            }
+            break;
+
+        case IRP_MN_CANCEL_REMOVE_DEVICE:
+            if (Vcb->Flags & VCB_DEVICE_REMOVED)
+            {
+                Status = STATUS_SUCCESS;
+                break;
+            }
+            Irp->IoStatus.Status = STATUS_SUCCESS;
+            Status = NtfsForwardIrpSynchronous(StorageDevice, Irp);
+            /* Cancellation is not resurrection after surprise removal. */
+            Vcb->Flags &= ~VCB_QUERY_REMOVE_PENDING;
+            {
+                NTSTATUS ResumeStatus = NtfsLfsResumeWriter(Vcb->LfsWriter);
+                if (!NT_SUCCESS(ResumeStatus))
+                {
+                    NtfsMarkVolumeCorrupt(Vcb);
+                    Vcb->Flags |= VCB_VOLUME_READ_ONLY;
+                    if (NT_SUCCESS(Status)) Status = ResumeStatus;
+                }
+            }
+            break;
+
+        case IRP_MN_REMOVE_DEVICE:
+            if (!(Vcb->Flags & (VCB_DEVICE_REMOVED | VCB_QUERY_REMOVE_PENDING | VCB_VOLUME_DISMOUNTED)))
+            {
+                Status = NtfsFlushVolume(Vcb);
+                if (NT_SUCCESS(Status)) Status = NtfsLfsFinishWriter(Vcb->LfsWriter);
+                if (!NT_SUCCESS(Status))
+                    DPRINT1("Removal flush failed: %lx\n", Status);
+            }
+            NtfsMarkDeviceRemoved(Vcb);
+            Irp->IoStatus.Status = STATUS_SUCCESS;
+            Status = NtfsForwardIrpSynchronous(StorageDevice, Irp);
+            Vcb->StorageDevice = NULL;
+            break;
+
+        case IRP_MN_SURPRISE_REMOVAL:
+            NtfsMarkDeviceRemoved(Vcb);
+            Irp->IoStatus.Status = STATUS_SUCCESS;
+            Status = NtfsForwardIrpSynchronous(StorageDevice, Irp);
+            break;
+
+        default:
+            /* Relations, capabilities, IDs, etc. belong to the storage stack.
+             * Success with no DEVICE_RELATIONS would break PnP enumeration. */
+            if (Vcb->Flags & VCB_DEVICE_REMOVED)
+                Status = STATUS_DEVICE_REMOVED;
+            else
+                Status = NtfsForwardIrpSynchronous(StorageDevice, Irp);
+            break;
+    }
+    ObDereferenceObject(StorageDevice);
+Done:
+    ExReleaseResourceLite(&Vcb->DirResource);
+    ExReleaseResourceLite(&Vcb->IoResource);
+    return Status;
 }
 
-/* EOF */
+NTSTATUS
+NtfsEjectMedia(PNTFS_IRP_CONTEXT IrpContext)
+{
+    PNTFS_VCB Vcb = IrpContext->DeviceObject->DeviceExtension;
+    PNTFS_FCB Fcb;
+    NTSTATUS Status;
+    BOOLEAN WasPending;
+
+    if (IrpContext->DeviceObject == NtfsGlobalData->DeviceObject ||
+        IrpContext->FileObject == NULL)
+        return STATUS_INVALID_DEVICE_REQUEST;
+    Fcb = IrpContext->FileObject->FsContext;
+    if (!(Fcb->Flags & FCB_IS_VOLUME))
+        return STATUS_INVALID_PARAMETER;
+
+    ExAcquireResourceExclusiveLite(&Vcb->IoResource, TRUE);
+    ExAcquireResourceExclusiveLite(&Vcb->DirResource, TRUE);
+    Status = NtfsPrepareForRemoval(Vcb, 1);
+    if (NT_SUCCESS(Status))
+    {
+        WasPending = BooleanFlagOn(Vcb->Flags, VCB_QUERY_REMOVE_PENDING);
+        Vcb->Flags |= VCB_QUERY_REMOVE_PENDING;
+        ExAcquireResourceExclusiveLite(&Vcb->PagingResource, TRUE);
+        ExReleaseResourceLite(&Vcb->PagingResource);
+        Status = NtfsForwardIrpSynchronous(Vcb->StorageDevice, IrpContext->Irp);
+        if (NT_SUCCESS(Status))
+        {
+            NtfsMarkDeviceRemoved(Vcb);
+            Vcb->StorageDevice = NULL;
+        }
+        else if (!WasPending)
+            Vcb->Flags &= ~VCB_QUERY_REMOVE_PENDING;
+    }
+    ExReleaseResourceLite(&Vcb->DirResource);
+    ExReleaseResourceLite(&Vcb->IoResource);
+    return Status;
+}
