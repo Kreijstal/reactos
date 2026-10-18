@@ -1188,4 +1188,3 @@ KiSetNextWaitBlock(_In_ PKWAIT_BLOCK WaitBlock,
 #endif
 }
 
-#include "ke_x.h"

@@ -132,6 +132,8 @@
 
 #include "tag.h"
 #include "ke.h"
+#include "spinlock.h"
+#include "ke_x.h"
 #include "ob.h"
 #include "mm.h"
 #include "ex.h"
@@ -150,7 +152,6 @@
 #include "lpc.h"
 #include "rtl.h"
 #include "dbgk.h"
-#include "spinlock.h"
 #include "test.h"
 #include "inbv.h"
 #include "vdm.h"
@@ -159,6 +160,7 @@
 #include "icif.h"
 #include "arch/intrin_i.h"
 #include <arbiter.h>
+#include "kse.h"
 
 /*
  * Use IsPointerOffset to test whether a pointer should be interpreted as an offset
