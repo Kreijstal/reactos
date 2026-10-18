@@ -797,7 +797,7 @@ GreGetDIBitsInternal(
     PDC pDC;
     LONG width, height;
     WORD planes, bpp;
-    DWORD compr, size ;
+    DWORD compr, size;
     USHORT i;
     int bitmap_type;
     RGBQUAD* rgbQuads;
@@ -858,12 +858,12 @@ GreGetDIBitsInternal(
     }
 
     /* Validate input:
-       - negative width is always an invalid value
+       - non-null Bits and negative width is an invalid combination
        - non-null Bits and zero bpp is an invalid combination, unless the
          caller requested zero scan lines. In that case Windows treats the
          call as an information query.
        - only check the rest of the input params if either bpp is non-zero or Bits are set */
-    if (width < 0 || (bpp == 0 && Bits && ScanLines != 0))
+    if (Bits && (width < 0 || (bpp == 0 && ScanLines != 0)))
     {
         ScanLines = 0;
         goto done;
@@ -1213,8 +1213,11 @@ GreGetDIBitsInternal(
     }
     else
     {
-        /* Signals success and not the actual number of scan lines*/
-        ScanLines = 1;
+        if (width < 0 || Info->bmiHeader.biSizeImage == 0)
+            ScanLines = 0;
+        else
+            /* Signals success and not the actual number of scan lines*/
+            ScanLines = 1;
     }
 
 done:
@@ -2337,11 +2340,19 @@ INT FASTCALL DIB_BitmapInfoSize(const BITMAPINFO * info, WORD coloruse)
     if (info->bmiHeader.biSize == sizeof(BITMAPCOREHEADER))
     {
         const BITMAPCOREHEADER *core = (const BITMAPCOREHEADER *)info;
+        if (core->bcBitCount == 0)
+        {
+            return sizeof(BITMAPCOREHEADER);
+        }
         colors = (core->bcBitCount <= 8) ? 1 << core->bcBitCount : 0;
         return sizeof(BITMAPCOREHEADER) + colors * colorsize;
     }
     else  /* Assume BITMAPINFOHEADER */
     {
+        if (info->bmiHeader.biBitCount == 0)
+        {
+            return info->bmiHeader.biSize;
+        } 
         colors = info->bmiHeader.biClrUsed;
         if (colors > 256) colors = 256;
         if (!colors && (info->bmiHeader.biBitCount <= 8))
@@ -2490,13 +2501,13 @@ DIB_FreeConvertedBitmapInfo(BITMAPINFO* converted, BITMAPINFO* orig, DWORD usage
         if(!numColors) numColors = 1 << pbmci->bmciHeader.bcBitCount;
         if(usage == DIB_PAL_COLORS)
         {
-            RtlZeroMemory(pbmci->bmciColors, (1 << pbmci->bmciHeader.bcBitCount) * sizeof(WORD));
+            RtlZeroMemory(pbmci->bmciColors, ((SIZE_T)1 << pbmci->bmciHeader.bcBitCount) * sizeof(WORD));
             RtlCopyMemory(pbmci->bmciColors, converted->bmiColors, numColors * sizeof(WORD));
         }
         else
         {
             UINT i;
-            RtlZeroMemory(pbmci->bmciColors, (1 << pbmci->bmciHeader.bcBitCount) * sizeof(RGBTRIPLE));
+            RtlZeroMemory(pbmci->bmciColors, ((SIZE_T)1 << pbmci->bmciHeader.bcBitCount) * sizeof(RGBTRIPLE));
             for(i=0; i<numColors; i++)
             {
                 pbmci->bmciColors[i].rgbtRed = converted->bmiColors[i].rgbRed;

@@ -22,10 +22,6 @@ VgaInterpretCmdStream(
     UCHAR Value;
     USHORT ShortValue;
 
-    /* First make sure that we have a Command Stream */
-    if (!CmdStream)
-        return TRUE;
-
     /* Loop as long as we have commands */
     while (*CmdStream != EOD)
     {
@@ -182,6 +178,16 @@ VgaIsPresent(VOID)
     UCHAR OrgGCAddr, OrgReadMap, OrgBitMask;
     UCHAR OrgSCAddr, OrgMemMode;
     UCHAR i;
+
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    /* Check whether the current platform supports IO port access
+     * and fail if not, since we won't be able to use VGA IO ports */
+    if ((HALPRIVATEDISPATCH->Version >= 13) &&
+        HalQueryIoPortAccessSupported && !HalQueryIoPortAccessSupported())
+    {
+        return FALSE;
+    }
+#endif
 
     /* Remember the original state of the Graphics Controller Address register */
     OrgGCAddr = __inpb(VGA_BASE_IO_PORT + GRAPH_ADDRESS_PORT);
