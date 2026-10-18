@@ -76,16 +76,11 @@ const struct builtin_class_descr COMBO_builtin_class =
 {
     comboboxW,            /* name */
     CS_PARENTDC | CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW, /* style  */
-#ifdef __REACTOS__
-    ComboWndProcA,        /* procA */
-    ComboWndProcW,        /* procW */
+    &pfnClientA.pfnComboBoxWndProc,        /* procA */
+    &pfnClientW.pfnComboBoxWndProc,        /* procW */
 #ifdef BUILD_WOW6432
     sizeof(UINT64),
 #else
-    sizeof(HEADCOMBO *),  /* extra */
-#endif
-#else
-    WINPROC_COMBO,        /* proc */
     sizeof(HEADCOMBO *),  /* extra */
 #endif
     IDC_ARROW,            /* cursor */
