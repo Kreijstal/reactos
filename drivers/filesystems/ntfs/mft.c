@@ -2819,9 +2819,11 @@ UpdateFileNameRecordWorker(PDEVICE_EXTENSION Vcb,
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    Status = ReadAttribute(Vcb, IndexRootCtx, 0, IndexRecord, AttributeDataLength(IndexRootCtx->pRecord));
-    if (!NT_SUCCESS(Status))
+    // ReadAttribute returns the bytes it read
+    if (ReadAttribute(Vcb, IndexRootCtx, 0, IndexRecord, (ULONG)AttributeDataLength(IndexRootCtx->pRecord)) !=
+        AttributeDataLength(IndexRootCtx->pRecord))
     {
+        Status = STATUS_UNEXPECTED_IO_ERROR;
         DPRINT1("ERROR: Failed to read Index Root!\n");
         ExFreePoolWithTag(IndexRecord, TAG_NTFS);
         ReleaseAttributeContext(IndexRootCtx);
@@ -3661,9 +3663,10 @@ InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
     }
 
     // Read the Index Root
-    Status = ReadAttribute(DeviceExt, IndexRootContext, 0, (PCHAR)I30IndexRoot, I30IndexRootLength);
-    if (!NT_SUCCESS(Status))
+    // ReadAttribute returns the bytes it read
+    if (ReadAttribute(DeviceExt, IndexRootContext, 0, (PCHAR)I30IndexRoot, I30IndexRootLength) != I30IndexRootLength)
     {
+        Status = STATUS_UNEXPECTED_IO_ERROR;
         DPRINT1("ERROR: Couln't read index root attribute for Mft index #%I64u\n", DirectoryMftIndex);
         ReleaseAttributeContext(IndexRootContext);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
@@ -4123,9 +4126,10 @@ RemoveIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    Status = ReadAttribute(DeviceExt, IndexRootContext, 0, (PCHAR)I30IndexRoot, I30IndexRootLength);
-    if (!NT_SUCCESS(Status))
+    // ReadAttribute returns the bytes it read
+    if (ReadAttribute(DeviceExt, IndexRootContext, 0, (PCHAR)I30IndexRoot, I30IndexRootLength) != I30IndexRootLength)
     {
+        Status = STATUS_UNEXPECTED_IO_ERROR;
         DPRINT1("ERROR: Couldn't read index root attribute for Mft index #%I64u\n", DirectoryMftIndex);
         ReleaseAttributeContext(IndexRootContext);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
@@ -6080,9 +6084,10 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
         BitmapPtr = (PULONG)ALIGN_UP_BY((ULONG_PTR)BitmapMem, sizeof(ULONG));
 
         // Read the existing bitmap data
-        Status = ReadAttribute(Vcb, BitmapContext, 0, (PCHAR)BitmapPtr, BitmapLength);
-        if (!NT_SUCCESS(Status))
+        // ReadAttribute returns the bytes it read
+        if (ReadAttribute(Vcb, BitmapContext, 0, (PCHAR)BitmapPtr, (ULONG)BitmapLength) != BitmapLength)
         {
+            Status = STATUS_UNEXPECTED_IO_ERROR;
             DPRINT1("ERROR: Failed to read bitmap attribute!\n");
             ExFreePoolWithTag(BitmapMem, TAG_NTFS);
             ReleaseAttributeContext(BitmapContext);
