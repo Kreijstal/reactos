@@ -2,7 +2,9 @@
 #ifndef NTFS_RESTART_H
 #define NTFS_RESTART_H
 
+/* CurrentLsn: the last LSN the log used; the driver's next one follows
+ * it, so LSNs stamped on metadata keep increasing. */
 int NtfsBuildCleanRestart(UCHAR *Page, ULONG PageSize, ULONG SectorSize,
-                          ULONGLONG FileSize);
+                          ULONGLONG FileSize, ULONGLONG CurrentLsn);
 
 #endif

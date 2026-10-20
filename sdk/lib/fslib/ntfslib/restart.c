@@ -34,7 +34,7 @@ Put64(UCHAR *Buffer, ULONGLONG Value)
 
 int
 NtfsBuildCleanRestart(UCHAR *Page, ULONG PageSize, ULONG SectorSize,
-                      ULONGLONG FileSize)
+                      ULONGLONG FileSize, ULONGLONG CurrentLsn)
 {
     UCHAR *Area, *Client;
     ULONG i, Count, Bits = 0;
@@ -64,6 +64,7 @@ NtfsBuildCleanRestart(UCHAR *Page, ULONG PageSize, ULONG SectorSize,
     Put16(Page + 0x1C, 1);           /* Major version */
 
     Area = Page + 0x40;
+    Put64(Area, CurrentLsn);
     Put16(Area + 8, 1);              /* One registered client */
     Put16(Area + 0xA, 0xFFFF);       /* Empty free-client list */
     Put16(Area + 0xC, 0);            /* NTFS is client zero */

@@ -1415,7 +1415,7 @@ WriteMetafiles(VOID)
         UCHAR Restart[4096];
         ULONGLONG FileSize = (ULONGLONG)LAYOUT.LogFileClusters * C;
 
-        if (NtfsBuildCleanRestart(Restart, sizeof(Restart), BYTES_PER_SECTOR, FileSize) != 0)
+        if (NtfsBuildCleanRestart(Restart, sizeof(Restart), BYTES_PER_SECTOR, FileSize, 0) != 0)
         {
             Status = STATUS_INVALID_PARAMETER;
             goto done;

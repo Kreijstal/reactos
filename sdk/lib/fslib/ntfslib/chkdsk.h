@@ -56,6 +56,7 @@ typedef enum _NTFS_CHK_CODE {
     CHK_ERR_NOMEM,            /* model allocation failed: detect-only run     */
     CHK_ERR_IO,               /* storage read/write/flush failed              */
     CHK_ERR_LOGFILE,          /* could not checkpoint the repaired volume     */
+    CHK_ERR_LOG_UNRECOVERED,  /* $LogFile dirty, volume not marked: no repair */
     CHK_CODE_MAX
 } NTFS_CHK_CODE;
 
