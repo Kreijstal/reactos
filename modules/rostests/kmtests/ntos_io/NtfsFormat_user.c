@@ -12,14 +12,20 @@ typedef VOID (NTAPI *FORMAT_EX)(PWCHAR, FMIFS_MEDIA_FLAG, PWCHAR, PWCHAR,
                                BOOLEAN, ULONG, PFMIFSCALLBACK);
 static BOOLEAN FormatSucceeded;
 static ULONG CompletionCount;
+static ULONG LastPercent, PercentAtDone;
 
 static BOOLEAN NTAPI
 FormatCallback(CALLBACKCOMMAND Command, ULONG SubAction, PVOID Argument)
 {
     UNREFERENCED_PARAMETER(SubAction);
-    if (Command == DONE)
+    if (Command == PROGRESS)
+    {
+        LastPercent = *(PULONG)Argument;
+    }
+    else if (Command == DONE)
     {
         FormatSucceeded = *(PBOOLEAN)Argument;
+        PercentAtDone = LastPercent;
         ++CompletionCount;
     }
     return TRUE;
@@ -125,11 +131,16 @@ static VOID
 InvokeFormat(FORMAT_EX FormatEx, PWCHAR Root, ULONG ClusterSize, BOOLEAN Expected)
 {
     CompletionCount = 0;
+    LastPercent = PercentAtDone = 0;
     FormatSucceeded = !Expected;
     FormatEx(Root, FMIFS_HARDDISK, L"NTFS", L"KMTNTFS", TRUE, ClusterSize, FormatCallback);
     ok(CompletionCount != 0, "Formatter did not report completion\n");
     ok(FormatSucceeded == Expected, "Formatter success %u, expected %u\n",
        FormatSucceeded, Expected);
+    /* format.exe prints the PROGRESS percentage: a successful format reaches
+     * 100 before DONE. */
+    if (Expected && FormatSucceeded)
+        ok_eq_ulong(PercentAtDone, 100);
 }
 
 START_TEST(NtfsFormat)
@@ -141,7 +152,8 @@ START_TEST(NtfsFormat)
     DWORD Bytes, i, SectorsPerCluster, BytesPerSector, FreeClusters, TotalClusters;
     const CHAR Marker[] = "Formatting a busy volume must preserve existing files";
     CHAR Readback[sizeof(Marker)];
-    const ULONG ClusterSizes[] = { 512, 4096 };
+    /* Windows 10 1709+ formats NTFS with clusters up to 2 MiB (/A:2M). */
+    const ULONG ClusterSizes[] = { 512, 4096, 65536, 131072, 262144, 2097152 };
 
     if (!NtfsKmtFindFormatVolume(Root, Volume))
     {

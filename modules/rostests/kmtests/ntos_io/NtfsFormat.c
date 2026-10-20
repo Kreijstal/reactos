@@ -115,13 +115,25 @@ CheckFormattedVolume(VOID)
     SectorSize = Geometry.BytesPerSector;
     ok_eq_ulong(SectorSize, 512);
     if (SectorSize != 512) goto Cleanup;
-    ok(Geometry.BytesPerCluster == 512 || Geometry.BytesPerCluster == 4096,
+    /* The user part formats 512 B .. 2 MiB clusters (Windows 10 1709+ range). */
+    ok(Geometry.BytesPerCluster >= 512 && Geometry.BytesPerCluster <= 2 * 1024 * 1024 &&
+       (Geometry.BytesPerCluster & (Geometry.BytesPerCluster - 1)) == 0,
        "Unexpected cluster size %lu\n", Geometry.BytesPerCluster);
+    /* Windows' placement: $MFTMirr right behind the 8 KiB $Boot, $MFT a third
+     * into the volume (capped at 3 GiB). */
+    ok_eq_longlong(Geometry.Mft2StartLcn.QuadPart,
+                   (LONGLONG)((8192 + Geometry.BytesPerCluster - 1) / Geometry.BytesPerCluster));
+    ok_eq_longlong(Geometry.MftStartLcn.QuadPart,
+                   (LONGLONG)min((ULONGLONG)Geometry.TotalClusters.QuadPart / 3,
+                                 (3ULL << 30) / Geometry.BytesPerCluster));
     Status = NtfsKmtFsctl(Volume, FSCTL_IS_VOLUME_DIRTY, NULL, 0,
                           &Flags, sizeof(Flags), NULL);
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (NT_SUCCESS(Status)) ok_eq_ulong(Flags, 0);
     if (!FindLogLocation(Volume, &Geometry, &LogOffset, &LogSize)) goto Cleanup;
+    /* Windows sizes $LogFile at 2 MiB up to 200 MiB volumes (the fixture is
+     * 256 MiB: volume/200 rounded down to a cluster, never under 2 MiB). */
+    ok(LogSize >= 2 * 1024 * 1024, "$LogFile is only %I64u bytes\n", LogSize);
     Pages = NtfsKmtAlloc(8192);
     ok(Pages != NULL, "Cannot allocate restart-page buffer\n");
     if (Pages == NULL) goto Cleanup;
