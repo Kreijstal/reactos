@@ -49,6 +49,8 @@ PrepareAttributeContext(PNTFS_ATTR_RECORD AttrRecord)
         return NULL;
     }
 
+    Context->DirectIo = FALSE;
+
     // Allocate memory for a copy of the attribute
     Context->pRecord = ExAllocatePoolWithTag(NonPagedPool, AttrRecord->Length, TAG_NTFS);
     if(!Context->pRecord)
@@ -2069,13 +2071,17 @@ NtfsTransferAttributeRuns(PDEVICE_EXTENSION Vcb,
                           PIRP Irp,
                           PUCHAR Buffer,
                           PNTFS_IO_RUN_LIST RunList,
+                          BOOLEAN Direct,
                           PULONG Transferred)
 {
     ULONG Index;
     NTSTATUS Status = STATUS_SUCCESS;
 
     *Transferred = 0;
-    if (Vcb->StreamFileObject == NULL)
+    /* Paging file I/O goes straight to the disk. It is how Mm makes memory
+     * free, so it must not need cache pages of its own, and nothing but Mm
+     * ever reads or writes those clusters. */
+    if (Vcb->StreamFileObject == NULL || Direct)
     {
         return NtfsPerformIrpIoRuns(Vcb->StorageDevice, MajorFunction,
                                     Vcb->NtfsInfo.BytesPerSector, Irp, Buffer,
@@ -2148,7 +2154,7 @@ ReadAttributeToIrp(PDEVICE_EXTENSION Vcb,
     if (NT_SUCCESS(Status) && AlreadyRead != 0)
     {
         Status = NtfsTransferAttributeRuns(Vcb, IRP_MJ_READ, Irp, (PUCHAR)Buffer,
-                                            &RunList, &Transferred);
+                                            &RunList, Context->DirectIo, &Transferred);
     }
 
     NtfsFreeIoRunList(&RunList);
@@ -2431,7 +2437,7 @@ WriteAttributeFromIrp(PDEVICE_EXTENSION Vcb,
         /* NtfsPerformIrpIoRuns() rejects sparse runs on IRP_MJ_WRITE: holes are
          * filled above, and only a compressed attribute still has them */
         Status = NtfsTransferAttributeRuns(Vcb, IRP_MJ_WRITE, Irp, (PUCHAR)Buffer,
-                                            &RunList, &Transferred);
+                                            &RunList, Context->DirectIo, &Transferred);
     }
 
     NtfsFreeIoRunList(&RunList);

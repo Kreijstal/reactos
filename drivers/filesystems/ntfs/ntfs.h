@@ -694,6 +694,9 @@ typedef struct _NTFS_ATTR_CONTEXT
     ULONGLONG           FileMFTIndex;
     ULONGLONG           FileOwnerMFTIndex; /* If attribute list attribute, reference the original file */
     PNTFS_ATTR_RECORD    pRecord;
+    /* Transfer to and from the disk directly, not through the volume
+     * stream: a paging file's I/O, which must not need cache pages */
+    BOOLEAN             DirectIo;
 } NTFS_ATTR_CONTEXT, *PNTFS_ATTR_CONTEXT;
 
 #define FCB_CACHE_INITIALIZED   0x0001
@@ -701,6 +704,7 @@ typedef struct _NTFS_ATTR_CONTEXT
 #define FCB_IS_VOLUME           0x0004
 #define FCB_DELETE_PENDING      0x0008
 #define FCB_DELETED             0x0010
+#define FCB_IS_PAGING_FILE      0x0020
 #define MAX_PATH                260
 
 /* Longest name a $FILE_NAME can hold, in characters */
