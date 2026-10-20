@@ -78,14 +78,25 @@ MakeVolumeRaw(PWCHAR Root, PWCHAR Volume)
     HANDLE Handle;
     DWORD Bytes;
     BYTE Sector[512];
-    BOOLEAN Done = FALSE;
+    BOOLEAN Done = FALSE, Locked = FALSE;
+    ULONG Try;
 
     Handle = CreateFileW(Volume, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                          NULL, OPEN_EXISTING, FILE_FLAG_WRITE_THROUGH, NULL);
     ok(Handle != INVALID_HANDLE_VALUE, "Cannot open %ls: %lu\n", Volume, GetLastError());
     if (Handle == INVALID_HANDLE_VALUE)
         return FALSE;
-    if (!DeviceIoControl(Handle, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &Bytes, NULL) ||
+    /* The kernel part dismounted the volume to read its log at rest; the
+     * remount wakes whoever the mount notification reaches, which may hold
+     * the volume briefly. */
+    for (Try = 0; Try < 50; Try++)
+    {
+        Locked = DeviceIoControl(Handle, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &Bytes, NULL);
+        if (Locked || GetLastError() != ERROR_ACCESS_DENIED)
+            break;
+        Sleep(100);
+    }
+    if (!Locked ||
         !DeviceIoControl(Handle, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, &Bytes, NULL) ||
         !DeviceIoControl(Handle, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0,
                          &Length, sizeof(Length), &Bytes, NULL))
