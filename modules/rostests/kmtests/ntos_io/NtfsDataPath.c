@@ -606,6 +606,51 @@ TestSectionExtendedFiles(
     }
 }
 
+/* NtCreatePagingFile's own create: supersede as a paging file, deleted on
+ * close, with no DELETE access and the I/O manager's parameter check
+ * skipped, then size it through FileEndOfFileInformation. */
+static
+VOID
+TestPagingFileCreate(
+    _In_ PCWSTR Dir)
+{
+    WCHAR Path[MAX_PATH];
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK IoStatus;
+    LARGE_INTEGER AllocationSize;
+    FILE_END_OF_FILE_INFORMATION Eof;
+    HANDLE Handle;
+    NTSTATUS Status;
+
+    NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, L"pagefile.sys");
+    RtlInitUnicodeString(&Name, Path);
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    AllocationSize.QuadPart = 16 * 1024 * 1024 + PAGE_SIZE;
+    Status = IoCreateFile(&Handle,
+                          SYNCHRONIZE | WRITE_DAC | FILE_READ_DATA | FILE_WRITE_DATA,
+                          &Attributes,
+                          &IoStatus,
+                          &AllocationSize,
+                          FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN,
+                          FILE_SHARE_WRITE,
+                          FILE_SUPERSEDE,
+                          FILE_DELETE_ON_CLOSE | FILE_NO_COMPRESSION | FILE_NO_INTERMEDIATE_BUFFERING,
+                          NULL,
+                          0,
+                          CreateFileTypeNone,
+                          NULL,
+                          IO_OPEN_PAGING_FILE | IO_NO_PARAMETER_CHECKING);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    Eof.EndOfFile.QuadPart = 16 * 1024 * 1024;
+    Status = ZwSetInformationFile(Handle, &IoStatus, &Eof, sizeof(Eof), FileEndOfFileInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(Standard(Handle).EndOfFile.QuadPart, 16LL * 1024 * 1024);
+    ZwClose(Handle);
+}
+
 static
 VOID
 TestManyStreams(
@@ -810,6 +855,7 @@ START_TEST(NtfsDataPath)
     TestGrowAndTruncate(Dir);
     TestNonCachedWriteThenShrink(Dir, Drive);
     TestSectionExtendedFiles(Dir, Drive);
+    TestPagingFileCreate(Dir);
     TestManyStreams(Dir);
     TestManyLinks(Dir);
 
