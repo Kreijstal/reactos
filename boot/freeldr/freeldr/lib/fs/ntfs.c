@@ -1111,7 +1111,22 @@ const DEVVTBL* NtfsMount(ULONG DeviceId)
     //
     // Calculate cluster size and MFT record size
     //
-    Volume->ClusterSize = Volume->BootSector.SectorsPerCluster * Volume->BootSector.BytesPerSector;
+    //
+    // SectorsPerCluster is the count up to 0x80; above, it is 256 - log2(count),
+    // the form Windows 10 1709+ writes for clusters over 64 KiB (up to 2 MiB).
+    //
+    if (Volume->BootSector.SectorsPerCluster <= 0x80)
+        Volume->ClusterSize = Volume->BootSector.SectorsPerCluster;
+    else if (Volume->BootSector.SectorsPerCluster >= 0xF4)
+        Volume->ClusterSize = 1UL << (256 - Volume->BootSector.SectorsPerCluster);
+    else
+        Volume->ClusterSize = 0;
+    Volume->ClusterSize *= Volume->BootSector.BytesPerSector;
+    if (Volume->ClusterSize == 0)
+    {
+        FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
+        return NULL;
+    }
     if (Volume->BootSector.ClustersPerMftRecord > 0)
         Volume->MftRecordSize = Volume->BootSector.ClustersPerMftRecord * Volume->ClusterSize;
     else
