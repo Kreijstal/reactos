@@ -10,6 +10,10 @@
  *  - resident -> non-resident growth in steps (test_resident_grow);
  *  - truncate / extend through FileEndOfFileInformation and
  *    FileAllocationInformation, zero-filled gaps;
+ *  - setup's copy pattern: a non-cached page-rounded write, shrunk back
+ *    to the real size, read back cached and after a remount;
+ *  - setup's cabinet extraction: a file grown by a data section and filled
+ *    through a mapped view, whose partial last page is a clamped paging write;
  *  - offsets above 4 GiB on a non-sparse file (DISK_FULL, no 32-bit wrap);
  *  - $ATTRIBUTE_LIST growth: many named streams on one file, and enough
  *    hard links that the attribute list itself goes non-resident
@@ -433,6 +437,175 @@ TestGrowAndTruncate(
     ZwClose(Handle);
 }
 
+/* Setup's file copy: a non-cached write of the page-rounded source size,
+ * then FileEndOfFileInformation back to the real size.  The data must be on
+ * disk, so it is checked again after a dismount forces a fresh mount. */
+static
+VOID
+TestNonCachedWriteThenShrink(
+    _In_ PCWSTR Dir,
+    _In_ WCHAR Drive)
+{
+    static const ULONG Sizes[] = { 67, 700, 3620, 4095, 4096, 4258, 6088 };
+    WCHAR Path[MAX_PATH], Name[32];
+    FILE_END_OF_FILE_INFORMATION Eof;
+    HANDLE Handle, Volume;
+    PUCHAR Buffer;
+    ULONG_PTR Written;
+    NTSTATUS Status;
+    ULONG i, Pass, Rounded;
+
+    Buffer = NtfsKmtAlloc(2 * PAGE_SIZE);
+    if (Buffer == NULL)
+        return;
+    ok(((ULONG_PTR)Buffer & (PAGE_SIZE - 1)) == 0, "Buffer %p not page aligned\n", Buffer);
+    for (i = 0; i < RTL_NUMBER_OF(Sizes); i++)
+    {
+        RtlStringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"nocache%lu.bin", Sizes[i]);
+        NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, Name);
+        Status = NtfsKmtCreate(&Handle, NULL, Path, GENERIC_READ | GENERIC_WRITE, 0, 0, FILE_CREATE,
+                               FILE_NON_DIRECTORY_FILE | FILE_NO_INTERMEDIATE_BUFFERING | FILE_SEQUENTIAL_ONLY,
+                               NULL, 0, NULL);
+        ok(Status == STATUS_SUCCESS, "create %lu: 0x%lx\n", Sizes[i], Status);
+        if (!NT_SUCCESS(Status))
+            continue;
+        Rounded = ROUND_TO_PAGES(Sizes[i]);
+        NtfsKmtFillPattern(Buffer, Rounded, 9, 0);
+        Status = NtfsKmtWrite(Handle, 0, Buffer, Rounded, &Written);
+        ok(Status == STATUS_SUCCESS && Written == Rounded, "non-cached write of %lu: 0x%lx, %Iu\n",
+           Rounded, Status, Written);
+        Eof.EndOfFile.QuadPart = Sizes[i];
+        Status = NtfsKmtSetInfo(Handle, &Eof, sizeof(Eof), FileEndOfFileInformation);
+        ok(Status == STATUS_SUCCESS, "shrink to %lu: 0x%lx\n", Sizes[i], Status);
+        ZwClose(Handle);
+    }
+    NtfsKmtFree(Buffer);
+
+    for (Pass = 0; Pass < 2; Pass++)
+    {
+        if (Pass == 1)
+        {
+            Status = NtfsKmtOpenVolume(Drive, GENERIC_READ | GENERIC_WRITE, &Volume);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            if (!NT_SUCCESS(Status))
+                return;
+            Status = NtfsKmtFsctl(Volume, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, NULL);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            if (NT_SUCCESS(Status))
+            {
+                Status = NtfsKmtFsctl(Volume, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, NULL);
+                ok_eq_hex(Status, STATUS_SUCCESS);
+            }
+            ZwClose(Volume);
+            if (!NT_SUCCESS(Status))
+                return;
+        }
+        for (i = 0; i < RTL_NUMBER_OF(Sizes); i++)
+        {
+            CHAR What[64];
+
+            RtlStringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"nocache%lu.bin", Sizes[i]);
+            NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, Name);
+            Status = NtfsKmtOpen(&Handle, Path, GENERIC_READ, FILE_NON_DIRECTORY_FILE);
+            ok(Status == STATUS_SUCCESS, "reopen %lu: 0x%lx\n", Sizes[i], Status);
+            if (!NT_SUCCESS(Status))
+                continue;
+            ok_eq_longlong(Standard(Handle).EndOfFile.QuadPart, (LONGLONG)Sizes[i]);
+            RtlStringCchPrintfA(What, sizeof(What), "non-cached %lu %s", Sizes[i], Pass ? "after remount" : "reopened");
+            ReadCheck(Handle, 0, Sizes[i], STATUS_SUCCESS, Sizes[i], 9, What);
+            ZwClose(Handle);
+        }
+    }
+}
+
+/* Setup's cabinet extraction: an empty file grown by a data section of the
+ * real size, filled through a mapped view, then unmapped and closed.  The
+ * last, partial page reaches disk only as a paging write clamped to EOF. */
+static
+VOID
+TestSectionExtendedFiles(
+    _In_ PCWSTR Dir,
+    _In_ WCHAR Drive)
+{
+    static const ULONG Sizes[] = { 67, 700, 3620, 4096, 6088, 9000 };
+    WCHAR Path[MAX_PATH], Name[32];
+    OBJECT_ATTRIBUTES Attributes;
+    LARGE_INTEGER MaxSize;
+    HANDLE Handle, Section, Volume;
+    PVOID View;
+    SIZE_T ViewSize;
+    NTSTATUS Status;
+    ULONG i, Pass;
+
+    for (i = 0; i < RTL_NUMBER_OF(Sizes); i++)
+    {
+        RtlStringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"section%lu.bin", Sizes[i]);
+        NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, Name);
+        Status = NtfsKmtCreate(&Handle, NULL, Path, GENERIC_READ | GENERIC_WRITE, 0, 0, FILE_CREATE,
+                               FILE_NON_DIRECTORY_FILE, NULL, 0, NULL);
+        ok(Status == STATUS_SUCCESS, "create %lu: 0x%lx\n", Sizes[i], Status);
+        if (!NT_SUCCESS(Status))
+            continue;
+        MaxSize.QuadPart = Sizes[i];
+        InitializeObjectAttributes(&Attributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+        Status = ZwCreateSection(&Section, SECTION_ALL_ACCESS, &Attributes, &MaxSize,
+                                 PAGE_READWRITE, SEC_COMMIT, Handle);
+        ok(Status == STATUS_SUCCESS, "section %lu: 0x%lx\n", Sizes[i], Status);
+        if (NT_SUCCESS(Status))
+        {
+            View = NULL;
+            ViewSize = 0;
+            Status = ZwMapViewOfSection(Section, NtCurrentProcess(), &View, 0, 0, NULL,
+                                        &ViewSize, ViewUnmap, 0, PAGE_READWRITE);
+            ok(Status == STATUS_SUCCESS, "map %lu: 0x%lx\n", Sizes[i], Status);
+            if (NT_SUCCESS(Status))
+            {
+                NtfsKmtFillPattern(View, Sizes[i], 11, 0);
+                ZwUnmapViewOfSection(NtCurrentProcess(), View);
+            }
+            ZwClose(Section);
+        }
+        ZwClose(Handle);
+    }
+
+    for (Pass = 0; Pass < 2; Pass++)
+    {
+        if (Pass == 1)
+        {
+            Status = NtfsKmtOpenVolume(Drive, GENERIC_READ | GENERIC_WRITE, &Volume);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            if (!NT_SUCCESS(Status))
+                return;
+            Status = NtfsKmtFsctl(Volume, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, NULL);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            if (NT_SUCCESS(Status))
+            {
+                Status = NtfsKmtFsctl(Volume, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, NULL);
+                ok_eq_hex(Status, STATUS_SUCCESS);
+            }
+            ZwClose(Volume);
+            if (!NT_SUCCESS(Status))
+                return;
+        }
+        for (i = 0; i < RTL_NUMBER_OF(Sizes); i++)
+        {
+            CHAR What[64];
+
+            RtlStringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"section%lu.bin", Sizes[i]);
+            NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, Name);
+            Status = NtfsKmtOpen(&Handle, Path, GENERIC_READ, FILE_NON_DIRECTORY_FILE);
+            ok(Status == STATUS_SUCCESS, "reopen %lu: 0x%lx\n", Sizes[i], Status);
+            if (!NT_SUCCESS(Status))
+                continue;
+            ok_eq_longlong(Standard(Handle).EndOfFile.QuadPart, (LONGLONG)Sizes[i]);
+            RtlStringCchPrintfA(What, sizeof(What), "section-extended %lu %s", Sizes[i],
+                                Pass ? "after remount" : "reopened");
+            ReadCheck(Handle, 0, Sizes[i], STATUS_SUCCESS, Sizes[i], 11, What);
+            ZwClose(Handle);
+        }
+    }
+}
+
 static
 VOID
 TestManyStreams(
@@ -611,8 +784,9 @@ START_TEST(NtfsDataPath)
     NTSTATUS Status;
     HANDLE Handle;
     FILE_FS_SIZE_INFORMATION Size;
+    WCHAR Drive;
 
-    if (!NtfsKmtFindVolume(Root, NULL))
+    if (!NtfsKmtFindVolume(Root, &Drive))
     {
         ok(FALSE, "No writable NTFS volume found (attach an NTFS data disk)\n");
         return;
@@ -634,6 +808,8 @@ START_TEST(NtfsDataPath)
     TestCacheBoundaries(Dir);
     TestMappedLifetime(Dir);
     TestGrowAndTruncate(Dir);
+    TestNonCachedWriteThenShrink(Dir, Drive);
+    TestSectionExtendedFiles(Dir, Drive);
     TestManyStreams(Dir);
     TestManyLinks(Dir);
 
