@@ -1957,6 +1957,14 @@ ReadFileRecord(PDEVICE_EXTENSION Vcb,
                ULONGLONG index,
                PFILE_RECORD_HEADER file);
 
+/* As ReadFileRecord; with AllowUnused, a never-initialized (all-zero) slot
+ * also reads successfully, as zeroes. */
+NTSTATUS
+NtfsReadFileRecordEx(PDEVICE_EXTENSION Vcb,
+                     ULONGLONG Index,
+                     PFILE_RECORD_HEADER Record,
+                     BOOLEAN AllowUnused);
+
 /* NTFS duplicates a file's sizes, timestamps and attributes into the $FILE_NAME
  * of its entry in the parent directory's index, so a directory can be
  * enumerated without reading every file record. These flags say which of them
