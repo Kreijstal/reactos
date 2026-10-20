@@ -531,6 +531,14 @@ NtfsFormat(
 
 end:
 
+    // fmifs callers (format.exe prints it) expect the bar to reach 100
+    // before DONE reports the result.
+    if (Callback && Result)
+    {
+        ULONG pc = 100;
+        Callback(PROGRESS, 0, (PVOID)&pc);
+    }
+
     if (VolumeLocked)
         NtFsControlFile(DiskHandle, NULL, NULL, NULL, &Iosb,
                         FSCTL_UNLOCK_VOLUME, NULL, 0, NULL, 0);
