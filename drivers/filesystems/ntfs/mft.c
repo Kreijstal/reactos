@@ -4678,6 +4678,8 @@ FreeMftEntry(PDEVICE_EXTENSION Vcb, ULONGLONG Index)
     return Status;
 }
 
+static NTSTATUS NtfsFreeRecordClusters(PDEVICE_EXTENSION DeviceExt, PFILE_RECORD_HEADER FileRecord);
+
 /**
 * @name NtfsDeleteFileRecord
 * @implemented
@@ -4700,8 +4702,9 @@ FreeMftEntry(PDEVICE_EXTENSION Vcb, ULONGLONG Index)
 *
 * @remarks
 * Callers must have established that the file may be deleted, in particular that a directory
-* is empty. Clusters are released before the names, so a failure part-way through leaves a
-* reachable file rather than orphaned allocation.
+* is empty. The names leave the index before anything is freed, so a failure there leaves the
+* file whole; then the extension records, the clusters of the base record's attributes and
+* the record itself are released.
 */
 NTSTATUS
 NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
@@ -4710,9 +4713,6 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
 {
     NTSTATUS Status;
     PFILE_RECORD_HEADER FileRecord;
-    PNTFS_ATTR_RECORD Attribute;
-    PNTFS_ATTR_CONTEXT AttributeContext;
-    ULONG AttributeOffset;
     PFILENAME_ATTRIBUTE *Names = NULL;
     ULONG NameCount = 0, i;
 
@@ -4763,45 +4763,8 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
-    // Release the clusters held by every non-resident attribute
-    Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
-    AttributeOffset = FileRecord->AttributeOffset;
-
-    while (AttributeOffset < DeviceExt->NtfsInfo.BytesPerFileRecord &&
-           Attribute->Type != AttributeEnd)
-    {
-        if (Attribute->IsNonResident)
-        {
-            Status = FindAttribute(DeviceExt,
-                                   FileRecord,
-                                   Attribute->Type,
-                                   (PCWSTR)((ULONG_PTR)Attribute + Attribute->NameOffset),
-                                   Attribute->NameLength,
-                                   &AttributeContext,
-                                   NULL);
-            if (NT_SUCCESS(Status))
-            {
-                ULONGLONG ClusterCount = Attribute->NonResident.HighestVCN - Attribute->NonResident.LowestVCN + 1;
-
-                Status = FreeClusters(DeviceExt, AttributeContext, AttributeOffset, FileRecord, (ULONG)ClusterCount);
-                if (!NT_SUCCESS(Status))
-                {
-                    DPRINT1("ERROR: Failed to free clusters of attribute 0x%lx of file %I64u!\n",
-                            Attribute->Type, MftIndex);
-                }
-
-                ReleaseAttributeContext(AttributeContext);
-            }
-        }
-
-        if (Attribute->Length == 0)
-            break;
-
-        AttributeOffset += Attribute->Length;
-        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttributeOffset);
-    }
-
-    /* The extension records go with the base record */
+    /* The extension records go with the base record. They are found through the
+     * $ATTRIBUTE_LIST, so they go before the list's own clusters do. */
     if (NtfsRecordHasAttributeList(FileRecord))
     {
         Status = NtfsDeleteExtensionRecords(DeviceExt, FileRecord);
@@ -4809,6 +4772,14 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
         {
             DPRINT1("ERROR: Failed to free the extension records of file %I64u!\n", MftIndex);
         }
+    }
+
+    /* Then the clusters of every non-resident attribute of the base record. That
+     * includes a non-resident $ATTRIBUTE_LIST, which FindAttribute() never returns. */
+    Status = NtfsFreeRecordClusters(DeviceExt, FileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ERROR: Failed to free the clusters of file %I64u!\n", MftIndex);
     }
 
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
