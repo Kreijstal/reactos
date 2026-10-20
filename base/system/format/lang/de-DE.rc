@@ -20,7 +20,8 @@ BEGIN
   -Q               Führt eine Schnellformatierung durch.\n\
   -A:Größe         Überschreibt Anweisung für Standardblockgröße. Es wird dringend\n\
                    empfohlen, grundsätzlich Standardeinstellungen zu verwenden!\n\
-                   NTFS unterstützt 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K.\n\
+                   NTFS unterstützt 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K,\n\
+                                    128K, 256K, 512K, 1M, 2M.\n\
                    FAT unterstützt 8192, 16K, 32K, 64K, 128K, 256K.\n\
                    NTFS-Kompression wird für Blockgrößen über 4096 nicht\n\
                    unterstützt.\n\

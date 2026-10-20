@@ -17,7 +17,8 @@ BEGIN
   -Q                  Vykonáva rýchle formátovanie.\n\
   -A:veľkosť          Prepíše predvolenú veľkosť alokačnej jednotky. Pre všeobecné\n\
                       použitie sú dôrazne odporúčané predvolené nastavenia\n\
-                      NTFS podporuje 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K.\n\
+                      NTFS podporuje 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K,\n\
+                                     128K, 256K, 512K, 1M, 2M.\n\
                       FAT podporuje 8192, 16K, 32K, 64K, 128K, 256K.\n\
                       NTFS kompresia nie je podporovaná pre veľkosti alokačnej\n\
                       jednotky nad 4096.\n\

@@ -17,7 +17,8 @@ BEGIN
   -Q               Melakukan format cepat.\n\
   -A:size          mengganti unit alokasi standar. Setelan standar\n\
                    sangat direkomendasikan untuk penggunaan umum\n\
-                   NTFS mendukung 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K.\n\
+                   NTFS mendukung 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K,\n\
+                                  128K, 256K, 512K, 1M, 2M.\n\
                    FAT mendukung 8192, 16K, 32K, 64K, 128K, 256K.\n\
                    Kompresi NTFS tidak didukung untuk ukuran unit alokasi\n\
                    di atas 4096.\n\

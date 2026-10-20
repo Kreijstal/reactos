@@ -18,7 +18,8 @@ BEGIN
   -Q                Bir hızlı biçimlendirme gerçekleştirir.\n\
   -A:boyut          Varsayılan ayırma birimi boyutunu geçersiz kılar. Varsayılan\n\
                     ayarlar genel kullanım için şiddetle önerilendir.\n\
-                    NTFS destekler: 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K.\n\
+                    NTFS destekler: 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K,\n\
+                                    128K, 256K, 512K, 1M, 2M.\n\
                     FAT destekler: 8192, 16K, 32K, 64K, 128K, 256K.\n\
                     4096'dan yukarısındaki ayırma birimi boyutları\n\
                     için NTFS sıkıştırma desteklenmiyor.\n\
