@@ -178,14 +178,20 @@ ComputeLayout(IN ULONG ClusterSize)
     // $MFTMirr: the first four system records.
     LAYOUT.MftMirrClusters = (ULONG)CEIL_DIV((ULONGLONG)MFT_MIRR_COUNT * MFT_RECORD_SIZE, (ULONGLONG)C);
 
-    // $LogFile: ~0.78% of the volume, clamped to [256 KB, 64 MB].
+    // $LogFile: ~0.78% of the volume, clamped to [2 MB, 64 MB] as Windows
+    // sizes it; the driver logs metadata, and a smaller log checkpoints all
+    // the time.  A tiny volume gets 1/16 of itself, at least 256 KB.
     {
         ULONGLONG LogBytes = VolumeBytes / 128;
 
-        if (LogBytes < (256ULL * 1024))
-            LogBytes = 256ULL * 1024;
+        if (LogBytes < (2ULL * 1024 * 1024))
+            LogBytes = 2ULL * 1024 * 1024;
         if (LogBytes > (64ULL * 1024 * 1024))
             LogBytes = 64ULL * 1024 * 1024;
+        if (LogBytes > VolumeBytes / 16)
+            LogBytes = VolumeBytes / 16 > 256ULL * 1024 ? VolumeBytes / 16 : 256ULL * 1024;
+        // Whole log pages, whatever the cluster size.
+        LogBytes = (LogBytes + 0xFFFF) & ~0xFFFFULL;
 
         LAYOUT.LogFileClusters = (ULONG)CEIL_DIV(LogBytes, (ULONGLONG)C);
     }
