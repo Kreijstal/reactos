@@ -772,7 +772,9 @@ GetNfsVolumeData(PDEVICE_EXTENSION DeviceExt,
 
     if (Stack->Parameters.FileSystemControl.OutputBufferLength >= sizeof(NTFS_EXTENDED_VOLUME_DATA) + sizeof(NTFS_VOLUME_DATA_BUFFER))
     {
-        PNTFS_EXTENDED_VOLUME_DATA ExtendedData = (PNTFS_EXTENDED_VOLUME_DATA)((ULONG_PTR)Irp->UserBuffer + sizeof(NTFS_VOLUME_DATA_BUFFER));
+        /* METHOD_BUFFERED: the whole reply goes in the system buffer, which the I/O
+         * manager copies over the caller's buffer at completion */
+        PNTFS_EXTENDED_VOLUME_DATA ExtendedData = (PNTFS_EXTENDED_VOLUME_DATA)(DataBuffer + 1);
 
         ExtendedData->ByteCount = sizeof(NTFS_EXTENDED_VOLUME_DATA);
         ExtendedData->MajorVersion = DeviceExt->NtfsInfo.MajorVersion;
