@@ -651,6 +651,33 @@ TestPagingFileCreate(
     ZwClose(Handle);
 }
 
+/* A directory has no data stream: reading or writing its handle is an
+ * invalid request, not a byte-range lock check. */
+static
+VOID
+TestDirectoryReadWrite(
+    _In_ PCWSTR Dir)
+{
+    WCHAR Path[MAX_PATH];
+    HANDLE Handle;
+    NTSTATUS Status;
+    UCHAR Data[16] = { 0 };
+    ULONG_PTR Bytes;
+
+    NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, L"subdir");
+    Status = NtfsKmtCreate(&Handle, NULL, Path, GENERIC_READ | GENERIC_WRITE, 0,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_CREATE,
+                           FILE_DIRECTORY_FILE, NULL, 0, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    Status = NtfsKmtRead(Handle, 0, Data, sizeof(Data), &Bytes);
+    ok_eq_hex(Status, STATUS_INVALID_DEVICE_REQUEST);
+    Status = NtfsKmtWrite(Handle, 0, Data, sizeof(Data), &Bytes);
+    ok_eq_hex(Status, STATUS_INVALID_DEVICE_REQUEST);
+    ZwClose(Handle);
+}
+
 static
 VOID
 TestManyStreams(
@@ -856,6 +883,7 @@ START_TEST(NtfsDataPath)
     TestNonCachedWriteThenShrink(Dir, Drive);
     TestSectionExtendedFiles(Dir, Drive);
     TestPagingFileCreate(Dir);
+    TestDirectoryReadWrite(Dir);
     TestManyStreams(Dir);
     TestManyLinks(Dir);
 
