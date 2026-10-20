@@ -11,7 +11,16 @@
 #ifndef NTFS_CHKDSK_H
 #define NTFS_CHKDSK_H
 
-#include "mkntfs.h"   /* pulls ntfs_types.h + MKNTFS_IO */
+#include "ntfs_types.h"
+
+/* Volume I/O by partition-relative byte offset; each callback returns 0 on
+ * success. */
+typedef struct _MKNTFS_IO {
+    void *context;               /* Opaque handle (e.g., file descriptor or HANDLE) */
+    int (*write)(void *ctx, ULONGLONG offset, const void *buf, ULONG length);
+    int (*read)(void *ctx, ULONGLONG offset, void *buf, ULONG length);
+    int (*flush)(void *ctx);
+} MKNTFS_IO;
 
 /* Issue codes reported by the checker. */
 typedef enum _NTFS_CHK_CODE {
