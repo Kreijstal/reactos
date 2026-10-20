@@ -860,8 +860,8 @@ NtfsSetLinkCount(
 /**
 * @name NtfsMakeStreamFCB
 *
-* Makes the FCB of a named data stream of the file BaseFcb is open on, and puts it in the
-* FCB table under "path:stream".
+* The FCB of a named data stream of the file BaseFcb is open on: the one in the FCB table
+* under "path:stream" if the stream is open, else a new one put there.
 *
 * @param StreamName
 * The stream's name, at most 255 characters.
@@ -936,6 +936,17 @@ NtfsMakeStreamFCB(
     RtlCopyMemory(Path, BaseFcb->PathName, BaseLength * sizeof(WCHAR));
     Path[BaseLength] = L':';
     wcscpy(Path + BaseLength + 1, Stream);
+
+    /* A stream already open has its FCB: share access, byte-range locks and
+     * sizes are the stream's, however the name was spelled. */
+    Fcb = NtfsGrabFCBFromTable(Vcb, Path);
+    if (Fcb != NULL)
+    {
+        ExFreePoolWithTag(Path, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+        *StreamFcb = Fcb;
+        return STATUS_SUCCESS;
+    }
 
     Fcb = NtfsCreateFCB(Path, Stream, Vcb);
     ExFreePoolWithTag(Path, TAG_NTFS);

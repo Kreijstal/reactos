@@ -224,6 +224,8 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
+    DataContext->DirectIo = BooleanFlagOn(Fcb->Flags, FCB_IS_PAGING_FILE);
+
     StreamSize = AttributeDataLength(DataContext->pRecord);
     if (ReadOffset >= StreamSize)
     {
@@ -675,6 +677,8 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
+    DataContext->DirectIo = BooleanFlagOn(Fcb->Flags, FCB_IS_PAGING_FILE);
+
     // Get the size of the stream on disk
     StreamSize = AttributeDataLength(DataContext->pRecord);
 
@@ -1074,7 +1078,10 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
         PagingResourceAcquired = TRUE;
     }
 
+    /* A directory has no data stream and no byte-range locks; it is
+     * refused below. */
     if (!(Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)) &&
+        !NtfsFCBIsDirectory(Fcb) &&
         !NtfsCheckFileLock(Fcb, Irp, &ByteOffset, Length, TRUE))
     {
         if (PagingResourceAcquired)
@@ -1219,8 +1226,11 @@ WriteDone:
     if (NT_SUCCESS(Status) && !(Irp->Flags & IRP_PAGING_IO) && ReturnedWriteLength != 0)
     {
         FileObject->Flags |= FO_FILE_MODIFIED;
+        /* Write-through makes this write durable, not the whole volume. The
+         * cached path has already flushed the written range of the file into
+         * the volume stream, and the direct path wrote it there. */
         if (FileObject->Flags & FO_WRITE_THROUGH)
-            Status = NtfsFlushVolume(DeviceExt);
+            Status = NtfsFlushVolumeStream(DeviceExt);
     }
     return Status;
 }
