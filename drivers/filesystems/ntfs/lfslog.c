@@ -172,8 +172,10 @@ NtfsLfsLogFileRecord(PVOID Context, ULONGLONG MftIndex, PFILE_RECORD_HEADER Reco
     Before = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     if (Before == NULL) return STATUS_INSUFFICIENT_RESOURCES;
     /* Capture before taking the writer resource: other metadata writers can
-     * own MftContextResource while waiting for this writer. */
-    Status = ReadFileRecord(Vcb, MftIndex, Before);
+     * own MftContextResource while waiting for this writer. A slot the MFT
+     * bitmap just handed out may never have been initialized: its undo image
+     * is then its zeroes. */
+    Status = NtfsReadFileRecordEx(Vcb, MftIndex, Before, TRUE);
     if (!NT_SUCCESS(Status)) goto FreeBefore;
     ByteOffset = MftIndex * Vcb->NtfsInfo.BytesPerFileRecord;
     Params.TargetVcn = ByteOffset / Vcb->NtfsInfo.BytesPerCluster;
