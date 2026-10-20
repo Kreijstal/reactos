@@ -34,7 +34,6 @@
 #define NDEBUG
 #include <debug.h>
 
-static NTSTATUS NtfsFlushVolumeStream(PDEVICE_EXTENSION Vcb);
 static NTSTATUS NtfsLogSetDirty(PDEVICE_EXTENSION Vcb, BOOLEAN Dirty);
 
 /* FUNCTIONS ****************************************************************/
@@ -2113,17 +2112,6 @@ NtfsMarkVolumeDirty(PDEVICE_EXTENSION DeviceExt,
 
     DeviceExt->Flags |= VCB_VOLUME_CORRUPT;
     return NtfsSetVolumeFlags(DeviceExt, NTFS_VOLUME_FLAG_DIRTY, TRUE);
-}
-
-static NTSTATUS
-NtfsFlushVolumeStream(PDEVICE_EXTENSION Vcb)
-{
-    IO_STATUS_BLOCK IoStatus;
-
-    CcFlushCache(Vcb->StreamFileObject->SectionObjectPointer, NULL, 0, &IoStatus);
-    if (!NT_SUCCESS(IoStatus.Status))
-        return IoStatus.Status;
-    return NtfsFlushDevice(Vcb->StorageDevice);
 }
 
 /* FSCTL_EXTEND_VOLUME supplies the new partition-relative sector count.
