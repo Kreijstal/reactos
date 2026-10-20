@@ -342,13 +342,19 @@ NtfsFormat(
 
     InitializeObjectAttributes(&Attributes, DriveRoot, 0, NULL, NULL);
 
-    // Open volume
+    // Open the volume write-through. A blank or unrecognized partition is
+    // mounted by RAW, which (like Windows' RAW) has no IRP_MJ_FLUSH_BUFFERS
+    // handler, so a flush on this handle fails with
+    // STATUS_INVALID_DEVICE_REQUEST. Write-through makes every synchronous
+    // write durable (SL_WRITE_THROUGH -> FUA in classpnp) before the next one
+    // is issued, which is what orders the stale-boot-sector kill, the
+    // metadata and the final boot sector below.
     Status = NtOpenFile(&DiskHandle,
                         FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE,
                         &Attributes,
                         &Iosb,
                         FILE_SHARE_READ,
-                        FILE_SYNCHRONOUS_IO_ALERT);
+                        FILE_SYNCHRONOUS_IO_ALERT | FILE_WRITE_THROUGH);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("NtOpenFile() failed with status 0x%.08x\n", Status);
@@ -441,13 +447,19 @@ NtfsFormat(
     Status = NtFsControlFile(DiskHandle, NULL, NULL, NULL, &Iosb,
                              FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0);
     if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("FSCTL_LOCK_VOLUME failed with status 0x%.08x\n", Status);
         goto end;
+    }
     VolumeLocked = TRUE;
 
     Status = NtFsControlFile(DiskHandle, NULL, NULL, NULL, &Iosb,
                              FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0);
     if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("FSCTL_DISMOUNT_VOLUME failed with status 0x%.08x\n", Status);
         goto end;
+    }
 
     // Kill any stale boot sectors FIRST: the volume reads as RAW from here on,
     // so no partially-formatted state is ever recognizable as a filesystem.
@@ -458,10 +470,6 @@ NtfsFormat(
         goto end;
     }
 
-    Status = NtFlushBuffersFile(DiskHandle, &Iosb);
-    if (!NT_SUCCESS(Status))
-        goto end;
-
     // Create metafiles
     Status = WriteMetafiles();
     if (!NT_SUCCESS(Status))
@@ -469,10 +477,6 @@ NtfsFormat(
         DPRINT1("WriteMetafiles() failed with status 0x%.08x\n", Status);
         goto end;
     }
-
-    Status = NtFlushBuffersFile(DiskHandle, &Iosb);
-    if (!NT_SUCCESS(Status))
-        goto end;
 
     // Write the boot sector LAST - only now, with all metadata complete behind
     // it, does the volume become recognizable as NTFS.
@@ -482,10 +486,6 @@ NtfsFormat(
         DPRINT1("WriteBootSector() failed with status 0x%.08x\n", Status);
         goto end;
     }
-
-    Status = NtFlushBuffersFile(DiskHandle, &Iosb);
-    if (!NT_SUCCESS(Status))
-        goto end;
 
     Result = TRUE;
     DPRINT1("NtfsFormat() completed successfully\n");

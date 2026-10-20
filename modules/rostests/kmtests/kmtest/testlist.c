@@ -28,6 +28,7 @@ KMT_TESTFUNC Test_MmProcessChurnStress;
 KMT_TESTFUNC Test_NtCreateSection;
 KMT_TESTFUNC Test_NtfsDirIndex;
 KMT_TESTFUNC Test_NtfsFormat;
+KMT_TESTFUNC Test_NtfsChkdsk;
 KMT_TESTFUNC Test_NtfsCompression;
 KMT_TESTFUNC Test_NtfsCreateSemantics;
 KMT_TESTFUNC Test_NtfsDataPath;
@@ -85,6 +86,7 @@ const KMT_TEST TestList[] =
     { "NtCreateSection",              Test_NtCreateSection },
     { "NtfsDirIndex",                 Test_NtfsDirIndex },
     { "NtfsFormat",                   Test_NtfsFormat },
+    { "NtfsChkdsk",                   Test_NtfsChkdsk },
     { "NtfsCompression",               Test_NtfsCompression },
     { "NtfsCreateSemantics",           Test_NtfsCreateSemantics },
     { "NtfsDataPath",                  Test_NtfsDataPath },

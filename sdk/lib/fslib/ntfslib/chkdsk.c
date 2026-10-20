@@ -710,16 +710,6 @@ static int chk_volume_pass(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
 
     }
 
-    /* R0: arm the volume dirty flag before the first mutating repair, so an
-     * interrupted repair is re-detected on the next mount/check.  Fires when
-     * FixErrors and there is anything to repair (detected issues), even if the
-     * volume was not originally dirty.  R8 (dirty-clear) is the last write. */
-    if (opt->FixErrors && res->IssueCount > 0)
-    {
-        if (chk_set_volume_flag(c, 1, 0) == 0 && c->Io->flush)
-            c->Io->flush(c->Io->context);
-    }
-
     /* S4 record/attribute repairs (need the model; run before it is freed).
      * Order: R1 attr truncation, R1 crosslink, R4 link counts, R5 mft-bitmap. */
     if (opt->FixErrors)
@@ -747,7 +737,8 @@ static int chk_volume_pass(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
                 USHORT f = c->Rec[d].Flags;
                 if ((f & (CRF_IN_USE | CRF_DIRECTORY | CRF_INDEX_BAD)) ==
                         (CRF_IN_USE | CRF_DIRECTORY | CRF_INDEX_BAD) &&
-                    !(f & (CRF_ATTRLIST_UNSUPPORTED | CRF_CORRUPT | CRF_EXTENSION)))
+                    !(f & (CRF_ATTRLIST_UNSUPPORTED | CRF_I30_REMOTE |
+                           CRF_CORRUPT | CRF_EXTENSION)))
                     chk_rebuild_index(c, d, res);
             }
         }
@@ -798,8 +789,12 @@ static int chk_volume_pass(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
      * repaired metadata on the next mount.  Only when we repaired something. */
     if (opt->FixErrors && (res->RepairedCount > 0 || res->WasDirty))
     {
-        if (chk_stamp_logfile_clean(c, res) != 0)
-            CHK_TRACE("R8: $LogFile clean-stamp did not complete\n");
+        if (chk_stamp_logfile_clean(c, res) != 0 ||
+            (c->Io->flush != NULL && c->Io->flush(c->Io->context) != 0))
+        {
+            chk_add_issue(res, CHK_ERR_LOGFILE, 0, 0, 0);
+            rc = -1;
+        }
     }
 
     /* $Volume dirty flag (R8 disarm).  Clear + mark MODIFIED_BY_CHKDSK when the
@@ -817,13 +812,13 @@ static int chk_volume_pass(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
     if (res->WasDirty)
     {
         int fixed = 0;
-        if (opt->FixErrors && unfixed == 0 && chk_set_volume_flag(c, 0, 1) == 0)
+        if (opt->FixErrors && rc == 0 && unfixed == 0 && chk_set_volume_flag(c, 0, 1) == 0)
             fixed = 1;
         /* When the flag is deliberately left set, this records itself as an
          * unfixed issue, which is what drives ExitStatus to 1 below. */
         chk_add_issue(res, CHK_ERR_VOLUME_DIRTY, 0, 0, fixed);
     }
-    else if (opt->FixErrors && res->RepairedCount > 0 && unfixed == 0)
+    else if (opt->FixErrors && rc == 0 && res->RepairedCount > 0 && unfixed == 0)
     {
         /* R0 armed it above; disarm now (no VOLUME_DIRTY issue was recorded). */
         chk_set_volume_flag(c, 0, 1);
@@ -844,8 +839,7 @@ static int chk_volume_pass(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
     if (emitSummary)
         chk_emit_summary(opt, res);
 
-    (void)rc;
-    return res->ExitStatus;
+    return rc < 0 ? -1 : res->ExitStatus;
 }
 
 /* Final chkdsk-style summary.  Always emitted (independent of Verbose).
@@ -929,21 +923,104 @@ static void chk_emit_summary(const NTFS_CHK_OPTIONS *opt,
  * as it now stands, so `repaired` is the difference the run actually made and
  * nothing else.
  */
+
+/* Repairs stop writing after the first I/O failure. Arm the dirty flag and
+ * make it durable before each repair pass's first write, including repairs
+ * discovered during the late bitmap/mirror checks. */
+typedef struct _CHK_IO_STATE
+{
+    const MKNTFS_IO *Original;
+    int Failed;
+    int Armed;
+    int Changed;
+} CHK_IO_STATE;
+
+static int chk_checked_read(void *ctx, ULONGLONG off, void *buf, ULONG len)
+{
+    CHK_IO_STATE *state = ctx;
+    int rc = state->Original->read(state->Original->context, off, buf, len);
+    if (rc != 0)
+        state->Failed = 1;
+    return rc;
+}
+
+static int chk_checked_write(void *ctx, ULONGLONG off, const void *buf, ULONG len)
+{
+    CHK_IO_STATE *state = ctx;
+    int rc;
+
+    if (state->Failed)
+        return -1;
+    if (!state->Armed)
+    {
+        rc = NtfsChkSetVolumeDirty(state->Original);
+        if (rc == 0 && state->Original->flush != NULL)
+            rc = state->Original->flush(state->Original->context);
+        if (rc != 0)
+        {
+            state->Failed = 1;
+            return -1;
+        }
+        state->Armed = state->Changed = 1;
+    }
+    rc = state->Original->write(state->Original->context, off, buf, len);
+    if (rc != 0)
+        state->Failed = 1;
+    return rc;
+}
+
+static int chk_checked_flush(void *ctx)
+{
+    CHK_IO_STATE *state = ctx;
+    int rc = state->Original->flush(state->Original->context);
+    if (rc != 0)
+        state->Failed = 1;
+    return rc;
+}
+
+static int chk_finish_io(CHK_IO_STATE *state, const NTFS_CHK_OPTIONS *opt,
+                         NTFS_CHK_RESULT *res, int rc)
+{
+    if (opt->FixErrors && state->Changed && state->Original->flush != NULL)
+        chk_checked_flush(state);
+    if (state->Failed)
+    {
+        /* A failed clean-bit flush may already have changed the cached media
+         * image. Restore dirty best-effort, but retain the original failure. */
+        if (state->Changed)
+        {
+            NtfsChkSetVolumeDirty(state->Original);
+            if (state->Original->flush != NULL)
+                state->Original->flush(state->Original->context);
+        }
+        chk_add_issue(res, CHK_ERR_IO, 0, 0, 0);
+        res->ExitStatus = 1;
+        rc = -1;
+    }
+    if (!opt->CheckOnlyIfDirty || res->WasDirty || res->RecordsScanned != 0 || rc < 0)
+        chk_emit_summary(opt, res);
+    return rc;
+}
+
 int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
                   NTFS_CHK_RESULT *res)
 {
     NTFS_CHK_OPTIONS again;
     ULONG initial, before, remaining;
     int rc, pass;
+    CHK_IO_STATE state = {io, 0, 0, 0};
+    MKNTFS_IO checked = {&state, chk_checked_write, chk_checked_read,
+                         io->flush != NULL ? chk_checked_flush : NULL};
+
+    io = &checked;
 
     /* A read-only check makes no further passes, so its own numbers already
      * describe the volume as it stands: let it print them itself. */
-    rc = chk_volume_pass(io, opt, res, !opt->FixErrors);
+    rc = chk_volume_pass(io, opt, res, 0);
+    if (state.Failed) rc = -1;
     if (rc < 0 || !opt->FixErrors || res->IssueCount == 0)
     {
-        if (rc >= 0 && opt->FixErrors)
-            chk_emit_summary(opt, res);
-        return rc;
+        return chk_finish_io(&state, opt, res, rc);
     }
 
     /* Later passes are silent: one set of stage banners is enough, and the
@@ -966,6 +1043,7 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
         memset(&probe, 0, sizeof(probe));
         again.FixErrors = 0;
         prc = chk_volume_pass(io, &again, &probe, 0);
+        if (state.Failed) prc = -1;
         remaining = probe.IssueCount;
         /* The summary should describe the volume the run is leaving behind,
          * not the one the first pass walked into. */
@@ -989,7 +1067,9 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
         /* Still damaged: go round again. */
         memset(&probe, 0, sizeof(probe));
         again.FixErrors = 1;
+        state.Armed = 0;
         prc = chk_volume_pass(io, &again, &probe, 0);
+        if (state.Failed) prc = -1;
         progress = probe.OrphansRecovered + probe.IndexesRebuilt +
                    probe.LinksFixed + probe.AttrsTruncated;
         res->OrphansRecovered += probe.OrphansRecovered;
@@ -1038,8 +1118,7 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
     res->RepairedCount = (initial > remaining) ? initial - remaining : 0;
     res->ExitStatus = (remaining == 0) ? 2 : 1;
 
-    chk_emit_summary(opt, res);
-    return res->ExitStatus;
+    return chk_finish_io(&state, opt, res, res->ExitStatus);
 }
 
 const char *NtfsChkCodeString(NTFS_CHK_CODE code)
@@ -1075,6 +1154,8 @@ const char *NtfsChkCodeString(NTFS_CHK_CODE code)
     case CHK_ERR_MFTMIRR_MISMATCH:  return "$MFTMirr differs from $MFT";
     case CHK_ERR_UPCASE_BAD:        return "$UpCase unreadable or wrong size";
     case CHK_ERR_ATTR_TRUNCATED:    return "corrupt attribute truncated";
+    case CHK_ERR_IO:               return "volume I/O failed";
+    case CHK_ERR_LOGFILE:          return "$LogFile checkpoint failed";
     case CHK_ERR_NOMEM:             return "out of memory: detection degraded";
     default:                        return "unknown";
     }

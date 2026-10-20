@@ -5598,6 +5598,52 @@ MmIsDataSectionResident(
     return Ret;
 }
 
+/*
+ * Finds the lowest offset at or above Offset that a page table of the data
+ * segment covers. Offsets no page table covers have no page in memory, so
+ * there is nothing there to flush or purge. Returns FALSE when no page table
+ * lies at or above Offset.
+ */
+BOOLEAN
+NTAPI
+MmGetNextSegmentPageTable(
+    _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer,
+    _In_ LONGLONG Offset,
+    _Out_ PLONGLONG NextOffset)
+{
+    PMM_SECTION_SEGMENT Segment;
+    PCACHE_SECTION_PAGE_TABLE PageTable;
+    PVOID RestartKey = NULL;
+    BOOLEAN Found = FALSE;
+
+    Segment = MiGrabDataSection(SectionObjectPointer);
+    if (!Segment)
+        return FALSE;
+
+    MmLockSectionSegment(Segment);
+    for (PageTable = RtlEnumerateGenericTableWithoutSplaying(&Segment->PageTable, &RestartKey);
+         PageTable != NULL;
+         PageTable = RtlEnumerateGenericTableWithoutSplaying(&Segment->PageTable, &RestartKey))
+    {
+        LONGLONG Start = PageTable->FileOffset.QuadPart;
+        LONGLONG End = Start + _countof(PageTable->PageEntries) * PAGE_SIZE;
+
+        if (End <= Offset)
+            continue;
+        if (Start < Offset)
+            Start = Offset;
+        if (!Found || Start < *NextOffset)
+        {
+            *NextOffset = Start;
+            Found = TRUE;
+        }
+    }
+    MmUnlockSectionSegment(Segment);
+    MmDereferenceSegment(Segment);
+
+    return Found;
+}
+
 NTSTATUS
 NTAPI
 MmMakeDataSectionResident(

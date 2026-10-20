@@ -84,7 +84,8 @@ static ULONG Read32(PUCHAR Bytes)
     return Value;
 }
 
-START_TEST(NtfsFormat)
+static VOID
+CheckFormattedVolume(VOID)
 {
     WCHAR Root[MAX_PATH], Path[MAX_PATH], Drive;
     HANDLE Volume = NULL, File = NULL;
@@ -100,7 +101,8 @@ START_TEST(NtfsFormat)
 
     if (!NtfsKmtFindVolume(Root, &Drive))
     {
-        skip(FALSE, "No formatted NTFS fixture\n");
+        /* The user part already selected and formatted this fixture. */
+        ok(FALSE, "Formatted volume is unavailable or still read-only\n");
         return;
     }
     Status = NtfsKmtOpenVolume(Drive, FILE_READ_DATA, &Volume);
@@ -166,4 +168,14 @@ START_TEST(NtfsFormat)
 Cleanup:
     if (File != NULL) ZwClose(File);
     ZwClose(Volume);
+}
+
+START_TEST(NtfsFormat)
+{
+    CheckFormattedVolume();
+}
+
+START_TEST(NtfsChkdsk)
+{
+    CheckFormattedVolume();
 }

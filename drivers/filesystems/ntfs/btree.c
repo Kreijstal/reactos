@@ -131,7 +131,7 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
     ULONG *BitmapPtr;
     RTL_BITMAP Bitmap;
     ULONG BytesWritten;
-    ULONG BytesNeeded;
+    ULONG BytesNeeded, BufferLength;
     LARGE_INTEGER DataSize;
 
     DPRINT("AllocateIndexNode(%p, %p, %lu, %p, %lu, %p) called.\n", DeviceExt,
@@ -174,9 +174,12 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
     // Windows seems to allocate the bitmap in 8-byte chunks to keep any bytes from being wasted on padding
     BytesNeeded = ALIGN_UP(BytesNeeded, ATTR_RECORD_ALIGNMENT);
 
+    // The bitmap there is may already be longer than that; all of it is read
+    BufferLength = (ULONG)max(BytesNeeded, BitmapLength);
+
     // Allocate memory for the bitmap, including some padding; RtlInitializeBitmap() wants a pointer
     // that's ULONG-aligned, and it wants the size of the memory allocated for it to be a ULONG-multiple.
-    BitmapMem = ExAllocatePoolWithTag(NonPagedPool, BytesNeeded + sizeof(ULONG), TAG_NTFS);
+    BitmapMem = ExAllocatePoolWithTag(NonPagedPool, BufferLength + sizeof(ULONG), TAG_NTFS);
     if (!BitmapMem)
     {
         DPRINT1("Error: failed to allocate bitmap!");
@@ -186,10 +189,16 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
     // RtlInitializeBitmap() wants a pointer that's ULONG-aligned.
     BitmapPtr = (PULONG)ALIGN_UP_BY((ULONG_PTR)BitmapMem, sizeof(ULONG));
 
-    RtlZeroMemory(BitmapPtr, BytesNeeded);
+    RtlZeroMemory(BitmapPtr, BufferLength);
 
-    // Read the existing bitmap data
-    Status = ReadAttribute(DeviceExt, BitmapCtx, 0, (PCHAR)BitmapPtr, BitmapLength);
+    // Read the existing bitmap data; ReadAttribute returns the bytes it read
+    if (ReadAttribute(DeviceExt, BitmapCtx, 0, (PCHAR)BitmapPtr, (ULONG)BitmapLength) != BitmapLength)
+    {
+        DPRINT1("ERROR: Failed to read the index bitmap!\n");
+        ExFreePoolWithTag(BitmapMem, TAG_NTFS);
+        ReleaseAttributeContext(BitmapCtx);
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
 
     // Initialize bitmap. It has to describe the node we are about to add, so
     // it needs NextNodeNumber + 1 bits, not NextNodeNumber.
@@ -220,6 +229,7 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("ERROR: Failed to set length of bitmap attribute!\n");
+            ExFreePoolWithTag(BitmapMem, TAG_NTFS);
             ReleaseAttributeContext(BitmapCtx);
             return Status;
         }
@@ -235,6 +245,7 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("ERROR: Failed to set length of index allocation!\n");
+        ExFreePoolWithTag(BitmapMem, TAG_NTFS);
         ReleaseAttributeContext(BitmapCtx);
         return Status;
     }
@@ -244,6 +255,7 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("ERROR: Failed to update file record!\n");
+        ExFreePoolWithTag(BitmapMem, TAG_NTFS);
         ReleaseAttributeContext(BitmapCtx);
         return Status;
     }
@@ -1682,7 +1694,7 @@ DestroyBTreeNode(PB_TREE_FILENAME_NODE Node)
         CurrentKey = NextKey;
     }
 
-    NT_ASSERT(NextKey == NULL);
+    NT_ASSERT(CurrentKey == NULL);
 
     ExFreePoolWithTag(Node, TAG_NTFS);
 }

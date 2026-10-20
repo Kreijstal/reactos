@@ -767,7 +767,8 @@ NTSTATUS
 NtfsCheckCreateParameters(
     _In_ ULONG Disposition,
     _In_ ULONG Options,
-    _In_ ACCESS_MASK DesiredAccess)
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ BOOLEAN PagingFile)
 {
     if (Disposition > FILE_MAXIMUM_DISPOSITION)
         return STATUS_INVALID_PARAMETER;
@@ -787,8 +788,12 @@ NtfsCheckCreateParameters(
         return STATUS_INVALID_PARAMETER;
     }
 
+    /* NtCreatePagingFile supersedes the paging file delete-on-close without
+     * DELETE access, as on Windows; it skips the I/O manager's parameter
+     * check (IO_NO_PARAMETER_CHECKING) for that reason. */
     if (BooleanFlagOn(Options, FILE_DELETE_ON_CLOSE) &&
-        !BooleanFlagOn(DesiredAccess, DELETE))
+        !BooleanFlagOn(DesiredAccess, DELETE) &&
+        !PagingFile)
     {
         return STATUS_INVALID_PARAMETER;
     }
@@ -1813,7 +1818,8 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
 
     ASSERT(DeviceExt);
 
-    Status = NtfsCheckCreateParameters(Disposition, Options, DesiredAccess);
+    Status = NtfsCheckCreateParameters(Disposition, Options, DesiredAccess,
+                                       BooleanFlagOn(Stack->Flags, SL_OPEN_PAGING_FILE));
     if (!NT_SUCCESS(Status))
         return Status;
 
@@ -1937,6 +1943,13 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
     }
 
     ExFreePoolWithTag(Path.Buffer, TAG_NTFS);
+
+    /* Mm opens its paging files this way, and only Mm does I/O to them */
+    if (Status == STATUS_SUCCESS && (Stack->Flags & SL_OPEN_PAGING_FILE) &&
+        FileObject->FsContext != NULL)
+    {
+        ((PNTFS_FCB)FileObject->FsContext)->Flags |= FCB_IS_PAGING_FILE;
+    }
 
     return Status;
 }
