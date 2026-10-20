@@ -224,6 +224,8 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
+    DataContext->DirectIo = BooleanFlagOn(Fcb->Flags, FCB_IS_PAGING_FILE);
+
     StreamSize = AttributeDataLength(DataContext->pRecord);
     if (ReadOffset >= StreamSize)
     {
@@ -674,6 +676,8 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
         return Status;
     }
+
+    DataContext->DirectIo = BooleanFlagOn(Fcb->Flags, FCB_IS_PAGING_FILE);
 
     // Get the size of the stream on disk
     StreamSize = AttributeDataLength(DataContext->pRecord);
