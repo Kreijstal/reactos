@@ -181,14 +181,25 @@ ComputeLayout(IN ULONG ClusterSize)
     // $MFTMirr: the first four system records.
     LAYOUT.MftMirrClusters = (ULONG)CEIL_DIV((ULONGLONG)MFT_MIRR_COUNT * MFT_RECORD_SIZE, (ULONGLONG)C);
 
-    // $LogFile: ~0.78% of the volume, clamped to [256 KB, 64 MB].
+    // $LogFile: sized from the volume the way Windows' format does it
+    // (ntfs-3g's mkntfs documents the same table, measured on Windows
+    // volumes): 2 MiB up to 200 MiB, 64 MiB from 12 GiB, and in between
+    // about volume/200 rounded down to a cluster. Never below 2 MiB:
+    // smaller logs leave NTFS too little room for its restart area and a
+    // checkpoint's worth of records.
     {
-        ULONGLONG LogBytes = VolumeBytes / 128;
+        ULONGLONG LogVolume = LAYOUT.ClusterCount * C;
+        ULONGLONG LogBytes;
 
-        if (LogBytes < (256ULL * 1024))
-            LogBytes = 256ULL * 1024;
-        if (LogBytes > (64ULL * 1024 * 1024))
+        if (LogVolume <= (200ULL * 1024 * 1024))
+            LogBytes = 2ULL * 1024 * 1024;
+        else if (LogVolume >= (12ULL * 1024 * 1024 * 1024))
             LogBytes = 64ULL * 1024 * 1024;
+        else
+            LogBytes = (LogVolume / 200) & ~((ULONGLONG)C - 1);
+
+        if (LogBytes < (2ULL * 1024 * 1024))
+            LogBytes = 2ULL * 1024 * 1024;
 
         LAYOUT.LogFileClusters = (ULONG)CEIL_DIV(LogBytes, (ULONGLONG)C);
     }
