@@ -562,7 +562,18 @@ NtfsMountStartLog(PDEVICE_EXTENSION Vcb)
         return STATUS_SUCCESS;
     Status = NtfsLfsCreateWriter(Vcb, NtfsWriteDiskCached, NtfsLogWriteDirect, NtfsLogFlush,
                                  &Vcb->LfsWriter);
-    return Status;
+    if (!NT_SUCCESS(Status))
+        return Status;
+    /* Metadata is logged from here on, as Windows does; a log the writer
+     * cannot use leaves the volume as unprotected as before. */
+    ExAcquireResourceExclusiveLite(&Vcb->IoResource, TRUE);
+    ExAcquireResourceExclusiveLite(&Vcb->DirResource, TRUE);
+    Status = NtfsLfsEnableWriter(Vcb->LfsWriter);
+    ExReleaseResourceLite(&Vcb->DirResource);
+    ExReleaseResourceLite(&Vcb->IoResource);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("$LogFile is not written on this volume (%lx)\n", Status);
+    return STATUS_SUCCESS;
 }
 
 static
@@ -1189,9 +1200,6 @@ NtfsDismountVolume(PDEVICE_EXTENSION DeviceExt,
     {
         return STATUS_VOLUME_DISMOUNTED;
     }
-
-    if (NtfsLfsWriterEnabled(DeviceExt->LfsWriter) && !(DeviceExt->Flags & VCB_VOLUME_LOCKED))
-        return STATUS_ACCESS_DENIED;
 
     DPRINT1("Dismounting volume\n");
 
