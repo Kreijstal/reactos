@@ -1219,8 +1219,11 @@ WriteDone:
     if (NT_SUCCESS(Status) && !(Irp->Flags & IRP_PAGING_IO) && ReturnedWriteLength != 0)
     {
         FileObject->Flags |= FO_FILE_MODIFIED;
+        /* Write-through makes this write durable, not the whole volume. The
+         * cached path has already flushed the written range of the file into
+         * the volume stream, and the direct path wrote it there. */
         if (FileObject->Flags & FO_WRITE_THROUGH)
-            Status = NtfsFlushVolume(DeviceExt);
+            Status = NtfsFlushVolumeStream(DeviceExt);
     }
     return Status;
 }
