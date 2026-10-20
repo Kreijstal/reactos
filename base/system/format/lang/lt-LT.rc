@@ -17,7 +17,8 @@ BEGIN
   -Q               Atliekamas spartus formavimas.\n\
   -A:dydis         Pakeičia numatytąjį klasterio dydį. Bendram naudojimui\n\
                    rekomenduojami numatytieji nustatymai\n\
-                   NTFS palaiko 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K.\n\
+                   NTFS palaiko 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K,\n\
+                                128K, 256K, 512K, 1M, 2M.\n\
                    FAT palaiko 8192, 16K, 32K, 64K, 128K, 256K.\n\
                    NTFS glaudinimas nėra palaikomas klasteriams, kurių dydis\n\
                    viršija 4096.\n\
