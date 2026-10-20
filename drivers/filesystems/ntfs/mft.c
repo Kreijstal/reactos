@@ -2608,7 +2608,7 @@ ReadFileRecordInternal(PDEVICE_EXTENSION Vcb,
     return FixupUpdateSequenceArray(Vcb, &file->Ntfs);
 }
 
-static NTSTATUS
+NTSTATUS
 NtfsReadFileRecordEx(PDEVICE_EXTENSION Vcb, ULONGLONG Index,
                      PFILE_RECORD_HEADER Record, BOOLEAN AllowUnused)
 {
