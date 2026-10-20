@@ -120,8 +120,11 @@ ComputeLayout(IN ULONG ClusterSize)
     ULONG     C;
     ULONGLONG Lcn;
 
+    // Windows 10 1709 and later format NTFS with clusters of up to 2 MiB
+    // (format /A:128K .. /A:2M); the boot sector then stores
+    // SectorsPerCluster in its negative-shift form (see bootsect.c).
     if (Bps < 512 || Bps > 4096 || (Bps & (Bps - 1)) != 0 ||
-        (ClusterSize != 0 && (ClusterSize < Bps || ClusterSize > 65536 ||
+        (ClusterSize != 0 && (ClusterSize < Bps || ClusterSize > NTFS_MAX_CLUSTER_SIZE ||
                               (ClusterSize & (ClusterSize - 1)) != 0)))
         return STATUS_INVALID_PARAMETER;
 

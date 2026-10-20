@@ -32,6 +32,27 @@ FillOemId(OUT PBOOT_SECTOR BootSector)
     BootSector->OEMID.QuadPart = OEM_ID;
 }
 
+//
+// The BPB's SectorsPerCluster byte. Up to 128 sectors it is the count itself;
+// beyond that (clusters over 64 KiB with 512-byte sectors, which Windows 10
+// 1709 and later format) it is 256 - log2(count), i.e. a negative shift:
+// 0xF8 for 256 sectors (128 KiB) down to 0xF4 for 4096 (2 MiB). Windows,
+// ntfs-3g and Linux' ntfs3 all decode it that way.
+//
+static
+BYTE
+EncodeSectorsPerCluster(IN ULONG SectorsPerCluster)
+{
+    BYTE Shift = 0;
+
+    if (SectorsPerCluster <= 128)
+        return (BYTE)SectorsPerCluster;
+
+    while ((1UL << Shift) < SectorsPerCluster)
+        Shift++;
+    return (BYTE)(256 - Shift);
+}
+
 static
 VOID
 FillBiosParametersBlock(OUT PBIOS_PARAMETERS_BLOCK BiosParametersBlock)
@@ -39,7 +60,7 @@ FillBiosParametersBlock(OUT PBIOS_PARAMETERS_BLOCK BiosParametersBlock)
     // See: https://en.wikipedia.org/wiki/BIOS_parameter_block
 
     BiosParametersBlock->BytesPerSector    = (USHORT)BYTES_PER_SECTOR;
-    BiosParametersBlock->SectorsPerCluster = (BYTE)SECTORS_PER_CLUSTER;
+    BiosParametersBlock->SectorsPerCluster = EncodeSectorsPerCluster(SECTORS_PER_CLUSTER);
 
     BiosParametersBlock->MediaId = IS_HARD_DRIVE ? 0xF8 : 0xF0;
 
