@@ -45,6 +45,8 @@ typedef enum _NTFS_CHK_CODE {
     CHK_ERR_UPCASE_BAD,       /* $UpCase unreadable or wrong size             */
     CHK_ERR_ATTR_TRUNCATED,   /* corrupt attribute truncated/deleted (repair) */
     CHK_ERR_NOMEM,            /* model allocation failed: detect-only run     */
+    CHK_ERR_IO,               /* storage read/write/flush failed              */
+    CHK_ERR_LOGFILE,          /* could not checkpoint the repaired volume     */
     CHK_CODE_MAX
 } NTFS_CHK_CODE;
 
