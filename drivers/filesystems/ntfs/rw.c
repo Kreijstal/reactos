@@ -1078,7 +1078,10 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
         PagingResourceAcquired = TRUE;
     }
 
+    /* A directory has no data stream and no byte-range locks; it is
+     * refused below. */
     if (!(Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)) &&
+        !NtfsFCBIsDirectory(Fcb) &&
         !NtfsCheckFileLock(Fcb, Irp, &ByteOffset, Length, TRUE))
     {
         if (PagingResourceAcquired)
