@@ -1194,6 +1194,9 @@ NTSTATUS
 NtfsFlushVolume(PDEVICE_EXTENSION Vcb);
 
 NTSTATUS
+NtfsFlushVolumeStream(PDEVICE_EXTENSION Vcb);
+
+NTSTATUS
 NtfsFlushFileCache(PFILE_OBJECT FileObject, BOOLEAN Purge);
 
 

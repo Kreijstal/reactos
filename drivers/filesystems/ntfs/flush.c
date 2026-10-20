@@ -51,6 +51,21 @@ NtfsFlushVolume(PDEVICE_EXTENSION Vcb)
     return Status;
 }
 
+/* Make what this volume's writes have put in the volume stream durable.
+ * File data reaches storage through the volume stream, so a file whose own
+ * cache has been flushed is on the media once the volume stream and the
+ * device are. Other files' caches are not touched. */
+NTSTATUS
+NtfsFlushVolumeStream(PDEVICE_EXTENSION Vcb)
+{
+    IO_STATUS_BLOCK IoStatus;
+
+    CcFlushCache(Vcb->StreamFileObject->SectionObjectPointer, NULL, 0, &IoStatus);
+    if (!NT_SUCCESS(IoStatus.Status))
+        return IoStatus.Status;
+    return NtfsFlushDevice(Vcb->StorageDevice);
+}
+
 /* Flush before invalidation, and leave dirty pages intact on an I/O error. */
 NTSTATUS
 NtfsFlushFileCache(PFILE_OBJECT FileObject, BOOLEAN Purge)
@@ -111,11 +126,15 @@ NtfsFlushBuffers(PNTFS_IRP_CONTEXT IrpContext)
         return STATUS_VOLUME_DISMOUNTED;
     }
 
-    if (IrpContext->FileObject != NULL)
+    /* A volume handle flushes the volume. A file handle flushes that file
+     * and the metadata describing it, as on Windows: not every other file. */
+    if (IrpContext->FileObject != NULL &&
+        !(((PNTFS_FCB)IrpContext->FileObject->FsContext)->Flags & FCB_IS_VOLUME))
     {
         NTSTATUS Status = NtfsFlushFileCache(IrpContext->FileObject, FALSE);
         if (!NT_SUCCESS(Status))
             return Status;
+        return NtfsFlushVolumeStream(DeviceExt);
     }
     return NtfsFlushVolume(DeviceExt);
 }
