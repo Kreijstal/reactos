@@ -14,11 +14,7 @@
 // - https://ntquery.wordpress.com/2014/03/29/anti-debug-fiber-local-storage-fls/
 //
 
-typedef struct _FLS_CALLBACK_INFO
-{
-    PFLS_CALLBACK_FUNCTION Callback;
-    PVOID Unknown;
-} FLS_CALLBACK_INFO, *PFLS_CALLBACK_INFO;
+/* FLS_CALLBACK_INFO lives in ndk/rtltypes.h */
 
 typedef
 NTSTATUS
@@ -248,7 +244,7 @@ void Test_RtlFlsAllocFree(void)
         ok_eq_pointer(flsData->Data[flsIndex1], (PVOID)0x1234);
         ok_eq_ulong(peb->FlsHighIndex, flsIndex2);
         PFLS_CALLBACK_INFO callbackInfo = (PFLS_CALLBACK_INFO)peb->FlsCallback;
-        ok((callbackInfo == NULL) || (callbackInfo[flsIndex1].Callback == NULL), "Unexpected callback\n");
+        ok((callbackInfo == NULL) || (callbackInfo[flsIndex1].lpCallback == NULL), "Unexpected callback\n");
     }
 
     /* Delete flsIndex1, should not trigger callback */
@@ -282,7 +278,7 @@ void Test_RtlFlsAllocFree(void)
     {
         PFLS_CALLBACK_INFO callbackInfo = (PFLS_CALLBACK_INFO)peb->FlsCallback;
         ok(callbackInfo != NULL, "peb->FlsCallback is NULL. Bye.\n");
-        ok_eq_pointer(callbackInfo[flsIndex1].Callback, FlsTestCallback);
+        ok_eq_pointer(callbackInfo[flsIndex1].lpCallback, FlsTestCallback);
     }
 
     /* Delete FLS slot, this should now trigger callback */
@@ -294,7 +290,7 @@ void Test_RtlFlsAllocFree(void)
     if (GetNTVersion() < _WIN32_WINNT_WIN10)
     {
         PFLS_CALLBACK_INFO callbackInfo = (PFLS_CALLBACK_INFO)peb->FlsCallback;
-        ok_eq_pointer(callbackInfo[flsIndex1].Callback, NULL);
+        ok_eq_pointer(callbackInfo[flsIndex1].lpCallback, NULL);
     }
 
     /* Allocate index with a callback and set the value, then set it to NULL */
@@ -693,8 +689,8 @@ START_TEST(RtlFls)
         PPEB peb = NtCurrentPeb();
         PTEB teb = NtCurrentTeb();;
         PFLS_CALLBACK_INFO callbackInfo = (PFLS_CALLBACK_INFO)peb->FlsCallback;
-        ok_eq_pointer(callbackInfo[g_SharedFlsIndex1].Callback, NULL);
-        ok_eq_pointer(callbackInfo[g_SharedFlsIndex2].Callback, NULL);
+        ok_eq_pointer(callbackInfo[g_SharedFlsIndex1].lpCallback, NULL);
+        ok_eq_pointer(callbackInfo[g_SharedFlsIndex2].lpCallback, NULL);
         PRTL_FLS_DATA_VISTA flsData = (PRTL_FLS_DATA_VISTA)teb->FlsData;
         ok_eq_pointer(flsData->Data[g_SharedFlsIndex1], NULL);
         ok_eq_pointer(flsData->Data[g_SharedFlsIndex2], NULL);
