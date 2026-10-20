@@ -2021,6 +2021,46 @@ NtQueryDirectoryFile(IN HANDLE FileHandle,
     /* Check if we came from user mode */
     if (PreviousMode != KernelMode)
     {
+        ULONG MinimumLength;
+
+        /* As on Windows, refuse a class the directory query does not have,
+         * or a buffer too small for one entry's fixed part, before anything
+         * is sent to the file system. The I/O status block is untouched. */
+        switch (FileInformationClass)
+        {
+            case FileDirectoryInformation:
+                MinimumLength = sizeof(FILE_DIRECTORY_INFORMATION);
+                break;
+            case FileFullDirectoryInformation:
+                MinimumLength = sizeof(FILE_FULL_DIR_INFORMATION);
+                break;
+            case FileBothDirectoryInformation:
+                MinimumLength = sizeof(FILE_BOTH_DIR_INFORMATION);
+                break;
+            case FileNamesInformation:
+                MinimumLength = sizeof(FILE_NAMES_INFORMATION);
+                break;
+            case FileIdBothDirectoryInformation:
+                MinimumLength = sizeof(FILE_ID_BOTH_DIR_INFORMATION);
+                break;
+            case FileIdFullDirectoryInformation:
+                MinimumLength = sizeof(FILE_ID_FULL_DIR_INFORMATION);
+                break;
+            case FileObjectIdInformation:
+                MinimumLength = sizeof(FILE_OBJECTID_INFORMATION);
+                break;
+            case FileQuotaInformation:
+                MinimumLength = sizeof(FILE_QUOTA_INFORMATION);
+                break;
+            case FileReparsePointInformation:
+                MinimumLength = sizeof(FILE_REPARSE_POINT_INFORMATION);
+                break;
+            default:
+                return STATUS_INVALID_INFO_CLASS;
+        }
+        if (Length < MinimumLength)
+            return STATUS_INFO_LENGTH_MISMATCH;
+
         /* Enter SEH for probing */
         _SEH2_TRY
         {
