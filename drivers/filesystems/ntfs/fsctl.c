@@ -146,12 +146,12 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
         }
     }
 
-    /* Check cluster size */
-    ClusterSize = BootSector->BPB.BytesPerSector * BootSector->BPB.SectorsPerCluster;
-    if (ClusterSize != 512 && ClusterSize != 1024 &&
-        ClusterSize != 2048 && ClusterSize != 4096 &&
-        ClusterSize != 8192 && ClusterSize != 16384 &&
-        ClusterSize != 32768 && ClusterSize != 65536)
+    /* Check cluster size: a power of two from 512 bytes to 2 MiB (Windows 10
+     * 1709 and later format clusters over 64 KiB) */
+    ClusterSize = BootSector->BPB.BytesPerSector *
+                  NtfsDecodeSectorsPerCluster(BootSector->BPB.SectorsPerCluster);
+    if (ClusterSize < 512 || ClusterSize > NTFS_MAX_CLUSTER_SIZE ||
+        (ClusterSize & (ClusterSize - 1)) != 0)
     {
         DPRINT1("Cluster size failed: %hu, %hu, %hu\n",
                 BootSector->BPB.BytesPerSector,
@@ -246,8 +246,8 @@ NtfsGetVolumeData(PDEVICE_OBJECT DeviceObject,
 
     /* Read data from the bootsector */
     NtfsInfo->BytesPerSector = BootSector->BPB.BytesPerSector;
-    NtfsInfo->SectorsPerCluster = BootSector->BPB.SectorsPerCluster;
-    NtfsInfo->BytesPerCluster = BootSector->BPB.BytesPerSector * BootSector->BPB.SectorsPerCluster;
+    NtfsInfo->SectorsPerCluster = NtfsDecodeSectorsPerCluster(BootSector->BPB.SectorsPerCluster);
+    NtfsInfo->BytesPerCluster = BootSector->BPB.BytesPerSector * NtfsInfo->SectorsPerCluster;
     NtfsInfo->SectorCount = BootSector->EBPB.SectorCount;
     NtfsInfo->ClusterCount = DeviceExt->NtfsInfo.SectorCount / (ULONGLONG)DeviceExt->NtfsInfo.SectorsPerCluster;
 
