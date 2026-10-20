@@ -1,357 +1,235 @@
 /*
- * COPYRIGHT:   See COPYING in the top level directory
- * PROJECT:     ReactOS NTFS FS library
- * FILE:        lib/fslib/ntfslib/ntfslib.c
- * PURPOSE:     NTFS format and chkdsk implementation
- * PROGRAMMERS: Pierre Schweitzer (original stub)
- *              winmkntfs contributors (format implementation)
+ * PROJECT:     ReactOS NTFS filesystem library
  * LICENSE:     GPL-2.0-or-later
+ * PURPOSE:     Native I/O adapter for the offline consistency checker
  */
-
 #include <ndk/umtypes.h>
 #include <ndk/iofuncs.h>
 #include <ndk/obfuncs.h>
 #include <ndk/rtlfuncs.h>
 #include <fmifs/fmifs.h>
-
-#include "mkntfs.h"
 #include "chkdsk.h"
-
 #define NDEBUG
 #include <debug.h>
 
-/* ============================================================
- * I/O adapter: bridges MKNTFS_IO callbacks to NtWriteFile/NtReadFile
- * ============================================================ */
-
-typedef struct _NTFS_FORMAT_CONTEXT {
-    HANDLE FileHandle;
+typedef struct _NTFS_CHECK_CONTEXT
+{
+    HANDLE Handle;
+    ULONG SectorSize;
+    NTSTATUS FailureStatus;
     PFMIFSCALLBACK Callback;
-    ULONG Percent;
-} NTFS_FORMAT_CONTEXT;
-
-#define SECTOR_SIZE 512
+} NTFS_CHECK_CONTEXT;
 
 static int
-NtfsFormatWrite(void *ctx, ULONGLONG offset, const void *buf, ULONG length)
+NtfsCheckTransfer(NTFS_CHECK_CONTEXT *Context, ULONGLONG Offset,
+                  PVOID Buffer, ULONG Length, BOOLEAN Write)
 {
-    NTFS_FORMAT_CONTEXT *fctx = (NTFS_FORMAT_CONTEXT *)ctx;
-    IO_STATUS_BLOCK IoStatusBlock;
-    LARGE_INTEGER FileOffset;
+    IO_STATUS_BLOCK Iosb;
+    LARGE_INTEGER Position;
     NTSTATUS Status;
-    ULONG AlignedLength;
+    ULONG Prefix, AlignedLength;
+    PUCHAR AlignedBuffer = Buffer;
+    BOOLEAN Unaligned;
 
-    /* Direct disk I/O requires sector-aligned offset and length */
-    AlignedLength = (length + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
-
-    if (AlignedLength != length || (offset & (SECTOR_SIZE - 1)))
+    if (Length == 0)
+        return 0;
+    Prefix = (ULONG)(Offset % Context->SectorSize);
+    if (Length > MAXULONG - Prefix - (Context->SectorSize - 1))
     {
-        /* Unaligned: read-modify-write */
-        ULONGLONG AlignedOffset = offset & ~(ULONGLONG)(SECTOR_SIZE - 1);
-        ULONG PrePad = (ULONG)(offset - AlignedOffset);
-        ULONG TotalLen = (PrePad + length + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
-        PUCHAR TempBuf;
-
-        TempBuf = RtlAllocateHeap(RtlGetProcessHeap(), 0, TotalLen);
-        if (!TempBuf) return -1;
-
-        /* Read existing sector data */
-        FileOffset.QuadPart = (LONGLONG)AlignedOffset;
-        Status = NtReadFile(fctx->FileHandle, NULL, NULL, NULL,
-                            &IoStatusBlock, TempBuf, TotalLen,
-                            &FileOffset, NULL);
-        if (!NT_SUCCESS(Status))
-            RtlZeroMemory(TempBuf, TotalLen);
-
-        /* Overlay new data */
-        RtlCopyMemory(TempBuf + PrePad, buf, length);
-
-        /* Write back */
-        Status = NtWriteFile(fctx->FileHandle, NULL, NULL, NULL,
-                             &IoStatusBlock, TempBuf, TotalLen,
-                             &FileOffset, NULL);
-        RtlFreeHeap(RtlGetProcessHeap(), 0, TempBuf);
-    }
-    else
-    {
-        FileOffset.QuadPart = (LONGLONG)offset;
-        Status = NtWriteFile(fctx->FileHandle, NULL, NULL, NULL,
-                             &IoStatusBlock, (PVOID)buf, length,
-                             &FileOffset, NULL);
-    }
-
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("NtWriteFile failed at offset 0x%I64x, length %lu: 0x%08x\n",
-                offset, length, Status);
+        Context->FailureStatus = STATUS_INVALID_PARAMETER;
         return -1;
     }
+    AlignedLength = (Prefix + Length + Context->SectorSize - 1) & ~(Context->SectorSize - 1);
+    Position.QuadPart = (LONGLONG)(Offset - Prefix);
+    Unaligned = Prefix != 0 || AlignedLength != Length;
+    if (Unaligned)
+    {
+        AlignedBuffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, AlignedLength);
+        if (AlignedBuffer == NULL)
+        {
+            Context->FailureStatus = STATUS_INSUFFICIENT_RESOURCES;
+            return -1;
+        }
+    }
+    if (!Write || Unaligned)
+    {
+        Status = NtReadFile(Context->Handle, NULL, NULL, NULL, &Iosb,
+                            AlignedBuffer, AlignedLength, &Position, NULL);
+        if (!NT_SUCCESS(Status) || Iosb.Information != AlignedLength)
+            goto Failure;
+        if (!Write && Unaligned)
+            RtlCopyMemory(Buffer, AlignedBuffer + Prefix, Length);
+    }
+    if (Write)
+    {
+        if (Unaligned)
+            RtlCopyMemory(AlignedBuffer + Prefix, Buffer, Length);
+        Status = NtWriteFile(Context->Handle, NULL, NULL, NULL, &Iosb,
+                             AlignedBuffer, AlignedLength, &Position, NULL);
+        if (!NT_SUCCESS(Status) || Iosb.Information != AlignedLength)
+            goto Failure;
+    }
+    if (Unaligned)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, AlignedBuffer);
     return 0;
+Failure:
+    if (NT_SUCCESS(Context->FailureStatus))
+        Context->FailureStatus = NT_SUCCESS(Status) ? STATUS_DEVICE_DATA_ERROR : Status;
+    if (Unaligned)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, AlignedBuffer);
+    return -1;
 }
 
 static int
-NtfsFormatRead(void *ctx, ULONGLONG offset, void *buf, ULONG length)
+NtfsCheckRead(void *Context, ULONGLONG Offset, void *Buffer, ULONG Length)
 {
-    NTFS_FORMAT_CONTEXT *fctx = (NTFS_FORMAT_CONTEXT *)ctx;
-    IO_STATUS_BLOCK IoStatusBlock;
-    LARGE_INTEGER FileOffset;
-    NTSTATUS Status;
-
-    if ((length & (SECTOR_SIZE - 1)) || (offset & (SECTOR_SIZE - 1)))
-    {
-        /* Unaligned read */
-        ULONGLONG AlignedOffset = offset & ~(ULONGLONG)(SECTOR_SIZE - 1);
-        ULONG PrePad = (ULONG)(offset - AlignedOffset);
-        ULONG TotalLen = (PrePad + length + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
-        PUCHAR TempBuf;
-
-        TempBuf = RtlAllocateHeap(RtlGetProcessHeap(), 0, TotalLen);
-        if (!TempBuf) return -1;
-
-        FileOffset.QuadPart = (LONGLONG)AlignedOffset;
-        Status = NtReadFile(fctx->FileHandle, NULL, NULL, NULL,
-                            &IoStatusBlock, TempBuf, TotalLen,
-                            &FileOffset, NULL);
-        if (NT_SUCCESS(Status))
-            RtlCopyMemory(buf, TempBuf + PrePad, length);
-
-        RtlFreeHeap(RtlGetProcessHeap(), 0, TempBuf);
-    }
-    else
-    {
-        FileOffset.QuadPart = (LONGLONG)offset;
-        Status = NtReadFile(fctx->FileHandle, NULL, NULL, NULL,
-                            &IoStatusBlock, buf, length,
-                            &FileOffset, NULL);
-    }
-
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("NtReadFile failed at offset 0x%I64x, length %lu: 0x%08x\n",
-                offset, length, Status);
-        return -1;
-    }
-    return 0;
+    return NtfsCheckTransfer(Context, Offset, Buffer, Length, FALSE);
 }
 
 static int
-NtfsFormatFlush(void *ctx)
+NtfsCheckWrite(void *Context, ULONGLONG Offset, const void *Buffer, ULONG Length)
 {
-    NTFS_FORMAT_CONTEXT *fctx = (NTFS_FORMAT_CONTEXT *)ctx;
-    IO_STATUS_BLOCK IoStatusBlock;
-
-    NtFlushBuffersFile(fctx->FileHandle, &IoStatusBlock);
-    return 0;
+    return NtfsCheckTransfer(Context, Offset, (PVOID)Buffer, Length, TRUE);
 }
 
-/* ============================================================
- * chkdsk message sink: forward core text to the fmifs callback
- *
- * The checker emits chkdsk-style stage banners and a final summary through
- * NTFS_CHK_OPTIONS.Message.  We forward each line as an OUTPUT command with a
- * TEXTOUTPUT payload, exactly the shape autochk/chkdsk.exe's ChkdskCallback
- * consumes (Command == OUTPUT, Argument == PTEXTOUTPUT).
- * ============================================================ */
+static int
+NtfsCheckFlush(void *Context)
+{
+    NTFS_CHECK_CONTEXT *Io = Context;
+    IO_STATUS_BLOCK Iosb;
+    NTSTATUS Status = NtFlushBuffersFile(Io->Handle, &Iosb);
+
+    if (!NT_SUCCESS(Status) && NT_SUCCESS(Io->FailureStatus))
+        Io->FailureStatus = Status;
+    return NT_SUCCESS(Status) ? 0 : -1;
+}
 
 static void
-NtfsChkMessage(void *ctx, const char *msg)
+NtfsCheckMessage(void *Context, const char *Message)
 {
-    NTFS_FORMAT_CONTEXT *cctx = (NTFS_FORMAT_CONTEXT *)ctx;
+    NTFS_CHECK_CONTEXT *Io = Context;
     TEXTOUTPUT Output;
 
-    if (cctx == NULL || cctx->Callback == NULL || msg == NULL)
-        return;
-
     Output.Lines = 1;
-    Output.Output = (PCHAR)msg;
-    cctx->Callback(OUTPUT, 0, (PVOID)&Output);
+    Output.Output = (PCHAR)Message;
+    Io->Callback(OUTPUT, 0, &Output);
 }
 
 BOOLEAN
 NTAPI
-NtfsChkdsk(
-    IN PUNICODE_STRING DriveRoot,
-    IN PFMIFSCALLBACK Callback,
-    IN BOOLEAN FixErrors,
-    IN BOOLEAN Verbose,
-    IN BOOLEAN CheckOnlyIfDirty,
-    IN BOOLEAN ScanDrive,
-    IN PVOID pUnknown1,
-    IN PVOID pUnknown2,
-    IN PVOID pUnknown3,
-    IN PVOID pUnknown4,
-    IN PULONG ExitStatus)
+NtfsChkdsk(PUNICODE_STRING DriveRoot, PFMIFSCALLBACK Callback,
+            BOOLEAN FixErrors, BOOLEAN Verbose, BOOLEAN CheckOnlyIfDirty,
+            BOOLEAN ScanDrive, PVOID Unknown1, PVOID Unknown2,
+            PVOID Unknown3, PVOID Unknown4, PULONG ExitStatus)
 {
-    OBJECT_ATTRIBUTES ObjectAttributes;
+    OBJECT_ATTRIBUTES Attributes;
     IO_STATUS_BLOCK Iosb;
-    HANDLE FileHandle;
-    NTSTATUS Status, LockStatus;
-    NTFS_FORMAT_CONTEXT IoContext;
+    DISK_GEOMETRY Geometry;
+    NTFS_CHECK_CONTEXT Context;
     MKNTFS_IO Io;
     NTFS_CHK_OPTIONS Options;
     NTFS_CHK_RESULT *Result;
+    NTSTATUS Status, UnlockStatus;
     ACCESS_MASK Access;
-    BOOLEAN VolumeLocked = FALSE;
-    BOOLEAN RepairDeclined = FALSE;
-    int Rc;
+    BOOLEAN Locked = FALSE;
+    int Rc = -1;
 
     UNREFERENCED_PARAMETER(ScanDrive);
-    UNREFERENCED_PARAMETER(pUnknown1);
-    UNREFERENCED_PARAMETER(pUnknown2);
-    UNREFERENCED_PARAMETER(pUnknown3);
-    UNREFERENCED_PARAMETER(pUnknown4);
-
-    DPRINT("NtfsChkdsk(DriveRoot '%wZ', Fix %u, OnlyIfDirty %u)\n",
-           DriveRoot, FixErrors, CheckOnlyIfDirty);
-
-    if (Callback != NULL)
-    {
-        ULONG Percent = 0;
-        Callback(PROGRESS, 0, (PVOID)&Percent);
-    }
-
-    /* Keep the checker result off the stack; it owns a heap-grown issue list,
-     * so zero it here and release it through NtfsChkFreeResult() on every exit
-     * path -- including the ones taken before NtfsChkVolume() zeroes it. */
-    Result = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(NTFS_CHK_RESULT));
+    UNREFERENCED_PARAMETER(Unknown1);
+    UNREFERENCED_PARAMETER(Unknown2);
+    UNREFERENCED_PARAMETER(Unknown3);
+    UNREFERENCED_PARAMETER(Unknown4);
+    Result = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Result));
     if (Result == NULL)
     {
-        *ExitStatus = (ULONG)STATUS_INSUFFICIENT_RESOURCES;
+        *ExitStatus = STATUS_INSUFFICIENT_RESOURCES;
         return FALSE;
     }
-    RtlZeroMemory(Result, sizeof(NTFS_CHK_RESULT));
-
-    /* Open read-only unless we intend to repair. */
+    Context.Handle = NULL;
+    Context.FailureStatus = STATUS_SUCCESS;
+    Context.Callback = Callback;
     Access = FILE_GENERIC_READ | SYNCHRONIZE;
     if (FixErrors)
         Access |= FILE_GENERIC_WRITE;
-
-    InitializeObjectAttributes(&ObjectAttributes, DriveRoot, 0, NULL, NULL);
-    Status = NtOpenFile(&FileHandle,
-                        Access,
-                        &ObjectAttributes,
-                        &Iosb,
-                        FILE_SHARE_READ | FILE_SHARE_WRITE,
-                        FILE_SYNCHRONOUS_IO_ALERT);
+    InitializeObjectAttributes(&Attributes, DriveRoot, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&Context.Handle, Access, &Attributes, &Iosb,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_ALERT);
     if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    Status = NtDeviceIoControlFile(Context.Handle, NULL, NULL, NULL, &Iosb,
+                                   IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0,
+                                   &Geometry, sizeof(Geometry));
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    Context.SectorSize = Geometry.BytesPerSector;
+    if (Context.SectorSize < 512 || Context.SectorSize > 4096 ||
+        (Context.SectorSize & (Context.SectorSize - 1)) != 0)
     {
-        DPRINT1("NtfsChkdsk: NtOpenFile() failed 0x%08x\n", Status);
-        NtfsChkFreeResult(Result);
-        RtlFreeHeap(RtlGetProcessHeap(), 0, Result);
-        *ExitStatus = (ULONG)Status;
-        return FALSE;
+        Status = STATUS_NOT_SUPPORTED;
+        goto Cleanup;
     }
-
-    /* Lock the volume for an exclusive offline check when repairing. */
     if (FixErrors)
     {
-        LockStatus = NtFsControlFile(FileHandle, NULL, NULL, NULL, &Iosb,
-                                     FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0);
-        if (NT_SUCCESS(LockStatus))
+        Status = NtFsControlFile(Context.Handle, NULL, NULL, NULL, &Iosb,
+                                 FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0);
+        if (!NT_SUCCESS(Status))
         {
-            VolumeLocked = TRUE;
+            if (Callback != NULL)
+                Callback(VOLUMEINUSE, 0, NULL);
+            goto Cleanup;
         }
-        else
-        {
-            /*
-             * Downgrade to a read-only check.  Repairing without the lock is
-             * not merely "unsafe", it is actively destructive: every write
-             * below goes through NtWriteFile on the volume handle, i.e. raw
-             * sectors, while the mounted driver holds its own cached copies of
-             * the very structures being rewritten ($MFT records, $Bitmap,
-             * index blocks).  The two write back on independent schedules and
-             * overwrite each other, so a repair pass can both undo itself and
-             * corrupt structures that were intact -- which is why repeated
-             * passes on a live volume never converge, each one reporting a
-             * different issue count and repairing hundreds of entries forever.
-             *
-             * A volume that cannot be locked simply cannot be repaired online;
-             * this is why Windows' chkdsk answers "Cannot lock current drive"
-             * and offers to run at next boot instead of proceeding.  Report the
-             * damage and leave the dirty flag set (NtfsChkVolume only clears it
-             * for a converged repair run) so the volume is checked offline
-             * rather than silently forgotten.
-             */
-            DPRINT1("NtfsChkdsk: could not lock volume (0x%x); checking read-only, "
-                    "repairs need an offline run\n", LockStatus);
-            FixErrors = FALSE;
-            RepairDeclined = TRUE;
-        }
+        Locked = TRUE;
+        Status = NtFsControlFile(Context.Handle, NULL, NULL, NULL, &Iosb,
+                                 FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0);
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
     }
-
-    IoContext.FileHandle = FileHandle;
-    IoContext.Callback = Callback;
-    IoContext.Percent = 0;
-
-    Io.context = &IoContext;
-    Io.write = NtfsFormatWrite;
-    Io.read = NtfsFormatRead;
-    Io.flush = NtfsFormatFlush;
-
+    Io.context = &Context;
+    Io.read = NtfsCheckRead;
+    Io.write = NtfsCheckWrite;
+    Io.flush = NtfsCheckFlush;
     RtlZeroMemory(&Options, sizeof(Options));
-    Options.FixErrors = (FixErrors != FALSE);
-    Options.Verbose = (Verbose != FALSE);
-    Options.CheckOnlyIfDirty = (CheckOnlyIfDirty != FALSE);
-    /* Forward the checker's stage banners + summary to autochk/chkdsk.exe via
-     * the fmifs callback (OUTPUT/TEXTOUTPUT).  IoContext already carries the
-     * PFMIFSCALLBACK, so it doubles as the message-sink context. */
+    Options.FixErrors = FixErrors;
+    Options.Verbose = Verbose;
+    Options.CheckOnlyIfDirty = CheckOnlyIfDirty;
     if (Callback != NULL)
     {
-        Options.Message = NtfsChkMessage;
-        Options.MessageCtx = &IoContext;
+        ULONG Percent = 0;
+        Callback(PROGRESS, 0, &Percent);
+        Options.Message = NtfsCheckMessage;
+        Options.MessageCtx = &Context;
     }
-
     Rc = NtfsChkVolume(&Io, &Options, Result);
-
-    DPRINT("NtfsChkdsk: exit=%d scanned=%lu inuse=%lu issues=%lu repaired=%lu dirty=%d\n",
-           Result->ExitStatus, Result->RecordsScanned, Result->RecordsInUse,
-           Result->IssueCount, Result->RepairedCount, Result->WasDirty);
-
-    if (VolumeLocked)
+    Status = (Rc < 0 || Result->ExitStatus == 1) ? STATUS_DISK_CORRUPT_ERROR : STATUS_SUCCESS;
+    if (!NT_SUCCESS(Context.FailureStatus))
     {
-        NtFsControlFile(FileHandle, NULL, NULL, NULL, &Iosb,
-                        FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0);
-        NtFsControlFile(FileHandle, NULL, NULL, NULL, &Iosb,
-                        FSCTL_UNLOCK_VOLUME, NULL, 0, NULL, 0);
+        Status = Context.FailureStatus;
+        Rc = -1;
     }
-    NtClose(FileHandle);
-
-    if (Callback != NULL)
+    DPRINT1("NtfsChkdsk: %wZ Fix %u OnlyIfDirty %u -> rc %d, issues %lu, recorded %lu, "
+            "repaired %lu, dirty %u, Status 0x%08lx\n",
+            DriveRoot, FixErrors, CheckOnlyIfDirty, Rc, Result->IssueCount,
+            Result->IssueRecorded, Result->RepairedCount, Result->WasDirty, Status);
+    if (Callback != NULL && Rc >= 0)
     {
         ULONG Percent = 100;
-        Callback(PROGRESS, 0, (PVOID)&Percent);
+        Callback(PROGRESS, 0, &Percent);
     }
-
-    /*
-     * ExitStatus is an NTSTATUS, not a chkdsk.exe process exit code: that is
-     * what VfatChkdsk writes and what every consumer reads back
-     * (autochk's dirty test, chkdsk.exe's "run chkdsk again" hint, and the
-     * Status that fmifs!Chkdsk hands to the DONE callback).  Writing the 0..3
-     * exit convention here made the dirty verdict indistinguishable from
-     * STATUS_SUCCESS, so autochk checked the volume and then never repaired it.
-     *
-     *   Result->ExitStatus: 0 = nothing wrong, 2 = everything found was fixed,
-     *                       1 = uncorrected damage remains.
-     */
-    if (Rc < 0 || Result->ExitStatus == 1)
-        *ExitStatus = (ULONG)STATUS_DISK_CORRUPT_ERROR;
-    else
-        *ExitStatus = (ULONG)STATUS_SUCCESS;
-
-    /* `recorded` is the number of issues the repair stages could actually see.
-     * It equals `issues` unless the issue list hit CHK_ISSUES_MAX or failed to
-     * grow, which is the one case where a repair run cannot converge no matter
-     * how often it is repeated -- worth spotting straight from the log. */
-    DPRINT1("NtfsChkdsk: %wZ Fix %u OnlyIfDirty %u -> rc %d, issues %lu, "
-            "recorded %lu, repaired %lu, dirty %u, ExitStatus 0x%08lx%s\n",
-            DriveRoot, FixErrors, CheckOnlyIfDirty, Rc, Result->IssueCount,
-            Result->IssueRecorded,
-            Result->RepairedCount, Result->WasDirty, *ExitStatus,
-            RepairDeclined ? " [read-only: volume in use, repairs need an offline run]" : "");
-
+Cleanup:
+    if (Locked)
+    {
+        UnlockStatus = NtFsControlFile(Context.Handle, NULL, NULL, NULL, &Iosb,
+                                       FSCTL_UNLOCK_VOLUME, NULL, 0, NULL, 0);
+        if (NT_SUCCESS(Status) && !NT_SUCCESS(UnlockStatus))
+        {
+            Status = UnlockStatus;
+            Rc = -1;
+        }
+    }
+    if (Context.Handle != NULL)
+        NtClose(Context.Handle);
     NtfsChkFreeResult(Result);
     RtlFreeHeap(RtlGetProcessHeap(), 0, Result);
-
-    /* TRUE means the check itself completed (see ExitStatus for the verdict). */
-    return (Rc >= 0);
+    *ExitStatus = Status;
+    return Rc >= 0;
 }
