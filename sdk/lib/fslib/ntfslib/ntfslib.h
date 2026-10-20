@@ -209,13 +209,13 @@
 /* GLOBAL DATA ***************************************************************/
 
 //
-// The whole metadata is laid out contiguously from the start of the volume:
+// The metadata is laid out as Windows lays out a fresh volume:
 //
-//   [ $Boot | $MFT | $MFTMirr | $LogFile | $Bitmap | $UpCase | $AttrDef | $MFT bitmap | ... free ... ]
+//   [ $Boot | $MFTMirr | $LogFile | $Bitmap | $UpCase | ... ]  free  [ $MFT ]  free
+//   0                                                   FirstFreeLcn  MftLcn = min(clusters / 3, 3 GiB)
 //
-// A correct NTFS driver locates $MFT / $MFTMirr through the boot sector, so the
-// exact placement does not matter for mountability - only that everything fits
-// inside the volume and the cluster bitmap marks the used clusters.
+// The boot sector names $MFT and $MFTMirr; the cluster bitmap marks
+// [0, FirstFreeLcn) and the $MFT extent as used.
 //
 typedef struct _NTFS_LAYOUT
 {
@@ -249,7 +249,7 @@ typedef struct _NTFS_LAYOUT
     ULONGLONG  Cont2Lcn;       ULONG Cont2Clusters;     // $TxfLogContainer...0002 (2 MiB)
     ULONGLONG  DeletedIdxLcn;  ULONG DeletedIdxClusters;// $Extend/$Deleted:$I30 allocation (64 KiB)
 
-    ULONGLONG  FirstFreeLcn;   // Count of clusters used by metadata == first free cluster
+    ULONGLONG  FirstFreeLcn;   // End of the metadata behind $Boot ($MFT lies apart, at MftLcn)
 } NTFS_LAYOUT, *PNTFS_LAYOUT;
 
 // The $SDS descriptor mirror is stored NTFS_SDS_MIRROR bytes after the primary.

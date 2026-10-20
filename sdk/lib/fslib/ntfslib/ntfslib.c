@@ -245,11 +245,17 @@ ComputeLayout(IN ULONG ClusterSize)
     LAYOUT.DeletedIdxClusters = (ULONG)CEIL_DIV(64ULL * 1024,    (ULONGLONG)C);  // 64 KiB
 
     //
-    // Placement: everything contiguous from the start of the volume.
+    // Placement, as Windows (Vista and later) lays a fresh volume out:
+    // $MFTMirr directly behind the 8 KiB $Boot (LCN 2 with 4 KiB clusters)
+    // and $MFT far from it, at a third of the volume but no further than
+    // 3 GiB in (LCN 0xC0000 with 4 KiB clusters), so one damaged region
+    // cannot take both copies of the first records. The other metadata
+    // follows $MFTMirr. Windows' own volumes show this rule: $MFT at 8533 on
+    // Windows 7's 25599-cluster System Reserved partition, 43690 on a
+    // 512 MiB volume, 786432 on large ones, $MFTMirr at 2 on all of them.
     //
     Lcn = 0;
     LAYOUT.BootLcn      = Lcn; Lcn += LAYOUT.BootClusters;
-    LAYOUT.MftLcn       = Lcn; Lcn += LAYOUT.MftClusters;
     LAYOUT.MftMirrLcn   = Lcn; Lcn += LAYOUT.MftMirrClusters;
     LAYOUT.LogFileLcn   = Lcn; Lcn += LAYOUT.LogFileClusters;
     LAYOUT.BitmapLcn    = Lcn; Lcn += LAYOUT.BitmapClusters;
@@ -266,11 +272,30 @@ ComputeLayout(IN ULONG ClusterSize)
     LAYOUT.DeletedIdxLcn = Lcn; Lcn += LAYOUT.DeletedIdxClusters;
     LAYOUT.FirstFreeLcn = Lcn;
 
+    {
+        ULONGLONG MftLcn = LAYOUT.ClusterCount / 3;
+        ULONGLONG Cap    = NTFS_MFT_MAX_START / C;
+
+        if (MftLcn > Cap)
+            MftLcn = Cap;
+        // A volume too small to keep $MFT clear of the rest gets it right
+        // behind the other metadata.
+        if (MftLcn < LAYOUT.FirstFreeLcn ||
+            MftLcn + LAYOUT.MftClusters + 16 >= LAYOUT.ClusterCount)
+        {
+            MftLcn = LAYOUT.FirstFreeLcn;
+        }
+        LAYOUT.MftLcn = MftLcn;
+        Lcn = LAYOUT.FirstFreeLcn;
+        if (MftLcn + LAYOUT.MftClusters > Lcn)
+            Lcn = MftLcn + LAYOUT.MftClusters;
+    }
+
     // The volume must be large enough to hold the metadata (plus slack).
-    if (LAYOUT.FirstFreeLcn + 16 >= LAYOUT.ClusterCount)
+    if (Lcn + 16 >= LAYOUT.ClusterCount)
     {
         DPRINT1("Volume too small for NTFS: need %I64u clusters, have %I64u\n",
-                LAYOUT.FirstFreeLcn + 16, LAYOUT.ClusterCount);
+                Lcn + 16, LAYOUT.ClusterCount);
         return STATUS_DISK_FULL;
     }
 

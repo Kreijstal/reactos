@@ -1522,7 +1522,8 @@ WriteMetafiles(VOID)
         if (!NT_SUCCESS(Status)) { DPRINT1("ERROR: write $MFT:$BITMAP (Status %lx)\n", Status); goto done; }
     }
 
-    /* Cluster $Bitmap: metadata clusters [0, FirstFreeLcn) used, the rest free,
+    /* Cluster $Bitmap: metadata clusters [0, FirstFreeLcn) and the $MFT extent
+     * used, the rest free,
      * and the bits past ClusterCount (up to the 8-byte-aligned end) set. */
     {
         ULONG     Size = LAYOUT.BitmapClusters * BYTES_PER_CLUSTER;
@@ -1533,6 +1534,8 @@ WriteMetafiles(VOID)
         if (!Buf) { Status = STATUS_INSUFFICIENT_RESOURCES; goto done; }
         RtlZeroMemory(Buf, Size);
         for (c = 0; c < LAYOUT.FirstFreeLcn; c++)
+            Buf[c / 8] |= (1 << (c % 8));
+        for (c = LAYOUT.MftLcn; c < LAYOUT.MftLcn + LAYOUT.MftClusters; c++)
             Buf[c / 8] |= (1 << (c % 8));
         for (c = ClusterCount; c < BitmapBits; c++)
             Buf[c / 8] |= (1 << (c % 8));
