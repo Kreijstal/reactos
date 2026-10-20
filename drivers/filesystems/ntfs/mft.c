@@ -3083,6 +3083,44 @@ UpdateIndexEntryFileName(PDEVICE_EXTENSION Vcb,
 * STATUS_SUCCESSFUL on success. An error passed from WriteAttribute() otherwise.
 *
 */
+/* $MFTMirr holds copies of the first records of the MFT ($MFT, $MFTMirr,
+ * $LogFile, $Volume); Windows writes a mirrored record to both, so the copy
+ * never falls behind. Image is the on-disk form of record MftIndex. The
+ * caller holds MftContextResource. */
+static NTSTATUS
+NtfsMirrorFileRecord(PDEVICE_EXTENSION Vcb,
+                     ULONGLONG MftIndex,
+                     PFILE_RECORD_HEADER Image)
+{
+    PFILE_RECORD_HEADER Mirror;
+    PNTFS_ATTR_CONTEXT Data = NULL;
+    ULONG RecordSize = Vcb->NtfsInfo.BytesPerFileRecord;
+    ULONG Written;
+    NTSTATUS Status;
+
+    /* The mirror is four records, or one cluster when a cluster holds more;
+     * its $DATA length below has the last word. */
+    if (MftIndex >= max(4, Vcb->NtfsInfo.BytesPerCluster / RecordSize))
+        return STATUS_SUCCESS;
+
+    Mirror = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (Mirror == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    Status = ReadFileRecordInternal(Vcb, NTFS_FILE_MFTMIRR, Mirror, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = FindAttribute(Vcb, Mirror, AttributeData, L"", 0, &Data, NULL);
+    if (NT_SUCCESS(Status) &&
+        (MftIndex + 1) * RecordSize <= AttributeDataLength(Data->pRecord))
+    {
+        Status = WriteAttribute(Vcb, Data, MftIndex * RecordSize, (const PUCHAR)Image,
+                                RecordSize, &Written, Mirror);
+    }
+    if (Data != NULL)
+        ReleaseAttributeContext(Data);
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Mirror);
+    return Status;
+}
+
 static NTSTATUS
 UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
                  ULONGLONG MftIndex,
@@ -3125,6 +3163,10 @@ UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("UpdateFileRecord failed: %lu written, %lu expected\n", BytesWritten, Vcb->NtfsInfo.BytesPerFileRecord);
+    }
+    else
+    {
+        Status = NtfsMirrorFileRecord(Vcb, MftIndex, WriteImage);
     }
 
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, WriteImage);
