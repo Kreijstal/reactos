@@ -130,6 +130,11 @@ typedef struct _LFS_WRITE_CONTEXT
     ULONGLONG CurrentSeqNumber;
     ULONG     WriteOffset;
     ULONGLONG LastLsn;
+    /* Oldest record still needed: the log space it and later records use
+     * may not be reused.  Zero when no record is needed (none logged yet,
+     * or a checkpoint made all of them unnecessary); the next record
+     * emitted then becomes the oldest. */
+    ULONGLONG OldestLsn;
     USHORT    ClientId;
 } LFS_WRITE_CONTEXT, *PLFS_WRITE_CONTEXT;
 
@@ -211,7 +216,19 @@ NTSTATUS NtfsLfsCreateWriter(PDEVICE_EXTENSION Vcb, PNTFS_LOG_WRITE_CALLBACK Wri
                              PNTFS_LOG_FLUSH_CALLBACK Flush,
                              PNTFS_LOG_DIRTY_CALLBACK SetDirty, PVOID *WriterOut);
 NTSTATUS NtfsLfsEnableWriter(PVOID Writer);
-NTSTATUS NtfsLfsLogFileRecord(PVOID Writer, ULONGLONG MftIndex, PFILE_RECORD_HEADER Record);
+/* A logged file record whose own write has not been issued yet.  The
+ * caller keeps it from NtfsLfsLogFileRecord until NtfsLfsFileRecordWritten,
+ * which a checkpoint needs to know: until then the record must stay in the
+ * log. */
+typedef struct _NTFS_LOG_PENDING
+{
+    LIST_ENTRY Link;
+    ULONGLONG Lsn;
+} NTFS_LOG_PENDING, *PNTFS_LOG_PENDING;
+
+NTSTATUS NtfsLfsLogFileRecord(PVOID Writer, ULONGLONG MftIndex, PFILE_RECORD_HEADER Record,
+                              PNTFS_LOG_PENDING Pending);
+VOID NtfsLfsFileRecordWritten(PVOID Writer, PNTFS_LOG_PENDING Pending);
 NTSTATUS NtfsLfsFinishWriter(PVOID Writer);
 VOID NtfsLfsDestroyWriter(PVOID Writer);
 

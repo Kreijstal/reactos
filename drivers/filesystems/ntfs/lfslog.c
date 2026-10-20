@@ -4,7 +4,13 @@
  * PURPOSE:     Default-disabled LFS write-ahead emission (b4825bc14c1)
  *
  * This is experimental emission, not recovery. No user-facing switch
- * enables it. The caller must quiesce the volume before changing sessions.
+ * enables it.
+ *
+ * The log is reused as a circular buffer.  When it is full, a checkpoint
+ * flushes the volume: every logged file record whose write has been issued
+ * is then on disk, and its log record is no longer needed.  Records whose
+ * writes have not been issued yet (the pending list) stay needed, and
+ * bound the reusable space by the oldest of them. The caller must quiesce the volume before changing sessions.
  * Storage barriers are supplied by the mount layer; the codec has no
  * dependency on cache-manager or storage-device implementation details.
  */
@@ -25,6 +31,8 @@ typedef struct _NTFS_LOG_WRITER
     BOOLEAN Enabled;
     BOOLEAN Paused;
     BOOLEAN PreviouslyDirty;
+    KSPIN_LOCK PendingLock;
+    LIST_ENTRY PendingList;     /* NTFS_LOG_PENDING, logged but not written */
 } NTFS_LOG_WRITER, *PNTFS_LOG_WRITER;
 
 NTSTATUS
@@ -51,6 +59,8 @@ NtfsLfsCreateWriter(PDEVICE_EXTENSION Vcb,
     Writer->Write = Write;
     Writer->Flush = Flush;
     Writer->SetDirty = SetDirty;
+    KeInitializeSpinLock(&Writer->PendingLock);
+    InitializeListHead(&Writer->PendingList);
     *WriterOut = Writer;
     return STATUS_SUCCESS;
 }
@@ -86,6 +96,40 @@ NtfsLogWriteRange(PNTFS_LOG_WRITER Writer, ULONG Offset, ULONG Length)
         Length -= Part;
     }
     return STATUS_SUCCESS;
+}
+
+/* The oldest logged record whose file record write has not been issued yet,
+ * or zero when there is none. */
+static ULONGLONG
+NtfsLogOldestPending(PNTFS_LOG_WRITER Writer)
+{
+    PLIST_ENTRY Entry;
+    ULONGLONG Oldest = 0;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&Writer->PendingLock, &OldIrql);
+    for (Entry = Writer->PendingList.Flink; Entry != &Writer->PendingList; Entry = Entry->Flink)
+    {
+        PNTFS_LOG_PENDING Pending = CONTAINING_RECORD(Entry, NTFS_LOG_PENDING, Link);
+        if (Oldest == 0 || Pending->Lsn < Oldest)
+            Oldest = Pending->Lsn;
+    }
+    KeReleaseSpinLock(&Writer->PendingLock, OldIrql);
+    return Oldest;
+}
+
+/* Checkpoint: flushing the volume puts every issued metadata write on disk,
+ * so only records still pending are needed afterwards. */
+static NTSTATUS
+NtfsLogCheckpoint(PNTFS_LOG_WRITER Writer)
+{
+    NTSTATUS Status;
+
+    ASSERT(ExIsResourceAcquiredExclusiveLite(&Writer->Resource) && Writer->InIo);
+    Status = Writer->Flush(Writer->Vcb);
+    if (NT_SUCCESS(Status))
+        Writer->Codec.OldestLsn = NtfsLogOldestPending(Writer);
+    return Status;
 }
 
 NTSTATUS
@@ -153,7 +197,8 @@ Cleanup:
 }
 
 NTSTATUS
-NtfsLfsLogFileRecord(PVOID Context, ULONGLONG MftIndex, PFILE_RECORD_HEADER Record)
+NtfsLfsLogFileRecord(PVOID Context, ULONGLONG MftIndex, PFILE_RECORD_HEADER Record,
+                     PNTFS_LOG_PENDING Pending)
 {
     PNTFS_LOG_WRITER Writer = Context;
     PDEVICE_EXTENSION Vcb;
@@ -164,7 +209,9 @@ NtfsLfsLogFileRecord(PVOID Context, ULONGLONG MftIndex, PFILE_RECORD_HEADER Reco
     ULONGLONG ByteOffset, Lsn;
     ULONG Count, i, PageOffset;
     NTSTATUS Status;
+    KIRQL OldIrql;
 
+    Pending->Lsn = 0;
     if (Writer == NULL || !Writer->Enabled || (Writer->InIo && ExIsResourceAcquiredExclusiveLite(&Writer->Resource)))
         return STATUS_SUCCESS;
     Vcb = Writer->Vcb;
@@ -209,6 +256,12 @@ NtfsLfsLogFileRecord(PVOID Context, ULONGLONG MftIndex, PFILE_RECORD_HEADER Reco
     Params.ClientPreviousLsn = Writer->Codec.LastLsn;
     Writer->InIo = TRUE;
     Status = NtfsLfsEmitRecord(&Writer->Codec, &Params, &Lsn);
+    if (Status == STATUS_LOG_FILE_FULL)
+    {
+        Status = NtfsLogCheckpoint(Writer);
+        if (NT_SUCCESS(Status))
+            Status = NtfsLfsEmitRecord(&Writer->Codec, &Params, &Lsn);
+    }
     if (NT_SUCCESS(Status))
     {
         PageOffset = (NtfsLfsLsnToOffset(Writer->Codec.SeqNumberBits, Lsn) / PAGE_SIZE) * PAGE_SIZE;
@@ -216,7 +269,14 @@ NtfsLfsLogFileRecord(PVOID Context, ULONGLONG MftIndex, PFILE_RECORD_HEADER Reco
         if (NT_SUCCESS(Status)) Status = Writer->Flush(Vcb);
         if (NT_SUCCESS(Status)) Status = NtfsLogWriteRange(Writer, 0, 2 * PAGE_SIZE);
         if (NT_SUCCESS(Status)) Status = Writer->Flush(Vcb);
-        if (NT_SUCCESS(Status)) Record->Ntfs.Lsn = Lsn;
+        if (NT_SUCCESS(Status))
+        {
+            Record->Ntfs.Lsn = Lsn;
+            Pending->Lsn = Lsn;
+            KeAcquireSpinLock(&Writer->PendingLock, &OldIrql);
+            InsertTailList(&Writer->PendingList, &Pending->Link);
+            KeReleaseSpinLock(&Writer->PendingLock, OldIrql);
+        }
     }
     Writer->InIo = FALSE;
     ExReleaseResourceLite(&Writer->Resource);
@@ -225,6 +285,20 @@ FreeLcns:
 FreeBefore:
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Before);
     return Status;
+}
+
+VOID
+NtfsLfsFileRecordWritten(PVOID Context, PNTFS_LOG_PENDING Pending)
+{
+    PNTFS_LOG_WRITER Writer = Context;
+    KIRQL OldIrql;
+
+    if (Pending->Lsn == 0)
+        return;
+    KeAcquireSpinLock(&Writer->PendingLock, &OldIrql);
+    RemoveEntryList(&Pending->Link);
+    KeReleaseSpinLock(&Writer->PendingLock, OldIrql);
+    Pending->Lsn = 0;
 }
 
 NTSTATUS
@@ -266,6 +340,7 @@ NtfsLfsDestroyWriter(PVOID Context)
     PNTFS_LOG_WRITER Writer = Context;
 
     if (Writer == NULL) return;
+    ASSERT(IsListEmpty(&Writer->PendingList));
     if (Writer->Data != NULL) ReleaseAttributeContext(Writer->Data);
     if (Writer->Codec.Image != NULL) ExFreePoolWithTag(Writer->Codec.Image, TAG_NTFS);
     ExDeleteResourceLite(&Writer->Resource);
