@@ -200,12 +200,16 @@ static void chk_check_attrlist(CHK_CTX *c, UCHAR *rec, ULONG recno,
                 }
             }
 
-            /* $I30 attrs living outside the base record: rebuild unsupported */
+            /* $I30 attrs living outside the base record: the walk reads one
+             * held whole by an extension record (its only extent, at VCN 0),
+             * but the rebuild works on the base record alone. An attribute
+             * spread over further extents cannot be walked either. */
             if (e->Type == AT_INDEX_ROOT || e->Type == AT_INDEX_ALLOCATION ||
                 (e->Type == AT_BITMAP && e->NameLength == 4))
             {
                 if (c->Rec)
-                    c->Rec[recno].Flags |= CRF_ATTRLIST_UNSUPPORTED;
+                    c->Rec[recno].Flags |= (e->LowestVcn == 0) ? CRF_I30_REMOTE
+                                                               : CRF_ATTRLIST_UNSUPPORTED;
             }
         }
         pos += e->Length;
@@ -690,6 +694,69 @@ static void chk_walk_node(CHK_WALK *w, UCHAR *entries, ULONG length, int depth)
     }
 }
 
+/* Finds attribute type/name of base record rec: in rec itself, or, through
+ * its $ATTRIBUTE_LIST, in the extension record holding it whole (its only
+ * extent, at VCN 0), read into *ext for the caller to free. Returns the
+ * record holding the attribute (rec or *ext) with its offset in *off, or
+ * NULL. */
+static UCHAR *chk_locate_attr(CHK_CTX *c, UCHAR *rec, ULONG recno, ULONG type,
+                              const WCHAR *name, ULONG nameLen,
+                              ULONG *off, UCHAR **ext)
+{
+    FILE_RECORD_HEADER *h = (FILE_RECORD_HEADER *)rec;
+    UCHAR *val, *holder = NULL;
+    ULONGLONG size = 0, pos;
+    ULONG alOff;
+
+    *off = chk_find_attr(c, rec, type, name, nameLen);
+    if (*off)
+        return rec;
+    if (*ext != NULL)
+        return NULL;    /* one extension buffer per caller slot */
+    alOff = chk_find_attr(c, rec, AT_ATTRIBUTE_LIST, NULL, 0);
+    if (!alOff)
+        return NULL;
+    val = chk_read_attr_value(c, rec, alOff, 1024 * 1024, &size);
+    if (!val)
+        return NULL;
+
+    for (pos = 0; pos + sizeof(ATTR_LIST_ENTRY) <= size;)
+    {
+        ATTR_LIST_ENTRY *e = (ATTR_LIST_ENTRY *)(val + pos);
+        ULONG extRec;
+
+        if (e->Length < sizeof(ATTR_LIST_ENTRY) || pos + e->Length > size)
+            break;
+        if (e->Type != type || e->NameLength != nameLen || e->LowestVcn != 0 ||
+            (ULONG)e->NameOffset + nameLen * sizeof(WCHAR) > e->Length ||
+            (nameLen != 0 &&
+             memcmp(val + pos + e->NameOffset, name, nameLen * sizeof(WCHAR)) != 0))
+        {
+            pos += e->Length;
+            continue;
+        }
+
+        extRec = CHK_REF_REC(e->MftReference);
+        if (extRec == recno || extRec >= c->RecordCount)
+            break;
+        *ext = (UCHAR *)malloc(c->MftRecordSize);
+        if (*ext &&
+            chk_read_record(c, extRec, *ext) == 0 &&
+            *(ULONG *)*ext == NRH_FILE_TYPE &&
+            chk_apply_fixups(*ext, c->MftRecordSize, c->BytesPerSector) == 0 &&
+            ((FILE_RECORD_HEADER *)*ext)->BaseFileRecord ==
+                NtfsChkMftReference(recno, h->SequenceNumber))
+        {
+            *off = chk_find_attr(c, *ext, type, name, nameLen);
+            if (*off)
+                holder = *ext;
+        }
+        break;
+    }
+    free(val);
+    return holder;
+}
+
 void chk_walk_one_dir(CHK_CTX *c, ULONG recno, UCHAR *rec,
                       NTFS_CHK_RESULT *res, const NTFS_CHK_OPTIONS *opt)
 {
@@ -698,7 +765,8 @@ void chk_walk_one_dir(CHK_CTX *c, ULONG recno, UCHAR *rec,
     ATTR_RECORD *ir;
     INDEX_ROOT *root;
     ULONGLONG iaSize = 0;
-    UCHAR *base;
+    UCHAR *base, *irRec, *iaRec, *bmRec;
+    UCHAR *irExt = NULL, *iaExt = NULL, *bmExt = NULL;
     int i;
 
     memset(&w, 0, sizeof(w));
@@ -707,14 +775,15 @@ void chk_walk_one_dir(CHK_CTX *c, ULONG recno, UCHAR *rec,
     w.opt = opt;
     w.dirRec = recno;
 
-    irOff = chk_find_attr(c, rec, AT_INDEX_ROOT, chk_I30, 4);
-    if (!irOff)
+    /* The $I30 attributes may be in an extension record (CRF_I30_REMOTE). */
+    irRec = chk_locate_attr(c, rec, recno, AT_INDEX_ROOT, chk_I30, 4, &irOff, &irExt);
+    if (!irRec)
     {
         chk_add_issue(res, CHK_ERR_INDEX_STRUCT, recno, 0, 0);
         c->Rec[recno].Flags |= CRF_INDEX_BAD;
-        return;
+        goto Out;
     }
-    ir = (ATTR_RECORD *)(rec + irOff);
+    ir = (ATTR_RECORD *)(irRec + irOff);
     if (ir->NonResident ||
         ir->Resident.ValueLength < sizeof(INDEX_ROOT) ||
         irOff + ir->Resident.ValueOffset + ir->Resident.ValueLength >
@@ -722,35 +791,35 @@ void chk_walk_one_dir(CHK_CTX *c, ULONG recno, UCHAR *rec,
     {
         chk_add_issue(res, CHK_ERR_INDEX_STRUCT, recno, 1, 0);
         c->Rec[recno].Flags |= CRF_INDEX_BAD;
-        return;
+        goto Out;
     }
-    root = (INDEX_ROOT *)(rec + irOff + ir->Resident.ValueOffset);
+    root = (INDEX_ROOT *)(irRec + irOff + ir->Resident.ValueOffset);
     if (root->AttributeType != AT_FILE_NAME || root->CollationRule != 1)
     {
         chk_add_issue(res, CHK_ERR_INDEX_STRUCT, recno, 2, 0);
         c->Rec[recno].Flags |= CRF_INDEX_BAD;
-        return;
+        goto Out;
     }
 
     base = (UCHAR *)&root->Header;
     if (root->Header.EntriesOffset >= root->Header.IndexLength ||
-        (ULONG)(base - (rec + irOff + ir->Resident.ValueOffset)) +
+        (ULONG)(base - (irRec + irOff + ir->Resident.ValueOffset)) +
             root->Header.IndexLength > ir->Resident.ValueLength)
     {
         chk_add_issue(res, CHK_ERR_INDEX_STRUCT, recno, 3, 0);
         c->Rec[recno].Flags |= CRF_INDEX_BAD;
-        return;
+        goto Out;
     }
 
     /* large index: bring up $INDEX_ALLOCATION + $BITMAP state */
-    iaOff = chk_find_attr(c, rec, AT_INDEX_ALLOCATION, chk_I30, 4);
-    if (iaOff)
+    iaRec = chk_locate_attr(c, rec, recno, AT_INDEX_ALLOCATION, chk_I30, 4, &iaOff, &iaExt);
+    if (iaRec)
     {
-        ATTR_RECORD *ia = (ATTR_RECORD *)(rec + iaOff);
+        ATTR_RECORD *ia = (ATTR_RECORD *)(iaRec + iaOff);
         if (ia->NonResident)
         {
-            const UCHAR *mp = rec + iaOff + ia->NR.MappingPairsOffset;
-            const UCHAR *end = rec + iaOff + ia->Length;
+            const UCHAR *mp = iaRec + iaOff + ia->NR.MappingPairsOffset;
+            const UCHAR *end = iaRec + iaOff + ia->Length;
             w.iaRuns = (CHK_RUN *)malloc(sizeof(CHK_RUN) * CHK_MAX_RUNS);
             if (w.iaRuns)
             {
@@ -777,11 +846,11 @@ void chk_walk_one_dir(CHK_CTX *c, ULONG recno, UCHAR *rec,
     if (w.totalBlocks)
     {
         w.visited = (UCHAR *)calloc(1, (size_t)(w.totalBlocks + 7) / 8 + 8);
-        bmOff = chk_find_attr(c, rec, AT_BITMAP, chk_I30, 4);
-        if (bmOff)
+        bmRec = chk_locate_attr(c, rec, recno, AT_BITMAP, chk_I30, 4, &bmOff, &bmExt);
+        if (bmRec)
         {
             ULONGLONG bs = 0;
-            w.iaBmp = chk_read_attr_value(c, rec, bmOff,
+            w.iaBmp = chk_read_attr_value(c, bmRec, bmOff,
                                           (w.totalBlocks + 7) / 8 + 8, &bs);
             w.iaBmpBits = bs * 8;
         }
@@ -793,11 +862,15 @@ void chk_walk_one_dir(CHK_CTX *c, ULONG recno, UCHAR *rec,
     if (w.bad && !c->WalkVerifyOnly)
         c->Rec[recno].Flags |= CRF_INDEX_BAD;
 
+Out:
     free(w.iaRuns);
     free(w.iaBmp);
     free(w.visited);
     for (i = 0; i < CHK_MRU_SLOTS; i++)
         free(w.mruBuf[i]);
+    free(irExt);
+    free(iaExt);
+    free(bmExt);
 }
 
 int chk_walk_indexes(CHK_CTX *c, NTFS_CHK_RESULT *res,

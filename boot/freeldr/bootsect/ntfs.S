@@ -284,15 +284,9 @@ msgAnyKey:
 
 SectsPerMFT:
     .word 0
-
+    
 MFTStartSector:
     .quad 0
-
-MFTDataRunsOff:
-    .word 0        // Offset of $MFT's $DATA run list within segment
-
-MFTDataRunsSeg:
-    .word 0        // Segment of $MFT's $DATA run list
 
 BiosCHSDriveSize:
     .long 0
@@ -316,6 +310,9 @@ BootFlagSignature:
 #define FILE_MAGIC HEX(454c4946)
 #define INDX_MAGIC HEX(58444e49)
 #define NTFS_FILE_ROOT 5
+// Scratch segment holding $MFT record 0, kept resident so ReadInode can walk
+// $MFT's own $DATA run list (the MFT may be fragmented).
+#define MFT0_SEG HEX(1000)
 StartSearch:
     // Compute MFT start sector
     mov   eax, dword ptr [MftLocation]
@@ -353,34 +350,18 @@ StartSearch:
     mov   bp, sp
     sub   sp, HEX(10)
 
-    // Read MFT record 0 ($MFT) into [5000:0] (physical 0x50000) to get its
-    // data run list. This buffer must NOT be reused, since ReadInode
-    // references it later. Must not conflict with:
-    //   0x7C00-0x85FF = VBR code (sectors 0-4 loaded here),
-    //   0x1000-0x3FFF = page tables, 0x6F00 = stack/BSS,
-    //   0xF800-0x49800 = FreeLDR (FREELDR_BASE + PE image).
-    // 0x50000 is safely above all of these.
-    mov   ax, HEX(5000)
+    // read $MFT record 0 
+    mov   ax, MFT0_SEG
     mov   es, ax
     xor   bx, bx
-    xor   edx, edx
     xor   eax, eax
-    call  ReadInodeLinear
-
-    // Find $DATA attribute (0x80) in $MFT record and save its run list
+    call  ReadInodeContiguous
     xor   ax, ax
     mov   ebx, ATTRIBUTE_DATA
-    call  FindAttributeHdr
-    test  ax, ax
-#ifdef _USE_ML
-    jz    PrintFileSystemError2
-#else
-    jz    PrintFileSystemError
-#endif
+    call  FindAttributeHdr                    // ES:AX = $MFT $DATA header
     mov   si, ax
-    add   si, word ptr es:[si + HEX(20)]   // SI = offset of data runs within ES segment
-    mov   word ptr [MFTDataRunsOff], si
-    mov   word ptr [MFTDataRunsSeg], es
+    add   si, word ptr es:[si + HEX(20)]      // + mapping-pairs offset = run list
+    mov   word ptr [MftRunsOffset], si
 
     // Read Root Directory MFT into [2000:0]
     mov   ax, HEX(2000)
@@ -400,37 +381,36 @@ StartSearch:
     mov   ax, HEX(A00)
     mov   es, ax
     pop   eax
+    xor   bx, bx          // record must land at ES:0 (root read zeroes BX; this path must too)
     call  ReadInode
 
-    // Find $DATA attribute (0x80) to get file size and data runs
     xor   ax, ax
     mov   ebx, HEX(80)
     call  FindAttributeHdr
-    test  ax, ax
-#ifdef _USE_ML
-    jz    PrintFileSystemError2
-#else
-    jz    PrintFileSystemError
-#endif
-    mov   si, ax
+    mov   si, ax                            // si = $DATA attribute header
 
-    // Read allocated size from $DATA non-resident attribute header (offset 0x28)
-    mov   eax, dword ptr es:[si + HEX(28)]
-    movzx ecx, byte ptr [SectsPerCluster]
+    // We don't support compressed, sparse or encrypted Freeldr
+    // ($DATA nonresident Flags @ 0x0C: 0x0001 compressed, 0x4000 enc, 0x8000 sparse)
+    test  word ptr es:[si + HEX(0c)], HEX(c001)
+    jnz   CompressedFreeldr
+
+    // Size in clusters = $DATA AllocatedSize / (SectsPerCluster * BytesPerSector)
+    mov   eax, dword ptr es:[si + HEX(28)]  // $DATA AllocatedSize (bytes, low 32)
+    movzx ecx, byte ptr [SectsPerCluster]   // must zero-extend: div uses full ECX
     xor   edx, edx
     div   ecx
     mov   cx, word ptr [BytesPerSector]
     movzx ecx, cx
     xor   edx, edx
     div   ecx
-    mov   edx, eax
+    mov   edx, eax                          // edx = number of clusters to load
 
-    push  dx
+    push  ax
     mov   si, offset msgLoading
     call  PutChars
-    pop   dx
+    pop   ax
 
-    // Get data runs offset from the $DATA attribute
+    // address for ReadNonResidentAttribute (ES:AX)
     xor   ax, ax
     mov   ebx, HEX(80)
     call  FindAttributeHdr
@@ -486,50 +466,32 @@ ExploreIndexRoot:
     mov   ebx, ATTRIBUTE_INDEX_ROOT
     call  FindAttributeHdr
     test  ax, ax
-#ifdef _USE_ML
-    jz    PrintFileSystemError2         // fail if no INDEX_ROOT
-#else
-    jz    PrintFileSystemError
-#endif
+    jz    PrintFileSystemError         // fail if no INDEX_ROOT
 
     mov   si, ax
     cmp   byte ptr es:[si + 8], HEX(0)
-#ifdef _USE_ML
-    jnz   PrintFileSystemError2         // fail if attribute is non-resident
-#else
-    jnz   PrintFileSystemError
-#endif
+    jnz   PrintFileSystemError         // fail if attribute is non-resident
 
     add   si, word ptr es:[si + HEX(14)]
     cmp   dword ptr es:[si], HEX(30)
-#ifdef _USE_ML
-    jnz   PrintFileSystemError2                  // fail if FILE_NAME attribute isn't indexed
-#else
-    jnz   PrintFileSystemError
-#endif
+    jnz   PrintFileSystemError                  // fail if FILE_NAME attribute isn't indexed
 
     mov   word ptr [bp - indexRootData], si
     mov   ax, word ptr [bp - fileRecord]
 
-    test  byte ptr es:[si + HEX(0c)], 1
+    // Check the INDEX_HEADER flags (at value+0x1C), bit 0 = LARGE_INDEX (has an
+    // $INDEX_ALLOCATION).
+    test  byte ptr es:[si + HEX(1c)], 1
     jz    ExploreNext                          // Skip index allocation lookup if we don't have children
-
+    
     mov   ebx, ATTRIBUTE_INDEX_ALLOCATION
     call  FindAttributeHdr
     test  ax, ax
-#ifdef _USE_ML
-    jz    PrintFileSystemError2                  // No INDEX_ALLOCATION found
-#else
-    jz    PrintFileSystemError
-#endif
+    jz    PrintFileSystemError                  // No INDEX_ALLOCATION found
 
     mov   si, ax
     cmp   byte ptr es:[si + 8], 1
-#ifdef _USE_ML
-    jnz   PrintFileSystemError2                  // Fail if attribute is resident (shouldn't be)
-#else
-    jnz   PrintFileSystemError
-#endif
+    jnz   PrintFileSystemError                  // Fail if attribute is resident (shouldn't be)
 
     add   si, word ptr es:[si + HEX(20)]
     mov   word ptr [bp - allocationRunList], si // save run list
@@ -568,11 +530,7 @@ ExploreIndexRoot:
                                                // We take only the first word, the high word contains the
                                                // sequence number
         movzx edx, dx
-#ifdef _USE_ML
-        jmp   NEAR PTR ExitIndexTree
-#else
         jmp   ExitIndexTree
-#endif
     
         NodeCheckLastNode:
         test  word ptr es:[si + HEX(0C)], 1
@@ -667,13 +625,6 @@ CompareWideStrInsensitive:
     pop bx
     ret
 
-// Local trampoline for MASM: conditional short jumps cannot reach
-// PrintFileSystemError from this far, so bounce through a near jmp.
-#ifdef _USE_ML
-PrintFileSystemError2:
-    jmp   NEAR PTR PrintFileSystemError
-#endif
-
 // Reads a NTFS cluster
 // INPUT:
 //  - EDX:EAX     : cluster number to read
@@ -688,17 +639,81 @@ ReadCluster:
     pop   ecx
     ret
 
-// Reads a MFT entry using the simple linear calculation.
-// Only works for inodes in the first contiguous MFT run (e.g., record 0).
+// Reads a MFT entry, locating it through $MFT's own $DATA run list so a
+// fragment MFT works
 // INPUT:
-//  - EDX:EAX      : MFT inode
+//  - EAX     : MFT inode
+//  - ES:BX   : address to read into
 // OUTPUT:
-//  - ES:[BX] : address to read
-ReadInodeLinear:
+//  - ES:[BX] : the record
+ReadInode:
     push  ecx
     push  si
     push  di
+    push  edx
+    push  es
+    push  bx
 
+    // sectorInMft = inode * SectsPerMFT
+    mov   cx, word ptr [SectsPerMFT]
+    movzx ecx, cx
+    mul   ecx                                 // EDX:EAX = inode * SectsPerMFT
+
+    // VCN = sectorInMft / SectsPerCluster ; sectorInCluster = remainder
+    mov   cx, word ptr [SectsPerCluster]
+    movzx ecx, cx
+    div   ecx                                 // EAX = VCN, EDX = sectorInCluster
+    mov   dword ptr [InodeSecInClus], edx
+    mov   dword ptr [InodeRemVCN], eax
+
+    // Walk the $MFT run list (ES = MFT0_SEG, SI = run list) to map VCN -> LCN
+    mov   ax, MFT0_SEG
+    mov   es, ax
+    mov   si, word ptr [MftRunsOffset]
+    mov   dword ptr [InodeCurLCN], 0
+    ReadInodeWalk:
+        mov   al, byte ptr es:[si]
+        test  al, al
+        jz    PrintFileSystemError            // run list exhausted -> not found
+        call  UnpackRun                       // EAX=LCN delta, ECX=run len (clusters)
+        add   dword ptr [InodeCurLCN], eax
+        mov   eax, dword ptr [InodeRemVCN]
+        cmp   eax, ecx
+        jb    ReadInodeFound
+        sub   eax, ecx
+        mov   dword ptr [InodeRemVCN], eax
+        jmp   ReadInodeWalk
+    ReadInodeFound:
+    // targetLCN = InodeCurLCN + remaining VCN
+    mov   eax, dword ptr [InodeCurLCN]
+    add   eax, dword ptr [InodeRemVCN]
+    // absoluteSector = targetLCN * SectsPerCluster + sectorInCluster
+    mov   cx, word ptr [SectsPerCluster]
+    movzx ecx, cx
+    mul   ecx
+    add   eax, dword ptr [InodeSecInClus]
+
+    pop   bx                                  // restore destination ES:BX
+    pop   es
+    mov   cx, word ptr [SectsPerMFT]
+    movzx ecx, cx
+    call  ReadSectors
+
+    cmp   dword ptr es:[bx], FILE_MAGIC
+    jnz   PrintFileSystemError
+    call  ApplyFixups
+
+    pop   edx
+    pop   di
+    pop   si
+    pop   ecx
+    ret
+
+// Reads a MFT entry assuming a CONTIGUOUS MFT
+ReadInodeContiguous:
+    push  ecx
+    push  si
+    push  di
     push  edx
     mov   cx, word ptr [SectsPerMFT]
     movzx ecx, cx
@@ -707,112 +722,23 @@ ReadInodeLinear:
     add   eax, dword ptr [MFTStartSector]
     mov   cx, word ptr [SectsPerMFT]
     movzx ecx, cx
-    pop   edx
     call  ReadSectors
 
     cmp   dword ptr es:[bx], FILE_MAGIC
-#ifdef _USE_ML
-    jnz   PrintFileSystemError2
-#else
     jnz   PrintFileSystemError
-#endif
-
     call  ApplyFixups
 
+    pop   edx
     pop   di
     pop   si
     pop   ecx
     ret
 
-// Reads a MFT entry by following $MFT's data runs.
-// Works for any inode number, including those in non-contiguous MFT runs.
-// INPUT:
-//  - EDX:EAX      : MFT inode
-// OUTPUT:
-//  - ES:[BX] : address to read
-ReadInode:
-    push  ecx
-    push  si
-    push  di
-    push  es
-    push  bx
-
-    // Compute VCN = (inode * record_size) / cluster_size
-    //             = inode * SectsPerMFT / SectsPerCluster
-    mov   cx, word ptr [SectsPerMFT]
-    movzx ecx, cx
-    mul   ecx                              // EDX:EAX = inode * SectsPerMFT (sector offset in MFT)
-    // NOTE: Do NOT truncate the product. Truncating it to 16 bits limited this
-    // routine to inodes below 65536 / SectsPerMFT (32768 with the usual
-    // 1 KB records and 512-byte sectors): any file whose MFT record number was
-    // above that read a *wrong* record, so a boot file that got reallocated to
-    // a high record could no longer be loaded.
-    mov   cl, byte ptr [SectsPerCluster]
-    movzx ecx, cx
-    div   ecx                              // EAX = VCN, EDX = sector offset within cluster
-    push  dx                               // Save sector offset within cluster
-
-    // Read the MFT cluster containing our inode via data runs
-    mov   ecx, eax                         // ECX = VCN to read
-    push  es
-    mov   ax, word ptr [MFTDataRunsSeg]
-    mov   es, ax                           // ES = segment of MFT data runs
-    mov   ax, word ptr [MFTDataRunsOff]    // AX = offset of MFT data runs
-
-    // Use segment 0x3000 as temp buffer for the full cluster
-    push  HEX(3000)
-    pop   fs
-    xor   bx, bx
-    call  ReadNonResidentAttribute
-    pop   es
-    test  ax, ax
-#ifdef _USE_ML
-    jz    PrintFileSystemError2
-#else
-    jz    PrintFileSystemError
-#endif
-
-    // Now copy the correct MFT record from 0x3000:sector_offset to ES:BX
-    pop   dx                               // DX = sector offset within cluster
-    pop   bx                               // BX = original destination offset
-    pop   es                               // ES = original destination segment
-
-    push  ds
-    push  si
-    push  di
-
-    // Source: 0x3000:(sector_offset * BytesPerSector)
-    movzx si, dl
-    shl   si, 9                            // SI = sector_offset * 512
-    push  HEX(3000)
-    pop   ds                               // DS:SI = source
-
-    // Destination: ES:BX
-    mov   di, bx                           // ES:DI = destination
-
-    // Copy SectsPerMFT * 512 bytes = record_size
-    mov   cx, word ptr cs:[SectsPerMFT]
-    shl   cx, 8                            // CX = sectors * 256 (words to copy, since 512/2=256)
-    cld
-    rep   movsw
-
-    pop   di
-    pop   si
-    pop   ds
-
-    cmp   dword ptr es:[bx], FILE_MAGIC
-#ifdef _USE_ML
-    jnz   PrintFileSystemError2
-#else
-    jnz   PrintFileSystemError
-#endif
-
-    call  ApplyFixups
-
-    pop   di
-    pop   si
-    pop   ecx
-    ret
+// $MFT run-list walk state (see ReadInode / bootstrap)
+MftRunsOffset:  .word 0
+InodeSecInClus: .long 0
+InodeCurLCN:    .long 0
+InodeRemVCN:    .long 0
 
 #define UpdateSequenceOffset 4
 #define UpdateSequenceLen 6
@@ -838,17 +764,14 @@ ApplyFixups:
         add   di, bx
         sub   di, 2
         cmp   ax, word ptr es:[di]     // Check fixup value
-#ifdef _USE_ML
-        jnz   PrintFileSystemError2    // Fixup is corrupted, so print error
-#else
         jnz   PrintFileSystemError     // Fixup is corrupted, so print error
-#endif
-        add   si, cx
-        add   si, cx                   // Replacement word for sector CX is at USA + 2*CX
+        mov   ax, cx
+        shl   ax, 1
+        add   si, ax
+        inc   cx
         mov   ax, word ptr es:[si]     // Apply fixup
         mov   word ptr es:[di], ax
 
-        inc   cx
         jmp   FixupLoop
     EndFixupLoop:
 
@@ -999,17 +922,9 @@ ReadINDX:
     push  bx
     call  ReadNonResidentAttribute
     test  ax, ax
-#ifdef _USE_ML
-    jz    PrintFileSystemError2
-#else
     jz    PrintFileSystemError
-#endif
     cmp   dword ptr fs:[0], INDX_MAGIC
-#ifdef _USE_ML
-    jnz   PrintFileSystemError2  // jump if not valid
-#else
     jnz   PrintFileSystemError  // jump if not valid
-#endif
     pop   bx
     
     mov   ax, fs
@@ -1032,15 +947,15 @@ FindAttributeHdr:
     mov   cx, word ptr es:[si+HEX(14)]  // Get offset attribute
     add   si, cx
     FindAttributeHdrLoop:
-        mov   edx, dword ptr es:[si]    // Get attribute type 
-        cmp   edx, ebx                
+        mov   edx, dword ptr es:[si]    // Get attribute type
+        cmp   edx, ebx
         jz    AttrFound
         cmp   edx, HEX(ffffffff)
         jz    AttrNotFound
         add   cx, word ptr es:[si + 4]  // Add size of the attribute
-        add   si, word ptr es:[si + 4] 
+        add   si, word ptr es:[si + 4]
         jmp   FindAttributeHdrLoop
-    
+
     AttrNotFound:
     // Attribute not found, reset the offset
     xor   cx, cx

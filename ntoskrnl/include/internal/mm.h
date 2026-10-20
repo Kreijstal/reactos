@@ -1656,6 +1656,13 @@ MmFlushSegment(
     _In_ ULONG Length,
     _Out_opt_ PIO_STATUS_BLOCK Iosb);
 
+BOOLEAN
+NTAPI
+MmGetNextSegmentPageTable(
+    _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer,
+    _In_ LONGLONG Offset,
+    _Out_ PLONGLONG NextOffset);
+
 NTSTATUS
 NTAPI
 MmMakeDataSectionResident(

@@ -34,7 +34,6 @@
 #define NDEBUG
 #include <debug.h>
 
-static NTSTATUS NtfsFlushVolumeStream(PDEVICE_EXTENSION Vcb);
 static NTSTATUS NtfsLogSetDirty(PDEVICE_EXTENSION Vcb, BOOLEAN Dirty);
 
 /* FUNCTIONS ****************************************************************/
@@ -775,7 +774,9 @@ GetNfsVolumeData(PDEVICE_EXTENSION DeviceExt,
 
     if (Stack->Parameters.FileSystemControl.OutputBufferLength >= sizeof(NTFS_EXTENDED_VOLUME_DATA) + sizeof(NTFS_VOLUME_DATA_BUFFER))
     {
-        PNTFS_EXTENDED_VOLUME_DATA ExtendedData = (PNTFS_EXTENDED_VOLUME_DATA)((ULONG_PTR)Irp->UserBuffer + sizeof(NTFS_VOLUME_DATA_BUFFER));
+        /* METHOD_BUFFERED: the whole reply goes in the system buffer, which the I/O
+         * manager copies over the caller's buffer at completion */
+        PNTFS_EXTENDED_VOLUME_DATA ExtendedData = (PNTFS_EXTENDED_VOLUME_DATA)(DataBuffer + 1);
 
         ExtendedData->ByteCount = sizeof(NTFS_EXTENDED_VOLUME_DATA);
         ExtendedData->MajorVersion = DeviceExt->NtfsInfo.MajorVersion;
@@ -2115,17 +2116,6 @@ NtfsMarkVolumeDirty(PDEVICE_EXTENSION DeviceExt,
 
     DeviceExt->Flags |= VCB_VOLUME_CORRUPT;
     return NtfsSetVolumeFlags(DeviceExt, NTFS_VOLUME_FLAG_DIRTY, TRUE);
-}
-
-static NTSTATUS
-NtfsFlushVolumeStream(PDEVICE_EXTENSION Vcb)
-{
-    IO_STATUS_BLOCK IoStatus;
-
-    CcFlushCache(Vcb->StreamFileObject->SectionObjectPointer, NULL, 0, &IoStatus);
-    if (!NT_SUCCESS(IoStatus.Status))
-        return IoStatus.Status;
-    return NtfsFlushDevice(Vcb->StorageDevice);
 }
 
 /* FSCTL_EXTEND_VOLUME supplies the new partition-relative sector count.

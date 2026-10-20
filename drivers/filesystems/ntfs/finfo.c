@@ -1124,8 +1124,12 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     // set the attribute data length
     Status = SetAttributeDataLength(FileObject, Fcb, DataContext, AttributeOffset, Holder, NewFileSize);
 
-    /* The range the file grew by reads as zeros */
-    if (NT_SUCCESS(Status) && NewFileSize->QuadPart > CurrentFileSize.QuadPart)
+    /* The range the file grew by reads as zeros. Not for a paging file: Mm
+     * writes every page of it before it reads one back, and zeroing the
+     * gigabytes NtCreatePagingFile sizes it to would have to pass through
+     * memory before there is any page file to relieve it. */
+    if (NT_SUCCESS(Status) && NewFileSize->QuadPart > CurrentFileSize.QuadPart &&
+        !(Fcb->Flags & FCB_IS_PAGING_FILE))
     {
         Status = NtfsZeroStreamRange(DeviceExt,
                                      DataContext,

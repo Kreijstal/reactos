@@ -247,6 +247,7 @@ TestMountPoint(
     if (NT_SUCCESS(Status))
     {
         REPARSE_DATA_BUFFER Header;
+        REPARSE_GUID_DATA_BUFFER GuidHeader;
 
         RtlZeroMemory(&Header, sizeof(Header));
         Header.ReparseTag = IO_REPARSE_TAG_SYMLINK;
@@ -259,9 +260,12 @@ TestMountPoint(
             NtfsKmtFsctl(Handle, FSCTL_SET_REPARSE_POINT, Reparse, Size, NULL, 0, NULL);
         }
 
-        Header.ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
-        Status = NtfsKmtFsctl(Handle, FSCTL_DELETE_REPARSE_POINT, &Header,
-                              REPARSE_DATA_BUFFER_HEADER_SIZE, NULL, 0, NULL);
+        /* Windows also takes the GUID header for a Microsoft tag (Wine's
+         * test_reparse_points deletes its junction that way). */
+        RtlZeroMemory(&GuidHeader, sizeof(GuidHeader));
+        GuidHeader.ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
+        Status = NtfsKmtFsctl(Handle, FSCTL_DELETE_REPARSE_POINT, &GuidHeader,
+                              REPARSE_GUID_DATA_BUFFER_HEADER_SIZE, NULL, 0, NULL);
         ok_eq_hex(Status, STATUS_SUCCESS);
         ZwClose(Handle);
     }

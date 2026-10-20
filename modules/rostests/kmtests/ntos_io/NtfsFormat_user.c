@@ -6,6 +6,7 @@
 #include <kmt_test.h>
 #include <winioctl.h>
 #include <fmifs/fmifs.h>
+#include "NtfsFslib_user.h"
 
 typedef VOID (NTAPI *FORMAT_EX)(PWCHAR, FMIFS_MEDIA_FLAG, PWCHAR, PWCHAR,
                                BOOLEAN, ULONG, PFMIFSCALLBACK);
@@ -26,8 +27,8 @@ FormatCallback(CALLBACKCOMMAND Command, ULONG SubAction, PVOID Argument)
 
 /* Formatting is limited to the harness's labelled, 256 MiB data disk.
  * A label match alone must never authorize formatting an arbitrary disk. */
-static BOOLEAN
-FindFormatVolume(PWCHAR Root, PWCHAR Volume)
+BOOLEAN
+NtfsKmtFindFormatVolume(PWCHAR Root, PWCHAR Volume)
 {
     WCHAR Drive, Label[64], FileSystem[32], Windows[MAX_PATH];
     PARTITION_INFORMATION_EX Partition;
@@ -65,6 +66,61 @@ FindFormatVolume(PWCHAR Root, PWCHAR Volume)
     return FALSE;
 }
 
+/* Take the fixture off NTFS: invalidate both boot sectors through a locked,
+ * dismounted volume handle, so the next open of the volume is mounted by RAW.
+ * This is the state setup's format starts from on a fresh partition. */
+static BOOLEAN
+MakeVolumeRaw(PWCHAR Root, PWCHAR Volume)
+{
+    GET_LENGTH_INFORMATION Length;
+    WCHAR FileSystem[32];
+    LARGE_INTEGER Offset;
+    HANDLE Handle;
+    DWORD Bytes;
+    BYTE Sector[512];
+    BOOLEAN Done = FALSE;
+
+    Handle = CreateFileW(Volume, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         NULL, OPEN_EXISTING, FILE_FLAG_WRITE_THROUGH, NULL);
+    ok(Handle != INVALID_HANDLE_VALUE, "Cannot open %ls: %lu\n", Volume, GetLastError());
+    if (Handle == INVALID_HANDLE_VALUE)
+        return FALSE;
+    if (!DeviceIoControl(Handle, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &Bytes, NULL) ||
+        !DeviceIoControl(Handle, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, &Bytes, NULL) ||
+        !DeviceIoControl(Handle, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0,
+                         &Length, sizeof(Length), &Bytes, NULL))
+    {
+        ok(FALSE, "Cannot take %ls offline: %lu\n", Volume, GetLastError());
+        goto Cleanup;
+    }
+    ZeroMemory(Sector, sizeof(Sector));
+    Sector[510] = 0x55;
+    Sector[511] = 0xAA;
+    Offset.QuadPart = 0;
+    ok(SetFilePointerEx(Handle, Offset, NULL, FILE_BEGIN) &&
+       WriteFile(Handle, Sector, sizeof(Sector), &Bytes, NULL) && Bytes == sizeof(Sector),
+       "Primary boot sector write failed: %lu\n", GetLastError());
+    Offset.QuadPart = Length.Length.QuadPart - sizeof(Sector);
+    ok(SetFilePointerEx(Handle, Offset, NULL, FILE_BEGIN) &&
+       WriteFile(Handle, Sector, sizeof(Sector), &Bytes, NULL) && Bytes == sizeof(Sector),
+       "Backup boot sector write failed: %lu\n", GetLastError());
+    DeviceIoControl(Handle, FSCTL_UNLOCK_VOLUME, NULL, 0, NULL, 0, &Bytes, NULL);
+    Done = TRUE;
+Cleanup:
+    CloseHandle(Handle);
+    if (!Done)
+        return FALSE;
+    /* The volume must no longer be recognized as NTFS */
+    if (GetVolumeInformationW(Root, NULL, 0, NULL, NULL, NULL,
+                              FileSystem, RTL_NUMBER_OF(FileSystem)) &&
+        !wcscmp(FileSystem, L"NTFS"))
+    {
+        ok(FALSE, "%ls still mounts as NTFS after its boot sectors were invalidated\n", Root);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static VOID
 InvokeFormat(FORMAT_EX FormatEx, PWCHAR Root, ULONG ClusterSize, BOOLEAN Expected)
 {
@@ -87,7 +143,7 @@ START_TEST(NtfsFormat)
     CHAR Readback[sizeof(Marker)];
     const ULONG ClusterSizes[] = { 512, 4096 };
 
-    if (!FindFormatVolume(Root, Volume))
+    if (!NtfsKmtFindFormatVolume(Root, Volume))
     {
         skip(FALSE, "No dedicated KMTNTFS format fixture\n");
         return;
@@ -125,6 +181,22 @@ START_TEST(NtfsFormat)
                              &FreeClusters, &TotalClusters), "Cannot query formatted geometry\n");
         ok_eq_ulong(SectorsPerCluster * BytesPerSector, ClusterSizes[i]);
         KmtRunKernelTest("NtfsFormat");
+    }
+
+    /* Setup formats a fresh partition, which is mounted by RAW, not by a
+     * file system: the formatter must work through RAW's volume handle. */
+    if (MakeVolumeRaw(Root, Volume))
+    {
+        WCHAR Label[64] = L"", FileSystem[32] = L"";
+
+        InvokeFormat(FormatEx, Root, 4096, TRUE);
+        ok(GetVolumeInformationW(Root, Label, RTL_NUMBER_OF(Label), NULL, NULL, NULL,
+                                 FileSystem, RTL_NUMBER_OF(FileSystem)),
+           "Cannot query the volume formatted from RAW: %lu\n", GetLastError());
+        ok(!wcscmp(FileSystem, L"NTFS"), "Volume formatted from RAW mounts as %ls\n", FileSystem);
+        ok(!wcscmp(Label, L"KMTNTFS"), "Volume formatted from RAW has label %ls\n", Label);
+        if (FormatSucceeded)
+            KmtRunKernelTest("NtfsFormat");
     }
     FreeLibrary(Module);
 }

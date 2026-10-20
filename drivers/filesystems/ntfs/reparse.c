@@ -344,8 +344,14 @@ NtfsRemoveReparsePoint(PDEVICE_EXTENSION DeviceExt,
     ULONG ExistingLength;
     NTSTATUS Status;
 
+    /* The request carries no data. A Microsoft tag may come in either header,
+     * as Windows takes a REPARSE_GUID_DATA_BUFFER header for any tag (Wine's
+     * test_reparse_points deletes a mount point that way); a non-Microsoft tag
+     * needs the GUID one. */
     if (Request == NULL || Length < REPARSE_DATA_BUFFER_HEADER_SIZE ||
-        Length != NtfsReparseHeaderSize(Request->ReparseTag) || Request->ReparseDataLength != 0)
+        (Length != NtfsReparseHeaderSize(Request->ReparseTag) &&
+         Length != REPARSE_GUID_DATA_BUFFER_HEADER_SIZE) ||
+        Request->ReparseDataLength != 0)
     {
         return STATUS_IO_REPARSE_DATA_INVALID;
     }
