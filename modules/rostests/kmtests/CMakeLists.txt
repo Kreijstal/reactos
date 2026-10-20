@@ -224,6 +224,7 @@ list(APPEND KMTEST_SOURCE
     ntos_io/NtfsDirIndex_user.c
     ntos_io/NtfsFeatures_user.c
     ntos_io/NtfsFormat_user.c
+    ntos_io/NtfsChkdsk_user.c
     ntos_kd/NtSystemDebugControl.c
     ntos_mm/MmMapLockedPagesSpecifyCache_user.c
     ntos_mm/MmPageoutSysView_user.c
