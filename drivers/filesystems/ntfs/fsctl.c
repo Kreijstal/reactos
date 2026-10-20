@@ -34,7 +34,6 @@
 #define NDEBUG
 #include <debug.h>
 
-static NTSTATUS NtfsLogSetDirty(PDEVICE_EXTENSION Vcb, BOOLEAN Dirty);
 
 /* FUNCTIONS ****************************************************************/
 
@@ -434,6 +433,39 @@ NtfsGetVolumeData(PDEVICE_OBJECT DeviceObject,
 }
 
 
+/* The log's barrier: Length 0 makes every write so far durable, the
+ * volume stream's included; otherwise only the device's own cache. */
+static NTSTATUS
+NtfsLogFlush(PDEVICE_EXTENSION Vcb, LONGLONG Offset, ULONG Length)
+{
+    UNREFERENCED_PARAMETER(Offset);
+    if (Length == 0)
+        return NtfsFlushVolumeStream(Vcb);
+    return NtfsFlushDevice(Vcb->StorageDevice);
+}
+
+/* A forced log page goes to the device; its cached copy is written too,
+ * so a read of the volume sees it. */
+static NTSTATUS
+NtfsLogWriteDirect(PDEVICE_EXTENSION Vcb, LONGLONG Offset, ULONG Length, const PUCHAR Buffer)
+{
+    if (Vcb->Flags & VCB_DEVICE_REMOVED)
+        return STATUS_DEVICE_REMOVED;
+    return NtfsWriteDisk(Vcb->StorageDevice, Offset, Length, Vcb->NtfsInfo.BytesPerSector, Buffer);
+}
+
+static NTSTATUS
+NtfsMountStartLog(PDEVICE_EXTENSION Vcb)
+{
+    NTSTATUS Status;
+
+    if (Vcb->Flags & VCB_VOLUME_READ_ONLY)
+        return STATUS_SUCCESS;
+    Status = NtfsLfsCreateWriter(Vcb, NtfsWriteDiskCached, NtfsLogWriteDirect, NtfsLogFlush,
+                                 &Vcb->LfsWriter);
+    return Status;
+}
+
 static
 NTSTATUS
 NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
@@ -597,7 +629,6 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     if (!NT_SUCCESS(Status))
         goto ByeBye;
 
-
     Status = NtfsLfsCheckCleanShutdown(Vcb);
     if (!NT_SUCCESS(Status) || Vcb->LogFileVersionUnsupported)
     {
@@ -605,12 +636,9 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
         DPRINT1("Mounting read-only: $LogFile requires recovery or an unsupported format (%lx)\n", Status);
     }
 
-    if (!(Vcb->Flags & VCB_VOLUME_READ_ONLY))
-    {
-        Status = NtfsLfsCreateWriter(Vcb, NtfsWriteDiskCached, NtfsFlushVolumeStream,
-                                     NtfsLogSetDirty, &Vcb->LfsWriter);
-        if (!NT_SUCCESS(Status)) goto ByeBye;
-    }
+    Status = NtfsMountStartLog(Vcb);
+    if (!NT_SUCCESS(Status))
+        goto ByeBye;
 
     NtfsFindObjectIdIndex(Vcb);
     NtfsInitializeSecurity(Vcb);
@@ -2036,12 +2064,6 @@ NtfsSetVolumeFlags(PDEVICE_EXTENSION DeviceExt,
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, VolumeRecord);
 
     return Status;
-}
-
-static NTSTATUS
-NtfsLogSetDirty(PDEVICE_EXTENSION Vcb, BOOLEAN Dirty)
-{
-    return NtfsSetVolumeFlags(Vcb, NTFS_VOLUME_FLAG_DIRTY, Dirty);
 }
 
 /* A failed rollback leaves on-disk metadata inconsistent. Keep that fact
