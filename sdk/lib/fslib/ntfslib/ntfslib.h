@@ -93,6 +93,17 @@
 #define MFT_RECORD_SIZE    1024
 #define INDEX_RECORD_SIZE  4096
 
+// Largest cluster Windows formats NTFS with (Windows 10 1709 and later).
+#define NTFS_MAX_CLUSTER_SIZE  (2 * 1024 * 1024)
+
+// Windows places $MFT at a third of the volume, but never past this byte
+// offset (LCN 0xC0000 with 4 KiB clusters).
+#define NTFS_MFT_MAX_START     (3ULL * 1024 * 1024 * 1024)
+
+// Index blocks smaller than a cluster are counted, and addressed by VCN, in
+// these units (INDEX_ROOT's ClustersPerIndexBlock, an INDX block's VCN).
+#define NTFS_INDEX_BLOCK_UNIT  512
+
 // Count of MFT records materialized during format (the 16 reserved system records).
 #define MFT_RESERVED_RECORDS  16
 
