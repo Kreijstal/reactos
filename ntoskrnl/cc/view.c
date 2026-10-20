@@ -1304,6 +1304,42 @@ CcRosInternalFreeVacb (
 /*
  * @implemented
  */
+/* Finds the start of the first VACB of the shared cache map that ends above
+ * FileOffset. The VACB list is kept sorted by file offset. */
+static
+BOOLEAN
+CcRosNextVacbOffset (
+    PROS_SHARED_CACHE_MAP SharedCacheMap,
+    LONGLONG FileOffset,
+    PLONGLONG NextOffset)
+{
+    PLIST_ENTRY current_entry;
+    PROS_VACB current;
+    BOOLEAN Found = FALSE;
+    KIRQL oldIrql;
+
+    oldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    KeAcquireSpinLockAtDpcLevel(&SharedCacheMap->CacheMapLock);
+
+    for (current_entry = SharedCacheMap->CacheMapVacbListHead.Flink;
+         current_entry != &SharedCacheMap->CacheMapVacbListHead;
+         current_entry = current_entry->Flink)
+    {
+        current = CONTAINING_RECORD(current_entry, ROS_VACB, CacheMapVacbListEntry);
+        if (current->FileOffset.QuadPart + VACB_MAPPING_GRANULARITY > FileOffset)
+        {
+            *NextOffset = max(current->FileOffset.QuadPart, FileOffset);
+            Found = TRUE;
+            break;
+        }
+    }
+
+    KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, oldIrql);
+
+    return Found;
+}
+
 VOID
 NTAPI
 CcFlushCache (
@@ -1376,6 +1412,42 @@ CcFlushCache (
     {
         BOOLEAN DirtyVacb = FALSE;
         PROS_VACB vacb = CcRosLookupVacb(SharedCacheMap, FlushStart);
+
+        if (vacb == NULL)
+        {
+            LONGLONG NextVacb = 0, NextPage = 0, Next;
+            BOOLEAN HaveVacb, HavePage;
+
+            /* Step straight to the next chunk that holds cached data. Walking
+             * every chunk up to the end of a large, sparsely cached stream
+             * (a volume stream) costs time in the size of the stream instead
+             * of in the data it caches. */
+            HaveVacb = CcRosNextVacbOffset(SharedCacheMap, FlushStart, &NextVacb);
+            HavePage = MmGetNextSegmentPageTable(SectionObjectPointers, FlushStart, &NextPage);
+            if (!HaveVacb && !HavePage)
+                Next = FlushEnd;
+            else if (!HaveVacb)
+                Next = NextPage;
+            else if (!HavePage)
+                Next = NextVacb;
+            else
+                Next = min(NextVacb, NextPage);
+
+            if (Next >= FlushEnd)
+            {
+                /* Nothing cached in the rest of the range */
+                if (SharedCacheMap->ValidDataLength.QuadPart < FlushEnd)
+                    SharedCacheMap->ValidDataLength.QuadPart = FlushEnd;
+                break;
+            }
+
+            Next -= Next % VACB_MAPPING_GRANULARITY;
+            if (Next > FlushStart)
+            {
+                FlushStart = Next;
+                vacb = CcRosLookupVacb(SharedCacheMap, FlushStart);
+            }
+        }
 
         if (vacb != NULL)
         {
