@@ -71,6 +71,8 @@ typedef struct _CHK_RUN {
 #define CRF_ATTRLIST_UNSUPPORTED 0x0200   /* $I30 spread over extents: no rebuild  */
 #define CRF_CLAIMED              0x0400   /* extension claimed by a base's list    */
 #define CRF_VISITING             0x0800   /* connectivity walk: on current chain   */
+#define CRF_I30_REMOTE           0x1000   /* $I30 attr whole in an extension: walked,
+                                             not rebuilt                           */
 
 typedef struct _CHK_REC {
     ULONGLONG ParentRef;      /* first non-DOS $FILE_NAME's ParentDirectory */

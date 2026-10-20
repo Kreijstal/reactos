@@ -737,7 +737,8 @@ static int chk_volume_pass(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
                 USHORT f = c->Rec[d].Flags;
                 if ((f & (CRF_IN_USE | CRF_DIRECTORY | CRF_INDEX_BAD)) ==
                         (CRF_IN_USE | CRF_DIRECTORY | CRF_INDEX_BAD) &&
-                    !(f & (CRF_ATTRLIST_UNSUPPORTED | CRF_CORRUPT | CRF_EXTENSION)))
+                    !(f & (CRF_ATTRLIST_UNSUPPORTED | CRF_I30_REMOTE |
+                           CRF_CORRUPT | CRF_EXTENSION)))
                     chk_rebuild_index(c, d, res);
             }
         }
