@@ -202,12 +202,68 @@ static __inline ULONG chk_lfs_page_size(const CHK_CTX *c)
     return 4096;
 }
 
-/* Write two clean NTFS 1.1 restart pages after an offline repair. */
+/* The state of $LogFile's restart area (ntfs-3g logfile.h RESTART_AREA):
+ * the newest valid copy decides; *CurrentLsn receives its last LSN. */
+int chk_logfile_state(CHK_CTX *c, ULONGLONG *CurrentLsn)
+{
+    UCHAR *rec = NULL, *page = NULL;
+    CHK_RUN *runs;
+    ULONGLONG dataSize = 0, lsn, best = 0;
+    ULONG pageSize = chk_lfs_page_size(c), copy, i;
+    USHORT off, flags;
+    int n, state = CHK_LOG_UNREADABLE, found = 0, unused = 1;
+
+    if (CurrentLsn)
+        *CurrentLsn = 0;
+    rec = (UCHAR *)malloc(c->MftRecordSize);
+    runs = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
+    page = (UCHAR *)malloc(pageSize);
+    if (!rec || !runs || !page ||
+        chk_read_record(c, FILE_LogFile, rec) != 0 || *(ULONG *)rec != NRH_FILE_TYPE ||
+        chk_apply_fixups(rec, c->MftRecordSize, c->BytesPerSector) != 0)
+        goto done;
+    n = chk_find_data_runs(c, rec, runs, CHK_MAX_RUNS, &dataSize);
+    if (n <= 0 || dataSize < 2ULL * pageSize)
+        goto done;
+    for (copy = 0; copy < 2; copy++)
+    {
+        if (chk_stream_io(c->Io, runs, (ULONG)n, c->BytesPerCluster,
+                          (ULONGLONG)copy * pageSize, page, pageSize, 0) != 0)
+            goto done;
+        for (i = 0; i < pageSize && unused; i++)
+            unused = page[i] == page[0] && (page[0] == 0 || page[0] == 0xFF);
+        if (*(ULONG *)page != 0x52545352 || chk_apply_fixups(page, pageSize, c->BytesPerSector) != 0)
+            continue;
+        memcpy(&off, page + 0x18, sizeof(off));
+        if (off < 0x30 || off > pageSize - 0x30)
+            continue;
+        memcpy(&lsn, page + off, sizeof(lsn));
+        memcpy(&flags, page + off + 0xE, sizeof(flags));
+        if (!found || lsn > best)
+        {
+            best = lsn;
+            state = (flags & 2) ? CHK_LOG_CLEAN : CHK_LOG_DIRTY;
+            found = 1;
+        }
+    }
+    if (!found)
+        state = unused ? CHK_LOG_UNUSED : CHK_LOG_UNREADABLE;
+    else if (CurrentLsn)
+        *CurrentLsn = best;
+done:
+    free(page);
+    free(runs);
+    free(rec);
+    return state;
+}
+
+/* Write two clean NTFS 1.1 restart pages after an offline repair.  They
+ * keep the last LSN the log used, so the LSNs on metadata keep increasing. */
 int chk_stamp_logfile_clean(CHK_CTX *c, NTFS_CHK_RESULT *res)
 {
     UCHAR *rec = NULL, *page = NULL;
     CHK_RUN *runs;   /* 192 KiB: too large for the stack */
-    ULONGLONG dataSize = 0;
+    ULONGLONG dataSize = 0, lastLsn = 0;
     ULONG pageSize;
     int n, rc = -1;
 
@@ -261,7 +317,8 @@ int chk_stamp_logfile_clean(CHK_CTX *c, NTFS_CHK_RESULT *res)
     }
 
     /* Build one CLEAN RSTR page (USA already applied) and write it twice. */
-    if (NtfsBuildCleanRestart(page, pageSize, c->BytesPerSector, dataSize) != 0)
+    (void)chk_logfile_state(c, &lastLsn);
+    if (NtfsBuildCleanRestart(page, pageSize, c->BytesPerSector, dataSize, lastLsn) != 0)
         goto done;
 
     if (chk_stream_io(c->Io, runs, (ULONG)n, c->BytesPerCluster,
