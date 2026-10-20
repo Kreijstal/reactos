@@ -49,6 +49,8 @@ PrepareAttributeContext(PNTFS_ATTR_RECORD AttrRecord)
         return NULL;
     }
 
+    Context->DirectIo = FALSE;
+
     // Allocate memory for a copy of the attribute
     Context->pRecord = ExAllocatePoolWithTag(NonPagedPool, AttrRecord->Length, TAG_NTFS);
     if(!Context->pRecord)
@@ -2069,13 +2071,17 @@ NtfsTransferAttributeRuns(PDEVICE_EXTENSION Vcb,
                           PIRP Irp,
                           PUCHAR Buffer,
                           PNTFS_IO_RUN_LIST RunList,
+                          BOOLEAN Direct,
                           PULONG Transferred)
 {
     ULONG Index;
     NTSTATUS Status = STATUS_SUCCESS;
 
     *Transferred = 0;
-    if (Vcb->StreamFileObject == NULL)
+    /* Paging file I/O goes straight to the disk. It is how Mm makes memory
+     * free, so it must not need cache pages of its own, and nothing but Mm
+     * ever reads or writes those clusters. */
+    if (Vcb->StreamFileObject == NULL || Direct)
     {
         return NtfsPerformIrpIoRuns(Vcb->StorageDevice, MajorFunction,
                                     Vcb->NtfsInfo.BytesPerSector, Irp, Buffer,
@@ -2148,7 +2154,7 @@ ReadAttributeToIrp(PDEVICE_EXTENSION Vcb,
     if (NT_SUCCESS(Status) && AlreadyRead != 0)
     {
         Status = NtfsTransferAttributeRuns(Vcb, IRP_MJ_READ, Irp, (PUCHAR)Buffer,
-                                            &RunList, &Transferred);
+                                            &RunList, Context->DirectIo, &Transferred);
     }
 
     NtfsFreeIoRunList(&RunList);
@@ -2431,7 +2437,7 @@ WriteAttributeFromIrp(PDEVICE_EXTENSION Vcb,
         /* NtfsPerformIrpIoRuns() rejects sparse runs on IRP_MJ_WRITE: holes are
          * filled above, and only a compressed attribute still has them */
         Status = NtfsTransferAttributeRuns(Vcb, IRP_MJ_WRITE, Irp, (PUCHAR)Buffer,
-                                            &RunList, &Transferred);
+                                            &RunList, Context->DirectIo, &Transferred);
     }
 
     NtfsFreeIoRunList(&RunList);
@@ -2602,7 +2608,7 @@ ReadFileRecordInternal(PDEVICE_EXTENSION Vcb,
     return FixupUpdateSequenceArray(Vcb, &file->Ntfs);
 }
 
-static NTSTATUS
+NTSTATUS
 NtfsReadFileRecordEx(PDEVICE_EXTENSION Vcb, ULONGLONG Index,
                      PFILE_RECORD_HEADER Record, BOOLEAN AllowUnused)
 {
@@ -2813,9 +2819,11 @@ UpdateFileNameRecordWorker(PDEVICE_EXTENSION Vcb,
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    Status = ReadAttribute(Vcb, IndexRootCtx, 0, IndexRecord, AttributeDataLength(IndexRootCtx->pRecord));
-    if (!NT_SUCCESS(Status))
+    // ReadAttribute returns the bytes it read
+    if (ReadAttribute(Vcb, IndexRootCtx, 0, IndexRecord, (ULONG)AttributeDataLength(IndexRootCtx->pRecord)) !=
+        AttributeDataLength(IndexRootCtx->pRecord))
     {
+        Status = STATUS_UNEXPECTED_IO_ERROR;
         DPRINT1("ERROR: Failed to read Index Root!\n");
         ExFreePoolWithTag(IndexRecord, TAG_NTFS);
         ReleaseAttributeContext(IndexRootCtx);
@@ -3077,6 +3085,44 @@ UpdateIndexEntryFileName(PDEVICE_EXTENSION Vcb,
 * STATUS_SUCCESSFUL on success. An error passed from WriteAttribute() otherwise.
 *
 */
+/* $MFTMirr holds copies of the first records of the MFT ($MFT, $MFTMirr,
+ * $LogFile, $Volume); Windows writes a mirrored record to both, so the copy
+ * never falls behind. Image is the on-disk form of record MftIndex. The
+ * caller holds MftContextResource. */
+static NTSTATUS
+NtfsMirrorFileRecord(PDEVICE_EXTENSION Vcb,
+                     ULONGLONG MftIndex,
+                     PFILE_RECORD_HEADER Image)
+{
+    PFILE_RECORD_HEADER Mirror;
+    PNTFS_ATTR_CONTEXT Data = NULL;
+    ULONG RecordSize = Vcb->NtfsInfo.BytesPerFileRecord;
+    ULONG Written;
+    NTSTATUS Status;
+
+    /* The mirror is four records, or one cluster when a cluster holds more;
+     * its $DATA length below has the last word. */
+    if (MftIndex >= max(4, Vcb->NtfsInfo.BytesPerCluster / RecordSize))
+        return STATUS_SUCCESS;
+
+    Mirror = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (Mirror == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    Status = ReadFileRecordInternal(Vcb, NTFS_FILE_MFTMIRR, Mirror, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = FindAttribute(Vcb, Mirror, AttributeData, L"", 0, &Data, NULL);
+    if (NT_SUCCESS(Status) &&
+        (MftIndex + 1) * RecordSize <= AttributeDataLength(Data->pRecord))
+    {
+        Status = WriteAttribute(Vcb, Data, MftIndex * RecordSize, (const PUCHAR)Image,
+                                RecordSize, &Written, Mirror);
+    }
+    if (Data != NULL)
+        ReleaseAttributeContext(Data);
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Mirror);
+    return Status;
+}
+
 static NTSTATUS
 UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
                  ULONGLONG MftIndex,
@@ -3119,6 +3165,10 @@ UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("UpdateFileRecord failed: %lu written, %lu expected\n", BytesWritten, Vcb->NtfsInfo.BytesPerFileRecord);
+    }
+    else
+    {
+        Status = NtfsMirrorFileRecord(Vcb, MftIndex, WriteImage);
     }
 
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, WriteImage);
@@ -3613,9 +3663,10 @@ InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
     }
 
     // Read the Index Root
-    Status = ReadAttribute(DeviceExt, IndexRootContext, 0, (PCHAR)I30IndexRoot, I30IndexRootLength);
-    if (!NT_SUCCESS(Status))
+    // ReadAttribute returns the bytes it read
+    if (ReadAttribute(DeviceExt, IndexRootContext, 0, (PCHAR)I30IndexRoot, I30IndexRootLength) != I30IndexRootLength)
     {
+        Status = STATUS_UNEXPECTED_IO_ERROR;
         DPRINT1("ERROR: Couln't read index root attribute for Mft index #%I64u\n", DirectoryMftIndex);
         ReleaseAttributeContext(IndexRootContext);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
@@ -4075,9 +4126,10 @@ RemoveIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    Status = ReadAttribute(DeviceExt, IndexRootContext, 0, (PCHAR)I30IndexRoot, I30IndexRootLength);
-    if (!NT_SUCCESS(Status))
+    // ReadAttribute returns the bytes it read
+    if (ReadAttribute(DeviceExt, IndexRootContext, 0, (PCHAR)I30IndexRoot, I30IndexRootLength) != I30IndexRootLength)
     {
+        Status = STATUS_UNEXPECTED_IO_ERROR;
         DPRINT1("ERROR: Couldn't read index root attribute for Mft index #%I64u\n", DirectoryMftIndex);
         ReleaseAttributeContext(IndexRootContext);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
@@ -4672,6 +4724,8 @@ FreeMftEntry(PDEVICE_EXTENSION Vcb, ULONGLONG Index)
     return Status;
 }
 
+static NTSTATUS NtfsFreeRecordClusters(PDEVICE_EXTENSION DeviceExt, PFILE_RECORD_HEADER FileRecord);
+
 /**
 * @name NtfsDeleteFileRecord
 * @implemented
@@ -4694,8 +4748,9 @@ FreeMftEntry(PDEVICE_EXTENSION Vcb, ULONGLONG Index)
 *
 * @remarks
 * Callers must have established that the file may be deleted, in particular that a directory
-* is empty. Clusters are released before the names, so a failure part-way through leaves a
-* reachable file rather than orphaned allocation.
+* is empty. The names leave the index before anything is freed, so a failure there leaves the
+* file whole; then the extension records, the clusters of the base record's attributes and
+* the record itself are released.
 */
 NTSTATUS
 NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
@@ -4704,9 +4759,6 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
 {
     NTSTATUS Status;
     PFILE_RECORD_HEADER FileRecord;
-    PNTFS_ATTR_RECORD Attribute;
-    PNTFS_ATTR_CONTEXT AttributeContext;
-    ULONG AttributeOffset;
     PFILENAME_ATTRIBUTE *Names = NULL;
     ULONG NameCount = 0, i;
 
@@ -4757,45 +4809,8 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
-    // Release the clusters held by every non-resident attribute
-    Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
-    AttributeOffset = FileRecord->AttributeOffset;
-
-    while (AttributeOffset < DeviceExt->NtfsInfo.BytesPerFileRecord &&
-           Attribute->Type != AttributeEnd)
-    {
-        if (Attribute->IsNonResident)
-        {
-            Status = FindAttribute(DeviceExt,
-                                   FileRecord,
-                                   Attribute->Type,
-                                   (PCWSTR)((ULONG_PTR)Attribute + Attribute->NameOffset),
-                                   Attribute->NameLength,
-                                   &AttributeContext,
-                                   NULL);
-            if (NT_SUCCESS(Status))
-            {
-                ULONGLONG ClusterCount = Attribute->NonResident.HighestVCN - Attribute->NonResident.LowestVCN + 1;
-
-                Status = FreeClusters(DeviceExt, AttributeContext, AttributeOffset, FileRecord, (ULONG)ClusterCount);
-                if (!NT_SUCCESS(Status))
-                {
-                    DPRINT1("ERROR: Failed to free clusters of attribute 0x%lx of file %I64u!\n",
-                            Attribute->Type, MftIndex);
-                }
-
-                ReleaseAttributeContext(AttributeContext);
-            }
-        }
-
-        if (Attribute->Length == 0)
-            break;
-
-        AttributeOffset += Attribute->Length;
-        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttributeOffset);
-    }
-
-    /* The extension records go with the base record */
+    /* The extension records go with the base record. They are found through the
+     * $ATTRIBUTE_LIST, so they go before the list's own clusters do. */
     if (NtfsRecordHasAttributeList(FileRecord))
     {
         Status = NtfsDeleteExtensionRecords(DeviceExt, FileRecord);
@@ -4803,6 +4818,14 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
         {
             DPRINT1("ERROR: Failed to free the extension records of file %I64u!\n", MftIndex);
         }
+    }
+
+    /* Then the clusters of every non-resident attribute of the base record. That
+     * includes a non-resident $ATTRIBUTE_LIST, which FindAttribute() never returns. */
+    Status = NtfsFreeRecordClusters(DeviceExt, FileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ERROR: Failed to free the clusters of file %I64u!\n", MftIndex);
     }
 
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
@@ -6061,9 +6084,10 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
         BitmapPtr = (PULONG)ALIGN_UP_BY((ULONG_PTR)BitmapMem, sizeof(ULONG));
 
         // Read the existing bitmap data
-        Status = ReadAttribute(Vcb, BitmapContext, 0, (PCHAR)BitmapPtr, BitmapLength);
-        if (!NT_SUCCESS(Status))
+        // ReadAttribute returns the bytes it read
+        if (ReadAttribute(Vcb, BitmapContext, 0, (PCHAR)BitmapPtr, (ULONG)BitmapLength) != BitmapLength)
         {
+            Status = STATUS_UNEXPECTED_IO_ERROR;
             DPRINT1("ERROR: Failed to read bitmap attribute!\n");
             ExFreePoolWithTag(BitmapMem, TAG_NTFS);
             ReleaseAttributeContext(BitmapContext);
