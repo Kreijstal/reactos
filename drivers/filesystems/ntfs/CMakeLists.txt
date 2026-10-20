@@ -22,6 +22,7 @@ list(APPEND SOURCE
     lfs.c
     lfslog.c
     lfsparse.c
+    lfsrecov.c
     lock.c
     mft.c
     misc.c

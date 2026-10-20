@@ -19,15 +19,24 @@ NtfsLogPageSizeValid(ULONG Size, ULONG SectorSize)
            (Size & (Size - 1)) == 0;
 }
 
+/* No restart copy anywhere: the first two 4 KiB pages are uniform (zero,
+ * or the formatter's 0xFF), and no larger page size puts a restart page
+ * after them.  The record pages may hold anything: without a restart area
+ * they describe nothing. */
 static BOOLEAN
 NtfsLogUnused(PUCHAR Data, ULONG Length)
 {
-    ULONG i;
+    ULONG i, Size, Head = min(Length, 2 * PAGE_SIZE);
     UCHAR Fill = Data[0];
 
     if (Fill != 0 && Fill != 0xff) return FALSE;
-    for (i = 1; i < Length; i++)
+    for (i = 1; i < Head; i++)
         if (Data[i] != Fill) return FALSE;
+    for (Size = 2 * PAGE_SIZE; Size <= NTFS_LOG_MAX_PAGE && Size + sizeof(ULONG) <= Length; Size *= 2)
+    {
+        if (*(PULONG)(Data + Size) == NTFS_LOG_RESTART_MAGIC)
+            return FALSE;
+    }
     return TRUE;
 }
 
@@ -36,11 +45,13 @@ NtfsLogReadRestart(PDEVICE_EXTENSION Vcb,
                     PUCHAR Page,
                     ULONG PageSize,
                     ULONGLONG FileSize,
-                    PNTFS_LOG_RESTART_AREA Restart,
+                    PNTFS_LOG_RESTART_INFO Info,
                     PUSHORT Major,
                     PUSHORT Minor)
 {
     PNTFS_LOG_RESTART_HEADER Header = (PVOID)Page;
+    PNTFS_LOG_RESTART_AREA Restart = &Info->Area;
+    PUCHAR Client;
     ULONG SectorSize = Vcb->NtfsInfo.BytesPerSector;
     ULONG UsaEnd, ClientEnd;
     NTSTATUS Status;
@@ -74,24 +85,40 @@ NtfsLogReadRestart(PDEVICE_EXTENSION Vcb,
         Restart->LogPageDataOffset < 0x28 ||
         Restart->LogPageDataOffset >= Header->LogPageSize)
         return STATUS_FILE_CORRUPT_ERROR;
+    Info->LogPageSize = Header->LogPageSize;
+    Info->SystemPageSize = Header->SystemPageSize;
+    Info->LogSize = FileSize;
+    Info->ClientInUse = Restart->ClientInUseList == 0;
+    Info->ClientSeqNumber = 0;
+    Info->OldestLsn = Info->ClientRestartLsn = 0;
+    if (Info->ClientInUse)
+    {
+        /* ntfs-3g LOG_CLIENT_RECORD: oldest_lsn, client_restart_lsn,
+         * prev/next client, seq_number. */
+        Client = Page + Header->RestartOffset + Restart->ClientArrayOffset;
+        RtlCopyMemory(&Info->OldestLsn, Client, sizeof(ULONGLONG));
+        RtlCopyMemory(&Info->ClientRestartLsn, Client + 8, sizeof(ULONGLONG));
+        RtlCopyMemory(&Info->ClientSeqNumber, Client + 0x14, sizeof(USHORT));
+    }
     *Major = Header->MajorVersion;
     *Minor = Header->MinorVersion;
     return STATUS_SUCCESS;
 }
 
 NTSTATUS
-NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb)
+NtfsLfsReadRestart(PDEVICE_EXTENSION Vcb, PNTFS_LOG_RESTART_INFO Best)
 {
     PFILE_RECORD_HEADER Record = NULL;
     PNTFS_ATTR_CONTEXT Context = NULL;
     PUCHAR Data = NULL, Page = NULL;
-    NTFS_LOG_RESTART_AREA Restart, Best = {0};
+    NTFS_LOG_RESTART_INFO Info;
     ULONGLONG FileSize;
     ULONG Length, Size, Copy;
     USHORT Major, Minor;
     BOOLEAN Found = FALSE;
     NTSTATUS Status;
 
+    RtlZeroMemory(Best, sizeof(*Best));
     Vcb->LogFileDirty = TRUE;
     Vcb->LogFileVersionUnsupported = FALSE;
     Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
@@ -101,6 +128,7 @@ NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb)
         Status = FindAttribute(Vcb, Record, AttributeData, L"", 0, &Context, NULL);
     if (!NT_SUCCESS(Status)) goto Cleanup;
     FileSize = AttributeDataLength(Context->pRecord);
+    Best->LogSize = FileSize;
     Length = (ULONG)min(FileSize, 2ULL * NTFS_LOG_MAX_PAGE);
     if (Length < 2 * Vcb->NtfsInfo.BytesPerSector)
     {
@@ -124,6 +152,7 @@ NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb)
     if (NtfsLogUnused(Data, Length))
     {
         Vcb->LogFileDirty = FALSE;
+        Vcb->LogFileLsn = 0;
         Status = STATUS_SUCCESS;
         goto Cleanup;
     }
@@ -136,10 +165,10 @@ NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb)
         for (Copy = 0; Copy < 2; Copy++)
         {
             RtlCopyMemory(Page, Data + Copy * Size, Size);
-            Status = NtfsLogReadRestart(Vcb, Page, Size, FileSize, &Restart, &Major, &Minor);
-            if (NT_SUCCESS(Status) && (!Found || Restart.CurrentLsn > Best.CurrentLsn))
+            Status = NtfsLogReadRestart(Vcb, Page, Size, FileSize, &Info, &Major, &Minor);
+            if (NT_SUCCESS(Status) && (!Found || Info.Area.CurrentLsn > Best->Area.CurrentLsn))
             {
-                Best = Restart;
+                *Best = Info;
                 Vcb->LogFileMajorVersion = Major;
                 Vcb->LogFileMinorVersion = Minor;
                 Found = TRUE;
@@ -149,10 +178,10 @@ NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb)
     Status = STATUS_FILE_CORRUPT_ERROR;
     if (Found)
     {
-        Vcb->LogFileLsn = Best.CurrentLsn;
+        Vcb->LogFileLsn = Best->Area.CurrentLsn;
         Vcb->LogFileVersionUnsupported = Vcb->LogFileMajorVersion != 1 ||
                                        Vcb->LogFileMinorVersion > 1;
-        Vcb->LogFileDirty = !(Best.Flags & NTFS_LOG_CLEAN);
+        Vcb->LogFileDirty = !(Best->Area.Flags & NTFS_LOG_CLEAN);
         Status = Vcb->LogFileDirty ? STATUS_LOG_FILE_FULL : STATUS_SUCCESS;
     }
 Cleanup:
@@ -161,4 +190,12 @@ Cleanup:
     if (Context != NULL) ReleaseAttributeContext(Context);
     if (Record != NULL) ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
     return Status;
+}
+
+NTSTATUS
+NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb)
+{
+    NTFS_LOG_RESTART_INFO Info;
+
+    return NtfsLfsReadRestart(Vcb, &Info);
 }
