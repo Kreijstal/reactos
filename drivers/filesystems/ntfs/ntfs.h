@@ -1770,6 +1770,15 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
                PULONG LengthWritten,
                PFILE_RECORD_HEADER FileRecord);
 
+/* Not file data: written through the log. */
+BOOLEAN
+NtfsAttributeIsMetadata(PNTFS_ATTR_CONTEXT Context);
+
+NTSTATUS
+NtfsWriteFileRecordMirror(PDEVICE_EXTENSION Vcb,
+                          ULONGLONG MftIndex,
+                          PFILE_RECORD_HEADER Image);
+
 NTSTATUS
 WriteAttributeFromIrp(PDEVICE_EXTENSION Vcb,
                       PNTFS_ATTR_CONTEXT Context,
