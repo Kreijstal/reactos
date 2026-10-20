@@ -6,6 +6,7 @@
 #include <kmt_test.h>
 #include <winioctl.h>
 #include <fmifs/fmifs.h>
+#include "NtfsFslib_user.h"
 
 typedef VOID (NTAPI *FORMAT_EX)(PWCHAR, FMIFS_MEDIA_FLAG, PWCHAR, PWCHAR,
                                BOOLEAN, ULONG, PFMIFSCALLBACK);
@@ -26,8 +27,8 @@ FormatCallback(CALLBACKCOMMAND Command, ULONG SubAction, PVOID Argument)
 
 /* Formatting is limited to the harness's labelled, 256 MiB data disk.
  * A label match alone must never authorize formatting an arbitrary disk. */
-static BOOLEAN
-FindFormatVolume(PWCHAR Root, PWCHAR Volume)
+BOOLEAN
+NtfsKmtFindFormatVolume(PWCHAR Root, PWCHAR Volume)
 {
     WCHAR Drive, Label[64], FileSystem[32], Windows[MAX_PATH];
     PARTITION_INFORMATION_EX Partition;
@@ -87,7 +88,7 @@ START_TEST(NtfsFormat)
     CHAR Readback[sizeof(Marker)];
     const ULONG ClusterSizes[] = { 512, 4096 };
 
-    if (!FindFormatVolume(Root, Volume))
+    if (!NtfsKmtFindFormatVolume(Root, Volume))
     {
         skip(FALSE, "No dedicated KMTNTFS format fixture\n");
         return;
