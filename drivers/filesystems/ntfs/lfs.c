@@ -5,6 +5,11 @@
  *
  * Single-page codec only. Runtime logging remains disabled by default;
  * recovery and NTFS transaction management are separate work.
+ *
+ * The record pages form a circular buffer: past the last page, writing
+ * resumes at the first one under the next sequence number, so LSNs keep
+ * increasing.  A page is reused only when every record on it is older than
+ * the oldest record still needed (the client's OldestLsn).
  */
 #include "lfswrite.h"
 
@@ -80,14 +85,15 @@ NtfsLfsLsnToOffset(ULONG SeqNumberBits, ULONGLONG Lsn)
     return (ULONG)(OffsetPart << 3);
 }
 
-NTSTATUS
-NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
-                        PUCHAR Page,
-                        ULONG PageSize,
-                        ULONGLONG FileSize,
-                        ULONGLONG CurrentLsn,
-                        ULONG LastLsnDataLength,
-                        BOOLEAN Clean)
+static NTSTATUS
+LfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
+                    PUCHAR Page,
+                    ULONG PageSize,
+                    ULONGLONG FileSize,
+                    ULONGLONG CurrentLsn,
+                    ULONGLONG OldestLsn,
+                    ULONG LastLsnDataLength,
+                    BOOLEAN Clean)
 {
     PNTFS_RECORD_HEADER Hdr;
     NTFS_LFS_RESTART_AREA Area;
@@ -157,7 +163,7 @@ NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
         NTFS_LFS_CLIENT_RECORD Client;
 
         RtlZeroMemory(&Client, sizeof(Client));
-        Client.OldestLsn        = 0;
+        Client.OldestLsn        = OldestLsn;
         Client.ClientRestartLsn = 0;
         Client.PrevClient       = NTFS_LFS_CLIENT_NONE;
         Client.NextClient       = NTFS_LFS_CLIENT_NONE;
@@ -172,6 +178,19 @@ NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
      * (0 -> 1) and writes each sector's trailing USHORT, saving the
      * originals into the USA so FixupUpdateSequenceArray reverses it. */
     return AddFixupArray(Vcb, Hdr);
+}
+
+NTSTATUS
+NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
+                        PUCHAR Page,
+                        ULONG PageSize,
+                        ULONGLONG FileSize,
+                        ULONGLONG CurrentLsn,
+                        ULONG LastLsnDataLength,
+                        BOOLEAN Clean)
+{
+    return LfsBuildRestartPage(Vcb, Page, PageSize, FileSize, CurrentLsn, 0,
+                               LastLsnDataLength, Clean);
 }
 
 static NTSTATUS
@@ -363,7 +382,8 @@ NtfsLfsEmitRecord(PLFS_WRITE_CONTEXT Ctx,
     ULONG RedoAbs, UndoAbs, ClientDataLength, TotalLength;
     ULONG PageBase, PageEnd, RecordEnd;
     PUCHAR Page;
-    ULONGLONG ThisLsn;
+    ULONGLONG ThisLsn, SeqNumber, LastEndLsn;
+    DEVICE_EXTENSION Shim;
 
     if (Ctx == NULL || Ctx->Image == NULL || Params == NULL)
         return STATUS_INVALID_PARAMETER;
@@ -387,15 +407,33 @@ NtfsLfsEmitRecord(PLFS_WRITE_CONTEXT Ctx,
     PageBase = (Ctx->WriteOffset / Ctx->PageSize) * Ctx->PageSize;
     PageEnd = PageBase + Ctx->PageSize;
 
+    /* FixupUpdateSequenceArray / AddFixupArray want a Vcb only for the USA
+     * stride (BytesPerSector).  Drive them from a thin local shim built out
+     * of the context so emission stays Vcb-free and unit-testable. */
+    RtlZeroMemory(&Shim, sizeof(Shim));
+    Shim.NtfsInfo.BytesPerSector = Ctx->SectorSize;
+
     if (Ctx->WriteOffset + TotalLength > PageEnd)
     {
         PageBase = PageEnd;
-        /* Recycling requires a transaction-aware checkpoint. Preserve
-         * every existing record until one has made reuse safe. */
+        SeqNumber = Ctx->CurrentSeqNumber;
+        /* Past the last page the log wraps to the first record page, under
+         * the next sequence number. */
         if (PageBase + Ctx->PageSize > Ctx->ImageLength)
         {
-            return STATUS_LOG_FILE_FULL;
+            PageBase = Ctx->FirstRcrdOffset;
+            SeqNumber++;
         }
+        /* The page's last record (LastEndLsn, outside the USA sectors'
+         * tails) must no longer be needed.  Until a checkpoint says so,
+         * every existing record is preserved. */
+        LastEndLsn = *(PULONGLONG)(Ctx->Image + PageBase + 0x20);
+        if (LastEndLsn != 0 && Ctx->OldestLsn != 0 && LastEndLsn >= Ctx->OldestLsn)
+            return STATUS_LOG_FILE_FULL;
+        Status = LfsBuildEmptyRcrdPage(&Shim, Ctx->Image + PageBase, Ctx->PageSize);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        Ctx->CurrentSeqNumber = SeqNumber;
         Ctx->WriteOffset = PageBase + LFS_RCRD_FIRST_RECORD;
         PageEnd = PageBase + Ctx->PageSize;
     }
@@ -409,15 +447,8 @@ NtfsLfsEmitRecord(PLFS_WRITE_CONTEXT Ctx,
     ThisLsn = NtfsLfsMakeLsn(Ctx->SeqNumberBits, Ctx->CurrentSeqNumber,
                              Ctx->WriteOffset);
 
-    /* FixupUpdateSequenceArray / AddFixupArray want a Vcb only for the USA
-     * stride (BytesPerSector).  Drive them from a thin local shim built out
-     * of the context so emission stays Vcb-free and unit-testable. */
     {
-        DEVICE_EXTENSION Shim;
         PNTFS_RECORD_HEADER Hdr = (PNTFS_RECORD_HEADER)Page;
-
-        RtlZeroMemory(&Shim, sizeof(Shim));
-        Shim.NtfsInfo.BytesPerSector = Ctx->SectorSize;
 
         /* Reverse the page USA so each sector's trailing USHORT holds its
          * real payload byte again (not the sentinel) before we write the
@@ -447,12 +478,14 @@ NtfsLfsEmitRecord(PLFS_WRITE_CONTEXT Ctx,
 
         Ctx->WriteOffset = RecordEnd;
         Ctx->LastLsn = ThisLsn;
+        if (Ctx->OldestLsn == 0)
+            Ctx->OldestLsn = ThisLsn;
 
         /* Flip both restart copies to the dirty landmark: a crash now must
          * force a read-only remount until replay/chkdsk. */
-        Status = NtfsLfsBuildRestartPage(&Shim, Ctx->Image, Ctx->PageSize,
-                                         (ULONGLONG)Ctx->ImageLength,
-                                         ThisLsn, ClientDataLength, FALSE);
+        Status = LfsBuildRestartPage(&Shim, Ctx->Image, Ctx->PageSize,
+                                     (ULONGLONG)Ctx->ImageLength,
+                                     ThisLsn, Ctx->OldestLsn, ClientDataLength, FALSE);
         if (!NT_SUCCESS(Status))
             return Status;
         RtlCopyMemory(Ctx->Image + Ctx->PageSize, Ctx->Image, Ctx->PageSize);
@@ -474,9 +507,9 @@ NtfsLfsWriteRestart(PLFS_WRITE_CONTEXT Ctx,
     if (Ctx == NULL || Ctx->Image == NULL || Vcb == NULL)
         return STATUS_INVALID_PARAMETER;
 
-    Status = NtfsLfsBuildRestartPage(Vcb, Ctx->Image, Ctx->PageSize,
-                                     (ULONGLONG)Ctx->ImageLength,
-                                     Ctx->LastLsn, 0, Clean);
+    Status = LfsBuildRestartPage(Vcb, Ctx->Image, Ctx->PageSize,
+                                 (ULONGLONG)Ctx->ImageLength,
+                                 Ctx->LastLsn, Clean ? 0 : Ctx->OldestLsn, 0, Clean);
     if (!NT_SUCCESS(Status))
         return Status;
 

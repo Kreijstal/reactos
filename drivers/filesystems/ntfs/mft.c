@@ -3126,7 +3126,8 @@ NtfsMirrorFileRecord(PDEVICE_EXTENSION Vcb,
 static NTSTATUS
 UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
                  ULONGLONG MftIndex,
-                 PFILE_RECORD_HEADER FileRecord)
+                 PFILE_RECORD_HEADER FileRecord,
+                 PNTFS_LOG_PENDING LogPending)
 {
     ULONG BytesWritten;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -3134,7 +3135,7 @@ UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
 
     DPRINT("UpdateFileRecord(%p, 0x%I64x, %p)\n", Vcb, MftIndex, FileRecord);
 
-    Status = NtfsLfsLogFileRecord(Vcb->LfsWriter, MftIndex, FileRecord);
+    Status = NtfsLfsLogFileRecord(Vcb->LfsWriter, MftIndex, FileRecord, LogPending);
     if (!NT_SUCCESS(Status)) return Status;
 
     // Stamp the fixup array into a private copy: the caller's record may be
@@ -3142,6 +3143,7 @@ UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
     WriteImage = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     if (WriteImage == NULL)
     {
+        NtfsLfsFileRecordWritten(Vcb->LfsWriter, LogPending);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     RtlCopyMemory(WriteImage, FileRecord, Vcb->NtfsInfo.BytesPerFileRecord);
@@ -3170,6 +3172,8 @@ UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
     {
         Status = NtfsMirrorFileRecord(Vcb, MftIndex, WriteImage);
     }
+    // Issued (or failed): a checkpoint's flush now covers it
+    NtfsLfsFileRecordWritten(Vcb->LfsWriter, LogPending);
 
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, WriteImage);
 
@@ -3180,16 +3184,19 @@ NTSTATUS
 UpdateFileRecord(PDEVICE_EXTENSION Vcb, ULONGLONG Index, PFILE_RECORD_HEADER Record)
 {
     NTSTATUS Status;
+    NTFS_LOG_PENDING LogPending;
 
+    LogPending.Lsn = 0;
     KeEnterCriticalRegion();
     ExAcquireResourceSharedLite(&Vcb->MftContextResource, TRUE);
     _SEH2_TRY
     {
-        Status = UpdateFileRecordInternal(Vcb, Index, Record);
+        Status = UpdateFileRecordInternal(Vcb, Index, Record, &LogPending);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
         Status = _SEH2_GetExceptionCode();
+        NtfsLfsFileRecordWritten(Vcb->LfsWriter, &LogPending);
         ExReleaseResourceLite(&Vcb->MftContextResource);
         KeLeaveCriticalRegion();
         _SEH2_YIELD(ExRaiseStatus(Status));
