@@ -334,10 +334,20 @@ int chk_read_boot(CHK_CTX *c, NTFS_CHK_RESULT *res)
             { chk_add_issue(res, CHK_ERR_BOOT_OEM, 0, 0, 0); return -1; }
 
     c->BytesPerSector = bs->BytesPerSector;
-    c->SectorsPerCluster = bs->SectorsPerCluster;
+    /* Up to 0x80 the byte is the count; above, 256 - log2(count): the form
+     * Windows 10 1709+ writes for clusters over 64 KiB (0xF4 = 4096 sectors,
+     * the 2 MiB maximum with 512-byte sectors). */
+    if (bs->SectorsPerCluster <= 0x80)
+        c->SectorsPerCluster = bs->SectorsPerCluster;
+    else if (bs->SectorsPerCluster >= 0xF4)
+        c->SectorsPerCluster = 1u << (256 - bs->SectorsPerCluster);
+    else
+        c->SectorsPerCluster = 0;
     if (c->BytesPerSector < 256 || c->BytesPerSector > 4096 ||
         (c->BytesPerSector & (c->BytesPerSector - 1)) ||
-        c->SectorsPerCluster == 0)
+        c->SectorsPerCluster == 0 ||
+        (c->SectorsPerCluster & (c->SectorsPerCluster - 1)) ||
+        (ULONGLONG)c->BytesPerSector * c->SectorsPerCluster > 2 * 1024 * 1024)
         { chk_add_issue(res, CHK_ERR_BOOT_GEOMETRY, 0, 0, 0); return -1; }
 
     c->BytesPerCluster = c->BytesPerSector * c->SectorsPerCluster;
