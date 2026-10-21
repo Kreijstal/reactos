@@ -16,7 +16,8 @@ BEGIN
   -Q                        Realiza un formato rápido.\n\
   -A:tamaño                 Anula el tamaño por defecto de la unidad asignada. Configuración por defecto\n\
                             es altamente recomendado para uso general\n\
-                            NTFS soporta 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K.\n\
+                            NTFS soporta 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K,\n\
+                                         128K, 256K, 512K, 1M, 2M.\n\
                             FAT soporta 8192, 16K, 32K, 64K, 128K, 256K.\n\
                             La compresión NTFS no es soportada para tamaños de la unidad asignada\n\
                             por encima de 4096.\n\

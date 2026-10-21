@@ -44,10 +44,26 @@ typedef struct _NTFS_LOG_RESTART_AREA
 } NTFS_LOG_RESTART_AREA, *PNTFS_LOG_RESTART_AREA;
 #include <poppack.h>
 
+/* The newest valid restart area of $LogFile, as the mount found it. */
+typedef struct _NTFS_LOG_RESTART_INFO
+{
+    NTFS_LOG_RESTART_AREA Area;
+    ULONG LogPageSize;
+    ULONG SystemPageSize;
+    ULONGLONG LogSize;          /* $LogFile's data length */
+    BOOLEAN ClientInUse;        /* the in-use client is the NTFS client 0 */
+    USHORT ClientSeqNumber;
+    ULONGLONG OldestLsn;        /* of that client */
+    ULONGLONG ClientRestartLsn;
+} NTFS_LOG_RESTART_INFO, *PNTFS_LOG_RESTART_INFO;
+
 C_ASSERT(FIELD_OFFSET(NTFS_LOG_RESTART_HEADER, SystemPageSize) == 0x10);
 C_ASSERT(FIELD_OFFSET(NTFS_LOG_RESTART_HEADER, RestartOffset) == 0x18);
 C_ASSERT(FIELD_OFFSET(NTFS_LOG_RESTART_HEADER, MajorVersion) == 0x1c);
 C_ASSERT(sizeof(NTFS_LOG_RESTART_HEADER) == 0x1e);
 C_ASSERT(sizeof(NTFS_LOG_RESTART_AREA) == 0x30);
+
+NTSTATUS
+NtfsLfsReadRestart(PDEVICE_EXTENSION Vcb, PNTFS_LOG_RESTART_INFO Info);
 
 #endif
