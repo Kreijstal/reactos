@@ -22,7 +22,7 @@ if(NOT MSVC)
 endif()
 
 set_module_type(cng kernelmodedriver)
-target_link_libraries(cng symcrypt memcmp)
+target_link_libraries(cng symcrypt memcmp chkstk)
 add_importlibs(cng ntoskrnl hal)
 add_pch(cng cngp.h SOURCE)
 add_cd_file(TARGET cng DESTINATION reactos/system32/drivers NO_CAB FOR all)
