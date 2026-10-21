@@ -434,14 +434,21 @@ NtfsGetVolumeData(PDEVICE_OBJECT DeviceObject,
 
 
 /* The log's barrier: Length 0 makes every write so far durable, the
- * volume stream's included; otherwise only the device's own cache. */
+ * volume stream's included; MAXULONG only the device's own cache.  Any
+ * other Length writes that much of the volume stream's dirty pages. */
 static NTSTATUS
 NtfsLogFlush(PDEVICE_EXTENSION Vcb, LONGLONG Offset, ULONG Length)
 {
-    UNREFERENCED_PARAMETER(Offset);
+    IO_STATUS_BLOCK IoStatus;
+    LARGE_INTEGER Start;
+
     if (Length == 0)
         return NtfsFlushVolumeStream(Vcb);
-    return NtfsFlushDevice(Vcb->StorageDevice);
+    if (Length == MAXULONG)
+        return NtfsFlushDevice(Vcb->StorageDevice);
+    Start.QuadPart = Offset;
+    CcFlushCache(Vcb->StreamFileObject->SectionObjectPointer, &Start, Length, &IoStatus);
+    return IoStatus.Status;
 }
 
 /* A forced log page goes to the device only, once. */

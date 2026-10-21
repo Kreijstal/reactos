@@ -316,7 +316,8 @@ typedef NTSTATUS NTFS_LOG_WRITE_CALLBACK(PDEVICE_EXTENSION Vcb, LONGLONG Offset,
                                           ULONG Length, const PUCHAR Buffer);
 typedef NTFS_LOG_WRITE_CALLBACK *PNTFS_LOG_WRITE_CALLBACK;
 /* Length 0: makes every write so far durable, the volume stream's cached
- * ones included.  Otherwise a storage barrier for the direct writes. */
+ * ones included.  MAXULONG: a storage barrier for the direct writes.
+ * Otherwise writes the volume stream's dirty pages from Offset on. */
 typedef NTSTATUS NTFS_LOG_FLUSH_CALLBACK(PDEVICE_EXTENSION Vcb, LONGLONG Offset, ULONG Length);
 typedef NTFS_LOG_FLUSH_CALLBACK *PNTFS_LOG_FLUSH_CALLBACK;
 
@@ -329,14 +330,25 @@ NTSTATUS NtfsLfsCreateWriter(PDEVICE_EXTENSION Vcb, PNTFS_LOG_WRITE_CALLBACK Wri
  * volume stream is written, and wherever durability is asked for. */
 NTSTATUS NtfsLfsForce(PVOID Writer);
 NTSTATUS NtfsLfsEnableWriter(PVOID Writer);
-/* A logged file record whose own write has not been issued yet.  The
- * caller keeps it from NtfsLfsLogFileRecord until NtfsLfsFileRecordWritten,
- * which a checkpoint needs to know: until then the record must stay in the
- * log. */
+/* Volume bytes a logged write changes. */
+typedef struct _NTFS_LOG_DIRTY
+{
+    LONGLONG Offset;
+    ULONG Length;
+} NTFS_LOG_DIRTY, *PNTFS_LOG_DIRTY;
+
+#define NTFS_LOG_PENDING_EXTENTS 16
+
+/* A logged write that has not been issued yet.  The caller keeps it from
+ * NtfsLfsLogFileRecord until NtfsLfsFileRecordWritten, which a checkpoint
+ * needs to know: until then its records must stay in the log; then its
+ * bytes are dirty in the volume stream until a checkpoint writes them. */
 typedef struct _NTFS_LOG_PENDING
 {
     LIST_ENTRY Link;
     ULONGLONG Lsn;
+    ULONG ExtentCount;          /* MAXULONG: more than fit here */
+    NTFS_LOG_DIRTY Extents[NTFS_LOG_PENDING_EXTENTS];
 } NTFS_LOG_PENDING, *PNTFS_LOG_PENDING;
 
 /* A request in progress on a thread: the records it logs form one
