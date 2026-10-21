@@ -222,12 +222,14 @@ typedef struct _LOG_VIEW
     ULONG LogLength;
     ULONG LogSize;
     ULONG Sector;
+    ULONG Cluster;          /* bytes per cluster of the volume */
     ULONG SeqBits;
     ULONGLONG CurrentLsn;   /* newest restart copy */
     ULONGLONG OldestLsn;    /* of its client: where recovery would start */
     ULONG CurrentCopy;
     BOOLEAN Clean;
     UCHAR Page[LOG_PAGE];
+    UCHAR Copy[LOG_PAGE];
     UCHAR Record[3 * LOG_PAGE];
 } LOG_VIEW, *PLOG_VIEW;
 
@@ -264,39 +266,103 @@ ReadRestart(PLOG_VIEW View, const UCHAR *Log)
     return Found;
 }
 
+static ULONG
+LsnOffset(PLOG_VIEW View, ULONGLONG Lsn)
+{
+    return (ULONG)((Lsn & (((ULONGLONG)1 << (64 - View->SeqBits)) - 1)) << 3);
+}
+
+/* The newest valid version of the record page at Page into View->Page,
+ * fixups undone: the page in place, or one of the two tail copies after the
+ * restart pages that names it (Copy.FileOffset, in the LSN field), which
+ * ever holds the later record (LastEndLsn of a copy).  Returns its last
+ * LSN, 0 when no version is valid. */
+static ULONGLONG
+NewestPage(PLOG_VIEW View, ULONG Page)
+{
+    ULONGLONG Newest = 0;
+    ULONG Copy;
+
+    if (Page + LOG_PAGE > View->LogLength)
+        return 0;
+    RtlCopyMemory(View->Page, View->Log + Page, LOG_PAGE);
+    if (RtlCompareMemory(View->Page, "RCRD", 4) == 4 && Unfix(View->Page, LOG_PAGE, View->Sector))
+        Newest = Get64(View->Page + 8);
+    for (Copy = 2; Copy < 4; Copy++)
+    {
+        RtlCopyMemory(View->Copy, View->Log + Copy * LOG_PAGE, LOG_PAGE);
+        if (RtlCompareMemory(View->Copy, "RCRD", 4) != 4 || !Unfix(View->Copy, LOG_PAGE, View->Sector) ||
+            Get64(View->Copy + 8) != Page || !(Get32(View->Copy + 0x10) & 1) || Get64(View->Copy + 0x20) <= Newest)
+            continue;
+        Newest = Get64(View->Copy + 0x20);
+        RtlCopyMemory(View->Page, View->Copy, LOG_PAGE);
+    }
+    return Newest;
+}
+
 /* The log record at Lsn, reassembled across pages into View->Record. */
 static BOOLEAN
 ReadRecord(PLOG_VIEW View, ULONGLONG Lsn)
 {
-    ULONG Offset = (ULONG)((Lsn & (((ULONGLONG)1 << (64 - View->SeqBits)) - 1)) << 3);
-    ULONG Page = Offset - Offset % LOG_PAGE, Within = Offset % LOG_PAGE, Length = 0x30, Done = 0, Part;
+    ULONG Offset = LsnOffset(View, Lsn);
+    ULONG Page = Offset - Offset % LOG_PAGE, Within = Offset % LOG_PAGE, Length, Done = 0, Part;
 
-    if (View->SeqBits == 0 || View->SeqBits >= 64 || Offset >= View->LogLength || Within < 0x40)
+    if (View->SeqBits == 0 || View->SeqBits >= 64 || Offset >= View->LogLength || Within < 0x40 ||
+        LOG_PAGE - Within < 0x30 || NewestPage(View, Page) < Lsn)
+        return FALSE;
+    Length = 0x30 + Get32(View->Page + Within + 0x18);
+    if (Length > sizeof(View->Record))
         return FALSE;
     for (;;)
     {
-        RtlCopyMemory(View->Page, View->Log + Page, LOG_PAGE);
-        if (RtlCompareMemory(View->Page, "RCRD", 4) != 4 || !Unfix(View->Page, LOG_PAGE, View->Sector))
-            return FALSE;
-        if (Done == 0)
-        {
-            if (LOG_PAGE - Within < 0x30)
-                return FALSE;
-            Length = 0x30 + Get32(View->Page + Within + 0x18);
-            if (Length > sizeof(View->Record))
-                return FALSE;
-        }
         Part = min(Length - Done, LOG_PAGE - Within);
         RtlCopyMemory(View->Record + Done, View->Page + Within, Part);
         Done += Part;
         if (Done == Length)
             break;
         Page += LOG_PAGE;
-        if (Page >= View->LogLength)
-            return FALSE;
+        if (Page >= View->LogSize)
+            Page = 4 * LOG_PAGE;
         Within = 0x40;
+        if (NewestPage(View, Page) < Lsn)
+            return FALSE;
     }
     return Get64(View->Record) == Lsn;
+}
+
+/* The record after the one in View->Record: packed right behind it, or
+ * past the next page's header where its own header would not fit. */
+static ULONGLONG
+NextRecord(PLOG_VIEW View)
+{
+    ULONGLONG Lsn = Get64(View->Record), Seq = Lsn >> (64 - View->SeqBits);
+    ULONG Offset = LsnOffset(View, Lsn), Page = Offset - Offset % LOG_PAGE;
+    ULONG Length = (0x30 + Get32(View->Record + 0x18) + 7) & ~7, Room = LOG_PAGE - (Offset - Page);
+
+    while (Length > Room)
+    {
+        Length -= Room;
+        Page += LOG_PAGE;
+        if (Page >= View->LogSize)
+        {
+            Page = 4 * LOG_PAGE;
+            Seq++;
+        }
+        Offset = Page + 0x40;
+        Room = LOG_PAGE - 0x40;
+    }
+    Offset += Length;
+    if (LOG_PAGE - (Offset - Page) < 0x30)
+    {
+        Page += LOG_PAGE;
+        if (Page >= View->LogSize)
+        {
+            Page = 4 * LOG_PAGE;
+            Seq++;
+        }
+        Offset = Page + 0x40;
+    }
+    return (Seq << (64 - View->SeqBits)) | (Offset >> 3);
 }
 
 static BOOLEAN
@@ -310,86 +376,85 @@ HasMarker(const UCHAR *Image, ULONG Length, const UCHAR *Marker, ULONG MarkerLen
     return FALSE;
 }
 
-/* Walks the record pages of the copied log (each batch starts on a page,
- * records follow each other) and finds the record that put the new data in
- * the file's record: an InitializeFileRecordSegment (2) whose redo image
- * holds it and whose undo image does not.  *CommitLsn receives the record
- * committing its transaction (ForgetTransaction, 0x1B). */
+/* Walks the records from where recovery would start and finds the one that
+ * put the new data in the file's record: its redo bytes hold it, its undo
+ * bytes do not, and it is a whole image of the record (InitializeFile-
+ * RecordSegment, 2, whose MFTRecordNumber names it) or a range of the
+ * record's bytes (UpdateNonResidentValue, 8, at a cluster it lists).
+ * *CommitLsn receives the record committing its transaction
+ * (ForgetTransaction, 0x1B). */
 static ULONGLONG
-FindChange(PLOG_VIEW View, ULONGLONG MftIndex, PULONGLONG CommitLsn)
+FindChange(PLOG_VIEW View, ULONGLONG MftIndex, LONGLONG RecordOffset, ULONG RecordSize, PULONGLONG CommitLsn)
 {
     static const UCHAR Marker[16] = "RRRRRRRRRRRRRRRR";
     ULONGLONG Change = 0, Lsn;
-    ULONG Transaction = 0, Page, At, Length;
-    UCHAR *Header = View->Page;
+    ULONG Transaction = 0, Steps;
 
     *CommitLsn = 0;
-    for (Page = 4 * LOG_PAGE; Page + LOG_PAGE <= View->LogLength && *CommitLsn == 0; Page += LOG_PAGE)
+    for (Lsn = View->OldestLsn, Steps = 0; Lsn != 0 && *CommitLsn == 0 && Steps < 200000 && ReadRecord(View, Lsn);
+         Lsn = NextRecord(View), Steps++)
     {
-        RtlCopyMemory(View->Page, View->Log + Page, LOG_PAGE);
-        if (RtlCompareMemory(View->Page, "RCRD", 4) != 4 || !Unfix(View->Page, LOG_PAGE, View->Sector))
-            continue;
-        for (At = 0x40; At + 0x50 <= LOG_PAGE; At += Length)
-        {
-            Lsn = Get64(Header + At);
-            Length = (0x30 + Get32(Header + At + 0x18) + 7) & ~7;
-            if (Lsn == 0 || (ULONG)((Lsn & (((ULONGLONG)1 << (64 - View->SeqBits)) - 1)) << 3) != Page + At)
-                break;
-            if (Change != 0)
-            {
-                if (Get16(Header + At + 0x30) == 0x1B && Get32(Header + At + 0x24) == Transaction)
-                {
-                    *CommitLsn = Lsn;
-                    break;
-                }
-            }
-            else if (Get16(Header + At + 0x30) == 2 && ReadRecord(View, Lsn))
-            {
-                PUCHAR Rec = View->Record;
-                PUCHAR Redo = Rec + 0x30 + Get16(Rec + 0x34), Undo = Rec + 0x30 + Get16(Rec + 0x38);
-                ULONG RedoLength = Get16(Rec + 0x36), UndoLength = Get16(Rec + 0x3A);
+        PUCHAR Rec = View->Record;
+        USHORT Redo = Get16(Rec + 0x30);
 
-                /* MFTRecordNumber (XP header) of the image names the record. */
-                if (RedoLength >= 0x30 && Get32(Redo + 0x2C) == (ULONG)MftIndex &&
-                    HasMarker(Redo, RedoLength, Marker, sizeof(Marker)) &&
-                    !HasMarker(Undo, UndoLength, Marker, sizeof(Marker)))
-                {
-                    Change = Lsn;
-                    Transaction = Get32(Rec + 0x24);
-                }
-                /* ReadRecord used the page buffer. */
-                RtlCopyMemory(View->Page, View->Log + Page, LOG_PAGE);
-                Unfix(View->Page, LOG_PAGE, View->Sector);
+        if (Change != 0)
+        {
+            if (Redo == 0x1B && Get32(Rec + 0x24) == Transaction)
+                *CommitLsn = Lsn;
+        }
+        else if (Redo == 2 || Redo == 8)
+        {
+            PUCHAR RedoBytes = Rec + 0x30 + Get16(Rec + 0x34), UndoBytes = Rec + 0x30 + Get16(Rec + 0x38);
+            ULONG RedoLength = Get16(Rec + 0x36), UndoLength = Get16(Rec + 0x3A);
+            LONGLONG Target = (LONGLONG)Get64(Rec + 0x50) * View->Cluster + Get16(Rec + 0x42);
+            BOOLEAN Ours;
+
+            /* MFTRecordNumber (XP header) of the image names the record. */
+            if (Redo == 2)
+                Ours = RedoLength >= 0x30 && Get32(RedoBytes + 0x2C) == (ULONG)MftIndex;
+            else
+                Ours = Get16(Rec + 0x3E) > 0 && Target >= RecordOffset && Target < RecordOffset + RecordSize;
+            if (Ours && HasMarker(RedoBytes, RedoLength, Marker, sizeof(Marker)) &&
+                !HasMarker(UndoBytes, UndoLength, Marker, sizeof(Marker)))
+            {
+                Change = Lsn;
+                Transaction = Get32(Rec + 0x24);
             }
-            if (Length > LOG_PAGE - At)
-                break;
         }
     }
     return Change;
 }
 
 /* The commit never reached the disk: the log ends before it (its LSN field
- * is gone), and both restart copies name nothing past the change. */
+ * is gone from every version of its page), and both restart copies name
+ * nothing past the change. */
 static VOID
 CutLog(PLOG_VIEW View, ULONGLONG Change, ULONGLONG Commit)
 {
-    ULONG Offset = (ULONG)((Commit & (((ULONGLONG)1 << (64 - View->SeqBits)) - 1)) << 3);
-    PUCHAR Page = View->Log + Offset - Offset % LOG_PAGE;
-    ULONG Copy;
+    ULONG Offset = LsnOffset(View, Commit), Page = Offset - Offset % LOG_PAGE;
+    ULONG Where[3], k, Copy;
+    PUCHAR At;
 
-    if (Unfix(Page, LOG_PAGE, View->Sector))
+    Where[0] = Page;
+    Where[1] = 2 * LOG_PAGE;
+    Where[2] = 3 * LOG_PAGE;
+    for (k = 0; k < 3; k++)
     {
-        Put64(Page + Offset % LOG_PAGE, 0);
-        Refix(Page, View->Sector);
+        At = View->Log + Where[k];
+        if (RtlCompareMemory(At, "RCRD", 4) != 4 || !Unfix(At, LOG_PAGE, View->Sector))
+            continue;
+        if (k == 0 || Get64(At + 8) == Page)
+            Put64(At + Offset % LOG_PAGE, 0);
+        Refix(At, View->Sector);
     }
     for (Copy = 0; Copy < 2; Copy++)
     {
-        Page = View->Log + Copy * LOG_PAGE;
-        if (RtlCompareMemory(Page, "RSTR", 4) != 4 || !Unfix(Page, LOG_PAGE, View->Sector))
+        At = View->Log + Copy * LOG_PAGE;
+        if (RtlCompareMemory(At, "RSTR", 4) != 4 || !Unfix(At, LOG_PAGE, View->Sector))
             continue;
-        if (Get64(Page + Get16(Page + 0x18)) > Change)
-            Put64(Page + Get16(Page + 0x18), Change);
-        Refix(Page, View->Sector);
+        if (Get64(At + Get16(At + 0x18)) > Change)
+            Put64(At + Get16(At + 0x18), Change);
+        Refix(At, View->Sector);
     }
 }
 
@@ -502,6 +567,7 @@ START_TEST(NtfsLogReplay)
     if (View == NULL || PreRecord == NULL || PostRecord == NULL || VolumeRecord == NULL ||
         MirrorRecord == NULL || Data == NULL) goto Cleanup;
     View->Sector = Geometry.BytesPerSector;
+    View->Cluster = Geometry.BytesPerCluster;
     View->LogSize = (ULONG)min(LogSize, (ULONGLONG)MAXULONG);
     View->LogLength = (ULONG)min(LogSize, (ULONGLONG)MAX_LOG_BYTES);
     ok(LogRuns[0].Count * Geometry.BytesPerCluster >= View->LogLength, "$LogFile fixture is fragmented\n");
@@ -578,7 +644,7 @@ START_TEST(NtfsLogReplay)
 
     /* 5. Undo: the same log cut off after the change, before the request
      * that made it committed. */
-    ChangeLsn = FindChange(View, MftIndex, &CommitLsn);
+    ChangeLsn = FindChange(View, MftIndex, RecordOffset, RecordSize, &CommitLsn);
     ok(ChangeLsn != 0, "no logged record carries the change\n");
     ok(CommitLsn != 0, "no logged record commits the change\n");
     if (ChangeLsn != 0 && CommitLsn != 0 && LockAndDismount(Letter))

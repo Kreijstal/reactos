@@ -9,12 +9,14 @@
  * buffers, bitmaps, $Secure, attribute lists) as UpdateNonResidentValue
  * records carrying the bytes written and the bytes they replace.
  *
- * As LFS does, records are buffered: a batch goes onto a queue, and the
- * queue is forced to disk (written, then a storage barrier) before any
- * metadata page of the volume stream is written (NtfsLfsForce, from the
- * paging write), by an explicit flush, and when the queue fills.  Log pages
- * go to the device only, each once: the volume stream never caches them, so
- * the lazy writer never writes them again.  The restart area is written when a session logs
+ * As LFS does, records are buffered and packed: they fill the tail page
+ * (lfs.c), the pages a batch fills go onto a queue, and the log is forced
+ * to disk (the queue written, the tail page written to the next of the two
+ * tail-copy pages, then a storage barrier) before any metadata page of the
+ * volume stream is written (NtfsLfsForce, from the paging write) and by an
+ * explicit flush.  A full queue is written without a barrier.  Log pages go
+ * to the device only, each full page once: the volume stream never caches
+ * them, so the lazy writer never writes them again.  The restart area is written when a session logs
  * its first record (marking the log dirty), at checkpoints and when the
  * log is closed; recovery finds the records after it by scanning forward.
  *
@@ -56,6 +58,14 @@ typedef struct _NTFS_LOG_WRITER
     PUCHAR Queue;
     ULONG QueueOffset[NTFS_LOG_QUEUE_PAGES];
     ULONG QueueCount;
+    BOOLEAN Unflushed;          /* log writes not behind a barrier yet */
+    /* The tail page as the last batch left it, for the next tail copy. */
+    PUCHAR TailImage;
+    ULONG TailOffset;
+    BOOLEAN TailQueued;
+    PUCHAR TailBuild;           /* one page: the tail copy being written */
+    USHORT TailUsn[2];          /* of the copy each tail-copy page holds */
+    ULONG TailSlot;             /* the tail-copy page written next (0, 1) */
     BOOLEAN RestartQueued;
     ULONG RestartOffset;
     BOOLEAN RestartDirty;       /* the restart area on disk is dirty */
@@ -121,10 +131,15 @@ NtfsLogFreeSession(PNTFS_LOG_WRITER Writer)
     if (Writer->Restart != NULL) ExFreePoolWithTag(Writer->Restart, TAG_NTFS);
     if (Writer->RestartBuild != NULL) ExFreePoolWithTag(Writer->RestartBuild, TAG_NTFS);
     if (Writer->Queue != NULL) ExFreePoolWithTag(Writer->Queue, TAG_NTFS);
+    if (Writer->TailImage != NULL) ExFreePoolWithTag(Writer->TailImage, TAG_NTFS);
+    if (Writer->TailBuild != NULL) ExFreePoolWithTag(Writer->TailBuild, TAG_NTFS);
     Writer->Restart = NULL;
     Writer->RestartBuild = NULL;
     Writer->Queue = NULL;
+    Writer->TailImage = NULL;
+    Writer->TailBuild = NULL;
     Writer->QueueCount = 0;
+    Writer->TailQueued = FALSE;
     Writer->RestartQueued = FALSE;
     RtlZeroMemory(&Writer->Codec, sizeof(Writer->Codec));
 }
@@ -187,25 +202,67 @@ NtfsLogPurgeCache(PNTFS_LOG_WRITER Writer)
     }
 }
 
-/* Writes the queued batches to the device, then the queued restart page,
- * each behind a storage barrier: a restart page never names a record that
- * is not on disk. */
+/* Writes the queued pages, consecutive ones in one transfer. */
 static NTSTATUS
-NtfsLogForceLocked(PNTFS_LOG_WRITER Writer)
+NtfsLogWriteQueue(PNTFS_LOG_WRITER Writer)
 {
-    ULONG i;
+    ULONG PageSize = Writer->Codec.PageSize, i, Run;
     NTSTATUS Status = STATUS_SUCCESS;
 
     ASSERT(ExIsResourceAcquiredExclusiveLite(&Writer->ForceResource));
-    if (Writer->QueueCount != 0)
+    for (i = 0; NT_SUCCESS(Status) && i < Writer->QueueCount; i += Run)
     {
-        for (i = 0; NT_SUCCESS(Status) && i < Writer->QueueCount; i++)
-            Status = NtfsLogRange(Writer, Writer->QueueOffset[i], Writer->Codec.PageSize,
-                                  Writer->Queue + i * Writer->Codec.PageSize);
+        for (Run = 1; i + Run < Writer->QueueCount &&
+                      Writer->QueueOffset[i + Run] == Writer->QueueOffset[i] + Run * PageSize; Run++);
+        Status = NtfsLogRange(Writer, Writer->QueueOffset[i], Run * PageSize, Writer->Queue + i * PageSize);
+        Writer->Unflushed = TRUE;
+    }
+    if (NT_SUCCESS(Status))
+        Writer->QueueCount = 0;
+    return Status;
+}
+
+/* Writes the queued pages and the tail page's copy to the device, then the
+ * queued restart page, each behind a storage barrier: a restart page never
+ * names a record that is not on disk.  The tail copy goes to the copy page
+ * the last one did not: that one keeps the tail's records should this
+ * write tear, and also those of a page written full by this force. */
+static NTSTATUS
+NtfsLogForceLocked(PNTFS_LOG_WRITER Writer)
+{
+    ULONG Offset;
+    USHORT Usn;
+    NTSTATUS Status;
+
+    ASSERT(ExIsResourceAcquiredExclusiveLite(&Writer->ForceResource));
+    Status = NtfsLogWriteQueue(Writer);
+    if (NT_SUCCESS(Status) && Writer->TailQueued)
+    {
+        /* Not the number of the copy it overwrites: a torn write mixing the
+         * two then fails its fixup. */
+        Usn = Writer->TailUsn[Writer->TailSlot ^ 1];
+        do
+        {
+            if (++Usn == 0xFFFF)
+                Usn = 1;
+        } while (Usn == Writer->TailUsn[Writer->TailSlot]);
+        NtfsLfsBuildTailCopy(&Writer->Codec, Writer->TailImage, Writer->TailOffset, Usn,
+                             Writer->TailBuild);
+        Offset = (NTFS_LFS_TAIL_COPY_PAGE + Writer->TailSlot) * Writer->Codec.PageSize;
+        Status = NtfsLogRange(Writer, Offset, Writer->Codec.PageSize, Writer->TailBuild);
+        Writer->Unflushed = TRUE;
         if (NT_SUCCESS(Status))
-            Status = Writer->Flush(Writer->Vcb, 0, MAXULONG);
+        {
+            Writer->TailUsn[Writer->TailSlot] = Usn;
+            Writer->TailSlot ^= 1;
+            Writer->TailQueued = FALSE;
+        }
+    }
+    if (NT_SUCCESS(Status) && Writer->Unflushed)
+    {
+        Status = Writer->Flush(Writer->Vcb, 0, MAXULONG);
         if (NT_SUCCESS(Status))
-            Writer->QueueCount = 0;
+            Writer->Unflushed = FALSE;
     }
     if (NT_SUCCESS(Status) && Writer->RestartQueued)
     {
@@ -273,13 +330,22 @@ NtfsLogQueueBatch(PNTFS_LOG_WRITER Writer)
     KeEnterCriticalRegion();
     ExAcquireResourceExclusiveLite(&Writer->ForceResource, TRUE);
     if (Writer->QueueCount + Codec->StagedPages > NTFS_LOG_QUEUE_PAGES)
-        Status = NtfsLogForceLocked(Writer);
+        Status = NtfsLogWriteQueue(Writer);
     for (i = 0; NT_SUCCESS(Status) && i < Codec->StagedPages; i++)
     {
         Writer->QueueOffset[Writer->QueueCount] = NtfsLfsStagedPageOffset(Codec, i);
         RtlCopyMemory(Writer->Queue + Writer->QueueCount * Codec->PageSize,
                       Codec->Stage + i * Codec->PageSize, Codec->PageSize);
         Writer->QueueCount++;
+    }
+    if (NT_SUCCESS(Status))
+    {
+        Writer->TailQueued = NtfsLfsTailHasRecords(Codec);
+        if (Writer->TailQueued)
+        {
+            RtlCopyMemory(Writer->TailImage, Codec->Tail, Codec->PageSize);
+            Writer->TailOffset = Codec->NextPage;
+        }
     }
     ExReleaseResourceLite(&Writer->ForceResource);
     KeLeaveCriticalRegion();
@@ -613,6 +679,19 @@ NtfsLfsForce(PVOID Context)
     return NtfsLogForce(Writer);
 }
 
+/* The update sequence number of tail-copy page Slot, 0 if it holds none. */
+static USHORT
+NtfsLogTailCopyUsn(PNTFS_LOG_WRITER Writer, ULONG Slot)
+{
+    PNTFS_RECORD_HEADER Hdr = (PNTFS_RECORD_HEADER)Writer->TailBuild;
+
+    if (ReadAttribute(Writer->Vcb, Writer->Data, (NTFS_LFS_TAIL_COPY_PAGE + Slot) * PAGE_SIZE,
+                      (PCHAR)Writer->TailBuild, PAGE_SIZE) != PAGE_SIZE ||
+        Hdr->UsaOffset < sizeof(*Hdr) || Hdr->UsaOffset > PAGE_SIZE - sizeof(USHORT))
+        return 0;
+    return *(PUSHORT)(Writer->TailBuild + Hdr->UsaOffset);
+}
+
 NTSTATUS
 NtfsLfsEnableWriter(PVOID Context)
 {
@@ -667,12 +746,20 @@ NtfsLfsEnableWriter(PVOID Context)
     ASSERT(Pages <= NTFS_LOG_QUEUE_PAGES);
     Writer->RestartBuild = ExAllocatePoolWithTag(PagedPool, PAGE_SIZE, TAG_NTFS);
     Writer->Queue = ExAllocatePoolWithTag(PagedPool, NTFS_LOG_QUEUE_PAGES * PAGE_SIZE, TAG_NTFS);
+    Writer->TailImage = ExAllocatePoolWithTag(PagedPool, PAGE_SIZE, TAG_NTFS);
+    Writer->TailBuild = ExAllocatePoolWithTag(PagedPool, PAGE_SIZE, TAG_NTFS);
     if (Writer->Codec.Stage == NULL || Writer->Codec.Scratch == NULL || Writer->Restart == NULL ||
-        Writer->RestartBuild == NULL || Writer->Queue == NULL)
+        Writer->RestartBuild == NULL || Writer->Queue == NULL || Writer->TailImage == NULL ||
+        Writer->TailBuild == NULL)
     {
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Cleanup;
     }
+    /* What the tail-copy pages hold, maybe from an earlier session: a copy
+     * written over one is numbered differently. */
+    Writer->TailUsn[0] = NtfsLogTailCopyUsn(Writer, 0);
+    Writer->TailUsn[1] = NtfsLogTailCopyUsn(Writer, 1);
+    Writer->TailSlot = 0;
     Status = NtfsLfsInitWriteContext(&Writer->Codec, Vcb->NtfsInfo.BytesPerSector, (ULONG)Size,
                                      PAGE_SIZE, Vcb->LogFileLsn, Writer->Codec.Stage, Pages,
                                      Writer->Codec.Scratch, Scratch);
@@ -683,6 +770,8 @@ NtfsLfsEnableWriter(PVOID Context)
         Writer->Session++;
         Writer->RestartDirty = FALSE;
         Writer->QueueCount = 0;
+        Writer->Unflushed = FALSE;
+        Writer->TailQueued = FALSE;
         Writer->RestartQueued = FALSE;
         Writer->MarkerLsn = 0;
         Writer->UnloggedWrites = 0;
