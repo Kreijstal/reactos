@@ -5,6 +5,7 @@ include_directories(${REACTOS_SOURCE_DIR}/drivers/usb/usbxhci)
 #
 # subdirectories containing special-purpose drivers
 #
+add_subdirectory(cng)
 add_subdirectory(example)
 add_subdirectory(fltmgr)
 add_subdirectory(hidparse)
@@ -204,6 +205,7 @@ list(APPEND KMTEST_SOURCE
     kmtest/support.c
     kmtest/testlist.c
 
+    cng/Cng_user.c
     example/Example_user.c
 
     fltmgr/fltmgr_load/fltmgr_user.c
@@ -251,6 +253,7 @@ add_rostests_file(TARGET kmtest)
 add_custom_target(kmtest_drivers)
 add_dependencies(kmtest_drivers
     kmtest_drv
+    cng_drv
     kmt_exit_drv
     example_drv
     hidp_drv
