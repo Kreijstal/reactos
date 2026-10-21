@@ -37,11 +37,12 @@
  * leaves its pages of the volume stream in the dirty page table with the
  * oldest record of a change to them that may not be on disk yet (the
  * page's RecLsn, as NTFS keeps it).  When the log is full, a checkpoint
- * writes the pages whose changes keep the older half of it in use, and
- * those only: the records still needed are then the ones of the pages left
- * in the table, of writes not issued yet (the pending list), of
- * transactions still open, and the Noop record of an unlogged write, until
- * a flush of the whole volume stream has put it on disk.  A page is kept free behind
+ * writes the pages in the table, and those only, not the rest of the
+ * volume stream (file data): the records still needed are then the ones
+ * of the pages changed again meanwhile, of writes not issued yet (the
+ * pending list), of transactions still open, and the Noop record of an
+ * unlogged write, until a flush of the whole volume stream has put it on
+ * disk.  A page is kept free behind
  * every batch for the records that commit; a transaction that alone keeps
  * the log full is committed early.  Storage barriers are supplied by the
  * mount layer; the codec has no dependency on cache-manager or
@@ -489,15 +490,6 @@ NtfsLogOldestNeeded(PNTFS_LOG_WRITER Writer)
     return Oldest;
 }
 
-/* Where an LSN is in the log, as a byte count from the start of the first
- * lap: the LSNs of one session compare as distances. */
-static ULONGLONG
-NtfsLogPosition(PLFS_WRITE_CONTEXT Codec, ULONGLONG Lsn)
-{
-    return (Lsn >> (64 - Codec->SeqNumberBits)) * (Codec->LogSize - Codec->FirstRcrdOffset) +
-           NtfsLfsLsnToOffset(Codec->SeqNumberBits, Lsn) - Codec->FirstRcrdOffset;
-}
-
 static VOID
 NtfsLogSortPages(PULONGLONG Pages, ULONG Count)
 {
@@ -516,19 +508,20 @@ NtfsLogSortPages(PULONGLONG Pages, ULONG Count)
     }
 }
 
-/* Checkpoint: writes the pages of the dirty page table whose oldest change
- * is in the older half of the log in use (all of them with All), puts them
- * on disk, and drops them from the table unless changed since.  The
- * restart area then names the oldest record still needed, before any of
- * the space is reused.  A change the table does not hold takes a flush of
- * the whole volume stream. */
+/* Checkpoint: writes the pages of the dirty page table, puts them on disk,
+ * and drops them from the table unless changed since.  (Writing only the
+ * ones whose changes keep the older part of the log in use takes twice the
+ * checkpoints, each as dear for its barriers, for pages the next one has
+ * to write anyway.)  The restart area then names the oldest record still
+ * needed, before any of the space is reused.  A change the table does not
+ * hold takes a flush of the whole volume stream. */
 static NTSTATUS
-NtfsLogCheckpointLocked(PNTFS_LOG_WRITER Writer, BOOLEAN All)
+NtfsLogCheckpointLocked(PNTFS_LOG_WRITER Writer)
 {
     PLFS_WRITE_CONTEXT Codec = &Writer->Codec;
     PULONGLONG Pages;
     PLIST_ENTRY Entry, Next;
-    ULONGLONG Oldest, Target, FullFlushLsn;
+    ULONGLONG Oldest, FullFlushLsn;
     ULONG Capacity, Count = 0, i, Run;
     BOOLEAN Full;
     NTSTATUS Status;
@@ -539,10 +532,6 @@ NtfsLogCheckpointLocked(PNTFS_LOG_WRITER Writer, BOOLEAN All)
     Status = NtfsLogForce(Writer);
     if (!NT_SUCCESS(Status))
         return Status;
-    if (All || Codec->OldestLsn == 0)
-        Target = MAXULONGLONG;
-    else
-        Target = (NtfsLogPosition(Codec, Codec->OldestLsn) + NtfsLogPosition(Codec, NtfsLfsNextLsn(Codec))) / 2;
     /* No record is logged until the checkpoint ends; a write issued from
      * here on stays in the table. */
     Capacity = Writer->DirtyCount + 64;
@@ -556,7 +545,7 @@ NtfsLogCheckpointLocked(PNTFS_LOG_WRITER Writer, BOOLEAN All)
         for (Entry = Writer->Dirty[i].Flink; Entry != &Writer->Dirty[i]; Entry = Entry->Flink)
         {
             PNTFS_LOG_DIRTY_PAGE Dirty = CONTAINING_RECORD(Entry, NTFS_LOG_DIRTY_PAGE, Link);
-            if (!Full && (NtfsLogPosition(Codec, Dirty->RecLsn) >= Target || Count == Capacity))
+            if (!Full && Count == Capacity)
                 continue;
             Dirty->Flushing = TRUE;
             Dirty->NewLsn = 0;
@@ -692,17 +681,9 @@ NtfsLogEmit(PNTFS_LOG_WRITER Writer, PLFS_EMIT_PARAMS Params, ULONG Count, PULON
     ASSERT(ExIsResourceAcquiredExclusiveLite(&Writer->Resource) && Writer->InIo);
     Writer->Codec.ReservePages = Commit ? 0 : 1;
     Status = NtfsLfsEmitBatch(&Writer->Codec, Params, Count, Lsns);
-    /* Full: the older half of the log is freed, then all of it. */
     if (Status == STATUS_LOG_FILE_FULL)
     {
-        Status = NtfsLogCheckpointLocked(Writer, FALSE);
-        Writer->Codec.ReservePages = Commit ? 0 : 1;
-        if (NT_SUCCESS(Status))
-            Status = NtfsLfsEmitBatch(&Writer->Codec, Params, Count, Lsns);
-    }
-    if (Status == STATUS_LOG_FILE_FULL)
-    {
-        Status = NtfsLogCheckpointLocked(Writer, TRUE);
+        Status = NtfsLogCheckpointLocked(Writer);
         Writer->Codec.ReservePages = Commit ? 0 : 1;
         if (NT_SUCCESS(Status))
             Status = NtfsLfsEmitBatch(&Writer->Codec, Params, Count, Lsns);
@@ -711,7 +692,7 @@ NtfsLogEmit(PNTFS_LOG_WRITER Writer, PLFS_EMIT_PARAMS Params, ULONG Count, PULON
     {
         Status = NtfsLogForceCommit(Writer);
         if (NT_SUCCESS(Status))
-            Status = NtfsLogCheckpointLocked(Writer, TRUE);
+            Status = NtfsLogCheckpointLocked(Writer);
         if (NT_SUCCESS(Status) && OwnTransaction != 0)
         {
             /* This batch's records belong to a transaction committed early:
@@ -1406,7 +1387,7 @@ NtfsLfsCheckpoint(PVOID Context)
         return STATUS_SUCCESS;
     ExAcquireResourceExclusiveLite(&Writer->Resource, TRUE);
     Writer->InIo = TRUE;
-    Status = NtfsLogCheckpointLocked(Writer, TRUE);
+    Status = NtfsLogCheckpointLocked(Writer);
     Writer->InIo = FALSE;
     ExReleaseResourceLite(&Writer->Resource);
     return Status;
