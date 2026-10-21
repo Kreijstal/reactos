@@ -464,6 +464,18 @@ MkExtractFileName(IN  const BYTE *RecBuf,
     return 0;
 }
 
+/* INDEX_ROOT's ClustersPerIndexBlock: whole clusters when an index block
+ * spans one or more, otherwise 512-byte units (Windows and ntfs-3g; not the
+ * boot sector's negative log2 form). */
+static
+BYTE
+MkClustersPerIndexBlock(VOID)
+{
+    if (INDEX_RECORD_SIZE >= BYTES_PER_CLUSTER)
+        return (BYTE)(INDEX_RECORD_SIZE / BYTES_PER_CLUSTER);
+    return (BYTE)(INDEX_RECORD_SIZE / NTFS_INDEX_BLOCK_UNIT);
+}
+
 /* Empty ($I30) directory INDEX_ROOT (header + end marker). Returns 0x30. */
 static
 ULONG
@@ -473,7 +485,7 @@ MkEmptyI30Root(OUT PBYTE Out)
     WR32(Out, 0x00, AttributeFileName);
     WR32(Out, 0x04, COLLATION_FILE_NAME);
     WR32(Out, 0x08, INDEX_RECORD_SIZE);
-    Out[0x0C] = (BYTE)LAYOUT.ClustersPerIndexRecord;
+    Out[0x0C] = MkClustersPerIndexBlock();
     WR32(Out, 0x10, 0x10);              /* entries offset */
     WR32(Out, 0x14, 0x10 + 0x10);       /* index length */
     WR32(Out, 0x18, 0x10 + 0x10);       /* allocated */
@@ -493,7 +505,7 @@ MkLargeI30Root(OUT PBYTE Out)
     WR32(Out, 0x00, AttributeFileName);
     WR32(Out, 0x04, COLLATION_FILE_NAME);
     WR32(Out, 0x08, INDEX_RECORD_SIZE);
-    Out[0x0C] = (BYTE)LAYOUT.ClustersPerIndexRecord;
+    Out[0x0C] = MkClustersPerIndexBlock();
     WR32(Out, 0x10, 0x10);
     WR32(Out, 0x14, 0x10 + 0x18);
     WR32(Out, 0x18, 0x10 + 0x18);
@@ -521,7 +533,7 @@ MkI30RootWithEntries(OUT PBYTE        Out,
     WR32(Out, 0x00, AttributeFileName);
     WR32(Out, 0x04, COLLATION_FILE_NAME);
     WR32(Out, 0x08, INDEX_RECORD_SIZE);
-    Out[0x0C] = (BYTE)LAYOUT.ClustersPerIndexRecord;
+    Out[0x0C] = MkClustersPerIndexBlock();
     WR32(Out, 0x10, 0x10);              /* entries offset */
     Out[0x1C] = 0;                      /* small index */
 
@@ -564,7 +576,7 @@ MkEmptyViewRoot(OUT PBYTE Out,
     WR32(Out, 0x00, 0);                 /* view index (indexed attr type 0) */
     WR32(Out, 0x04, CollationRule);
     WR32(Out, 0x08, INDEX_RECORD_SIZE);
-    Out[0x0C] = (BYTE)LAYOUT.ClustersPerIndexRecord;
+    Out[0x0C] = MkClustersPerIndexBlock();
     WR32(Out, 0x10, 0x10);
     WR32(Out, 0x14, 0x10 + 0x10);
     WR32(Out, 0x18, 0x10 + 0x10);
@@ -584,7 +596,7 @@ MkLargeViewRoot(OUT PBYTE Out,
     WR32(Out, 0x00, 0);
     WR32(Out, 0x04, CollationRule);
     WR32(Out, 0x08, INDEX_RECORD_SIZE);
-    Out[0x0C] = (BYTE)LAYOUT.ClustersPerIndexRecord;
+    Out[0x0C] = MkClustersPerIndexBlock();
     WR32(Out, 0x10, 0x10);
     WR32(Out, 0x14, 0x10 + 0x18);
     WR32(Out, 0x18, 0x10 + 0x18);
@@ -613,7 +625,7 @@ MkViewRootN(OUT PBYTE                Out,
     WR32(Out, 0x00, 0);
     WR32(Out, 0x04, CollationRule);
     WR32(Out, 0x08, INDEX_RECORD_SIZE);
-    Out[0x0C] = (BYTE)LAYOUT.ClustersPerIndexRecord;
+    Out[0x0C] = MkClustersPerIndexBlock();
     WR32(Out, 0x10, 0x10);
     Out[0x1C] = 0;
 
@@ -1415,7 +1427,7 @@ WriteMetafiles(VOID)
         UCHAR Restart[4096];
         ULONGLONG FileSize = (ULONGLONG)LAYOUT.LogFileClusters * C;
 
-        if (NtfsBuildCleanRestart(Restart, sizeof(Restart), BYTES_PER_SECTOR, FileSize) != 0)
+        if (NtfsBuildCleanRestart(Restart, sizeof(Restart), BYTES_PER_SECTOR, FileSize, 0) != 0)
         {
             Status = STATUS_INVALID_PARAMETER;
             goto done;
@@ -1510,7 +1522,8 @@ WriteMetafiles(VOID)
         if (!NT_SUCCESS(Status)) { DPRINT1("ERROR: write $MFT:$BITMAP (Status %lx)\n", Status); goto done; }
     }
 
-    /* Cluster $Bitmap: metadata clusters [0, FirstFreeLcn) used, the rest free,
+    /* Cluster $Bitmap: metadata clusters [0, FirstFreeLcn) and the $MFT extent
+     * used, the rest free,
      * and the bits past ClusterCount (up to the 8-byte-aligned end) set. */
     {
         ULONG     Size = LAYOUT.BitmapClusters * BYTES_PER_CLUSTER;
@@ -1521,6 +1534,8 @@ WriteMetafiles(VOID)
         if (!Buf) { Status = STATUS_INSUFFICIENT_RESOURCES; goto done; }
         RtlZeroMemory(Buf, Size);
         for (c = 0; c < LAYOUT.FirstFreeLcn; c++)
+            Buf[c / 8] |= (1 << (c % 8));
+        for (c = LAYOUT.MftLcn; c < LAYOUT.MftLcn + LAYOUT.MftClusters; c++)
             Buf[c / 8] |= (1 << (c % 8));
         for (c = ClusterCount; c < BitmapBits; c++)
             Buf[c / 8] |= (1 << (c % 8));

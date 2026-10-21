@@ -1449,6 +1449,39 @@ NtfsSetBasicInformation(PDEVICE_EXTENSION DeviceExt,
 }
 
 /**
+* @name NtfsSetPositionInformation
+* @implemented
+*
+* Moves the file object's current byte offset (MS-FSA 2.1.5.14.9). The I/O manager
+* does this itself for a synchronous file object; other handles reach the driver.
+*
+* @return
+* STATUS_SUCCESS on success. STATUS_INFO_LENGTH_MISMATCH for a short buffer,
+* STATUS_INVALID_PARAMETER if the file was opened without intermediate buffering and
+* the offset isn't a multiple of the sector size.
+*/
+static
+NTSTATUS
+NtfsSetPositionInformation(PDEVICE_EXTENSION DeviceExt,
+                           PFILE_OBJECT FileObject,
+                           PFILE_POSITION_INFORMATION PositionInfo,
+                           ULONG BufferLength)
+{
+    if (BufferLength < sizeof(FILE_POSITION_INFORMATION))
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    /* Unbuffered I/O goes straight to the disk, a sector at a time */
+    if ((FileObject->Flags & FO_NO_INTERMEDIATE_BUFFERING) &&
+        (PositionInfo->CurrentByteOffset.QuadPart & (DeviceExt->NtfsInfo.BytesPerSector - 1)) != 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    FileObject->CurrentByteOffset = PositionInfo->CurrentByteOffset;
+    return STATUS_SUCCESS;
+}
+
+/**
 * @name NtfsSetDispositionInformation
 * @implemented
 *
@@ -3155,6 +3188,13 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
                                              &NotifyFilter);
             ExReleaseResourceLite(&DeviceExt->IndexResource);
             KeLeaveCriticalRegion();
+            break;
+
+        case FilePositionInformation:
+            Status = NtfsSetPositionInformation(DeviceExt,
+                                                FileObject,
+                                                (PFILE_POSITION_INFORMATION)SystemBuffer,
+                                                BufferLength);
             break;
 
         case FileAllocationInformation:
