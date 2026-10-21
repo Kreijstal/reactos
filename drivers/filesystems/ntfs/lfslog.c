@@ -232,10 +232,12 @@ NtfsLogRange(PNTFS_LOG_WRITER Writer, ULONG Offset, ULONG Length, PUCHAR Buffer)
     return STATUS_SUCCESS;
 }
 
-/* The volume stream holds no log page the writer has written: copies it
- * cached before (the mount's reads of the restart area) are dropped when a
- * session starts, and pages read during one when it ends, so a read of the
- * volume afterwards gets the device's bytes. */
+/* The volume stream is to hold no copy of a log page the writer wrote:
+ * copies it cached before (the mount's reads of the restart area) are
+ * dropped when a session starts, and pages read during one when it ends.
+ * Where the cache manager cannot drop them, the restart pages are written
+ * through it as well when the session ends (NtfsLogCacheRestart): they are
+ * what a locked volume's checker reads. */
 static VOID
 NtfsLogPurgeCache(PNTFS_LOG_WRITER Writer)
 {
@@ -252,9 +254,38 @@ NtfsLogPurgeCache(PNTFS_LOG_WRITER Writer)
         Offset.QuadPart = Lcn * Vcb->NtfsInfo.BytesPerCluster;
         if (!CcPurgeCacheSection(Vcb->StreamFileObject->SectionObjectPointer, &Offset,
                                  (ULONG)(RunLength * Vcb->NtfsInfo.BytesPerCluster), FALSE))
-            DPRINT1("$LogFile pages stay cached at %I64x\n", Offset.QuadPart);
+            DPRINT("$LogFile pages stay cached at %I64x\n", Offset.QuadPart);
         Vcn += RunLength;
     }
+}
+
+/* The restart page just queued, through the volume stream as well, and
+ * written at once: the session is ending, its records and their metadata
+ * are on disk, and the page queued has the same bytes. */
+static NTSTATUS
+NtfsLogCacheRestart(PNTFS_LOG_WRITER Writer)
+{
+    PDEVICE_EXTENSION Vcb = Writer->Vcb;
+    ULONGLONG Position = Writer->RestartOffset, Disk;
+    ULONG Length = Writer->Codec.PageSize, Done = 0, Within, Part;
+    LONGLONG Lcn, RunLength;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    while (NT_SUCCESS(Status) && Done < Length)
+    {
+        if (!FsRtlLookupLargeMcbEntry(&Writer->Data->DataRunsMCB, Position / Vcb->NtfsInfo.BytesPerCluster,
+                                      &Lcn, &RunLength, NULL, NULL, NULL) || Lcn < 0 || RunLength <= 0)
+            return STATUS_FILE_CORRUPT_ERROR;
+        Within = (ULONG)(Position % Vcb->NtfsInfo.BytesPerCluster);
+        Part = (ULONG)min((ULONGLONG)(Length - Done), (ULONGLONG)RunLength * Vcb->NtfsInfo.BytesPerCluster - Within);
+        Disk = (ULONGLONG)Lcn * Vcb->NtfsInfo.BytesPerCluster + Within;
+        Status = NtfsWriteDiskCached(Vcb, Disk, Part, Writer->Restart + Done);
+        if (NT_SUCCESS(Status))
+            Status = Writer->Flush(Vcb, Disk, Part);
+        Position += Part;
+        Done += Part;
+    }
+    return Status;
 }
 
 /* Writes the queued pages, consecutive ones in one transfer. */
@@ -1470,7 +1501,9 @@ NtfsLfsFinishWriter(PVOID Context)
         KeReleaseSpinLock(&Writer->PendingLock, OldIrql);
     }
     if (NT_SUCCESS(Status)) Status = NtfsLogQueueRestart(Writer, TRUE);
+    if (NT_SUCCESS(Status)) Status = NtfsLogCacheRestart(Writer);
     if (NT_SUCCESS(Status)) Status = NtfsLogQueueRestart(Writer, TRUE);
+    if (NT_SUCCESS(Status)) Status = NtfsLogCacheRestart(Writer);
     if (NT_SUCCESS(Status)) Status = NtfsLogForce(Writer);
     if (NT_SUCCESS(Status))
     {
