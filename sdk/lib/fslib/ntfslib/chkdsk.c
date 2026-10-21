@@ -334,10 +334,20 @@ int chk_read_boot(CHK_CTX *c, NTFS_CHK_RESULT *res)
             { chk_add_issue(res, CHK_ERR_BOOT_OEM, 0, 0, 0); return -1; }
 
     c->BytesPerSector = bs->BytesPerSector;
-    c->SectorsPerCluster = bs->SectorsPerCluster;
+    /* Up to 0x80 the byte is the count; above, 256 - log2(count): the form
+     * Windows 10 1709+ writes for clusters over 64 KiB (0xF4 = 4096 sectors,
+     * the 2 MiB maximum with 512-byte sectors). */
+    if (bs->SectorsPerCluster <= 0x80)
+        c->SectorsPerCluster = bs->SectorsPerCluster;
+    else if (bs->SectorsPerCluster >= 0xF4)
+        c->SectorsPerCluster = 1u << (256 - bs->SectorsPerCluster);
+    else
+        c->SectorsPerCluster = 0;
     if (c->BytesPerSector < 256 || c->BytesPerSector > 4096 ||
         (c->BytesPerSector & (c->BytesPerSector - 1)) ||
-        c->SectorsPerCluster == 0)
+        c->SectorsPerCluster == 0 ||
+        (c->SectorsPerCluster & (c->SectorsPerCluster - 1)) ||
+        (ULONGLONG)c->BytesPerSector * c->SectorsPerCluster > 2 * 1024 * 1024)
         { chk_add_issue(res, CHK_ERR_BOOT_GEOMETRY, 0, 0, 0); return -1; }
 
     c->BytesPerCluster = c->BytesPerSector * c->SectorsPerCluster;
@@ -607,6 +617,64 @@ static void chk_emit_summary(const NTFS_CHK_OPTIONS *opt,
 /* One complete scan + (optionally) repair pass over the volume.  Wrapped by
  * NtfsChkVolume(), which repeats it while it is still repairing something.
  * Only the pass whose numbers describe the final state emits the summary. */
+/* The $Volume dirty flag, as record 3 holds it. */
+static int chk_volume_dirty_flag(CHK_CTX *c)
+{
+    UCHAR *rec = (UCHAR *)malloc(c->MftRecordSize);
+    int dirty = 0;
+
+    if (rec)
+    {
+        if (chk_read_record(c, FILE_Volume, rec) == 0 &&
+            *(ULONG *)rec == NRH_FILE_TYPE &&
+            chk_apply_fixups(rec, c->MftRecordSize, c->BytesPerSector) == 0)
+        {
+            FILE_RECORD_HEADER *h = (FILE_RECORD_HEADER *)rec;
+            ULONG off = h->AttributeOffset;
+            while (off + 8 <= c->MftRecordSize)
+            {
+                ATTR_RECORD *a = (ATTR_RECORD *)(rec + off);
+                if (a->Type == AT_END || a->Length == 0 ||
+                    off + a->Length > c->MftRecordSize)
+                    break;
+                if (a->Type == AT_VOLUME_INFORMATION && !a->NonResident)
+                {
+                    VOLUME_INFORMATION *vi =
+                        (VOLUME_INFORMATION *)(rec + off + a->Resident.ValueOffset);
+                    dirty = (vi->Flags & VOLUME_IS_DIRTY) != 0;
+                    break;
+                }
+                off += a->Length;
+            }
+        }
+        free(rec);
+    }
+    return dirty;
+}
+
+/* Whether $LogFile still has to be recovered: its restart area is dirty,
+ * and nothing marked the volume for chkdsk.  The log then describes
+ * metadata the disk does not hold yet; mounting the volume recovers it.
+ * (A log the driver cannot recover is marked dirty, and is chkdsk's to
+ * reset.) */
+static int chk_log_unrecovered(const MKNTFS_IO *io)
+{
+    NTFS_CHK_RESULT scratch;
+    CHK_CTX *c = (CHK_CTX *)malloc(sizeof(*c));
+    int unrecovered = 0;
+
+    if (!c)
+        return 0;
+    memset(c, 0, sizeof(*c));
+    memset(&scratch, 0, sizeof(scratch));
+    c->Io = io;
+    if (chk_read_boot(c, &scratch) == 0 && chk_load_mft(c, &scratch) == 0)
+        unrecovered = chk_logfile_state(c, NULL) == CHK_LOG_DIRTY && !chk_volume_dirty_flag(c);
+    NtfsChkFreeResult(&scratch);
+    free(c);
+    return unrecovered;
+}
+
 static int chk_volume_pass(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
                            NTFS_CHK_RESULT *res, int emitSummary)
 {
@@ -635,34 +703,7 @@ static int chk_volume_pass(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
     /* Pass 3 seeds WasDirty; honor CheckOnlyIfDirty by peeking record 3 first. */
     if (opt->CheckOnlyIfDirty)
     {
-        UCHAR *rec = (UCHAR *)malloc(c->MftRecordSize);
-        int dirty = 0;
-        if (rec)
-        {
-            if (chk_read_record(c, FILE_Volume, rec) == 0 &&
-                *(ULONG *)rec == NRH_FILE_TYPE &&
-                chk_apply_fixups(rec, c->MftRecordSize, c->BytesPerSector) == 0)
-            {
-                FILE_RECORD_HEADER *h = (FILE_RECORD_HEADER *)rec;
-                ULONG off = h->AttributeOffset;
-                while (off + 8 <= c->MftRecordSize)
-                {
-                    ATTR_RECORD *a = (ATTR_RECORD *)(rec + off);
-                    if (a->Type == AT_END || a->Length == 0 ||
-                        off + a->Length > c->MftRecordSize)
-                        break;
-                    if (a->Type == AT_VOLUME_INFORMATION && !a->NonResident)
-                    {
-                        VOLUME_INFORMATION *vi =
-                            (VOLUME_INFORMATION *)(rec + off + a->Resident.ValueOffset);
-                        dirty = (vi->Flags & VOLUME_IS_DIRTY) != 0;
-                        break;
-                    }
-                    off += a->Length;
-                }
-            }
-            free(rec);
-        }
+        int dirty = chk_volume_dirty_flag(c);
         if (!dirty)
         {
             res->ExitStatus = 0;
@@ -1014,6 +1055,17 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
 
     io = &checked;
 
+    /* Repairs never fight a log that still has to be replayed. */
+    if (opt->FixErrors && chk_log_unrecovered(io))
+    {
+        memset(res, 0, sizeof(*res));
+        chk_emit(opt, "The volume's $LogFile has not been recovered. Mount the volume to\r\n"
+                      "recover it, then check it again. Nothing was changed.\r\n");
+        chk_add_issue(res, CHK_ERR_LOG_UNRECOVERED, 0, 0, 0);
+        res->ExitStatus = 1;
+        return chk_finish_io(&state, opt, res, 1);
+    }
+
     /* A read-only check makes no further passes, so its own numbers already
      * describe the volume as it stands: let it print them itself. */
     rc = chk_volume_pass(io, opt, res, 0);
@@ -1156,6 +1208,7 @@ const char *NtfsChkCodeString(NTFS_CHK_CODE code)
     case CHK_ERR_ATTR_TRUNCATED:    return "corrupt attribute truncated";
     case CHK_ERR_IO:               return "volume I/O failed";
     case CHK_ERR_LOGFILE:          return "$LogFile checkpoint failed";
+    case CHK_ERR_LOG_UNRECOVERED:  return "$LogFile has not been recovered";
     case CHK_ERR_NOMEM:             return "out of memory: detection degraded";
     default:                        return "unknown";
     }

@@ -28,7 +28,7 @@
 /* INCLUDES *****************************************************************/
 
 #include <ntddk.h>
-#include "ntfs.h"
+#include "lfswrite.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -91,6 +91,16 @@ NtfsReadWriteVolume(PDEVICE_EXTENSION DeviceExt,
 
     if (Length == 0)
         return STATUS_SUCCESS;
+
+    /* Write-ahead logging: the log reaches the disk before any page of the
+     * volume stream (metadata, or the log's own cached copy) does. */
+    if (MajorFunction == IRP_MJ_WRITE && (Irp->Flags & IRP_PAGING_IO) &&
+        !(DeviceExt->Flags & VCB_VOLUME_DISMOUNTED))
+    {
+        Status = NtfsLfsForce(DeviceExt->LfsWriter);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
 
     /* A raw handle must observe dirty metadata too. Paging I/O on the
      * internal volume stream is the cache's recursion terminator. */

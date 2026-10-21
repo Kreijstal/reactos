@@ -2305,15 +2305,55 @@ NtfsFillHolesForWrite(PDEVICE_EXTENSION Vcb,
 *
 */
 
-NTSTATUS
-WriteAttributeFromIrp(PDEVICE_EXTENSION Vcb,
-                      PNTFS_ATTR_CONTEXT Context,
-                      ULONGLONG Offset,
-                      const PUCHAR Buffer,
-                      ULONG Length,
-                      PULONG RealLengthWritten,
-                      PFILE_RECORD_HEADER FileRecord,
-                      PIRP Irp)
+/* Non-resident metadata, which is logged here: everything but file data,
+ * and the file records themselves, whose writes UpdateFileRecord logs. */
+BOOLEAN
+NtfsAttributeIsMetadata(PNTFS_ATTR_CONTEXT Context)
+{
+    return Context->pRecord->Type != AttributeData ||
+           Context->FileMFTIndex < NTFS_FILE_FIRST_USER_FILE;
+}
+
+static NTSTATUS
+NtfsLogMetadataRuns(PDEVICE_EXTENSION Vcb,
+                    PNTFS_IO_RUN_LIST RunList,
+                    const UCHAR *Buffer,
+                    ULONGLONG Offset,
+                    PNTFS_LOG_METADATA_WRITE LogWrite)
+{
+    NTFS_LOG_EXTENT Extents[NTFS_LOG_METADATA_RECORDS];
+    ULONG i;
+    NTSTATUS Status;
+
+    if (RunList->Count > RTL_NUMBER_OF(Extents))
+    {
+        /* Too fragmented to log: the volume is checked after a crash. */
+        LogWrite->Pending.Lsn = 0;
+        Status = NtfsLfsBeginUnloggedWrite(Vcb->LfsWriter);
+        LogWrite->Unlogged = NT_SUCCESS(Status);
+        return Status;
+    }
+    for (i = 0; i < RunList->Count; i++)
+    {
+        /* Holes are filled before a write maps its runs. */
+        ASSERT(RunList->Runs[i].Lbo != NTFS_SPARSE_LBO);
+        Extents[i].DiskOffset = RunList->Runs[i].Lbo;
+        Extents[i].Length = RunList->Runs[i].ByteCount;
+        Extents[i].BufferOffset = RunList->Runs[i].BufferOffset;
+    }
+    return NtfsLfsBeginMetadataWrite(Vcb->LfsWriter, Extents, RunList->Count, Buffer, Offset, LogWrite);
+}
+
+static NTSTATUS
+WriteAttributeInternal(PDEVICE_EXTENSION Vcb,
+                       PNTFS_ATTR_CONTEXT Context,
+                       ULONGLONG Offset,
+                       const PUCHAR Buffer,
+                       ULONG Length,
+                       PULONG RealLengthWritten,
+                       PFILE_RECORD_HEADER FileRecord,
+                       PIRP Irp,
+                       BOOLEAN Logged)
 {
     ULONG MappedLength = 0;
     ULONG Transferred = 0;
@@ -2434,10 +2474,21 @@ WriteAttributeFromIrp(PDEVICE_EXTENSION Vcb,
 
     if (NT_SUCCESS(Status))
     {
+        BOOLEAN Metadata = !Logged && !Context->DirectIo && NtfsAttributeIsMetadata(Context);
+        NTFS_LOG_METADATA_WRITE LogWrite;
+
+        /* Metadata is logged before it is written, as file records are. */
+        if (Metadata)
+            Status = NtfsLogMetadataRuns(Vcb, &RunList, Buffer, Offset, &LogWrite);
         /* NtfsPerformIrpIoRuns() rejects sparse runs on IRP_MJ_WRITE: holes are
          * filled above, and only a compressed attribute still has them */
-        Status = NtfsTransferAttributeRuns(Vcb, IRP_MJ_WRITE, Irp, (PUCHAR)Buffer,
-                                            &RunList, Context->DirectIo, &Transferred);
+        if (NT_SUCCESS(Status))
+        {
+            Status = NtfsTransferAttributeRuns(Vcb, IRP_MJ_WRITE, Irp, (PUCHAR)Buffer,
+                                                &RunList, Context->DirectIo, &Transferred);
+            if (Metadata)
+                NtfsLfsEndMetadataWrite(Vcb->LfsWriter, &LogWrite);
+        }
     }
 
     NtfsFreeIoRunList(&RunList);
@@ -2461,6 +2512,20 @@ WriteAttributeFromIrp(PDEVICE_EXTENSION Vcb,
 }
 
 NTSTATUS
+WriteAttributeFromIrp(PDEVICE_EXTENSION Vcb,
+                      PNTFS_ATTR_CONTEXT Context,
+                      ULONGLONG Offset,
+                      const PUCHAR Buffer,
+                      ULONG Length,
+                      PULONG RealLengthWritten,
+                      PFILE_RECORD_HEADER FileRecord,
+                      PIRP Irp)
+{
+    return WriteAttributeInternal(Vcb, Context, Offset, Buffer, Length,
+                                  RealLengthWritten, FileRecord, Irp, FALSE);
+}
+
+NTSTATUS
 WriteAttribute(PDEVICE_EXTENSION Vcb,
                PNTFS_ATTR_CONTEXT Context,
                ULONGLONG Offset,
@@ -2469,14 +2534,8 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
                PULONG RealLengthWritten,
                PFILE_RECORD_HEADER FileRecord)
 {
-    return WriteAttributeFromIrp(Vcb,
-                                 Context,
-                                 Offset,
-                                 Buffer,
-                                 Length,
-                                 RealLengthWritten,
-                                 FileRecord,
-                                 NULL);
+    return WriteAttributeInternal(Vcb, Context, Offset, Buffer, Length,
+                                  RealLengthWritten, FileRecord, NULL, FALSE);
 }
 
 /**
@@ -3114,8 +3173,8 @@ NtfsMirrorFileRecord(PDEVICE_EXTENSION Vcb,
     if (NT_SUCCESS(Status) &&
         (MftIndex + 1) * RecordSize <= AttributeDataLength(Data->pRecord))
     {
-        Status = WriteAttribute(Vcb, Data, MftIndex * RecordSize, (const PUCHAR)Image,
-                                RecordSize, &Written, Mirror);
+        Status = WriteAttributeInternal(Vcb, Data, MftIndex * RecordSize, (const PUCHAR)Image,
+                                        RecordSize, &Written, Mirror, NULL, TRUE);
     }
     if (Data != NULL)
         ReleaseAttributeContext(Data);
@@ -3123,10 +3182,27 @@ NtfsMirrorFileRecord(PDEVICE_EXTENSION Vcb,
     return Status;
 }
 
+/* Recovery's write of a file record image (on-disk form) to its mirror. */
+NTSTATUS
+NtfsWriteFileRecordMirror(PDEVICE_EXTENSION Vcb,
+                          ULONGLONG MftIndex,
+                          PFILE_RECORD_HEADER Image)
+{
+    NTSTATUS Status;
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceSharedLite(&Vcb->MftContextResource, TRUE);
+    Status = NtfsMirrorFileRecord(Vcb, MftIndex, Image);
+    ExReleaseResourceLite(&Vcb->MftContextResource);
+    KeLeaveCriticalRegion();
+    return Status;
+}
+
 static NTSTATUS
 UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
                  ULONGLONG MftIndex,
-                 PFILE_RECORD_HEADER FileRecord)
+                 PFILE_RECORD_HEADER FileRecord,
+                 PNTFS_LOG_PENDING LogPending)
 {
     ULONG BytesWritten;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -3134,7 +3210,7 @@ UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
 
     DPRINT("UpdateFileRecord(%p, 0x%I64x, %p)\n", Vcb, MftIndex, FileRecord);
 
-    Status = NtfsLfsLogFileRecord(Vcb->LfsWriter, MftIndex, FileRecord);
+    Status = NtfsLfsLogFileRecord(Vcb->LfsWriter, MftIndex, FileRecord, LogPending);
     if (!NT_SUCCESS(Status)) return Status;
 
     // Stamp the fixup array into a private copy: the caller's record may be
@@ -3142,6 +3218,7 @@ UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
     WriteImage = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     if (WriteImage == NULL)
     {
+        NtfsLfsFileRecordWritten(Vcb->LfsWriter, LogPending);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     RtlCopyMemory(WriteImage, FileRecord, Vcb->NtfsInfo.BytesPerFileRecord);
@@ -3154,13 +3231,15 @@ UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
         ((PFIXUP_ARRAY)((ULONG_PTR)WriteImage + WriteImage->Ntfs.UsaOffset))->USN;
 
     // write the file record to the master file table
-    Status = WriteAttribute(Vcb,
-                            Vcb->MFTContext,
-                            MftIndex * Vcb->NtfsInfo.BytesPerFileRecord,
-                            (const PUCHAR)WriteImage,
-                            Vcb->NtfsInfo.BytesPerFileRecord,
-                            &BytesWritten,
-                            FileRecord);
+    Status = WriteAttributeInternal(Vcb,
+                                    Vcb->MFTContext,
+                                    MftIndex * Vcb->NtfsInfo.BytesPerFileRecord,
+                                    (const PUCHAR)WriteImage,
+                                    Vcb->NtfsInfo.BytesPerFileRecord,
+                                    &BytesWritten,
+                                    FileRecord,
+                                    NULL,
+                                    TRUE);
 
     if (!NT_SUCCESS(Status))
     {
@@ -3170,6 +3249,8 @@ UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
     {
         Status = NtfsMirrorFileRecord(Vcb, MftIndex, WriteImage);
     }
+    // Issued (or failed): a checkpoint's flush now covers it
+    NtfsLfsFileRecordWritten(Vcb->LfsWriter, LogPending);
 
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, WriteImage);
 
@@ -3180,16 +3261,19 @@ NTSTATUS
 UpdateFileRecord(PDEVICE_EXTENSION Vcb, ULONGLONG Index, PFILE_RECORD_HEADER Record)
 {
     NTSTATUS Status;
+    NTFS_LOG_PENDING LogPending;
 
+    LogPending.Lsn = 0;
     KeEnterCriticalRegion();
     ExAcquireResourceSharedLite(&Vcb->MftContextResource, TRUE);
     _SEH2_TRY
     {
-        Status = UpdateFileRecordInternal(Vcb, Index, Record);
+        Status = UpdateFileRecordInternal(Vcb, Index, Record, &LogPending);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
         Status = _SEH2_GetExceptionCode();
+        NtfsLfsFileRecordWritten(Vcb->LfsWriter, &LogPending);
         ExReleaseResourceLite(&Vcb->MftContextResource);
         KeLeaveCriticalRegion();
         _SEH2_YIELD(ExRaiseStatus(Status));

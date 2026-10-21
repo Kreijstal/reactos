@@ -102,6 +102,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/NtfsLocks.c
     ntos_io/NtfsNotify.c
     ntos_io/NtfsLogFile.c
+    ntos_io/NtfsLogReplay.c
     ntos_io/NtfsFormat.c
     ntos_io/NtfsLinks.c
     ntos_io/NtfsObjectId.c

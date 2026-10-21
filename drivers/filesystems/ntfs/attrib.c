@@ -28,7 +28,7 @@
 
 /* INCLUDES *****************************************************************/
 
-#include "ntfs.h"
+#include "lfswrite.h"
 #include "sparse.h"
 #include <ntintsafe.h>
 
@@ -2387,6 +2387,10 @@ NtfsFreeClusterRange(PDEVICE_EXTENSION Vcb, ULONG FirstCluster, ULONG ClusterCou
         Vcb->FreeClusterCount += ClusterCount;
     else
         RtlSetBits(&Vcb->ClusterBitmap, FirstCluster, ClusterCount);
+    /* The range may have held logged metadata (rollbacks, moves): no
+     * record may be replayed over its next owner. */
+    if (NT_SUCCESS(Status))
+        Status = NtfsLfsCheckpoint(Vcb->LfsWriter);
     ExReleaseResourceLite(&Vcb->BitmapResource);
     KeLeaveCriticalRegion();
     return Status;
@@ -2533,6 +2537,10 @@ FreeClusters(PNTFS_VCB Vcb,
                     RtlSetBits(&Vcb->ClusterBitmap, (ULONG)Lbn, (ULONG)Count);
             }
         }
+        /* Logged images of this metadata may still target the clusters:
+         * none may be replayed over a later owner's data. */
+        if (NT_SUCCESS(Status) && NtfsAttributeIsMetadata(AttrContext))
+            Status = NtfsLfsCheckpoint(Vcb->LfsWriter);
         ExReleaseResourceLite(&Vcb->BitmapResource);
         KeLeaveCriticalRegion();
     }
@@ -2968,6 +2976,8 @@ NtfsDeallocateSparseRangeEx(PDEVICE_EXTENSION Vcb,
                     break;
                 }
             }
+            if (NT_SUCCESS(Status) && NtfsAttributeIsMetadata(AttrContext))
+                Status = NtfsLfsCheckpoint(Vcb->LfsWriter);
             ExReleaseResourceLite(&Vcb->BitmapResource);
             KeLeaveCriticalRegion();
         }

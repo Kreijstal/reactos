@@ -16,7 +16,8 @@ BEGIN
   -Q            Provede rychlé formátování.\n\
   -A:velikost   Přepíše implicitní velikost alokační jednotky. Pro běžné\n\
                 použití silně doporučujeme implicitní hodnoty.\n\
-                NTFS podporuje 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K.\n\
+                NTFS podporuje 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K,\n\
+                               128K, 256K, 512K, 1M, 2M.\n\
                 FAT podporuje 8192, 16K, 32K, 64K, 128K, 256K.\n\
                 Pro alokační jednotky přes 4096 není podporována NTFS komprese.\n\
   -C            Soubory vytvořené na novém svazku budou implicitně\n\

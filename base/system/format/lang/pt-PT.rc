@@ -16,7 +16,8 @@ BEGIN
   -Q               Executa uma formatação rápida.\n\
   -A:size          Substitui o tamanho da unidade de alocação predefinido.\n\
                    Configurações predefinidas são fortemente recomendadas para uso geral.\n\
-                   NTFS suporta 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K.\n\
+                   NTFS suporta 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K,\n\
+                                128K, 256K, 512K, 1M, 2M.\n\
                    FAT suporta 8192, 16K, 32K, 64K, 128K, 256K.\n\
                    NTFS compressão não é suportada para os tamanhos de unidades de alocação.\n\
                    superiores a 4096.\n\

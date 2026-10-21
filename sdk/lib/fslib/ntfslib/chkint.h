@@ -251,6 +251,11 @@ void chk_free_repair_index(CHK_CTX *c);
  * synthesize redo/undo records.  Called from the R8 disarm phase only when a
  * repair was actually made.  Returns 0 on success, -1 if it could not stamp. */
 int  chk_stamp_logfile_clean(CHK_CTX *c, NTFS_CHK_RESULT *res);
+#define CHK_LOG_UNREADABLE (-1)
+#define CHK_LOG_UNUSED     0
+#define CHK_LOG_CLEAN      1
+#define CHK_LOG_DIRTY      2
+int  chk_logfile_state(CHK_CTX *c, ULONGLONG *CurrentLsn);
 
 /* Is `dir` a live, walkable directory whose index we trust?  Shared with
  * chkscan.c pass 3; used by the link-count repair to gate on a trusted
