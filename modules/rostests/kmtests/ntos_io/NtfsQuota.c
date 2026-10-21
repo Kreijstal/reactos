@@ -655,7 +655,7 @@ TestNativeQuota(WCHAR Letter)
     PFILE_QUOTA_INFORMATION Entry;
     PIO_STATUS_BLOCK IoStatus;
     PSID StartSid;
-    SID_IDENTIFIER_AUTHORITY Authority = SECURITY_NT_AUTHORITY;
+    SID_IDENTIFIER_AUTHORITY Authority = {SECURITY_NT_AUTHORITY};
     HANDLE Volume = NULL, ReadOnly = NULL, Async = NULL;
     NTSTATUS Status;
     ULONG Length, Offset, ErrorOffset;

@@ -30,7 +30,7 @@ FsRtlNotifyDereferenceSync(PREAL_NOTIFY_SYNC Sync)
         ExFreePoolWithTag(Sync, 'SNSF');
 }
 
-FORCEINLINE VOID
+static __inline VOID
 FsRtlNotifyAcquireFastMutex(PREAL_NOTIFY_SYNC Sync)
 {
     ULONG_PTR Thread = (ULONG_PTR)KeGetCurrentThread();
@@ -44,7 +44,7 @@ FsRtlNotifyAcquireFastMutex(PREAL_NOTIFY_SYNC Sync)
     Sync->OwnerCount++;
 }
 
-FORCEINLINE VOID
+static __inline VOID
 FsRtlNotifyReleaseFastMutex(PREAL_NOTIFY_SYNC Sync)
 {
     LIST_ENTRY Completions;

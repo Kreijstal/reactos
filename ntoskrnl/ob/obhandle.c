@@ -1172,7 +1172,7 @@ ObpIncrementHandleCount(IN PVOID Object,
         ObpCalloutEnd(CalloutIrql, "Open", ObjectType, Object);
 
         if (NT_SUCCESS(Status) && AccessState)
-            AccessState->PreviouslyGrantedAccess = GrantedAccess;
+            AccessState->PreviouslyGrantedAccess = *GrantedAccess;
 
         /* Check if the open procedure failed */
         if (!NT_SUCCESS(Status))

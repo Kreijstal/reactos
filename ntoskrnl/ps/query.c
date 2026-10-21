@@ -3848,7 +3848,7 @@ NtQueryInformationThread(
 #if (NTDDI_VERSION >= NTDDI_VISTA)
                                                    THREAD_QUERY_LIMITED_INFORMATION,
 #else
-                                                   Access,
+                                                   THREAD_QUERY_INFORMATION,
 #endif
                                                    PsThreadType,
                                                    PreviousMode,
@@ -3993,7 +3993,7 @@ NtQueryInformationThread(
 #if (NTDDI_VERSION >= NTDDI_VISTA)
                                                THREAD_QUERY_LIMITED_INFORMATION,
 #else
-                                               Access,
+                                               THREAD_QUERY_INFORMATION,
 #endif
                                                PsThreadType,
                                                PreviousMode,

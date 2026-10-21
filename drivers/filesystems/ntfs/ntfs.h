@@ -5,6 +5,18 @@
 #include <pseh/pseh2.h>
 #include <section_attribs.h>
 
+#if (NTDDI_VERSION < NTDDI_VISTA)
+/* Vista+ names this driver implements whatever the build's target version is. */
+#define FileHardLinkInformation ((FILE_INFORMATION_CLASS)46)
+
+NTKERNELAPI
+VOID
+NTAPI
+FsRtlNotifyCleanupAll(
+    _In_ PNOTIFY_SYNC NotifySync,
+    _In_ PLIST_ENTRY NotifyList);
+#endif
+
 #define CACHEPAGESIZE(pDeviceExt) \
 	((pDeviceExt)->NtfsInfo.UCHARsPerCluster > PAGE_SIZE ? \
 	 (pDeviceExt)->NtfsInfo.UCHARsPerCluster : PAGE_SIZE)
