@@ -16,6 +16,11 @@
 
 #define NTFS_KMT_TAG            'tKtN'
 
+#if (NTDDI_VERSION < NTDDI_VISTA)
+/* Windows' NTFS answers this class on every version; the headers only name it for Vista+. */
+#define FileHardLinkInformation ((FILE_INFORMATION_CLASS)46)
+#endif
+
 /* Longest path the helpers build (characters, including the terminator). */
 #define NTFS_KMT_MAX_PATH       2048
 

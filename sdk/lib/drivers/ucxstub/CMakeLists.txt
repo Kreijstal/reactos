@@ -1,5 +1,5 @@
 
-remove_definitions(-D_WIN32_WINNT=0x502)
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT})
 
 add_library(ucxstub STATIC ucxstub.c ucxstub.h)
 add_dependencies(ucxstub xdk)

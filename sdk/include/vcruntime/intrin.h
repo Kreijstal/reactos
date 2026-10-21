@@ -248,6 +248,7 @@ static __inline__ int _rdrand32_step(unsigned int *_Value)
 
 #if defined(_M_X64)
 #define _REACTOS_INTRIN_RDRAND64_STEP
+#define _REACTOS_INTRIN_XSAVE64
 static __inline__ int _rdrand64_step(unsigned __int64 *_Value)
 {
     unsigned char _Ok;

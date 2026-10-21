@@ -1424,22 +1424,28 @@ WriteMetafiles(VOID)
     Status = WritePatternToClusters(LAYOUT.LogFileLcn, LAYOUT.LogFileClusters, 0xFF);
     if (!NT_SUCCESS(Status)) { DPRINT1("ERROR: write $LogFile (Status %lx)\n", Status); goto done; }
     {
-        UCHAR Restart[4096];
+        /* On the heap: a page-sized local needs __chkstk, which setuplib does not link. */
+        const ULONG RestartSize = 4096;
+        PUCHAR Restart = RtlAllocateHeap(RtlGetProcessHeap(), 0, RestartSize);
         ULONGLONG FileSize = (ULONGLONG)LAYOUT.LogFileClusters * C;
 
-        if (NtfsBuildCleanRestart(Restart, sizeof(Restart), BYTES_PER_SECTOR, FileSize, 0) != 0)
+        if (!Restart) { Status = STATUS_INSUFFICIENT_RESOURCES; goto done; }
+        if (NtfsBuildCleanRestart(Restart, RestartSize, BYTES_PER_SECTOR, FileSize, 0) != 0)
         {
             Status = STATUS_INVALID_PARAMETER;
-            goto done;
         }
-        Status = WriteAt(LAYOUT.LogFileLcn, Restart, sizeof(Restart));
-        if (NT_SUCCESS(Status))
+        else
         {
-            LARGE_INTEGER Offset;
+            Status = WriteAt(LAYOUT.LogFileLcn, Restart, RestartSize);
+            if (NT_SUCCESS(Status))
+            {
+                LARGE_INTEGER Offset;
 
-            Offset.QuadPart = (LONGLONG)LAYOUT.LogFileLcn * C + sizeof(Restart);
-            Status = NtfsWriteFormatBytes(Offset.QuadPart, Restart, sizeof(Restart));
+                Offset.QuadPart = (LONGLONG)LAYOUT.LogFileLcn * C + RestartSize;
+                Status = NtfsWriteFormatBytes(Offset.QuadPart, Restart, RestartSize);
+            }
         }
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Restart);
         if (!NT_SUCCESS(Status))
             goto done;
     }
