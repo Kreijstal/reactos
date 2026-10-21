@@ -16,7 +16,8 @@ BEGIN
   -Q               Fullføre en rask formatering.\n\
   -A:størrelse     Dominerende standard fordeling enhet størrelse. Standard innstilling\n\
                    er sterkt anbefalt for generielt bruk\n\
-                   NTFS støtter 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K.\n\
+                   NTFS støtter 512, 1024, 2048, 4096, 8192, 16K, 32K, 64K,\n\
+                                128K, 256K, 512K, 1M, 2M.\n\
                    FAT støtter 8192, 16K, 32K, 64K, 128K, 256K.\n\
                    NTFS komprimering er ikke støttet for fordeling enhet størrelse\n\
                    ovenfor 4096.\n\

@@ -34,7 +34,6 @@
 #define NDEBUG
 #include <debug.h>
 
-static NTSTATUS NtfsLogSetDirty(PDEVICE_EXTENSION Vcb, BOOLEAN Dirty);
 
 /* FUNCTIONS ****************************************************************/
 
@@ -147,12 +146,12 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
         }
     }
 
-    /* Check cluster size */
-    ClusterSize = BootSector->BPB.BytesPerSector * BootSector->BPB.SectorsPerCluster;
-    if (ClusterSize != 512 && ClusterSize != 1024 &&
-        ClusterSize != 2048 && ClusterSize != 4096 &&
-        ClusterSize != 8192 && ClusterSize != 16384 &&
-        ClusterSize != 32768 && ClusterSize != 65536)
+    /* Check cluster size: a power of two from 512 bytes to 2 MiB (Windows 10
+     * 1709 and later format clusters over 64 KiB) */
+    ClusterSize = BootSector->BPB.BytesPerSector *
+                  NtfsDecodeSectorsPerCluster(BootSector->BPB.SectorsPerCluster);
+    if (ClusterSize < 512 || ClusterSize > NTFS_MAX_CLUSTER_SIZE ||
+        (ClusterSize & (ClusterSize - 1)) != 0)
     {
         DPRINT1("Cluster size failed: %hu, %hu, %hu\n",
                 BootSector->BPB.BytesPerSector,
@@ -247,8 +246,8 @@ NtfsGetVolumeData(PDEVICE_OBJECT DeviceObject,
 
     /* Read data from the bootsector */
     NtfsInfo->BytesPerSector = BootSector->BPB.BytesPerSector;
-    NtfsInfo->SectorsPerCluster = BootSector->BPB.SectorsPerCluster;
-    NtfsInfo->BytesPerCluster = BootSector->BPB.BytesPerSector * BootSector->BPB.SectorsPerCluster;
+    NtfsInfo->SectorsPerCluster = NtfsDecodeSectorsPerCluster(BootSector->BPB.SectorsPerCluster);
+    NtfsInfo->BytesPerCluster = BootSector->BPB.BytesPerSector * NtfsInfo->SectorsPerCluster;
     NtfsInfo->SectorCount = BootSector->EBPB.SectorCount;
     NtfsInfo->ClusterCount = DeviceExt->NtfsInfo.SectorCount / (ULONGLONG)DeviceExt->NtfsInfo.SectorsPerCluster;
 
@@ -436,6 +435,149 @@ NtfsGetVolumeData(PDEVICE_OBJECT DeviceObject,
 }
 
 
+/* The log's barrier: Length 0 makes every write so far durable, the
+ * volume stream's included; otherwise only the device's own cache. */
+static NTSTATUS
+NtfsLogFlush(PDEVICE_EXTENSION Vcb, LONGLONG Offset, ULONG Length)
+{
+    UNREFERENCED_PARAMETER(Offset);
+    if (Length == 0)
+        return NtfsFlushVolumeStream(Vcb);
+    return NtfsFlushDevice(Vcb->StorageDevice);
+}
+
+/* A forced log page goes to the device; its cached copy is written too,
+ * so a read of the volume sees it. */
+static NTSTATUS
+NtfsLogWriteDirect(PDEVICE_EXTENSION Vcb, LONGLONG Offset, ULONG Length, const PUCHAR Buffer)
+{
+    if (Vcb->Flags & VCB_DEVICE_REMOVED)
+        return STATUS_DEVICE_REMOVED;
+    return NtfsWriteDisk(Vcb->StorageDevice, Offset, Length, Vcb->NtfsInfo.BytesPerSector, Buffer);
+}
+
+/* Recovery rewrote system file records the mount had already read: $MFT's
+ * own record and $Volume's. */
+static NTSTATUS
+NtfsReloadVolumeRecords(PDEVICE_EXTENSION Vcb)
+{
+    PFILE_RECORD_HEADER Record;
+    PNTFS_ATTR_CONTEXT Context = NULL;
+    PVOLINFO_ATTRIBUTE VolumeInfo;
+    NTSTATUS Status;
+
+    Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (Record == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    Status = NtfsReadDiskCached(Vcb, Vcb->NtfsInfo.MftStart.QuadPart * Vcb->NtfsInfo.BytesPerCluster,
+                                Vcb->NtfsInfo.BytesPerFileRecord, (PUCHAR)Record);
+    if (NT_SUCCESS(Status))
+        Status = FixupUpdateSequenceArray(Vcb, &Record->Ntfs);
+    if (NT_SUCCESS(Status))
+        Status = FindAttribute(Vcb, Record, AttributeData, L"", 0, &Context, &Vcb->MftDataOffset);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+        return Status;
+    }
+    ExAcquireResourceExclusiveLite(&Vcb->MftContextResource, TRUE);
+    RtlCopyMemory(Vcb->MasterFileTable, Record, Vcb->NtfsInfo.BytesPerFileRecord);
+    ReleaseAttributeContext(Vcb->MFTContext);
+    Vcb->MFTContext = Context;
+    ExReleaseResourceLite(&Vcb->MftContextResource);
+
+    Status = ReadFileRecord(Vcb, NTFS_FILE_VOLUME, Record);
+    if (NT_SUCCESS(Status))
+        Status = FindAttribute(Vcb, Record, AttributeVolumeInformation, L"", 0, &Context, NULL);
+    if (NT_SUCCESS(Status))
+    {
+        if (!Context->pRecord->IsNonResident && Context->pRecord->Resident.ValueLength >= sizeof(*VolumeInfo))
+        {
+            VolumeInfo = (PVOID)((ULONG_PTR)Context->pRecord + Context->pRecord->Resident.ValueOffset);
+            Vcb->NtfsInfo.MajorVersion = VolumeInfo->MajorVersion;
+            Vcb->NtfsInfo.MinorVersion = VolumeInfo->MinorVersion;
+            Vcb->NtfsInfo.Flags = VolumeInfo->Flags;
+        }
+        ReleaseAttributeContext(Context);
+    }
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+    return Status;
+}
+
+/* Brings $LogFile to a clean state before anything reads metadata it may
+ * describe, as NTFS does at mount: a dirty log is recovered.  A log that
+ * cannot be recovered leaves the volume read-only; when it is one this
+ * driver wrote, chkdsk is due (it repairs the volume and resets the log).
+ * A log in another format is Windows': it needs Windows' recovery (the
+ * volume may be hibernated), and is left alone. */
+static NTSTATUS
+NtfsMountLog(PDEVICE_EXTENSION Vcb)
+{
+    NTFS_LOG_RECOVERY_RESULT Result;
+    NTSTATUS Status;
+
+    if (NtfsDeviceIoControl(Vcb->StorageDevice, IOCTL_DISK_IS_WRITABLE, NULL, 0,
+                            NULL, NULL, FALSE) == STATUS_MEDIA_WRITE_PROTECTED)
+        Vcb->Flags |= VCB_VOLUME_READ_ONLY;
+
+    Status = NtfsLfsCheckCleanShutdown(Vcb);
+    if (NT_SUCCESS(Status) && !Vcb->LogFileVersionUnsupported)
+        return STATUS_SUCCESS;
+    if (Status == STATUS_LOG_FILE_FULL && !Vcb->LogFileVersionUnsupported &&
+        !(Vcb->Flags & VCB_VOLUME_READ_ONLY))
+    {
+        Status = NtfsLfsRecover(Vcb, &Result);
+        if (NT_SUCCESS(Status))
+        {
+            if (Result.SystemRecords)
+            {
+                Status = NtfsReloadVolumeRecords(Vcb);
+                if (!NT_SUCCESS(Status))
+                    return Status;
+            }
+            if (Result.NeedsCheck)
+                NtfsMarkVolumeCorrupt(Vcb);
+            return STATUS_SUCCESS;
+        }
+    }
+
+    DPRINT1("Mounting read-only: $LogFile %s (%lx)\n",
+            Vcb->LogFileVersionUnsupported ? "has an unsupported version" : "cannot be recovered", Status);
+    if (!Vcb->LogFileVersionUnsupported && Status != STATUS_NOT_SUPPORTED)
+    {
+        /* The mark is the last write: on disk before the volume turns
+         * read-only, which no later flush may write through. */
+        NtfsMarkVolumeCorrupt(Vcb);
+        if (!(Vcb->Flags & VCB_VOLUME_READ_ONLY) && !NT_SUCCESS(NtfsFlushVolumeStream(Vcb)))
+            DPRINT1("Couldn't write the dirty mark\n");
+    }
+    Vcb->Flags |= VCB_VOLUME_READ_ONLY;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+NtfsMountStartLog(PDEVICE_EXTENSION Vcb)
+{
+    NTSTATUS Status;
+
+    if (Vcb->Flags & VCB_VOLUME_READ_ONLY)
+        return STATUS_SUCCESS;
+    Status = NtfsLfsCreateWriter(Vcb, NtfsWriteDiskCached, NtfsLogWriteDirect, NtfsLogFlush,
+                                 &Vcb->LfsWriter);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    /* Metadata is logged from here on, as Windows does; a log the writer
+     * cannot use leaves the volume as unprotected as before. */
+    ExAcquireResourceExclusiveLite(&Vcb->IoResource, TRUE);
+    ExAcquireResourceExclusiveLite(&Vcb->DirResource, TRUE);
+    Status = NtfsLfsEnableWriter(Vcb->LfsWriter);
+    ExReleaseResourceLite(&Vcb->DirResource);
+    ExReleaseResourceLite(&Vcb->IoResource);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("$LogFile is not written on this volume (%lx)\n", Status);
+    return STATUS_SUCCESS;
+}
+
 static
 NTSTATUS
 NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
@@ -595,24 +737,17 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     }
     _SEH2_END;
 
+    Status = NtfsMountLog(Vcb);
+    if (!NT_SUCCESS(Status))
+        goto ByeBye;
+
     Status = NtfsLoadVolumeBitmap(Vcb);
     if (!NT_SUCCESS(Status))
         goto ByeBye;
 
-
-    Status = NtfsLfsCheckCleanShutdown(Vcb);
-    if (!NT_SUCCESS(Status) || Vcb->LogFileVersionUnsupported)
-    {
-        Vcb->Flags |= VCB_VOLUME_READ_ONLY;
-        DPRINT1("Mounting read-only: $LogFile requires recovery or an unsupported format (%lx)\n", Status);
-    }
-
-    if (!(Vcb->Flags & VCB_VOLUME_READ_ONLY))
-    {
-        Status = NtfsLfsCreateWriter(Vcb, NtfsWriteDiskCached, NtfsFlushVolumeStream,
-                                     NtfsLogSetDirty, &Vcb->LfsWriter);
-        if (!NT_SUCCESS(Status)) goto ByeBye;
-    }
+    Status = NtfsMountStartLog(Vcb);
+    if (!NT_SUCCESS(Status))
+        goto ByeBye;
 
     NtfsFindObjectIdIndex(Vcb);
     NtfsInitializeSecurity(Vcb);
@@ -1067,9 +1202,6 @@ NtfsDismountVolume(PDEVICE_EXTENSION DeviceExt,
     {
         return STATUS_VOLUME_DISMOUNTED;
     }
-
-    if (NtfsLfsWriterEnabled(DeviceExt->LfsWriter) && !(DeviceExt->Flags & VCB_VOLUME_LOCKED))
-        return STATUS_ACCESS_DENIED;
 
     DPRINT1("Dismounting volume\n");
 
@@ -2038,12 +2170,6 @@ NtfsSetVolumeFlags(PDEVICE_EXTENSION DeviceExt,
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, VolumeRecord);
 
     return Status;
-}
-
-static NTSTATUS
-NtfsLogSetDirty(PDEVICE_EXTENSION Vcb, BOOLEAN Dirty)
-{
-    return NtfsSetVolumeFlags(Vcb, NTFS_VOLUME_FLAG_DIRTY, Dirty);
 }
 
 /* A failed rollback leaves on-disk metadata inconsistent. Keep that fact

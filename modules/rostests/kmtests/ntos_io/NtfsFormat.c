@@ -84,6 +84,78 @@ static ULONG Read32(PUCHAR Bytes)
     return Value;
 }
 
+/* The restart pages describe the log of a volume at rest: while the volume
+ * is mounted its log is in use, as on Windows. Take the volume offline and
+ * check the restart area its last dismount left, which must be clean. */
+static VOID
+CheckRestartPages(WCHAR Drive, PLARGE_INTEGER LogOffset, ULONG SectorSize)
+{
+    HANDLE Volume;
+    PUCHAR Pages;
+    ULONG i, Try;
+    ULONG_PTR Bytes;
+    LARGE_INTEGER Delay;
+    NTSTATUS Status;
+
+    Status = NtfsKmtOpenVolume(Drive, FILE_READ_DATA | FILE_WRITE_DATA, &Volume);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    /* Whoever the mount notification woke up may hold the volume briefly. */
+    Delay.QuadPart = -100 * 10000LL;
+    for (Try = 0; Try < 50; Try++)
+    {
+        Status = NtfsKmtFsctl(Volume, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, NULL);
+        if (Status != STATUS_ACCESS_DENIED)
+            break;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtfsKmtFsctl(Volume, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        ZwClose(Volume);
+        return;
+    }
+    Pages = NtfsKmtAlloc(8192);
+    ok(Pages != NULL, "Cannot allocate restart-page buffer\n");
+    if (Pages == NULL)
+    {
+        ZwClose(Volume);
+        return;
+    }
+    Status = NtfsKmtRead(Volume, LogOffset->QuadPart, Pages, 8192, &Bytes);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok_eq_ulong(Bytes, 8192);
+        ok(RtlCompareMemory(Pages, "RSTR", 4) == 4, "Missing restart magic\n");
+        ok(RtlCompareMemory(Pages + 0x40, Pages + 4096 + 0x40, 0xD0) == 0xD0,
+           "Restart areas of the two copies differ\n");
+        ok_eq_ulong(Read32(Pages + 0x10), 4096);
+        ok_eq_ulong(Read32(Pages + 0x14), 4096);
+        ok_eq_uint(Read16(Pages + 0x18), 0x40);
+        ok_eq_uint(Read16(Pages + 0x1A), 1);
+        ok_eq_uint(Read16(Pages + 0x1C), 1);
+        ok_eq_uint(Read16(Pages + 0x4E), 2);
+        ok_eq_uint(Read16(Pages + 0x54), 0xD0);
+        ok_eq_uint(Read16(Pages + 0x56), 0x30);
+        ok_eq_uint(Read16(Pages + 0x48), 1);
+        ok_eq_uint(Read16(Pages + 0x4A), MAXUSHORT);
+        ok_eq_uint(Read16(Pages + 0x4C), 0);
+        ok_eq_uint(Read16(Pages + 0x84), 1);
+        ok_eq_ulong(Read32(Pages + 0x8C), 8);
+        ok(RtlCompareMemory(Pages + 0x90, L"NTFS", 8) == 8, "Missing NTFS client\n");
+        for (i = 1; i <= 4096 / SectorSize; ++i)
+            ok_eq_uint(Read16(Pages + i * SectorSize - 2), Read16(Pages + 0x28));
+    }
+    NtfsKmtFree(Pages);
+    ZwClose(Volume);
+}
+
 static VOID
 CheckFormattedVolume(VOID)
 {
@@ -92,8 +164,8 @@ CheckFormattedVolume(VOID)
     NTFS_VOLUME_DATA_BUFFER Geometry;
     LARGE_INTEGER LogOffset;
     ULONGLONG LogSize;
-    PUCHAR Pages;
-    ULONG i, SectorSize, Flags;
+    ULONG SectorSize, Flags;
+    BOOLEAN HaveLog = FALSE;
     ULONG_PTR Bytes;
     NTSTATUS Status;
     const CHAR Data[] = "Freshly formatted NTFS supports ordinary file I/O";
@@ -115,42 +187,26 @@ CheckFormattedVolume(VOID)
     SectorSize = Geometry.BytesPerSector;
     ok_eq_ulong(SectorSize, 512);
     if (SectorSize != 512) goto Cleanup;
-    ok(Geometry.BytesPerCluster == 512 || Geometry.BytesPerCluster == 4096,
+    /* The user part formats 512 B .. 2 MiB clusters (Windows 10 1709+ range). */
+    ok(Geometry.BytesPerCluster >= 512 && Geometry.BytesPerCluster <= 2 * 1024 * 1024 &&
+       (Geometry.BytesPerCluster & (Geometry.BytesPerCluster - 1)) == 0,
        "Unexpected cluster size %lu\n", Geometry.BytesPerCluster);
+    /* Windows' placement: $MFTMirr right behind the 8 KiB $Boot, $MFT a third
+     * into the volume (capped at 3 GiB). */
+    ok_eq_longlong(Geometry.Mft2StartLcn.QuadPart,
+                   (LONGLONG)((8192 + Geometry.BytesPerCluster - 1) / Geometry.BytesPerCluster));
+    ok_eq_longlong(Geometry.MftStartLcn.QuadPart,
+                   (LONGLONG)min((ULONGLONG)Geometry.TotalClusters.QuadPart / 3,
+                                 (3ULL << 30) / Geometry.BytesPerCluster));
     Status = NtfsKmtFsctl(Volume, FSCTL_IS_VOLUME_DIRTY, NULL, 0,
                           &Flags, sizeof(Flags), NULL);
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (NT_SUCCESS(Status)) ok_eq_ulong(Flags, 0);
-    if (!FindLogLocation(Volume, &Geometry, &LogOffset, &LogSize)) goto Cleanup;
-    Pages = NtfsKmtAlloc(8192);
-    ok(Pages != NULL, "Cannot allocate restart-page buffer\n");
-    if (Pages == NULL) goto Cleanup;
-    Status = NtfsKmtRead(Volume, LogOffset.QuadPart, Pages, 8192, &Bytes);
-    ok_eq_hex(Status, STATUS_SUCCESS);
-    if (NT_SUCCESS(Status))
-    {
-        ok_eq_ulong(Bytes, 8192);
-        ok(RtlCompareMemory(Pages, "RSTR", 4) == 4, "Missing restart magic\n");
-        ok(RtlCompareMemory(Pages, Pages + 4096, 4096) == 4096,
-           "Fresh restart copies differ\n");
-        ok_eq_ulong(Read32(Pages + 0x10), 4096);
-        ok_eq_ulong(Read32(Pages + 0x14), 4096);
-        ok_eq_uint(Read16(Pages + 0x18), 0x40);
-        ok_eq_uint(Read16(Pages + 0x1A), 1);
-        ok_eq_uint(Read16(Pages + 0x1C), 1);
-        ok_eq_uint(Read16(Pages + 0x4E), 2);
-        ok_eq_uint(Read16(Pages + 0x54), 0xD0);
-        ok_eq_uint(Read16(Pages + 0x56), 0x30);
-        ok_eq_uint(Read16(Pages + 0x48), 1);
-        ok_eq_uint(Read16(Pages + 0x4A), MAXUSHORT);
-        ok_eq_uint(Read16(Pages + 0x4C), 0);
-        ok_eq_uint(Read16(Pages + 0x84), 1);
-        ok_eq_ulong(Read32(Pages + 0x8C), 8);
-        ok(RtlCompareMemory(Pages + 0x90, L"NTFS", 8) == 8, "Missing NTFS client\n");
-        for (i = 1; i <= 4096 / SectorSize; ++i)
-            ok_eq_uint(Read16(Pages + i * SectorSize - 2), Read16(Pages + 0x28));
-    }
-    NtfsKmtFree(Pages);
+    HaveLog = FindLogLocation(Volume, &Geometry, &LogOffset, &LogSize);
+    /* Windows sizes $LogFile at 2 MiB up to 200 MiB volumes (the fixture is
+     * 256 MiB: volume/200 rounded down to a cluster, never under 2 MiB). */
+    if (HaveLog)
+        ok(LogSize >= 2 * 1024 * 1024, "$LogFile is only %I64u bytes\n", LogSize);
     NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Root, L"KMT_FORMAT_DATA.bin");
     Status = NtfsKmtCreateFileWithData(Path, Data, sizeof(Data));
     ok_eq_hex(Status, STATUS_SUCCESS);
@@ -168,6 +224,8 @@ CheckFormattedVolume(VOID)
 Cleanup:
     if (File != NULL) ZwClose(File);
     ZwClose(Volume);
+    if (HaveLog)
+        CheckRestartPages(Drive, &LogOffset, SectorSize);
 }
 
 START_TEST(NtfsFormat)

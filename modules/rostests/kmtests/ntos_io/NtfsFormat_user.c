@@ -12,14 +12,20 @@ typedef VOID (NTAPI *FORMAT_EX)(PWCHAR, FMIFS_MEDIA_FLAG, PWCHAR, PWCHAR,
                                BOOLEAN, ULONG, PFMIFSCALLBACK);
 static BOOLEAN FormatSucceeded;
 static ULONG CompletionCount;
+static ULONG LastPercent, PercentAtDone;
 
 static BOOLEAN NTAPI
 FormatCallback(CALLBACKCOMMAND Command, ULONG SubAction, PVOID Argument)
 {
     UNREFERENCED_PARAMETER(SubAction);
-    if (Command == DONE)
+    if (Command == PROGRESS)
+    {
+        LastPercent = *(PULONG)Argument;
+    }
+    else if (Command == DONE)
     {
         FormatSucceeded = *(PBOOLEAN)Argument;
+        PercentAtDone = LastPercent;
         ++CompletionCount;
     }
     return TRUE;
@@ -78,14 +84,25 @@ MakeVolumeRaw(PWCHAR Root, PWCHAR Volume)
     HANDLE Handle;
     DWORD Bytes;
     BYTE Sector[512];
-    BOOLEAN Done = FALSE;
+    BOOLEAN Done = FALSE, Locked = FALSE;
+    ULONG Try;
 
     Handle = CreateFileW(Volume, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                          NULL, OPEN_EXISTING, FILE_FLAG_WRITE_THROUGH, NULL);
     ok(Handle != INVALID_HANDLE_VALUE, "Cannot open %ls: %lu\n", Volume, GetLastError());
     if (Handle == INVALID_HANDLE_VALUE)
         return FALSE;
-    if (!DeviceIoControl(Handle, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &Bytes, NULL) ||
+    /* The kernel part dismounted the volume to read its log at rest; the
+     * remount wakes whoever the mount notification reaches, which may hold
+     * the volume briefly. */
+    for (Try = 0; Try < 50; Try++)
+    {
+        Locked = DeviceIoControl(Handle, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &Bytes, NULL);
+        if (Locked || GetLastError() != ERROR_ACCESS_DENIED)
+            break;
+        Sleep(100);
+    }
+    if (!Locked ||
         !DeviceIoControl(Handle, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, &Bytes, NULL) ||
         !DeviceIoControl(Handle, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0,
                          &Length, sizeof(Length), &Bytes, NULL))
@@ -125,11 +142,16 @@ static VOID
 InvokeFormat(FORMAT_EX FormatEx, PWCHAR Root, ULONG ClusterSize, BOOLEAN Expected)
 {
     CompletionCount = 0;
+    LastPercent = PercentAtDone = 0;
     FormatSucceeded = !Expected;
     FormatEx(Root, FMIFS_HARDDISK, L"NTFS", L"KMTNTFS", TRUE, ClusterSize, FormatCallback);
     ok(CompletionCount != 0, "Formatter did not report completion\n");
     ok(FormatSucceeded == Expected, "Formatter success %u, expected %u\n",
        FormatSucceeded, Expected);
+    /* format.exe prints the PROGRESS percentage: a successful format reaches
+     * 100 before DONE. */
+    if (Expected && FormatSucceeded)
+        ok_eq_ulong(PercentAtDone, 100);
 }
 
 START_TEST(NtfsFormat)
@@ -141,7 +163,8 @@ START_TEST(NtfsFormat)
     DWORD Bytes, i, SectorsPerCluster, BytesPerSector, FreeClusters, TotalClusters;
     const CHAR Marker[] = "Formatting a busy volume must preserve existing files";
     CHAR Readback[sizeof(Marker)];
-    const ULONG ClusterSizes[] = { 512, 4096 };
+    /* Windows 10 1709+ formats NTFS with clusters up to 2 MiB (/A:2M). */
+    const ULONG ClusterSizes[] = { 512, 4096, 65536, 131072, 262144, 2097152 };
 
     if (!NtfsKmtFindFormatVolume(Root, Volume))
     {

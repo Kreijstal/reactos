@@ -120,8 +120,11 @@ ComputeLayout(IN ULONG ClusterSize)
     ULONG     C;
     ULONGLONG Lcn;
 
+    // Windows 10 1709 and later format NTFS with clusters of up to 2 MiB
+    // (format /A:128K .. /A:2M); the boot sector then stores
+    // SectorsPerCluster in its negative-shift form (see bootsect.c).
     if (Bps < 512 || Bps > 4096 || (Bps & (Bps - 1)) != 0 ||
-        (ClusterSize != 0 && (ClusterSize < Bps || ClusterSize > 65536 ||
+        (ClusterSize != 0 && (ClusterSize < Bps || ClusterSize > NTFS_MAX_CLUSTER_SIZE ||
                               (ClusterSize & (ClusterSize - 1)) != 0)))
         return STATUS_INVALID_PARAMETER;
 
@@ -178,14 +181,27 @@ ComputeLayout(IN ULONG ClusterSize)
     // $MFTMirr: the first four system records.
     LAYOUT.MftMirrClusters = (ULONG)CEIL_DIV((ULONGLONG)MFT_MIRR_COUNT * MFT_RECORD_SIZE, (ULONGLONG)C);
 
-    // $LogFile: ~0.78% of the volume, clamped to [256 KB, 64 MB].
+    // $LogFile: sized from the volume the way Windows' format does it
+    // (ntfs-3g's mkntfs documents the same table, measured on Windows
+    // volumes): 2 MiB up to 200 MiB, 64 MiB from 12 GiB, and in between
+    // about volume/200 rounded down to a cluster. Never below 2 MiB:
+    // smaller logs leave NTFS too little room for its restart area and a
+    // checkpoint's worth of records.
     {
-        ULONGLONG LogBytes = VolumeBytes / 128;
+        ULONGLONG LogVolume = LAYOUT.ClusterCount * C;
+        ULONGLONG LogBytes;
 
-        if (LogBytes < (256ULL * 1024))
-            LogBytes = 256ULL * 1024;
-        if (LogBytes > (64ULL * 1024 * 1024))
+        if (LogVolume <= (200ULL * 1024 * 1024))
+            LogBytes = 2ULL * 1024 * 1024;
+        else if (LogVolume >= (12ULL * 1024 * 1024 * 1024))
             LogBytes = 64ULL * 1024 * 1024;
+        else
+            LogBytes = (LogVolume / 200) & ~((ULONGLONG)C - 1);
+
+        if (LogBytes < (2ULL * 1024 * 1024))
+            LogBytes = 2ULL * 1024 * 1024;
+        // Whole 4 KB log pages, whatever the cluster size.
+        LogBytes = (LogBytes + 0xFFF) & ~0xFFFULL;
 
         LAYOUT.LogFileClusters = (ULONG)CEIL_DIV(LogBytes, (ULONGLONG)C);
     }
@@ -231,11 +247,17 @@ ComputeLayout(IN ULONG ClusterSize)
     LAYOUT.DeletedIdxClusters = (ULONG)CEIL_DIV(64ULL * 1024,    (ULONGLONG)C);  // 64 KiB
 
     //
-    // Placement: everything contiguous from the start of the volume.
+    // Placement, as Windows (Vista and later) lays a fresh volume out:
+    // $MFTMirr directly behind the 8 KiB $Boot (LCN 2 with 4 KiB clusters)
+    // and $MFT far from it, at a third of the volume but no further than
+    // 3 GiB in (LCN 0xC0000 with 4 KiB clusters), so one damaged region
+    // cannot take both copies of the first records. The other metadata
+    // follows $MFTMirr. Windows' own volumes show this rule: $MFT at 8533 on
+    // Windows 7's 25599-cluster System Reserved partition, 43690 on a
+    // 512 MiB volume, 786432 on large ones, $MFTMirr at 2 on all of them.
     //
     Lcn = 0;
     LAYOUT.BootLcn      = Lcn; Lcn += LAYOUT.BootClusters;
-    LAYOUT.MftLcn       = Lcn; Lcn += LAYOUT.MftClusters;
     LAYOUT.MftMirrLcn   = Lcn; Lcn += LAYOUT.MftMirrClusters;
     LAYOUT.LogFileLcn   = Lcn; Lcn += LAYOUT.LogFileClusters;
     LAYOUT.BitmapLcn    = Lcn; Lcn += LAYOUT.BitmapClusters;
@@ -252,11 +274,30 @@ ComputeLayout(IN ULONG ClusterSize)
     LAYOUT.DeletedIdxLcn = Lcn; Lcn += LAYOUT.DeletedIdxClusters;
     LAYOUT.FirstFreeLcn = Lcn;
 
+    {
+        ULONGLONG MftLcn = LAYOUT.ClusterCount / 3;
+        ULONGLONG Cap    = NTFS_MFT_MAX_START / C;
+
+        if (MftLcn > Cap)
+            MftLcn = Cap;
+        // A volume too small to keep $MFT clear of the rest gets it right
+        // behind the other metadata.
+        if (MftLcn < LAYOUT.FirstFreeLcn ||
+            MftLcn + LAYOUT.MftClusters + 16 >= LAYOUT.ClusterCount)
+        {
+            MftLcn = LAYOUT.FirstFreeLcn;
+        }
+        LAYOUT.MftLcn = MftLcn;
+        Lcn = LAYOUT.FirstFreeLcn;
+        if (MftLcn + LAYOUT.MftClusters > Lcn)
+            Lcn = MftLcn + LAYOUT.MftClusters;
+    }
+
     // The volume must be large enough to hold the metadata (plus slack).
-    if (LAYOUT.FirstFreeLcn + 16 >= LAYOUT.ClusterCount)
+    if (Lcn + 16 >= LAYOUT.ClusterCount)
     {
         DPRINT1("Volume too small for NTFS: need %I64u clusters, have %I64u\n",
-                LAYOUT.FirstFreeLcn + 16, LAYOUT.ClusterCount);
+                Lcn + 16, LAYOUT.ClusterCount);
         return STATUS_DISK_FULL;
     }
 
@@ -491,6 +532,14 @@ NtfsFormat(
     DPRINT1("NtfsFormat() completed successfully\n");
 
 end:
+
+    // fmifs callers (format.exe prints it) expect the bar to reach 100
+    // before DONE reports the result.
+    if (Callback && Result)
+    {
+        ULONG pc = 100;
+        Callback(PROGRESS, 0, (PVOID)&pc);
+    }
 
     if (VolumeLocked)
         NtFsControlFile(DiskHandle, NULL, NULL, NULL, &Iosb,

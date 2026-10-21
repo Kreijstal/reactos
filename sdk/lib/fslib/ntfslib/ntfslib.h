@@ -93,6 +93,17 @@
 #define MFT_RECORD_SIZE    1024
 #define INDEX_RECORD_SIZE  4096
 
+// Largest cluster Windows formats NTFS with (Windows 10 1709 and later).
+#define NTFS_MAX_CLUSTER_SIZE  (2 * 1024 * 1024)
+
+// Windows places $MFT at a third of the volume, but never past this byte
+// offset (LCN 0xC0000 with 4 KiB clusters).
+#define NTFS_MFT_MAX_START     (3ULL * 1024 * 1024 * 1024)
+
+// Index blocks smaller than a cluster are counted, and addressed by VCN, in
+// these units (INDEX_ROOT's ClustersPerIndexBlock, an INDX block's VCN).
+#define NTFS_INDEX_BLOCK_UNIT  512
+
 // Count of MFT records materialized during format (the 16 reserved system records).
 #define MFT_RESERVED_RECORDS  16
 
@@ -198,13 +209,13 @@
 /* GLOBAL DATA ***************************************************************/
 
 //
-// The whole metadata is laid out contiguously from the start of the volume:
+// The metadata is laid out as Windows lays out a fresh volume:
 //
-//   [ $Boot | $MFT | $MFTMirr | $LogFile | $Bitmap | $UpCase | $AttrDef | $MFT bitmap | ... free ... ]
+//   [ $Boot | $MFTMirr | $LogFile | $Bitmap | $UpCase | ... ]  free  [ $MFT ]  free
+//   0                                                   FirstFreeLcn  MftLcn = min(clusters / 3, 3 GiB)
 //
-// A correct NTFS driver locates $MFT / $MFTMirr through the boot sector, so the
-// exact placement does not matter for mountability - only that everything fits
-// inside the volume and the cluster bitmap marks the used clusters.
+// The boot sector names $MFT and $MFTMirr; the cluster bitmap marks
+// [0, FirstFreeLcn) and the $MFT extent as used.
 //
 typedef struct _NTFS_LAYOUT
 {
@@ -238,7 +249,7 @@ typedef struct _NTFS_LAYOUT
     ULONGLONG  Cont2Lcn;       ULONG Cont2Clusters;     // $TxfLogContainer...0002 (2 MiB)
     ULONGLONG  DeletedIdxLcn;  ULONG DeletedIdxClusters;// $Extend/$Deleted:$I30 allocation (64 KiB)
 
-    ULONGLONG  FirstFreeLcn;   // Count of clusters used by metadata == first free cluster
+    ULONGLONG  FirstFreeLcn;   // End of the metadata behind $Boot ($MFT lies apart, at MftLcn)
 } NTFS_LAYOUT, *PNTFS_LAYOUT;
 
 // The $SDS descriptor mirror is stored NTFS_SDS_MIRROR bytes after the primary.

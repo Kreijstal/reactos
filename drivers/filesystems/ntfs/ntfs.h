@@ -61,6 +61,23 @@ typedef struct _BOOT_SECTOR
 } BOOT_SECTOR, *PBOOT_SECTOR;
 #include <poppack.h>
 
+/* Largest NTFS cluster (Windows 10 1709 and later format up to 2 MiB). */
+#define NTFS_MAX_CLUSTER_SIZE (2 * 1024 * 1024)
+
+/* The BPB's SectorsPerCluster: the count itself up to 0x80, above that
+ * 256 - log2(count) (clusters over 64 KiB, 0xF4 = 4096 sectors). 0 for a
+ * value no NTFS writes. */
+FORCEINLINE
+ULONG
+NtfsDecodeSectorsPerCluster(UCHAR Value)
+{
+    if (Value <= 0x80)
+        return Value;
+    if (Value >= 0xF4)
+        return 1UL << (256 - Value);
+    return 0;
+}
+
 //typedef struct _BootSector BootSector;
 
 typedef struct _NTFS_INFO
@@ -1769,6 +1786,15 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
                ULONG Length,
                PULONG LengthWritten,
                PFILE_RECORD_HEADER FileRecord);
+
+/* Not file data: written through the log. */
+BOOLEAN
+NtfsAttributeIsMetadata(PNTFS_ATTR_CONTEXT Context);
+
+NTSTATUS
+NtfsWriteFileRecordMirror(PDEVICE_EXTENSION Vcb,
+                          ULONGLONG MftIndex,
+                          PFILE_RECORD_HEADER Image);
 
 NTSTATUS
 WriteAttributeFromIrp(PDEVICE_EXTENSION Vcb,

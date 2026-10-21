@@ -102,6 +102,10 @@ SIZEDEFINITION LegalSizes[] = {
     { L"64K", 65536 },
     { L"128K", 65536 * 2 },
     { L"256K", 65536 * 4 },
+    /* NTFS only (Windows 10 1709 and later offer up to /A:2M) */
+    { L"512K", 65536 * 8 },
+    { L"1M", 65536 * 16 },
+    { L"2M", 65536 * 32 },
     { L"", 0 },
 };
 
