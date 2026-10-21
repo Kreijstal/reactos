@@ -1,0 +1,9 @@
+; Kernel Cryptography, Next Generation
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\CNG","Description",0x00000000,"Kernel Cryptography, Next Generation"
+HKLM,"SYSTEM\CurrentControlSet\Services\CNG","DisplayName",0x00000000,"CNG"
+HKLM,"SYSTEM\CurrentControlSet\Services\CNG","ErrorControl",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\CNG","Group",0x00000000,"Core"
+HKLM,"SYSTEM\CurrentControlSet\Services\CNG","ImagePath",0x00020000,"system32\drivers\cng.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\CNG","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\CNG","Type",0x00010001,0x00000001
