@@ -356,7 +356,10 @@ typedef struct _NTFS_LOG_REQUEST
 VOID NtfsLfsBeginRequest(PVOID Writer, PNTFS_LOG_REQUEST Request);
 NTSTATUS NtfsLfsEndRequest(PVOID Writer, PNTFS_LOG_REQUEST Request, BOOLEAN ForceLog);
 
-NTSTATUS NtfsLfsLogFileRecord(PVOID Writer, ULONGLONG MftIndex, PFILE_RECORD_HEADER Record,
+/* Logs the bytes a file record write changes, Image being what is written
+ * (update sequence array applied); Pending->Lsn receives the LSN to stamp
+ * on the record, 0 when nothing changes. */
+NTSTATUS NtfsLfsLogFileRecord(PVOID Writer, ULONGLONG MftIndex, PFILE_RECORD_HEADER Image,
                               PNTFS_LOG_PENDING Pending);
 VOID NtfsLfsFileRecordWritten(PVOID Writer, PNTFS_LOG_PENDING Pending);
 /* Around a metadata write the log does not describe: the log then tells
@@ -379,17 +382,20 @@ typedef struct _NTFS_LOG_METADATA_WRITE
     BOOLEAN Unlogged;
 } NTFS_LOG_METADATA_WRITE, *PNTFS_LOG_METADATA_WRITE;
 
-/* The largest non-resident metadata write logged; a larger one (a whole
- * volume bitmap) is written around NtfsLfsBeginUnloggedWrite. */
-#define NTFS_LOG_MAX_METADATA_WRITE  0x4000
-/* Each record carries at most this much of it, over at most this many
- * clusters, in at most this many records. */
+/* The largest non-resident metadata write logged, in at most this many
+ * extents, changing at most this many bytes; any other one is written
+ * around NtfsLfsBeginUnloggedWrite. */
+#define NTFS_LOG_MAX_METADATA_WRITE  0x100000
+#define NTFS_LOG_METADATA_EXTENTS    32
+#define NTFS_LOG_MAX_CHANGED         0x10000
+/* A record carries at most this many changed bytes, over at most this
+ * many clusters; a write is logged in at most this many records. */
 #define NTFS_LOG_METADATA_CHUNK      0x1000
 #define NTFS_LOG_METADATA_LCNS       (NTFS_LOG_METADATA_CHUNK / 512 + 2)
-#define NTFS_LOG_METADATA_RECORDS    16
+#define NTFS_LOG_BATCH_RECORDS       64
 
-/* Logs the redo and undo images of a non-resident metadata write before it
- * is issued; NtfsLfsEndMetadataWrite once it has been. */
+/* Logs the bytes a non-resident metadata write changes, before it is
+ * issued; NtfsLfsEndMetadataWrite once it has been. */
 NTSTATUS NtfsLfsBeginMetadataWrite(PVOID Writer, const NTFS_LOG_EXTENT *Extents, ULONG Count,
                                    const UCHAR *Buffer, ULONGLONG Offset,
                                    PNTFS_LOG_METADATA_WRITE Write);
