@@ -866,7 +866,7 @@ NtfsQueryInformation(PNTFS_IRP_CONTEXT IrpContext)
         return NtfsMarkIrpContextForQueue(IrpContext);
     }
 
-    switch (FileInformationClass)
+    switch ((ULONG)FileInformationClass)
     {
         case FileStandardInformation:
             Status = NtfsGetStandardInformation(Fcb,

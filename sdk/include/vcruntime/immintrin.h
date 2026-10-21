@@ -243,15 +243,19 @@ __INTRIN_INLINE void _fxrstor(void const *__P)
 }
 
 #if defined(__x86_64__)
+#ifndef _REACTOS_INTRIN_XSAVE64
 __INTRIN_INLINE void _fxsave64(void *__P)
 {
     __builtin_ia32_fxsave64(__P);
 }
+#endif
 
+#ifndef _REACTOS_INTRIN_XSAVE64
 __INTRIN_INLINE void _fxrstor64(void const *__P)
 {
     __builtin_ia32_fxrstor64((void*)__P);
 }
+#endif
 #endif // __x86_64__
 
 #ifdef __clang__
@@ -308,10 +312,12 @@ __INTRIN_INLINE_XSAVE void _xrstors(void const *__P, unsigned __int64 __M)
 }
 
 #if defined(__x86_64__)
+#ifndef _REACTOS_INTRIN_XSAVE64
 __INTRIN_INLINE_XSAVE void _xsave64(void *__P, unsigned __int64 __M)
 {
     __builtin_ia32_xsave64(__P, __M);
 }
+#endif
 
 __INTRIN_INLINE_XSAVE void _xsavec64(void *__P, unsigned __int64 __M)
 {
@@ -322,6 +328,7 @@ __INTRIN_INLINE_XSAVE void _xsavec64(void *__P, unsigned __int64 __M)
 #endif
 }
 
+#ifndef _REACTOS_INTRIN_XSAVE64
 __INTRIN_INLINE_XSAVE void _xsaveopt64(void *__P, unsigned __int64 __M)
 {
 #if 0 // Needs newer GCC
@@ -330,7 +337,9 @@ __INTRIN_INLINE_XSAVE void _xsaveopt64(void *__P, unsigned __int64 __M)
     __asm__ __volatile__("xsaveopt %0" : "=m" (*(char*)__P) : "a" ((unsigned int)__M), "d" ((unsigned int)(__M >> 32)) : "memory");
 #endif
 }
+#endif
 
+#ifndef _REACTOS_INTRIN_XSAVE64
 __INTRIN_INLINE_XSAVE void _xsaves64(void *__P, unsigned __int64 __M)
 {
 #if 0 // Needs newer GCC
@@ -339,12 +348,16 @@ __INTRIN_INLINE_XSAVE void _xsaves64(void *__P, unsigned __int64 __M)
     __asm__ __volatile__("xsaves %0" : "=m" (*(char*)__P) : "a" ((unsigned int)__M), "d" ((unsigned int)(__M >> 32)) : "memory");
 #endif
 }
+#endif
 
+#ifndef _REACTOS_INTRIN_XSAVE64
 __INTRIN_INLINE_XSAVE void _xrstor64(void const *__P, unsigned __int64 __M)
 {
     __builtin_ia32_xrstor64((void*)__P, __M);
 }
+#endif
 
+#ifndef _REACTOS_INTRIN_XSAVE64
 __INTRIN_INLINE_XSAVE void _xrstors64(void const *__P, unsigned __int64 __M)
 {
 #if 0 // Needs newer GCC
@@ -353,6 +366,7 @@ __INTRIN_INLINE_XSAVE void _xrstors64(void const *__P, unsigned __int64 __M)
     __asm__ __volatile__("xrstors %0" : "=m" (*(char*)__P) : "a" ((unsigned int)__M), "d" ((unsigned int)(__M >> 32)) : "memory");
 #endif
 }
+#endif
 #endif // __x86_64__
 
 #ifndef __clang__
