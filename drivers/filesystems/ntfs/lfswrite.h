@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS NTFS driver
  * LICENSE:     GPL-2.0-or-later (see COPYING)
- * PURPOSE:     Experimental LFS emission, disabled by default
+ * PURPOSE:     LFS record layout, emission and restart recovery
  */
 #ifndef NTFS_LFS_WRITE_H
 #define NTFS_LFS_WRITE_H
@@ -53,10 +53,32 @@ C_ASSERT(FIELD_OFFSET(NTFS_LFS_CLIENT_RECORD, ClientName) == 0x20);
 
 #define NTFS_LFS_CLIENT_INDEX_NTFS  0
 #define NTFS_LFS_CLIENT_NAME_NTFS   L"NTFS"
+/* The client record's sequence number, which every record of the client
+ * repeats (ntfs-3g logfile.h LOG_CLIENT_ID.seq_number). */
+#define NTFS_LFS_CLIENT_SEQ_NTFS    1
 
 #define NTFS_LFS_RSTR_MAJOR_VERSION_OFFSET  0x1C
 #define NTFS_LFS_RSTR_MINOR_VERSION_OFFSET  0x1A
 #define NTFS_LFS_SUPPORTED_MAJOR_VERSION    1
+
+/* ntfs-3g logfile.h RECORD_PAGE_HEADER: the header of a log record page. */
+typedef struct _NTFS_LFS_PAGE_HEADER
+{
+    NTFS_RECORD_HEADER Header;  /* "RCRD"; Header.Lsn is the last LSN with
+                                   bytes on this page */
+    ULONG     Flags;
+    USHORT    PageCount;
+    USHORT    PagePosition;
+    USHORT    NextRecordOffset;
+    USHORT    Reserved[3];
+    ULONGLONG LastEndLsn;       /* the last record that ends on this page */
+} NTFS_LFS_PAGE_HEADER, *PNTFS_LFS_PAGE_HEADER;
+
+C_ASSERT(FIELD_OFFSET(NTFS_LFS_PAGE_HEADER, Flags) == 0x10);
+C_ASSERT(FIELD_OFFSET(NTFS_LFS_PAGE_HEADER, NextRecordOffset) == 0x18);
+C_ASSERT(FIELD_OFFSET(NTFS_LFS_PAGE_HEADER, LastEndLsn) == 0x20);
+
+#define NTFS_LFS_PAGE_FLAG_RECORD_END 0x00000001
 
 typedef struct _NTFS_LFS_RECORD_HEADER
 {
@@ -64,33 +86,38 @@ typedef struct _NTFS_LFS_RECORD_HEADER
     ULONGLONG ClientPreviousLsn;
     ULONGLONG ClientUndoNextLsn;
     ULONG     ClientDataLength;
-    USHORT    ClientId;
-    USHORT    Alignment;
+    USHORT    ClientId;         /* LOG_CLIENT_ID.seq_number */
+    USHORT    Alignment;        /* LOG_CLIENT_ID.client_index */
     ULONG     RecordType;
     ULONG     TransactionId;
     USHORT    Flags;
     USHORT    Reserved1[3];
+    /* The NTFS client data starts here, at 0x30. */
     USHORT    RedoOperation;
     USHORT    UndoOperation;
-    USHORT    RedoOffset;
+    USHORT    RedoOffset;       /* from the client data */
     USHORT    RedoLength;
-    USHORT    UndoOffset;
+    USHORT    UndoOffset;       /* from the client data */
     USHORT    UndoLength;
     USHORT    TargetAttribute;
     USHORT    LcnsToFollow;
     USHORT    RecordOffset;
     USHORT    AttributeOffset;
-    USHORT    MftClusterIndex;
-    USHORT    Alignment2;
+    USHORT    MftClusterIndex;  /* 512-byte blocks into TargetVcn */
+    USHORT    Alignment2;       /* ntfs-3g: attribute_flags */
     ULONGLONG TargetVcn;
-
 } NTFS_LFS_RECORD_HEADER, *PNTFS_LFS_RECORD_HEADER;
 
 #include <poppack.h>
 
+C_ASSERT(FIELD_OFFSET(NTFS_LFS_RECORD_HEADER, RedoOperation) == 0x30);
+C_ASSERT(FIELD_OFFSET(NTFS_LFS_RECORD_HEADER, TargetVcn) == 0x48);
+C_ASSERT(sizeof(NTFS_LFS_RECORD_HEADER) == 0x50);
+
 #define NTFS_LFS_RECTYPE_NORMAL        0x00000001
 #define NTFS_LFS_RECTYPE_CHECKPOINT    0x00000002
 
+/* NTFS log operations (ntfs-3g ntfsrecover's table, in order) */
 #define NTFS_LFS_OP_NOOP                       0x00
 #define NTFS_LFS_OP_COMPENSATION_LOG_RECORD    0x01
 #define NTFS_LFS_OP_INITIALIZE_FILE_RECORD_SEGMENT  0x02
@@ -101,36 +128,75 @@ typedef struct _NTFS_LFS_RECORD_HEADER
 #define NTFS_LFS_OP_UPDATE_RESIDENT_VALUE      0x07
 #define NTFS_LFS_OP_UPDATE_NONRESIDENT_VALUE   0x08
 #define NTFS_LFS_OP_UPDATE_MAPPING_PAIRS       0x09
+#define NTFS_LFS_OP_DELETE_DIRTY_CLUSTERS      0x0A
 #define NTFS_LFS_OP_SET_NEW_ATTRIBUTE_SIZES    0x0B
 #define NTFS_LFS_OP_ADD_INDEX_ENTRY_ROOT       0x0C
 #define NTFS_LFS_OP_DELETE_INDEX_ENTRY_ROOT    0x0D
 #define NTFS_LFS_OP_ADD_INDEX_ENTRY_ALLOCATION 0x0E
 #define NTFS_LFS_OP_DELETE_INDEX_ENTRY_ALLOCATION 0x0F
+#define NTFS_LFS_OP_WRITE_END_OF_INDEX_BUFFER  0x10
+#define NTFS_LFS_OP_SET_INDEX_ENTRY_VCN_ROOT   0x11
 #define NTFS_LFS_OP_SET_INDEX_ENTRY_VCN_ALLOCATION 0x12
 #define NTFS_LFS_OP_UPDATE_FILE_NAME_ROOT      0x13
 #define NTFS_LFS_OP_UPDATE_FILE_NAME_ALLOCATION 0x14
 #define NTFS_LFS_OP_SET_BITS_IN_NONRESIDENT_BITMAP 0x15
 #define NTFS_LFS_OP_CLEAR_BITS_IN_NONRESIDENT_BITMAP 0x16
-#define NTFS_LFS_OP_OPEN_NONRESIDENT_ATTRIBUTE 0x1B
-#define NTFS_LFS_OP_FORGET_TRANSACTION         0x20
+#define NTFS_LFS_OP_HOT_FIX                    0x17
+#define NTFS_LFS_OP_END_TOP_LEVEL_ACTION       0x18
+#define NTFS_LFS_OP_PREPARE_TRANSACTION        0x19
+#define NTFS_LFS_OP_COMMIT_TRANSACTION         0x1A
+#define NTFS_LFS_OP_FORGET_TRANSACTION         0x1B
+#define NTFS_LFS_OP_OPEN_NONRESIDENT_ATTRIBUTE 0x1C
+#define NTFS_LFS_OP_OPEN_ATTRIBUTE_TABLE_DUMP  0x1D
+#define NTFS_LFS_OP_ATTRIBUTE_NAMES_DUMP       0x1E
+#define NTFS_LFS_OP_DIRTY_PAGE_TABLE_DUMP      0x1F
+#define NTFS_LFS_OP_TRANSACTION_TABLE_DUMP     0x20
 
 #define NTFS_LFS_RECORD_FLAG_MULTI_PAGE        0x0001
 
+/* ntfs-3g logfile.h ATTRIBUTE_FLAGS: the record's target is a file record */
+#define NTFS_LFS_ACTS_ON_MFT                   0x0002
+
 #define NTFS_LFS_RECORD_HEADER_LENGTH          0x30
 #define NTFS_LFS_ATTR_HEADER_LENGTH            0x20
+/* First record byte of a record page: past the header and the update
+ * sequence array of a 4 KiB page with 512-byte sectors (0x28 + 9 words). */
+#define NTFS_LFS_PAGE_DATA_OFFSET              0x40
+/* LFS 1.1: two restart pages, then two tail-copy pages, then records. */
+#define NTFS_LFS_FIRST_RECORD_PAGE             4
 
+/* The codec builds whole record pages in a staging buffer: every batch of
+ * records starts on a page of its own, so a page that holds an acknowledged
+ * record is never written again within its lap of the log (a torn rewrite
+ * could lose it). */
 typedef struct _LFS_WRITE_CONTEXT
 {
-    PUCHAR    Image;
-    ULONG     ImageLength;
+    ULONG     LogSize;
     ULONG     PageSize;
     ULONG     SectorSize;
     ULONG     FirstRcrdOffset;
     ULONG     SeqNumberBits;
-    ULONGLONG CurrentSeqNumber;
-    ULONG     WriteOffset;
+    ULONGLONG CurrentSeqNumber; /* the sequence of the page at NextPage */
+    ULONG     NextPage;         /* the next batch starts on this page */
     ULONGLONG LastLsn;
+    /* Oldest record still needed: the log space it and later records use
+     * may not be reused.  Zero when no record is needed (none logged yet,
+     * or a checkpoint made all of them unnecessary); the next record
+     * emitted then becomes the oldest. */
+    ULONGLONG OldestLsn;
+    ULONG     LastDataLength;   /* client data length of LastLsn's record */
+    ULONG     NextRestart;      /* restart copy (0 or 1) written next */
+    /* Pages past a batch that must stay reusable too: room kept for the
+     * records that commit transactions. */
+    ULONG     ReservePages;
+    USHORT    RestartUsn;
     USHORT    ClientId;
+    PUCHAR    Stage;            /* StagePages pages */
+    ULONG     StagePages;
+    ULONG     StagedPages;      /* pages the last batch filled */
+    ULONG     StagedFirst;      /* log offset of the first of them */
+    PUCHAR    Scratch;          /* ScratchLength bytes: one formatted record */
+    ULONG     ScratchLength;
 } LFS_WRITE_CONTEXT, *PLFS_WRITE_CONTEXT;
 
 typedef struct _LFS_EMIT_PARAMS
@@ -142,7 +208,6 @@ typedef struct _LFS_EMIT_PARAMS
     const VOID  *UndoData;
     USHORT       UndoLength;
     ULONG        TransactionId;
-    ULONGLONG    ClientPreviousLsn;
     ULONGLONG    ClientUndoNextLsn;
     USHORT       TargetAttribute;
     ULONGLONG    TargetVcn;
@@ -151,7 +216,7 @@ typedef struct _LFS_EMIT_PARAMS
     USHORT       LcnsToFollow;
     const LONGLONG *Lcns;
     USHORT       ClusterBlockOffset;
-    USHORT       TargetBlockSize;
+    USHORT       AttributeFlags;
 } LFS_EMIT_PARAMS, *PLFS_EMIT_PARAMS;
 
 #endif
@@ -174,49 +239,163 @@ NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
                         ULONG LastLsnDataLength,
                         BOOLEAN Clean);
 
+/* The total length of one record carrying these redo and undo lengths. */
+ULONG
+NtfsLfsRecordLength(ULONG RedoLength, ULONG UndoLength, ULONG LcnsToFollow);
+
+/* Pages a staging buffer needs for a batch of BatchBytes record bytes. */
+ULONG
+NtfsLfsStagePages(ULONG PageSize, ULONG BatchBytes);
+
 NTSTATUS
-NtfsLfsInitWriteContext(PDEVICE_EXTENSION Vcb,
-                        PLFS_WRITE_CONTEXT Ctx,
-                        PUCHAR Image,
-                        ULONG ImageLength,
-                        ULONG PageSize);
+NtfsLfsInitWriteContext(PLFS_WRITE_CONTEXT Ctx,
+                        ULONG SectorSize,
+                        ULONG LogSize,
+                        ULONG PageSize,
+                        ULONGLONG LastLsn,
+                        PUCHAR Stage,
+                        ULONG StagePages,
+                        PUCHAR Scratch,
+                        ULONG ScratchLength);
 
 NTSTATUS
 NtfsLfsFormatRecord(PLFS_WRITE_CONTEXT Ctx,
                     const LFS_EMIT_PARAMS *Params,
                     ULONGLONG ThisLsn,
+                    ULONGLONG PreviousLsn,
                     PUCHAR Buffer,
                     ULONG BufferLength,
                     PULONG RecordLengthOut);
 
+/* Lays Count records out on fresh pages of the staging buffer, the first
+ * page at Ctx->NextPage, and returns their LSNs.  STATUS_LOG_FILE_FULL,
+ * with nothing changed, when a page the batch needs still holds a record
+ * at or after OldestLsn. */
 NTSTATUS
-NtfsLfsEmitRecord(PLFS_WRITE_CONTEXT Ctx,
-                  const LFS_EMIT_PARAMS *Params,
-                  PULONGLONG LsnOut);
+NtfsLfsEmitBatch(PLFS_WRITE_CONTEXT Ctx,
+                 const LFS_EMIT_PARAMS *Params,
+                 ULONG Count,
+                 PULONGLONG Lsns);
 
+/* The LSN the next batch's first record will get. */
+ULONGLONG
+NtfsLfsNextLsn(PLFS_WRITE_CONTEXT Ctx);
+
+/* The log offset of staged page Index of the last batch. */
+ULONG
+NtfsLfsStagedPageOffset(PLFS_WRITE_CONTEXT Ctx, ULONG Index);
+
+/* Builds the next restart page (the copies alternate) into Page and returns
+ * its log offset. */
 NTSTATUS
-NtfsLfsWriteRestart(PLFS_WRITE_CONTEXT Ctx,
-                    PDEVICE_EXTENSION Vcb,
-                    BOOLEAN Clean);
+NtfsLfsBuildNextRestart(PLFS_WRITE_CONTEXT Ctx,
+                        BOOLEAN Clean,
+                        PUCHAR Page,
+                        PULONG OffsetOut);
 
 typedef NTSTATUS NTFS_LOG_WRITE_CALLBACK(PDEVICE_EXTENSION Vcb, LONGLONG Offset,
                                           ULONG Length, const PUCHAR Buffer);
 typedef NTFS_LOG_WRITE_CALLBACK *PNTFS_LOG_WRITE_CALLBACK;
-typedef NTSTATUS NTFS_LOG_FLUSH_CALLBACK(PDEVICE_EXTENSION Vcb);
+/* Length 0: makes every write so far durable, the volume stream's cached
+ * ones included.  Otherwise a storage barrier for the direct writes. */
+typedef NTSTATUS NTFS_LOG_FLUSH_CALLBACK(PDEVICE_EXTENSION Vcb, LONGLONG Offset, ULONG Length);
 typedef NTFS_LOG_FLUSH_CALLBACK *PNTFS_LOG_FLUSH_CALLBACK;
-typedef NTSTATUS NTFS_LOG_DIRTY_CALLBACK(PDEVICE_EXTENSION Vcb, BOOLEAN Dirty);
-typedef NTFS_LOG_DIRTY_CALLBACK *PNTFS_LOG_DIRTY_CALLBACK;
+
+/* Log pages buffered before a force writes them. */
+#define NTFS_LOG_QUEUE_PAGES 64
 
 NTSTATUS NtfsLfsCreateWriter(PDEVICE_EXTENSION Vcb, PNTFS_LOG_WRITE_CALLBACK Write,
-                             PNTFS_LOG_FLUSH_CALLBACK Flush,
-                             PNTFS_LOG_DIRTY_CALLBACK SetDirty, PVOID *WriterOut);
+                             PNTFS_LOG_WRITE_CALLBACK WriteDirect,
+                             PNTFS_LOG_FLUSH_CALLBACK Flush, PVOID *WriterOut);
+/* Puts every record logged so far on disk: before a metadata page of the
+ * volume stream is written, and wherever durability is asked for. */
+NTSTATUS NtfsLfsForce(PVOID Writer);
 NTSTATUS NtfsLfsEnableWriter(PVOID Writer);
-NTSTATUS NtfsLfsLogFileRecord(PVOID Writer, ULONGLONG MftIndex, PFILE_RECORD_HEADER Record);
+/* A logged file record whose own write has not been issued yet.  The
+ * caller keeps it from NtfsLfsLogFileRecord until NtfsLfsFileRecordWritten,
+ * which a checkpoint needs to know: until then the record must stay in the
+ * log. */
+typedef struct _NTFS_LOG_PENDING
+{
+    LIST_ENTRY Link;
+    ULONGLONG Lsn;
+} NTFS_LOG_PENDING, *PNTFS_LOG_PENDING;
+
+/* A request in progress on a thread: the records it logs form one
+ * transaction, committed when it ends.  The caller provides the storage
+ * (NtfsDispatch, on its stack); nested requests of the thread join it. */
+typedef struct _NTFS_LOG_REQUEST
+{
+    LIST_ENTRY Link;
+    PKTHREAD Thread;
+    ULONG Session;
+    ULONG TransactionId;        /* 0 until it logs a record */
+    ULONGLONG FirstLsn;         /* its first record */
+    BOOLEAN Joined;             /* nested: the outer request is the one */
+    BOOLEAN Forced;             /* committed early, for a full log */
+} NTFS_LOG_REQUEST, *PNTFS_LOG_REQUEST;
+
+VOID NtfsLfsBeginRequest(PVOID Writer, PNTFS_LOG_REQUEST Request);
+NTSTATUS NtfsLfsEndRequest(PVOID Writer, PNTFS_LOG_REQUEST Request, BOOLEAN ForceLog);
+
+NTSTATUS NtfsLfsLogFileRecord(PVOID Writer, ULONGLONG MftIndex, PFILE_RECORD_HEADER Record,
+                              PNTFS_LOG_PENDING Pending);
+VOID NtfsLfsFileRecordWritten(PVOID Writer, PNTFS_LOG_PENDING Pending);
+/* Around a metadata write the log does not describe: the log then tells
+ * recovery that metadata outside it may be out of date. */
+NTSTATUS NtfsLfsBeginUnloggedWrite(PVOID Writer);
+VOID NtfsLfsEndUnloggedWrite(PVOID Writer);
+
+/* A piece of a non-resident metadata write: volume bytes and where in the
+ * caller's buffer they come from. */
+typedef struct _NTFS_LOG_EXTENT
+{
+    LONGLONG DiskOffset;
+    ULONG Length;
+    ULONG BufferOffset;
+} NTFS_LOG_EXTENT, *PNTFS_LOG_EXTENT;
+
+typedef struct _NTFS_LOG_METADATA_WRITE
+{
+    NTFS_LOG_PENDING Pending;
+    BOOLEAN Unlogged;
+} NTFS_LOG_METADATA_WRITE, *PNTFS_LOG_METADATA_WRITE;
+
+/* The largest non-resident metadata write logged; a larger one (a whole
+ * volume bitmap) is written around NtfsLfsBeginUnloggedWrite. */
+#define NTFS_LOG_MAX_METADATA_WRITE  0x4000
+/* Each record carries at most this much of it, over at most this many
+ * clusters, in at most this many records. */
+#define NTFS_LOG_METADATA_CHUNK      0x1000
+#define NTFS_LOG_METADATA_LCNS       (NTFS_LOG_METADATA_CHUNK / 512 + 2)
+#define NTFS_LOG_METADATA_RECORDS    16
+
+/* Logs the redo and undo images of a non-resident metadata write before it
+ * is issued; NtfsLfsEndMetadataWrite once it has been. */
+NTSTATUS NtfsLfsBeginMetadataWrite(PVOID Writer, const NTFS_LOG_EXTENT *Extents, ULONG Count,
+                                   const UCHAR *Buffer, ULONGLONG Offset,
+                                   PNTFS_LOG_METADATA_WRITE Write);
+VOID NtfsLfsEndMetadataWrite(PVOID Writer, PNTFS_LOG_METADATA_WRITE Write);
+/* Every metadata write issued so far is to be made durable: the records
+ * describing them are no longer needed. */
+NTSTATUS NtfsLfsCheckpoint(PVOID Writer);
 NTSTATUS NtfsLfsFinishWriter(PVOID Writer);
 VOID NtfsLfsDestroyWriter(PVOID Writer);
 
 BOOLEAN NtfsLfsWriterEnabled(PVOID Writer);
 NTSTATUS NtfsLfsSuspendWriter(PVOID Writer);
 NTSTATUS NtfsLfsResumeWriter(PVOID Writer);
+
+/* Restart recovery (lfsrecov.c) */
+typedef struct _NTFS_LOG_RECOVERY_RESULT
+{
+    ULONG Records;          /* records analysed */
+    ULONG Redone;           /* redo images written */
+    ULONG Undone;           /* undo images written */
+    BOOLEAN SystemRecords;  /* a file record below 16 was rewritten */
+    BOOLEAN NeedsCheck;     /* metadata outside the log may be stale */
+} NTFS_LOG_RECOVERY_RESULT, *PNTFS_LOG_RECOVERY_RESULT;
+
+NTSTATUS NtfsLfsRecover(PDEVICE_EXTENSION Vcb, PNTFS_LOG_RECOVERY_RESULT Result);
 
 #endif

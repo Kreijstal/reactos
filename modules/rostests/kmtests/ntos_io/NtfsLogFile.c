@@ -4,8 +4,16 @@
  * PURPOSE:     Black-box $LogFile restart selection and read-only mount tests
  *
  * Only public volume/file requests are used. The fixture changes the first
- * two $LogFile pages on a locked, dismounted throwaway volume and restores
- * their original bytes after the last dismount. No boot sector is changed.
+ * two $LogFile pages, and puts back its $Volume record, on a locked,
+ * dismounted throwaway volume; after the last case the restart pages of a
+ * clean dismount are written back, keeping LSNs increasing. No boot sector
+ * is changed.
+ *
+ * A dirty restart area is recovered at mount; one naming no record this
+ * driver can read cannot be, and the volume then mounts read-only, marked
+ * dirty for chkdsk.  An unsupported log version mounts read-only, not
+ * marked: it is another system's log.  Logging is on, so a read-write
+ * mount leaves both restart pages clean after its dismount.
  */
 #include <kmt_test.h>
 #include "NtfsKmt.h"
@@ -95,6 +103,49 @@ BuildRestart(PUCHAR Page, ULONG SectorSize, ULONGLONG FileSize,
     }
 }
 
+/* Both restart copies valid and clean, as a dismount leaves them. */
+static BOOLEAN
+RestartPairClean(const UCHAR *Pair, ULONG SectorSize)
+{
+    UCHAR Page[LOG_PAGE];
+    ULONG Copy, i;
+    USHORT UsaOffset, UsaCount, Offset, Flags;
+
+    for (Copy = 0; Copy < 2; Copy++)
+    {
+        RtlCopyMemory(Page, Pair + Copy * LOG_PAGE, LOG_PAGE);
+        RtlCopyMemory(&UsaOffset, Page + 4, 2);
+        RtlCopyMemory(&UsaCount, Page + 6, 2);
+        if (RtlCompareMemory(Page, "RSTR", 4) != 4 || UsaCount != LOG_PAGE / SectorSize + 1 ||
+            UsaOffset + 2u * UsaCount > SectorSize)
+        {
+            trace("restart copy %lu: magic %.4s usa %u/%u\n", Copy, Page, UsaOffset, UsaCount);
+            return FALSE;
+        }
+        for (i = 1; i < UsaCount; i++)
+        {
+            if (RtlCompareMemory(Page + i * SectorSize - 2, Page + UsaOffset, 2) != 2)
+            {
+                trace("restart copy %lu: sector %lu torn\n", Copy, i);
+                return FALSE;
+            }
+            RtlCopyMemory(Page + i * SectorSize - 2, Page + UsaOffset + 2 * i, 2);
+        }
+        RtlCopyMemory(&Offset, Page + 0x18, 2);
+        if (Offset > LOG_PAGE - 0x30)
+            return FALSE;
+        RtlCopyMemory(&Flags, Page + Offset + 0xE, 2);
+        if (!(Flags & 2))
+        {
+            ULONGLONG Lsn;
+            RtlCopyMemory(&Lsn, Page + Offset, 8);
+            trace("restart copy %lu: flags %x lsn %I64x\n", Copy, Flags, Lsn);
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 static BOOLEAN
 FindLogLocation(HANDLE Volume, PNTFS_VOLUME_DATA_BUFFER Geometry,
                 PLARGE_INTEGER Offset, PULONGLONG FileSize)
@@ -163,7 +214,19 @@ static BOOLEAN
 DismountLogVolume(HANDLE Volume)
 {
     NTSTATUS Status;
-    Status = NtfsKmtFsctl(Volume, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, NULL);
+    LARGE_INTEGER Delay;
+    ULONG Try;
+
+    /* A volume just mounted can be opened briefly by whoever the mount
+     * notification woke up: the lock waits for that to pass. */
+    Delay.QuadPart = -100 * 10000LL;
+    for (Try = 0; Try < 50; Try++)
+    {
+        Status = NtfsKmtFsctl(Volume, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, NULL);
+        if (Status != STATUS_ACCESS_DENIED)
+            break;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status)) return FALSE;
     Status = NtfsKmtFsctl(Volume, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, NULL);
@@ -172,7 +235,7 @@ DismountLogVolume(HANDLE Volume)
 }
 
 static BOOLEAN
-CheckLogMount(WCHAR Letter, PCWSTR Path, BOOLEAN ReadOnly, PBOOLEAN Dismounted,
+CheckLogMount(WCHAR Letter, PCWSTR Path, BOOLEAN ReadOnly, BOOLEAN MarkedDirty, PBOOLEAN Dismounted,
               PLARGE_INTEGER LogOffset, PUCHAR Pages)
 {
     HANDLE Volume, File = NULL;
@@ -262,8 +325,7 @@ CheckLogMount(WCHAR Letter, PCWSTR Path, BOOLEAN ReadOnly, PBOOLEAN Dismounted,
     {
         if (!ReadOnly)
         {
-            /* Normal data and MFT updates must leave the existing log
-             * untouched while experimental emission is disabled. */
+            /* A logged data and MFT update. */
             Status = NtfsKmtWrite(File, 0, "L", 1, NULL);
             ok_eq_hex(Status, STATUS_SUCCESS);
             Status = NtfsKmtFlush(File);
@@ -302,10 +364,12 @@ CheckLogMount(WCHAR Letter, PCWSTR Path, BOOLEAN ReadOnly, PBOOLEAN Dismounted,
         ok_eq_hex(Status, STATUS_MEDIA_WRITE_PROTECTED);
         Status = NtfsKmtFsctl(Volume, FSCTL_IS_VOLUME_DIRTY, NULL, 0, &Dirty, sizeof(Dirty), NULL);
         ok_eq_hex(Status, STATUS_SUCCESS);
-        ok(!(Dirty & VOLUME_IS_DIRTY), "read-only mount wrote the dirty flag\n");
+        ok(!!(Dirty & VOLUME_IS_DIRTY) == MarkedDirty, "dirty flag %lx, expected %u\n", Dirty, MarkedDirty);
     }
     *Dismounted = DismountLogVolume(Volume);
-    if (*Dismounted)
+    /* A read-write mount logged and left its own clean restart pages: those
+     * are checked as they are. */
+    if (*Dismounted && ReadOnly)
     {
         /* Identical log bytes, written through the same volume handle only
          * after the filesystem is dismounted. No boot sector is touched. */
@@ -329,9 +393,10 @@ START_TEST(NtfsLogFile)
     NTFS_VOLUME_DATA_BUFFER Geometry;
     LARGE_INTEGER Offset;
     ULONGLONG LogSize;
-    PUCHAR Saved = NULL, Pages = NULL, Verify = NULL;
+    PUCHAR Saved = NULL, Pages = NULL, Verify = NULL, Latest = NULL, VolumeRecords = NULL;
+    LARGE_INTEGER VolumeOffset, MirrorOffset;
     ULONG Case;
-    BOOLEAN Dismounted = FALSE, Modified = FALSE;
+    BOOLEAN Dismounted = FALSE, Modified = FALSE, HaveLatest = FALSE, ReadOnly, MarkedDirty;
 
     if (!NtfsKmtFindVolume(Root, &Letter)) { ok(FALSE, "no NTFS fixture volume\n"); return; }
     NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Root, L"kmt_logfile.dat");
@@ -357,13 +422,28 @@ START_TEST(NtfsLogFile)
     Saved = NtfsKmtAlloc(LOG_PAIR);
     Pages = NtfsKmtAlloc(LOG_PAIR);
     Verify = NtfsKmtAlloc(LOG_PAIR);
-    if (Saved == NULL || Pages == NULL || Verify == NULL) goto Cleanup;
+    Latest = NtfsKmtAlloc(LOG_PAIR);
+    VolumeRecords = NtfsKmtAlloc(2 * Geometry.BytesPerFileRecordSegment);
+    if (Saved == NULL || Pages == NULL || Verify == NULL || Latest == NULL || VolumeRecords == NULL ||
+        Geometry.BytesPerFileRecordSegment == 0) goto Cleanup;
+    /* $Volume's record and its mirror: the first MFT extent holds it. */
+    VolumeOffset.QuadPart = Geometry.MftStartLcn.QuadPart * Geometry.BytesPerCluster +
+                            3LL * Geometry.BytesPerFileRecordSegment;
+    MirrorOffset.QuadPart = Geometry.Mft2StartLcn.QuadPart * Geometry.BytesPerCluster +
+                            3LL * Geometry.BytesPerFileRecordSegment;
     Status = NtfsKmtFlush(Volume);
     ok_eq_hex(Status, STATUS_SUCCESS);
     Dismounted = DismountLogVolume(Volume);
     ZwClose(Volume); Volume = NULL;
     if (!Dismounted) goto Cleanup;
     Status = ZwReadFile(Raw, NULL, NULL, NULL, &IoStatus, Saved, LOG_PAIR, &Offset, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    Status = ZwReadFile(Raw, NULL, NULL, NULL, &IoStatus, VolumeRecords,
+                        Geometry.BytesPerFileRecordSegment, &VolumeOffset, NULL);
+    if (NT_SUCCESS(Status))
+        Status = ZwReadFile(Raw, NULL, NULL, NULL, &IoStatus, VolumeRecords + Geometry.BytesPerFileRecordSegment,
+                            Geometry.BytesPerFileRecordSegment, &MirrorOffset, NULL);
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status)) goto Cleanup;
     for (Case = 0; Case < 9; Case++)
@@ -389,20 +469,43 @@ START_TEST(NtfsLogFile)
         Status = WriteLogRequest(Raw, Pages, LOG_PAIR, &Offset);
         ok_eq_hex(Status, STATUS_SUCCESS);
         if (!NT_SUCCESS(Status)) break;
+        /* Each case starts from a volume not marked dirty. */
+        Status = WriteLogRequest(Raw, VolumeRecords, Geometry.BytesPerFileRecordSegment, &VolumeOffset);
+        if (NT_SUCCESS(Status))
+            Status = WriteLogRequest(Raw, VolumeRecords + Geometry.BytesPerFileRecordSegment,
+                                     Geometry.BytesPerFileRecordSegment, &MirrorOffset);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status)) break;
         Status = NtfsKmtFlush(Raw);
         ok_eq_hex(Status, STATUS_SUCCESS);
         if (!NT_SUCCESS(Status)) break;
-        if (!CheckLogMount(Letter, Path, Case == 1 || Case == 2 || Case == 4 ||
-                             Case == 5 || Case == 7 || Case == 8, &Dismounted, &Offset, Pages)) break;
+        ReadOnly = Case == 1 || Case == 2 || Case == 4 || Case == 5 || Case == 7 || Case == 8;
+        /* Unrecoverable logs are chkdsk's; another version is not ours. */
+        MarkedDirty = ReadOnly && Case != 4;
+        if (!CheckLogMount(Letter, Path, ReadOnly, MarkedDirty, &Dismounted, &Offset, Pages)) break;
         Status = ZwReadFile(Raw, NULL, NULL, NULL, &IoStatus, Verify, LOG_PAIR, &Offset, NULL);
         ok_eq_hex(Status, STATUS_SUCCESS);
-        if (NT_SUCCESS(Status))
-            ok(RtlEqualMemory(Pages, Verify, LOG_PAIR), "mount/cleanup changed $LogFile\n");
+        if (NT_SUCCESS(Status) && ReadOnly)
+            ok(RtlEqualMemory(Pages, Verify, LOG_PAIR), "a read-only mount changed $LogFile\n");
+        else if (NT_SUCCESS(Status))
+        {
+            ok(RestartPairClean(Verify, Geometry.BytesPerSector),
+               "a read-write mount did not leave both restart pages clean\n");
+            RtlCopyMemory(Latest, Verify, LOG_PAIR);
+            HaveLatest = TRUE;
+        }
     }
 Cleanup:
     if (Modified && Dismounted)
     {
-        Status = WriteLogRequest(Raw, Saved, LOG_PAIR, &Offset);
+        /* The newest clean restart the driver wrote: the records carry LSNs
+         * up to it. */
+        Status = WriteLogRequest(Raw, HaveLatest ? Latest : Saved, LOG_PAIR, &Offset);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Status = WriteLogRequest(Raw, VolumeRecords, Geometry.BytesPerFileRecordSegment, &VolumeOffset);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Status = WriteLogRequest(Raw, VolumeRecords + Geometry.BytesPerFileRecordSegment,
+                                 Geometry.BytesPerFileRecordSegment, &MirrorOffset);
         ok_eq_hex(Status, STATUS_SUCCESS);
         Status = NtfsKmtFlush(Raw);
         ok_eq_hex(Status, STATUS_SUCCESS);
@@ -415,6 +518,8 @@ Cleanup:
         Status = NtfsKmtDelete(Path);
         ok_eq_hex(Status, STATUS_SUCCESS);
     }
+    NtfsKmtFree(VolumeRecords);
+    NtfsKmtFree(Latest);
     NtfsKmtFree(Verify);
     NtfsKmtFree(Pages);
     NtfsKmtFree(Saved);

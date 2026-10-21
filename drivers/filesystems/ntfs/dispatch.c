@@ -26,7 +26,7 @@
 
 /* INCLUDES *****************************************************************/
 
-#include "ntfs.h"
+#include "lfswrite.h"
 #include <ntddstor.h>
 #include <ntdddisk.h>
 
@@ -121,6 +121,8 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
     PNTFS_VCB Vcb;
     PERESOURCE IoResource = NULL;
     PERESOURCE QuotaResource = NULL;
+    NTFS_LOG_REQUEST LogRequest;
+    PVOID LogWriter = NULL;
     BOOLEAN PromotedTopLevel;
     BOOLEAN QuotaExclusive;
 
@@ -175,6 +177,10 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
             Irp->IoStatus.Information = 0;
             goto Complete;
         }
+        /* The metadata this request logs is one transaction. IoResource
+         * keeps the writer from being torn down under it. */
+        LogWriter = Vcb->LfsWriter;
+        NtfsLfsBeginRequest(LogWriter, &LogRequest);
     }
 
     if (IrpContext->DeviceObject != NtfsGlobalData->DeviceObject &&
@@ -356,6 +362,9 @@ Complete:
         }
         ExReleaseResourceLite(QuotaResource);
     }
+    /* Committed before the request completes. */
+    if (LogWriter != NULL)
+        NtfsLfsEndRequest(LogWriter, &LogRequest, IrpContext->MajorFunction == IRP_MJ_FLUSH_BUFFERS);
     if (IoResource != NULL)
         ExReleaseResourceLite(IoResource);
 

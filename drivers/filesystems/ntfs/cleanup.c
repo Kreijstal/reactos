@@ -26,7 +26,7 @@
 
 /* INCLUDES *****************************************************************/
 
-#include "ntfs.h"
+#include "lfswrite.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -354,6 +354,7 @@ NtfsCleanup(PNTFS_IRP_CONTEXT IrpContext)
     PFILE_OBJECT FileObject;
     NTSTATUS Status;
     PDEVICE_OBJECT DeviceObject;
+    NTFS_LOG_REQUEST LogRequest;
 
     DPRINT("NtfsCleanup() called\n");
 
@@ -374,8 +375,12 @@ NtfsCleanup(PNTFS_IRP_CONTEXT IrpContext)
         return NtfsMarkIrpContextForQueue(IrpContext);
     }
 
+    /* A deletion on close is one transaction.  DirResource keeps the
+     * writer from being torn down under it. */
+    NtfsLfsBeginRequest(DeviceExtension->LfsWriter, &LogRequest);
     Status = NtfsCleanupFile(DeviceExtension, FileObject,
                               BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
+    NtfsLfsEndRequest(DeviceExtension->LfsWriter, &LogRequest, FALSE);
 
     ExReleaseResourceLite(&DeviceExtension->DirResource);
 

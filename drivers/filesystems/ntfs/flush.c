@@ -2,7 +2,7 @@
 
 /* INCLUDES *****************************************************************/
 
-#include "ntfs.h"
+#include "lfswrite.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -48,6 +48,9 @@ NtfsFlushVolume(PDEVICE_EXTENSION Vcb)
 
     if (NT_SUCCESS(Status))
         Status = NtfsFlushDevice(Vcb->StorageDevice);
+    /* Everything logged so far is on disk: a checkpoint. */
+    if (NT_SUCCESS(Status))
+        Status = NtfsLfsCheckpoint(Vcb->LfsWriter);
     return Status;
 }
 
