@@ -8,11 +8,14 @@
  * increasing.  A page is reused only when every record on it is older than
  * the oldest record still needed (the client's OldestLsn).
  *
- * Records are written in batches, and every batch starts on a page of its
- * own: a page that holds a record whose write was acknowledged is never
- * written again in the same lap of the log, so a torn page write can only
- * lose the batch being written.  A record longer than what is left of a
- * page continues after the header of the next page (MULTI_PAGE).
+ * Records are packed: each follows the one before it, in the tail page,
+ * the last page in use.  A record longer than what is left of a page
+ * continues after the header of the next page (MULTI_PAGE); a record starts
+ * only where its header fits.  A page is written to its place in the log
+ * once, when it is full; until then forces write the tail page to the two
+ * tail-copy pages after the restart pages, in turn.  A torn write of a copy
+ * or of the full page then never destroys the only copy of a record whose
+ * write was acknowledged: the other tail copy still holds it.
  *
  * Layout: ntfs-3g logfile.h (RESTART_PAGE_HEADER, RESTART_AREA,
  * LOG_CLIENT_RECORD, RECORD_PAGE_HEADER, LOG_RECORD).
@@ -236,10 +239,40 @@ NtfsLfsStagePages(ULONG PageSize, ULONG BatchBytes)
 {
     ULONG PerPage = PageSize - NTFS_LFS_PAGE_DATA_OFFSET;
 
-    /* A record starts only where its header fits, so each record can leave
-     * up to a header's worth unused at a page end; one page more covers it
-     * for the batches the writer emits (at most a few records). */
-    return (BatchBytes + PerPage - 1) / PerPage + 2;
+    /* The batch can complete the tail page it starts on, every page its
+     * bytes fill, and leave up to a header's worth unused at each page end
+     * (a record starts only where its header fits); the last page is the
+     * tail page. */
+    return (BatchBytes + PerPage - 1) / PerPage + 3;
+}
+
+/* An empty record page. */
+static VOID
+LfsInitRecordPage(PLFS_WRITE_CONTEXT Ctx, PUCHAR Page)
+{
+    PNTFS_LFS_PAGE_HEADER Hdr = (PNTFS_LFS_PAGE_HEADER)Page;
+
+    RtlZeroMemory(Page, Ctx->PageSize);
+    Hdr->Header.Type = LFS_RCRD_MAGIC;
+    Hdr->Header.UsaOffset = LFS_RCRD_USA_OFFSET;
+    Hdr->Header.UsaCount = (USHORT)(Ctx->PageSize / Ctx->SectorSize + 1);
+    Hdr->PageCount = 1;
+    Hdr->PagePosition = 1;
+    Hdr->NextRecordOffset = NTFS_LFS_PAGE_DATA_OFFSET;
+}
+
+/* Applies a page's update sequence array with Usn. */
+static VOID
+LfsFixupPage(PLFS_WRITE_CONTEXT Ctx, PUCHAR Page, USHORT Usn)
+{
+    DEVICE_EXTENSION Shim;
+
+    /* AddFixupArray increments the seed before stamping it, and wants a
+     * Vcb only for the sector size. */
+    *(PUSHORT)(Page + LFS_RCRD_USA_OFFSET) = (USHORT)(Usn - 1);
+    RtlZeroMemory(&Shim, sizeof(Shim));
+    Shim.NtfsInfo.BytesPerSector = Ctx->SectorSize;
+    AddFixupArray(&Shim, (PNTFS_RECORD_HEADER)Page);
 }
 
 NTSTATUS
@@ -255,7 +288,7 @@ NtfsLfsInitWriteContext(PLFS_WRITE_CONTEXT Ctx,
 {
     ULONG OffsetBits;
 
-    if (Ctx == NULL || Stage == NULL || Scratch == NULL || StagePages == 0)
+    if (Ctx == NULL || Stage == NULL || Scratch == NULL || StagePages < 2)
         return STATUS_INVALID_PARAMETER;
     if (SectorSize == 0 || PageSize < SectorSize || (PageSize % SectorSize) != 0 ||
         LFS_RCRD_USA_OFFSET + (PageSize / SectorSize + 1) * sizeof(USHORT) > NTFS_LFS_PAGE_DATA_OFFSET)
@@ -272,18 +305,22 @@ NtfsLfsInitWriteContext(PLFS_WRITE_CONTEXT Ctx,
     Ctx->FirstRcrdOffset = PageSize * NTFS_LFS_FIRST_RECORD_PAGE;
     Ctx->SeqNumberBits = NtfsLfsSeqNumberBits((ULONGLONG)LogSize);
     OffsetBits = 64 - Ctx->SeqNumberBits;
-    /* LSNs keep increasing across sessions: the first record of this one
-     * is in the sequence after the last LSN the restart area named. */
-    Ctx->CurrentSeqNumber = (LastLsn >> OffsetBits) + 1;
+    /* LSNs keep increasing across sessions, and past every record the log
+     * may hold: a session that ended in a crash can have left pages written
+     * past its last record that recovery found, up to a lap ahead of it. */
+    Ctx->CurrentSeqNumber = (LastLsn >> OffsetBits) + 2;
     Ctx->NextPage = Ctx->FirstRcrdOffset;
+    Ctx->TailUsed = NTFS_LFS_PAGE_DATA_OFFSET;
     Ctx->LastLsn = LastLsn;
     Ctx->OldestLsn = 0;
     Ctx->RestartUsn = (USHORT)(LastLsn >> 3);
     Ctx->ClientId = NTFS_LFS_CLIENT_INDEX_NTFS;
     Ctx->Stage = Stage;
     Ctx->StagePages = StagePages;
+    Ctx->Tail = Stage + (StagePages - 1) * PageSize;
     Ctx->Scratch = Scratch;
     Ctx->ScratchLength = ScratchLength;
+    LfsInitRecordPage(Ctx, Ctx->Tail);
     return STATUS_SUCCESS;
 }
 
@@ -385,18 +422,21 @@ LfsPageReusable(PLFS_WRITE_CONTEXT Ctx, ULONG Offset, ULONGLONG SeqNumber)
                                             Offset + Ctx->PageSize);
 }
 
+/* The tail page is full: it is staged, its update sequence array applied
+ * with its lap's number, and the next page becomes the tail page. */
 static VOID
-LfsInitRecordPage(PLFS_WRITE_CONTEXT Ctx, PUCHAR Page, USHORT Count, USHORT Position)
+LfsStageTail(PLFS_WRITE_CONTEXT Ctx)
 {
-    PNTFS_LFS_PAGE_HEADER Hdr = (PNTFS_LFS_PAGE_HEADER)Page;
+    PUCHAR Page = Ctx->Stage + Ctx->StagedPages * Ctx->PageSize;
 
-    RtlZeroMemory(Page, Ctx->PageSize);
-    Hdr->Header.Type = LFS_RCRD_MAGIC;
-    Hdr->Header.UsaOffset = LFS_RCRD_USA_OFFSET;
-    Hdr->Header.UsaCount = (USHORT)(Ctx->PageSize / Ctx->SectorSize + 1);
-    Hdr->PageCount = Count;
-    Hdr->PagePosition = Position;
-    Hdr->NextRecordOffset = NTFS_LFS_PAGE_DATA_OFFSET;
+    ASSERT(Ctx->StagedPages + 1 < Ctx->StagePages);
+    if (Ctx->StagedPages++ == 0)
+        Ctx->StagedFirst = Ctx->NextPage;
+    RtlCopyMemory(Page, Ctx->Tail, Ctx->PageSize);
+    LfsFixupPage(Ctx, Page, LfsPageUsn(Ctx->CurrentSeqNumber));
+    Ctx->NextPage = LfsNextPage(Ctx, Ctx->NextPage, &Ctx->CurrentSeqNumber);
+    Ctx->TailUsed = NTFS_LFS_PAGE_DATA_OFFSET;
+    LfsInitRecordPage(Ctx, Ctx->Tail);
 }
 
 NTSTATUS
@@ -405,134 +445,99 @@ NtfsLfsEmitBatch(PLFS_WRITE_CONTEXT Ctx,
                  ULONG Count,
                  PULONGLONG Lsns)
 {
-    ULONG Pos, Page, Pages, i, Length, Room, Copied, Index, Part, LastPage;
-    ULONGLONG Seq, LastSeq, PreviousLsn, ThisLsn;
-    DEVICE_EXTENSION Shim;
+    ULONG Page, Used, Left, Pages, i, Length, Remaining, Copied, Part;
+    ULONGLONG Seq, PreviousLsn, ThisLsn;
+    PNTFS_LFS_PAGE_HEADER Hdr = (PNTFS_LFS_PAGE_HEADER)(Ctx != NULL ? Ctx->Tail : NULL);
+    PNTFS_LFS_RECORD_HEADER Rec;
     NTSTATUS Status;
 
     if (Ctx == NULL || Ctx->Stage == NULL || Params == NULL || Lsns == NULL || Count == 0)
         return STATUS_INVALID_PARAMETER;
 
-    /* Lay the batch out: pages it needs, each one reusable. */
+    /* Lay the batch out from the tail: the pages it moves on to, each one
+     * reusable, and none the batch already uses. */
+    Pages = (Ctx->LogSize - Ctx->FirstRcrdOffset) / Ctx->PageSize;
     Seq = Ctx->CurrentSeqNumber;
     Page = Ctx->NextPage;
-    Pos = Page + NTFS_LFS_PAGE_DATA_OFFSET;
-    Pages = 1;
-    if (!LfsPageReusable(Ctx, Page, Seq))
+    Used = Ctx->TailUsed;
+    Left = 0;
+    /* An empty tail page is claimed by the first record put on it. */
+    if (Used == NTFS_LFS_PAGE_DATA_OFFSET && !LfsPageReusable(Ctx, Page, Seq))
         return STATUS_LOG_FILE_FULL;
-    for (i = 0; i < Count; i++)
+    for (i = 0; i < Count + Ctx->ReservePages; i++)
     {
-        Length = NtfsLfsRecordLength(Params[i].RedoLength, Params[i].UndoLength,
-                                     Params[i].LcnsToFollow);
-        if (Length > Ctx->ScratchLength)
-            return STATUS_INVALID_PARAMETER;
-        while (Length != 0)
+        if (i < Count)
         {
-            Room = Ctx->PageSize - (Pos - Page);
+            Remaining = NtfsLfsRecordLength(Params[i].RedoLength, Params[i].UndoLength,
+                                            Params[i].LcnsToFollow);
+            if (Remaining > Ctx->ScratchLength)
+                return STATUS_INVALID_PARAMETER;
             /* A record starts only where its header fits. */
-            if (Room == 0 || (Room < NTFS_LFS_RECORD_HEADER_LENGTH &&
-                              Length == NtfsLfsRecordLength(Params[i].RedoLength,
-                                                            Params[i].UndoLength,
-                                                            Params[i].LcnsToFollow)))
-            {
-                Page = LfsNextPage(Ctx, Page, &Seq);
-                Pos = Page + NTFS_LFS_PAGE_DATA_OFFSET;
-                if (++Pages > Ctx->StagePages ||
-                    Pages > (Ctx->LogSize - Ctx->FirstRcrdOffset) / Ctx->PageSize)
-                    return Pages > Ctx->StagePages ? STATUS_INVALID_PARAMETER : STATUS_LOG_FILE_FULL;
-                if (!LfsPageReusable(Ctx, Page, Seq))
-                    return STATUS_LOG_FILE_FULL;
-                continue;
-            }
-            Part = min(Length, Room);
-            Pos += Part;
-            Length -= Part;
+            if (Ctx->PageSize - Used < NTFS_LFS_RECORD_HEADER_LENGTH)
+                Remaining += Ctx->PageSize - Used;
         }
+        else
+        {
+            /* Room left behind the batch for the records that commit: whole
+             * pages past the one it ends on. */
+            Remaining = Ctx->PageSize - Used + 1;
+        }
+        while (Remaining > Ctx->PageSize - Used)
+        {
+            Remaining -= Ctx->PageSize - Used;
+            Page = LfsNextPage(Ctx, Page, &Seq);
+            Used = NTFS_LFS_PAGE_DATA_OFFSET;
+            /* The batch never comes round to the page it started on. */
+            if (++Left >= Pages)
+                return STATUS_LOG_FILE_FULL;
+            if (i < Count && Left >= Ctx->StagePages)
+                return STATUS_INVALID_PARAMETER;
+            if (!LfsPageReusable(Ctx, Page, Seq))
+                return STATUS_LOG_FILE_FULL;
+            if (i >= Count)
+                Remaining = 0;
+        }
+        Used += Remaining;
     }
 
-    /* Room left behind the batch for commits. */
-    for (i = 0, LastPage = Page, LastSeq = Seq; i < Ctx->ReservePages; i++)
-    {
-        LastPage = LfsNextPage(Ctx, LastPage, &LastSeq);
-        if (Pages + i + 1 > (Ctx->LogSize - Ctx->FirstRcrdOffset) / Ctx->PageSize ||
-            !LfsPageReusable(Ctx, LastPage, LastSeq))
-            return STATUS_LOG_FILE_FULL;
-    }
-
-    /* Build the pages: the layout above cannot fail any more. */
-    for (i = 0; i < Pages; i++)
-        LfsInitRecordPage(Ctx, Ctx->Stage + i * Ctx->PageSize, (USHORT)Pages, (USHORT)(i + 1));
-    Seq = Ctx->CurrentSeqNumber;
-    Page = Ctx->NextPage;
-    Pos = Page + NTFS_LFS_PAGE_DATA_OFFSET;
-    Index = 0;
+    /* Pack the records: the layout above cannot fail any more. */
+    Ctx->StagedPages = 0;
     PreviousLsn = Ctx->LastLsn;
     for (i = 0; i < Count; i++)
     {
-        PNTFS_LFS_RECORD_HEADER Rec = (PNTFS_LFS_RECORD_HEADER)Ctx->Scratch;
-        PNTFS_LFS_PAGE_HEADER Hdr;
-
-        Room = Ctx->PageSize - (Pos - Page);
-        if (Room < NTFS_LFS_RECORD_HEADER_LENGTH)
-        {
-            Page = LfsNextPage(Ctx, Page, &Seq);
-            Pos = Page + NTFS_LFS_PAGE_DATA_OFFSET;
-            Index++;
-            Room = Ctx->PageSize - NTFS_LFS_PAGE_DATA_OFFSET;
-        }
-        ThisLsn = NtfsLfsMakeLsn(Ctx->SeqNumberBits, Seq, Pos);
+        if (Ctx->PageSize - Ctx->TailUsed < NTFS_LFS_RECORD_HEADER_LENGTH)
+            LfsStageTail(Ctx);
+        ThisLsn = NtfsLfsMakeLsn(Ctx->SeqNumberBits, Ctx->CurrentSeqNumber, Ctx->NextPage + Ctx->TailUsed);
         Status = NtfsLfsFormatRecord(Ctx, &Params[i], ThisLsn, PreviousLsn,
                                      Ctx->Scratch, Ctx->ScratchLength, &Length);
         ASSERT(NT_SUCCESS(Status));
         if (!NT_SUCCESS(Status))
             return Status;
-        if (Length > Room)
+        Rec = (PNTFS_LFS_RECORD_HEADER)Ctx->Scratch;
+        if (Length > Ctx->PageSize - Ctx->TailUsed)
             Rec->Flags |= NTFS_LFS_RECORD_FLAG_MULTI_PAGE;
         Copied = 0;
         for (;;)
         {
-            Hdr = (PNTFS_LFS_PAGE_HEADER)(Ctx->Stage + Index * Ctx->PageSize);
-            Part = min(Length - Copied, Room);
-            RtlCopyMemory((PUCHAR)Hdr + (Pos - Page), Ctx->Scratch + Copied, Part);
+            Part = min(Length - Copied, Ctx->PageSize - Ctx->TailUsed);
+            RtlCopyMemory(Ctx->Tail + Ctx->TailUsed, Ctx->Scratch + Copied, Part);
             Hdr->Header.Lsn = ThisLsn;
             Copied += Part;
-            Pos += Part;
+            Ctx->TailUsed += Part;
             if (Copied == Length)
             {
                 Hdr->Flags |= NTFS_LFS_PAGE_FLAG_RECORD_END;
                 Hdr->LastEndLsn = ThisLsn;
-                Hdr->NextRecordOffset = (USHORT)(Pos - Page);
+                Hdr->NextRecordOffset = (USHORT)Ctx->TailUsed;
                 break;
             }
-            Page = LfsNextPage(Ctx, Page, &Seq);
-            Pos = Page + NTFS_LFS_PAGE_DATA_OFFSET;
-            Index++;
-            Room = Ctx->PageSize - NTFS_LFS_PAGE_DATA_OFFSET;
+            LfsStageTail(Ctx);
         }
         Lsns[i] = ThisLsn;
         PreviousLsn = ThisLsn;
         Ctx->LastDataLength = Rec->ClientDataLength;
     }
-    ASSERT(Index + 1 == Pages);
-
-    RtlZeroMemory(&Shim, sizeof(Shim));
-    Shim.NtfsInfo.BytesPerSector = Ctx->SectorSize;
-    LastPage = Ctx->NextPage;
-    LastSeq = Ctx->CurrentSeqNumber;
-    for (i = 0; i < Pages; i++)
-    {
-        PNTFS_RECORD_HEADER Hdr = (PNTFS_RECORD_HEADER)(Ctx->Stage + i * Ctx->PageSize);
-
-        if (i != 0)
-            LastPage = LfsNextPage(Ctx, LastPage, &LastSeq);
-        *(PUSHORT)((PUCHAR)Hdr + LFS_RCRD_USA_OFFSET) = (USHORT)(LfsPageUsn(LastSeq) - 1);
-        AddFixupArray(&Shim, Hdr);
-    }
-
-    Ctx->StagedFirst = Ctx->NextPage;
-    Ctx->StagedPages = Pages;
-    Ctx->NextPage = LfsNextPage(Ctx, LastPage, &LastSeq);
-    Ctx->CurrentSeqNumber = LastSeq;
+    ASSERT(Ctx->StagedPages + 1 <= Ctx->StagePages);
     Ctx->LastLsn = PreviousLsn;
     if (Ctx->OldestLsn == 0)
         Ctx->OldestLsn = Lsns[0];
@@ -542,8 +547,31 @@ NtfsLfsEmitBatch(PLFS_WRITE_CONTEXT Ctx,
 ULONGLONG
 NtfsLfsNextLsn(PLFS_WRITE_CONTEXT Ctx)
 {
-    return NtfsLfsMakeLsn(Ctx->SeqNumberBits, Ctx->CurrentSeqNumber,
-                          Ctx->NextPage + NTFS_LFS_PAGE_DATA_OFFSET);
+    ULONGLONG Seq = Ctx->CurrentSeqNumber;
+    ULONG Page = Ctx->NextPage;
+
+    if (Ctx->PageSize - Ctx->TailUsed >= NTFS_LFS_RECORD_HEADER_LENGTH)
+        return NtfsLfsMakeLsn(Ctx->SeqNumberBits, Seq, Page + Ctx->TailUsed);
+    Page = LfsNextPage(Ctx, Page, &Seq);
+    return NtfsLfsMakeLsn(Ctx->SeqNumberBits, Seq, Page + NTFS_LFS_PAGE_DATA_OFFSET);
+}
+
+BOOLEAN
+NtfsLfsTailHasRecords(PLFS_WRITE_CONTEXT Ctx)
+{
+    return Ctx->TailUsed != NTFS_LFS_PAGE_DATA_OFFSET;
+}
+
+VOID
+NtfsLfsBuildTailCopy(PLFS_WRITE_CONTEXT Ctx,
+                     const UCHAR *Image,
+                     ULONG TailOffset,
+                     USHORT Usn,
+                     PUCHAR Page)
+{
+    RtlCopyMemory(Page, Image, Ctx->PageSize);
+    ((PNTFS_LFS_PAGE_HEADER)Page)->Header.Lsn = TailOffset;
+    LfsFixupPage(Ctx, Page, Usn);
 }
 
 ULONG

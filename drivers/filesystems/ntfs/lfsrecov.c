@@ -19,17 +19,23 @@
  * then the volume is flushed and a clean restart area is written.
  *
  * Operations replayed (the ones lfslog.c writes):
+ *   UpdateNonResidentValue / UpdateNonResidentValue
+ *             redo and undo are a range of the bytes of a metadata write
+ *             (file records, index buffers, bitmaps, $Secure, attribute
+ *             lists), as the disk holds them, at AttributeOffset into the
+ *             first of the LCNs listed; they are written in LSN order: a
+ *             range's redo is right over any version of its bytes;
  *   InitializeFileRecordSegment / InitializeFileRecordSegment
  *             redo and undo are whole file record images; the target is
- *             TargetVcn and MftClusterIndex of $MFT, at the LCNs listed;
- *   UpdateNonResidentValue / UpdateNonResidentValue
- *             redo and undo are the bytes of a non-resident metadata write
- *             (index buffers, bitmaps, $Secure, attribute lists) at
- *             AttributeOffset into the first of the LCNs listed; they are
- *             written in LSN order;
+ *             TargetVcn and MftClusterIndex of $MFT, at the LCNs listed
+ *             (logs written before ranges were);
  *   ForgetTransaction / Noop      commits its transaction;
  *   Noop / Noop (no transaction)  metadata outside the log changed after
  *             the last checkpoint: chkdsk must look at the volume.
+ *
+ * A record page is read as the newest valid version of it: the page at its
+ * place in the log, or a tail copy of it (lfs.c), whichever holds the later
+ * record.
  *
  * Anything else, a record that fails a check, or a log with an NTFS restart
  * record (ClientRestartLsn, as Windows writes) is not guessed at: recovery
@@ -52,6 +58,14 @@ typedef struct _LOG_RECORD_INFO
     BOOLEAN Committed;
 } LOG_RECORD_INFO, *PLOG_RECORD_INFO;
 
+/* A tail-copy page, as the mount found it. */
+typedef struct _LOG_TAIL_COPY
+{
+    BOOLEAN Valid;
+    ULONG Offset;               /* of the page it is a copy of */
+    ULONGLONG LastLsn;          /* the last record ending on it */
+} LOG_TAIL_COPY, *PLOG_TAIL_COPY;
+
 typedef struct _LOG_READER
 {
     PDEVICE_EXTENSION Vcb;
@@ -62,6 +76,8 @@ typedef struct _LOG_READER
     ULONG FirstRcrdOffset;
     ULONG SeqNumberBits;
     PUCHAR Page;
+    PUCHAR Tails;               /* the two tail-copy pages, fixups undone */
+    LOG_TAIL_COPY Tail[2];
     PUCHAR Record;              /* the record ReadRecord returned */
     ULONG RecordCapacity;
     PUCHAR Image;               /* one file record */
@@ -70,13 +86,14 @@ typedef struct _LOG_READER
     ULONG Capacity;
 } LOG_READER, *PLOG_READER;
 
+/* Reads the log page at Offset into Page and checks it is a record page. */
 static NTSTATUS
-LogReadPage(PLOG_READER Reader, ULONG Offset, ULONGLONG MinimumLsn)
+LogReadRawPage(PLOG_READER Reader, ULONG Offset, PUCHAR Page)
 {
-    PNTFS_LFS_PAGE_HEADER Hdr = (PNTFS_LFS_PAGE_HEADER)Reader->Page;
+    PNTFS_LFS_PAGE_HEADER Hdr = (PNTFS_LFS_PAGE_HEADER)Page;
     PDEVICE_EXTENSION Vcb = Reader->Vcb;
 
-    if (ReadAttribute(Vcb, Reader->Log, Offset, (PCHAR)Reader->Page, Reader->PageSize) != Reader->PageSize)
+    if (ReadAttribute(Vcb, Reader->Log, Offset, (PCHAR)Page, Reader->PageSize) != Reader->PageSize)
         return STATUS_UNEXPECTED_IO_ERROR;
     if (Hdr->Header.Type != LFS_RCRD_MAGIC ||
         Hdr->Header.UsaCount != Reader->PageSize / Vcb->NtfsInfo.BytesPerSector + 1 ||
@@ -85,9 +102,66 @@ LogReadPage(PLOG_READER Reader, ULONG Offset, ULONGLONG MinimumLsn)
         return STATUS_FILE_CORRUPT_ERROR;
     if (!NT_SUCCESS(FixupUpdateSequenceArray(Vcb, &Hdr->Header)))
         return STATUS_FILE_CORRUPT_ERROR;
+    return STATUS_SUCCESS;
+}
+
+/* The two tail-copy pages: a valid one names the page it copies
+ * (Copy.FileOffset, in Header.Lsn) and the last record ending on it. */
+static VOID
+LogReadTailCopies(PLOG_READER Reader)
+{
+    PNTFS_LFS_PAGE_HEADER Hdr;
+    ULONG Slot;
+
+    for (Slot = 0; Slot < 2; Slot++)
+    {
+        PLOG_TAIL_COPY Tail = &Reader->Tail[Slot];
+        PUCHAR Page = Reader->Tails + Slot * Reader->PageSize;
+
+        RtlZeroMemory(Tail, sizeof(*Tail));
+        Hdr = (PNTFS_LFS_PAGE_HEADER)Page;
+        if (!NT_SUCCESS(LogReadRawPage(Reader, (NTFS_LFS_TAIL_COPY_PAGE + Slot) * Reader->PageSize, Page)) ||
+            Hdr->Header.Lsn < Reader->FirstRcrdOffset || Hdr->Header.Lsn >= Reader->LogSize ||
+            (Hdr->Header.Lsn % Reader->PageSize) != 0 || !(Hdr->Flags & NTFS_LFS_PAGE_FLAG_RECORD_END) ||
+            Hdr->LastEndLsn == 0)
+            continue;
+        Tail->Valid = TRUE;
+        Tail->Offset = (ULONG)Hdr->Header.Lsn;
+        Tail->LastLsn = Hdr->LastEndLsn;
+    }
+}
+
+/* The newest valid version of the record page at Offset that holds bytes
+ * of record MinimumLsn or later: the page itself, or a tail copy of it.
+ * A copy holds the same records as far as it goes, so the version whose
+ * last record is newest holds them all. */
+static NTSTATUS
+LogReadPage(PLOG_READER Reader, ULONG Offset, ULONGLONG MinimumLsn)
+{
+    PNTFS_LFS_PAGE_HEADER Hdr = (PNTFS_LFS_PAGE_HEADER)Reader->Page;
+    ULONGLONG Newest = 0;
+    ULONG Slot, Best = MAXULONG;
+    BOOLEAN Found;
+
     /* A page of an earlier lap holds no byte of the record wanted. */
-    if (Hdr->Header.Lsn < MinimumLsn)
+    Found = NT_SUCCESS(LogReadRawPage(Reader, Offset, Reader->Page)) && Hdr->Header.Lsn >= MinimumLsn;
+    if (Found)
+        Newest = Hdr->Header.Lsn;
+    for (Slot = 0; Slot < 2; Slot++)
+    {
+        PLOG_TAIL_COPY Tail = &Reader->Tail[Slot];
+        if (Tail->Valid && Tail->Offset == Offset && Tail->LastLsn >= MinimumLsn &&
+            (!Found || Tail->LastLsn > Newest))
+        {
+            Found = TRUE;
+            Newest = Tail->LastLsn;
+            Best = Slot;
+        }
+    }
+    if (!Found)
         return STATUS_FILE_CORRUPT_ERROR;
+    if (Best != MAXULONG)
+        RtlCopyMemory(Reader->Page, Reader->Tails + Best * Reader->PageSize, Reader->PageSize);
     return STATUS_SUCCESS;
 }
 
@@ -285,8 +359,9 @@ LogAddRecord(PLOG_READER Reader, PLOG_RECORD_INFO Info)
     return STATUS_SUCCESS;
 }
 
-/* The record after Rec: the next one of its batch right behind it, or the
- * first one of the next batch, at the next page.  0 when neither is one. */
+/* The record after Rec: right behind it, or at the next page where its
+ * header would not fit.  A log written before records were packed started
+ * each batch on a page of its own: the next page is tried too. */
 static ULONGLONG
 LogNextRecord(PLOG_READER Reader, PNTFS_LFS_RECORD_HEADER Rec)
 {
@@ -591,6 +666,32 @@ LogWriteImage(PLOG_READER Reader, PNTFS_LFS_RECORD_HEADER Rec, ULONGLONG Target,
     return Status;
 }
 
+/* Whether a range record writes a byte of the first file records, the
+ * system files' (the mount has read $MFT's and $Volume's). */
+static BOOLEAN
+LogRangeTouchesSystemRecords(PLOG_READER Reader, PNTFS_LFS_RECORD_HEADER Rec)
+{
+    PDEVICE_EXTENSION Vcb = Reader->Vcb;
+    PLONGLONG Lcns = (PLONGLONG)((PUCHAR)Rec + sizeof(NTFS_LFS_RECORD_HEADER));
+    ULONG Bpc = Vcb->NtfsInfo.BytesPerCluster, i;
+    ULONGLONG Vcn, Clusters = ((ULONGLONG)NTFS_FILE_FIRST_USER_FILE * Vcb->NtfsInfo.BytesPerFileRecord + Bpc - 1) / Bpc;
+    LONGLONG Lcn, Count;
+    BOOLEAN Touches = FALSE;
+
+    if (Rec->RedoOperation != NTFS_LFS_OP_UPDATE_NONRESIDENT_VALUE)
+        return FALSE;
+    ExAcquireResourceSharedLite(&Vcb->MftContextResource, TRUE);
+    for (Vcn = 0; Vcn < Clusters && !Touches; Vcn++)
+    {
+        if (!FsRtlLookupLargeMcbEntry(&Vcb->MFTContext->DataRunsMCB, Vcn, &Lcn, &Count, NULL, NULL, NULL) || Lcn < 0)
+            continue;
+        for (i = 0; i < Rec->LcnsToFollow && !Touches; i++)
+            Touches = Lcns[i] == Lcn;
+    }
+    ExReleaseResourceLite(&Vcb->MftContextResource);
+    return Touches;
+}
+
 static NTSTATUS
 LogRedo(PLOG_READER Reader, PNTFS_LOG_RECOVERY_RESULT Result)
 {
@@ -621,6 +722,10 @@ LogRedo(PLOG_READER Reader, PNTFS_LOG_RECOVERY_RESULT Result)
             if (Op->Target < NTFS_FILE_FIRST_USER_FILE)
                 Result->SystemRecords = TRUE;
         }
+        else if (LogRangeTouchesSystemRecords(Reader, Rec))
+        {
+            Result->SystemRecords = TRUE;
+        }
         Status = LogWriteImage(Reader, Rec, Op->Target, TRUE);
         if (!NT_SUCCESS(Status))
             return Status;
@@ -645,13 +750,13 @@ LogUndo(PLOG_READER Reader, PNTFS_LOG_RECOVERY_RESULT Result)
         Status = LogReadRecord(Reader, Op->Lsn, &Rec);
         if (!NT_SUCCESS(Status))
             return Status;
+        if ((Op->RedoOperation == NTFS_LFS_OP_INITIALIZE_FILE_RECORD_SEGMENT &&
+             Op->Target < NTFS_FILE_FIRST_USER_FILE) || LogRangeTouchesSystemRecords(Reader, Rec))
+            Result->SystemRecords = TRUE;
         Status = LogWriteImage(Reader, Rec, Op->Target, FALSE);
         if (!NT_SUCCESS(Status))
             return Status;
         Result->Undone++;
-        if (Op->RedoOperation == NTFS_LFS_OP_INITIALIZE_FILE_RECORD_SEGMENT &&
-            Op->Target < NTFS_FILE_FIRST_USER_FILE)
-            Result->SystemRecords = TRUE;
     }
     return STATUS_SUCCESS;
 }
@@ -738,9 +843,11 @@ NtfsLfsRecover(PDEVICE_EXTENSION Vcb, PNTFS_LOG_RECOVERY_RESULT Result)
 
     Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     Reader.Page = ExAllocatePoolWithTag(PagedPool, PAGE_SIZE, TAG_NTFS);
+    Reader.Tails = ExAllocatePoolWithTag(PagedPool, 2 * PAGE_SIZE, TAG_NTFS);
     Reader.Record = ExAllocatePoolWithTag(PagedPool, Reader.RecordCapacity, TAG_NTFS);
     Reader.Image = ExAllocatePoolWithTag(PagedPool, Vcb->NtfsInfo.BytesPerFileRecord, TAG_NTFS);
-    if (Record == NULL || Reader.Page == NULL || Reader.Record == NULL || Reader.Image == NULL)
+    if (Record == NULL || Reader.Page == NULL || Reader.Tails == NULL || Reader.Record == NULL ||
+        Reader.Image == NULL)
     {
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Cleanup;
@@ -758,6 +865,7 @@ NtfsLfsRecover(PDEVICE_EXTENSION Vcb, PNTFS_LOG_RECOVERY_RESULT Result)
     }
 
     /* Nothing is written until every record checked out. */
+    LogReadTailCopies(&Reader);
     Status = LogAnalyse(&Reader, Result);
     if (NT_SUCCESS(Status))
         Status = LogCheckUndo(&Reader);
@@ -784,6 +892,7 @@ Cleanup:
     if (Reader.Image != NULL) ExFreePoolWithTag(Reader.Image, TAG_NTFS);
     if (Reader.Record != NULL) ExFreePoolWithTag(Reader.Record, TAG_NTFS);
     if (Reader.Page != NULL) ExFreePoolWithTag(Reader.Page, TAG_NTFS);
+    if (Reader.Tails != NULL) ExFreePoolWithTag(Reader.Tails, TAG_NTFS);
     if (Record != NULL) ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
     return Status;
 }
