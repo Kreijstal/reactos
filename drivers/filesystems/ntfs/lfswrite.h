@@ -326,9 +326,12 @@ typedef NTFS_LOG_FLUSH_CALLBACK *PNTFS_LOG_FLUSH_CALLBACK;
 
 NTSTATUS NtfsLfsCreateWriter(PDEVICE_EXTENSION Vcb, PNTFS_LOG_WRITE_CALLBACK WriteDirect,
                              PNTFS_LOG_FLUSH_CALLBACK Flush, PVOID *WriterOut);
-/* Puts every record logged so far on disk: before a metadata page of the
- * volume stream is written, and wherever durability is asked for. */
+/* Puts every record logged so far on disk, wherever durability is asked
+ * for. */
 NTSTATUS NtfsLfsForce(PVOID Writer);
+/* Before Length bytes of the volume stream at Offset are written: puts on
+ * disk every record of a change they may hold. */
+NTSTATUS NtfsLfsForceRange(PVOID Writer, LONGLONG Offset, ULONG Length);
 NTSTATUS NtfsLfsEnableWriter(PVOID Writer);
 /* Volume bytes a logged write changes. */
 typedef struct _NTFS_LOG_DIRTY
