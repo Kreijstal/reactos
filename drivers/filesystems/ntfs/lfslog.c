@@ -3,11 +3,14 @@
  * LICENSE:     GPL-2.0-or-later (see COPYING)
  * PURPOSE:     $LogFile write-ahead logging of file records
  *
- * Metadata is logged before it is written: a file record update as an
- * InitializeFileRecordSegment record carrying its after image (redo) and
- * before image (undo), any other non-resident metadata write (index
- * buffers, bitmaps, $Secure, attribute lists) as UpdateNonResidentValue
- * records carrying the bytes written and the bytes they replace.
+ * Metadata is logged before it is written: a file record update, or any
+ * other non-resident metadata write (index buffers, bitmaps, $Secure,
+ * attribute lists, $MFTMirr), as UpdateNonResidentValue records, each
+ * carrying a range of the bytes the write changes (redo) and the bytes they
+ * replace (undo), at the clusters they go to.  The bytes are the ones the
+ * disk holds, update sequence arrays applied: a range's redo is right over
+ * any version of its bytes, even a torn write, so recovery replays them
+ * without reading what is there.
  *
  * As LFS does, records are buffered and packed: they fill the tail page
  * (lfs.c), the pages a batch fills go onto a queue, and the log is forced
@@ -728,15 +731,12 @@ NtfsLfsEnableWriter(PVOID Context)
         Status = STATUS_NOT_SUPPORTED;
         goto Cleanup;
     }
-    /* The largest batches: a file record's redo and undo images with the
-     * clusters it spans and the record that commits it, or a metadata write
-     * in its records. */
-    Scratch = max(NtfsLfsRecordLength(Vcb->NtfsInfo.BytesPerFileRecord, Vcb->NtfsInfo.BytesPerFileRecord,
-                                      Vcb->NtfsInfo.BytesPerFileRecord / Vcb->NtfsInfo.BytesPerCluster + 2),
-                  NtfsLfsRecordLength(NTFS_LOG_METADATA_CHUNK, NTFS_LOG_METADATA_CHUNK,
-                                      NTFS_LOG_METADATA_LCNS));
-    Batch = max(Scratch, 2 * NTFS_LOG_MAX_METADATA_WRITE +
-                         NTFS_LOG_METADATA_RECORDS * NtfsLfsRecordLength(0, 0, NTFS_LOG_METADATA_LCNS)) +
+    /* The largest record carries a chunk of changed bytes; the largest
+     * batch, the changes of the largest write logged in its records (a
+     * file record is smaller), and the record that commits it. */
+    Scratch = NtfsLfsRecordLength(NTFS_LOG_METADATA_CHUNK, NTFS_LOG_METADATA_CHUNK, NTFS_LOG_METADATA_LCNS);
+    Batch = 2 * max(NTFS_LOG_MAX_CHANGED, Vcb->NtfsInfo.BytesPerFileRecord) +
+            NTFS_LOG_BATCH_RECORDS * NtfsLfsRecordLength(0, 0, NTFS_LOG_METADATA_LCNS) +
             NtfsLfsRecordLength(0, 0, 0);
     Pages = NtfsLfsStagePages(PAGE_SIZE, Batch);
     Writer->Codec.Stage = ExAllocatePoolWithTag(PagedPool, Pages * PAGE_SIZE, TAG_NTFS);
@@ -785,18 +785,123 @@ Cleanup:
     return Status;
 }
 
+/* The records of one logged write: each carries a range of bytes the write
+ * changes, redo the new bytes, undo the old ones. */
+typedef struct _NTFS_LOG_BATCH
+{
+    ULONG Count;
+    LFS_EMIT_PARAMS Params[NTFS_LOG_BATCH_RECORDS + 1];
+    LONGLONG Lcns[NTFS_LOG_BATCH_RECORDS][NTFS_LOG_METADATA_LCNS];
+    ULONGLONG Lsns[NTFS_LOG_BATCH_RECORDS + 1];
+} NTFS_LOG_BATCH, *PNTFS_LOG_BATCH;
+
+/* Bytes that differ are logged in ranges; ranges closer than this are
+ * logged as one, cheaper than a record header between them. */
+#define NTFS_LOG_RANGE_GAP 64
+
+/* Where New differs from Old, outside [SkipStart, SkipStart + SkipLength),
+ * in ranges at least Gap apart: into Starts/Ends while there is room.
+ * Returns the records they take (a record carries at most a chunk). */
+static ULONG
+NtfsLogDiff(const UCHAR *Old, const UCHAR *New, ULONG Length, ULONG SkipStart, ULONG SkipLength,
+            ULONG Gap, PULONG Starts, PULONG Ends, ULONG Room, PULONG RangesOut)
+{
+    ULONG i = 0, Start, End, Ranges = 0, Records = 0;
+
+    for (;;)
+    {
+        while (i < Length && (Old[i] == New[i] || (i >= SkipStart && i - SkipStart < SkipLength)))
+            i++;
+        if (i == Length)
+            break;
+        Start = i;
+        End = i + 1;
+        for (i++; i < Length && i - End < Gap; i++)
+        {
+            if (Old[i] != New[i] && !(i >= SkipStart && i - SkipStart < SkipLength))
+                End = i + 1;
+        }
+        i = End;
+        if (Ranges < Room)
+        {
+            Starts[Ranges] = Start;
+            Ends[Ranges] = End;
+        }
+        Ranges++;
+        Records += (End - Start + NTFS_LOG_METADATA_CHUNK - 1) / NTFS_LOG_METADATA_CHUNK;
+    }
+    *RangesOut = Ranges;
+    return Records;
+}
+
+/* Adds the records of the bytes where New differs from Old, the Length
+ * bytes Within bytes into cluster Vcn of an attribute, at the clusters Lcns
+ * lists (or, with no list, the ones from FirstLcn on), in what is left of
+ * the batch's records and of the bytes it may carry (*Bytes).  FALSE when
+ * they do not fit. */
+static BOOLEAN
+NtfsLogAddRanges(PNTFS_LOG_BATCH Batch, ULONG Bpc, const UCHAR *Old, const UCHAR *New, ULONG Length,
+                 ULONG SkipStart, ULONG SkipLength, ULONGLONG Vcn, ULONG Within, const LONGLONG *Lcns,
+                 LONGLONG FirstLcn, PULONG Bytes)
+{
+    ULONG Starts[NTFS_LOG_BATCH_RECORDS], Ends[NTFS_LOG_BATCH_RECORDS];
+    ULONG Gap, Ranges, Records, Changed, r, k, Done, Part, At, Cluster;
+
+    /* Ranges merged further apart take fewer records, more bytes. */
+    for (Gap = NTFS_LOG_RANGE_GAP; ; Gap *= 2)
+    {
+        Records = NtfsLogDiff(Old, New, Length, SkipStart, SkipLength, Gap, Starts, Ends,
+                              RTL_NUMBER_OF(Starts), &Ranges);
+        if (Records <= NTFS_LOG_BATCH_RECORDS - Batch->Count && Ranges <= RTL_NUMBER_OF(Starts))
+            break;
+        if (Gap >= Length)
+            return FALSE;
+    }
+    for (r = 0, Changed = 0; r < Ranges; r++)
+        Changed += Ends[r] - Starts[r];
+    if (Changed > *Bytes)
+        return FALSE;
+    *Bytes -= Changed;
+    for (r = 0; r < Ranges; r++)
+    {
+        for (Done = Starts[r]; Done < Ends[r]; Done += Part)
+        {
+            PLFS_EMIT_PARAMS P = &Batch->Params[Batch->Count];
+            PLONGLONG L = Batch->Lcns[Batch->Count];
+
+            ASSERT(Batch->Count < NTFS_LOG_BATCH_RECORDS);
+            Part = min(Ends[r] - Done, NTFS_LOG_METADATA_CHUNK);
+            At = Within + Done;
+            Cluster = At / Bpc;
+            RtlZeroMemory(P, sizeof(*P));
+            P->RedoOperation = P->UndoOperation = NTFS_LFS_OP_UPDATE_NONRESIDENT_VALUE;
+            P->RedoData = New + Done;
+            P->UndoData = Old + Done;
+            P->RedoLength = P->UndoLength = (USHORT)Part;
+            P->TargetVcn = Vcn + Cluster;
+            P->AttributeOffset = (USHORT)(At % Bpc);
+            P->LcnsToFollow = (USHORT)((At % Bpc + Part + Bpc - 1) / Bpc);
+            ASSERT(P->LcnsToFollow <= NTFS_LOG_METADATA_LCNS);
+            for (k = 0; k < P->LcnsToFollow; k++)
+                L[k] = Lcns != NULL ? Lcns[Cluster + k] : FirstLcn + Cluster + k;
+            P->Lcns = L;
+            Batch->Count++;
+        }
+    }
+    return TRUE;
+}
+
 NTSTATUS
-NtfsLfsLogFileRecord(PVOID Context, ULONGLONG MftIndex, PFILE_RECORD_HEADER Record,
+NtfsLfsLogFileRecord(PVOID Context, ULONGLONG MftIndex, PFILE_RECORD_HEADER Image,
                      PNTFS_LOG_PENDING Pending)
 {
     PNTFS_LOG_WRITER Writer = Context;
     PDEVICE_EXTENSION Vcb;
-    PFILE_RECORD_HEADER Before;
-    LFS_EMIT_PARAMS Params[2];
-    LONGLONG Lcn, RunLength, LastVcn;
-    LONGLONG Lcns[16];
-    ULONGLONG ByteOffset, Lsns[2];
-    ULONG Count, i;
+    PUCHAR Before = NULL;
+    PNTFS_LOG_BATCH Batch = NULL;
+    LONGLONG Lcn, RunLength, Lcns[16];
+    ULONGLONG ByteOffset, FirstVcn, LastVcn;
+    ULONG Count, Bpc, Size, Within, Done, Part, i, Bytes = MAXULONG;
     NTSTATUS Status;
     KIRQL OldIrql;
 
@@ -804,31 +909,19 @@ NtfsLfsLogFileRecord(PVOID Context, ULONGLONG MftIndex, PFILE_RECORD_HEADER Reco
     if (Writer == NULL || !Writer->Enabled || (Writer->InIo && ExIsResourceAcquiredExclusiveLite(&Writer->Resource)))
         return STATUS_SUCCESS;
     Vcb = Writer->Vcb;
-    RtlZeroMemory(Params, sizeof(Params));
-    ByteOffset = MftIndex * Vcb->NtfsInfo.BytesPerFileRecord;
-    Params[0].TargetVcn = ByteOffset / Vcb->NtfsInfo.BytesPerCluster;
-    LastVcn = (ByteOffset + Vcb->NtfsInfo.BytesPerFileRecord - 1) / Vcb->NtfsInfo.BytesPerCluster;
-    Count = (ULONG)(LastVcn - Params[0].TargetVcn + 1);
+    Bpc = Vcb->NtfsInfo.BytesPerCluster;
+    Size = Vcb->NtfsInfo.BytesPerFileRecord;
+    ByteOffset = MftIndex * Size;
+    FirstVcn = ByteOffset / Bpc;
+    Within = (ULONG)(ByteOffset % Bpc);
+    LastVcn = (ByteOffset + Size - 1) / Bpc;
+    Count = (ULONG)(LastVcn - FirstVcn + 1);
     if (Count > RTL_NUMBER_OF(Lcns))
         return STATUS_NOT_SUPPORTED;
-    Before = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
-    if (Before == NULL) return STATUS_INSUFFICIENT_RESOURCES;
-    /* Capture before taking the writer resource: other metadata writers can
-     * own MftContextResource while waiting for this writer. A slot the MFT
-     * bitmap just handed out may never have been initialized, and a new
-     * extent of the MFT holds whatever its clusters held: no record was
-     * there, and the undo image is zeroes, a slot never used. */
-    Status = NtfsReadFileRecordEx(Vcb, MftIndex, Before, TRUE);
-    if (Status == STATUS_FILE_CORRUPT_ERROR)
-    {
-        RtlZeroMemory(Before, Vcb->NtfsInfo.BytesPerFileRecord);
-        Status = STATUS_SUCCESS;
-    }
-    if (!NT_SUCCESS(Status)) goto FreeBefore;
     ExAcquireResourceSharedLite(&Vcb->MftContextResource, TRUE);
-    for (i = 0; i < Count; i++)
+    for (i = 0, Status = STATUS_SUCCESS; i < Count; i++)
     {
-        if (!FsRtlLookupLargeMcbEntry(&Vcb->MFTContext->DataRunsMCB, Params[0].TargetVcn + i,
+        if (!FsRtlLookupLargeMcbEntry(&Vcb->MFTContext->DataRunsMCB, FirstVcn + i,
                                       &Lcn, &RunLength, NULL, NULL, NULL) || Lcn < 0)
         {
             Status = STATUS_FILE_CORRUPT_ERROR;
@@ -837,31 +930,57 @@ NtfsLfsLogFileRecord(PVOID Context, ULONGLONG MftIndex, PFILE_RECORD_HEADER Reco
         Lcns[i] = Lcn;
     }
     ExReleaseResourceLite(&Vcb->MftContextResource);
-    if (!NT_SUCCESS(Status)) goto FreeBefore;
-    Params[0].RedoOperation = NTFS_LFS_OP_INITIALIZE_FILE_RECORD_SEGMENT;
-    Params[0].UndoOperation = NTFS_LFS_OP_INITIALIZE_FILE_RECORD_SEGMENT;
-    Params[0].RedoData = Record;
-    Params[0].UndoData = Before;
-    Params[0].RedoLength = Params[0].UndoLength = (USHORT)Vcb->NtfsInfo.BytesPerFileRecord;
-    Params[0].LcnsToFollow = (USHORT)Count;
-    Params[0].Lcns = Lcns;
-    Params[0].ClusterBlockOffset = (USHORT)((ByteOffset % Vcb->NtfsInfo.BytesPerCluster) / 512);
-    Params[0].AttributeFlags = NTFS_LFS_ACTS_ON_MFT;
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Before = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    Batch = ExAllocatePoolWithTag(PagedPool, sizeof(*Batch), TAG_NTFS);
+    if (Before == NULL || Batch == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+    /* The bytes the write replaces, as the volume holds them: read before
+     * taking the writer resource, which other metadata writers can wait
+     * for while they own MftContextResource.  A slot never initialized, or
+     * a new extent of the MFT, holds what its clusters held. */
+    for (i = 0, Done = 0; NT_SUCCESS(Status) && Done < Size; i++, Done += Part)
+    {
+        Part = min(Bpc - (i == 0 ? Within : 0), Size - Done);
+        Status = NtfsReadDiskCached(Vcb, Lcns[i] * Bpc + (i == 0 ? Within : 0), Part, Before + Done);
+    }
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    /* The changed bytes, but for the record's LSN, stamped once it is
+     * known: it has no part in replaying the record. */
+    Batch->Count = 0;
+    if (!NtfsLogAddRanges(Batch, Bpc, Before, (const UCHAR *)Image, Size,
+                          FIELD_OFFSET(NTFS_RECORD_HEADER, Lsn), sizeof(ULONGLONG),
+                          FirstVcn, Within, Lcns, 0, &Bytes))
+    {
+        /* A file record's chunks always fit. */
+        ASSERT(FALSE);
+        Status = STATUS_INTERNAL_ERROR;
+        goto Cleanup;
+    }
+    if (Batch->Count == 0)
+        goto Cleanup;
     ExAcquireResourceExclusiveLite(&Writer->Resource, TRUE);
     Writer->InIo = TRUE;
-    Status = NtfsLogEmitOwn(Writer, Params, 1, Lsns);
+    Status = NtfsLogEmitOwn(Writer, Batch->Params, Batch->Count, Batch->Lsns);
     if (NT_SUCCESS(Status))
     {
-        Record->Ntfs.Lsn = Lsns[0];
-        Pending->Lsn = Lsns[0];
+        Pending->Lsn = Batch->Lsns[0];
         KeAcquireSpinLock(&Writer->PendingLock, &OldIrql);
         InsertTailList(&Writer->PendingList, &Pending->Link);
         KeReleaseSpinLock(&Writer->PendingLock, OldIrql);
     }
     Writer->InIo = FALSE;
     ExReleaseResourceLite(&Writer->Resource);
-FreeBefore:
-    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Before);
+Cleanup:
+    if (Batch != NULL)
+        ExFreePoolWithTag(Batch, TAG_NTFS);
+    if (Before != NULL)
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Before);
     return Status;
 }
 
@@ -869,17 +988,13 @@ NTSTATUS
 NtfsLfsBeginMetadataWrite(PVOID Context, const NTFS_LOG_EXTENT *Extents, ULONG Count,
                           const UCHAR *Buffer, ULONGLONG Offset, PNTFS_LOG_METADATA_WRITE Write)
 {
-    struct
-    {
-        LFS_EMIT_PARAMS Params[NTFS_LOG_METADATA_RECORDS + 1];
-        LONGLONG Lcns[NTFS_LOG_METADATA_RECORDS][NTFS_LOG_METADATA_LCNS];
-        ULONGLONG Lsns[NTFS_LOG_METADATA_RECORDS + 1];
-        UCHAR Undo[NTFS_LOG_MAX_METADATA_WRITE];
-    } *Batch;
     PNTFS_LOG_WRITER Writer = Context;
     PDEVICE_EXTENSION Vcb;
-    ULONG Total = 0, Records = 0, i, k, Done, Part, Within, Bpc;
-    NTSTATUS Status;
+    PNTFS_LOG_BATCH Batch = NULL;
+    PUCHAR Undo = NULL;
+    ULONG Total = 0, Bytes = NTFS_LOG_MAX_CHANGED, i, Bpc;
+    BOOLEAN Fits = TRUE;
+    NTSTATUS Status = STATUS_SUCCESS;
     KIRQL OldIrql;
 
     Write->Pending.Lsn = 0;
@@ -889,56 +1004,50 @@ NtfsLfsBeginMetadataWrite(PVOID Context, const NTFS_LOG_EXTENT *Extents, ULONG C
     Vcb = Writer->Vcb;
     Bpc = Vcb->NtfsInfo.BytesPerCluster;
     for (i = 0; i < Count; i++)
-    {
         Total += Extents[i].Length;
-        Records += (Extents[i].Length + NTFS_LOG_METADATA_CHUNK - 1) / NTFS_LOG_METADATA_CHUNK;
-    }
-    if (Total > NTFS_LOG_MAX_METADATA_WRITE || Records > NTFS_LOG_METADATA_RECORDS)
-    {
-        Status = NtfsLfsBeginUnloggedWrite(Writer);
-        Write->Unlogged = NT_SUCCESS(Status);
-        return Status;
-    }
     if (Total == 0)
         return STATUS_SUCCESS;
-
-    /* The undo images: what the bytes hold now. */
-    Batch = ExAllocatePoolWithTag(PagedPool, sizeof(*Batch), TAG_NTFS);
-    if (Batch == NULL)
-        return STATUS_INSUFFICIENT_RESOURCES;
-    RtlZeroMemory(Batch->Params, sizeof(Batch->Params));
-    Records = 0;
-    Total = 0;
-    for (i = 0; i < Count; i++)
+    if (Total <= NTFS_LOG_MAX_METADATA_WRITE && Count <= NTFS_LOG_METADATA_EXTENTS)
     {
-        Status = NtfsReadDiskCached(Vcb, Extents[i].DiskOffset, Extents[i].Length, Batch->Undo + Total);
-        if (!NT_SUCCESS(Status))
-            goto Cleanup;
-        for (Done = 0; Done < Extents[i].Length; Done += Part, Records++)
+        Batch = ExAllocatePoolWithTag(PagedPool, sizeof(*Batch), TAG_NTFS);
+        Undo = ExAllocatePoolWithTag(PagedPool, Total, TAG_NTFS);
+        if (Batch == NULL || Undo == NULL)
         {
-            PLFS_EMIT_PARAMS P = &Batch->Params[Records];
-            LONGLONG Disk = Extents[i].DiskOffset + Done;
-
-            Part = min(Extents[i].Length - Done, NTFS_LOG_METADATA_CHUNK);
-            Within = (ULONG)(Disk % Bpc);
-            P->RedoOperation = P->UndoOperation = NTFS_LFS_OP_UPDATE_NONRESIDENT_VALUE;
-            P->RedoData = Buffer + Extents[i].BufferOffset + Done;
-            P->UndoData = Batch->Undo + Total + Done;
-            P->RedoLength = P->UndoLength = (USHORT)Part;
-            P->TargetVcn = (Offset + Extents[i].BufferOffset + Done) / Bpc;
-            P->AttributeOffset = (USHORT)Within;
-            P->LcnsToFollow = (USHORT)((Within + Part + Bpc - 1) / Bpc);
-            ASSERT(P->LcnsToFollow <= NTFS_LOG_METADATA_LCNS);
-            for (k = 0; k < P->LcnsToFollow; k++)
-                Batch->Lcns[Records][k] = Disk / Bpc + k;
-            P->Lcns = Batch->Lcns[Records];
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Cleanup;
         }
-        Total += Extents[i].Length;
+        /* The bytes the write replaces, and the ranges of them it changes. */
+        Batch->Count = 0;
+        for (i = 0, Total = 0; Fits && i < Count; i++)
+        {
+            Status = NtfsReadDiskCached(Vcb, Extents[i].DiskOffset, Extents[i].Length, Undo + Total);
+            if (!NT_SUCCESS(Status))
+                goto Cleanup;
+            Fits = NtfsLogAddRanges(Batch, Bpc, Undo + Total, Buffer + Extents[i].BufferOffset,
+                                    Extents[i].Length, 0, 0, (Offset + Extents[i].BufferOffset) / Bpc,
+                                    (ULONG)(Extents[i].DiskOffset % Bpc), NULL, Extents[i].DiskOffset / Bpc,
+                                    &Bytes);
+            Total += Extents[i].Length;
+        }
     }
+    else
+    {
+        Fits = FALSE;
+    }
+    if (!Fits)
+    {
+        /* Too large or too scattered a change to log (a whole volume
+         * bitmap): the volume is checked after a crash. */
+        Status = NtfsLfsBeginUnloggedWrite(Writer);
+        Write->Unlogged = NT_SUCCESS(Status);
+        goto Cleanup;
+    }
+    if (Batch->Count == 0)
+        goto Cleanup;
 
     ExAcquireResourceExclusiveLite(&Writer->Resource, TRUE);
     Writer->InIo = TRUE;
-    Status = NtfsLogEmitOwn(Writer, Batch->Params, Records, Batch->Lsns);
+    Status = NtfsLogEmitOwn(Writer, Batch->Params, Batch->Count, Batch->Lsns);
     if (NT_SUCCESS(Status))
     {
         Write->Pending.Lsn = Batch->Lsns[0];
@@ -949,7 +1058,10 @@ NtfsLfsBeginMetadataWrite(PVOID Context, const NTFS_LOG_EXTENT *Extents, ULONG C
     Writer->InIo = FALSE;
     ExReleaseResourceLite(&Writer->Resource);
 Cleanup:
-    ExFreePoolWithTag(Batch, TAG_NTFS);
+    if (Undo != NULL)
+        ExFreePoolWithTag(Undo, TAG_NTFS);
+    if (Batch != NULL)
+        ExFreePoolWithTag(Batch, TAG_NTFS);
     return Status;
 }
 

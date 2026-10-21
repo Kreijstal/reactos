@@ -19,14 +19,16 @@
  * then the volume is flushed and a clean restart area is written.
  *
  * Operations replayed (the ones lfslog.c writes):
+ *   UpdateNonResidentValue / UpdateNonResidentValue
+ *             redo and undo are a range of the bytes of a metadata write
+ *             (file records, index buffers, bitmaps, $Secure, attribute
+ *             lists), as the disk holds them, at AttributeOffset into the
+ *             first of the LCNs listed; they are written in LSN order: a
+ *             range's redo is right over any version of its bytes;
  *   InitializeFileRecordSegment / InitializeFileRecordSegment
  *             redo and undo are whole file record images; the target is
- *             TargetVcn and MftClusterIndex of $MFT, at the LCNs listed;
- *   UpdateNonResidentValue / UpdateNonResidentValue
- *             redo and undo are the bytes of a non-resident metadata write
- *             (index buffers, bitmaps, $Secure, attribute lists) at
- *             AttributeOffset into the first of the LCNs listed; they are
- *             written in LSN order;
+ *             TargetVcn and MftClusterIndex of $MFT, at the LCNs listed
+ *             (logs written before ranges were);
  *   ForgetTransaction / Noop      commits its transaction;
  *   Noop / Noop (no transaction)  metadata outside the log changed after
  *             the last checkpoint: chkdsk must look at the volume.
@@ -664,6 +666,32 @@ LogWriteImage(PLOG_READER Reader, PNTFS_LFS_RECORD_HEADER Rec, ULONGLONG Target,
     return Status;
 }
 
+/* Whether a range record writes a byte of the first file records, the
+ * system files' (the mount has read $MFT's and $Volume's). */
+static BOOLEAN
+LogRangeTouchesSystemRecords(PLOG_READER Reader, PNTFS_LFS_RECORD_HEADER Rec)
+{
+    PDEVICE_EXTENSION Vcb = Reader->Vcb;
+    PLONGLONG Lcns = (PLONGLONG)((PUCHAR)Rec + sizeof(NTFS_LFS_RECORD_HEADER));
+    ULONG Bpc = Vcb->NtfsInfo.BytesPerCluster, i;
+    ULONGLONG Vcn, Clusters = ((ULONGLONG)NTFS_FILE_FIRST_USER_FILE * Vcb->NtfsInfo.BytesPerFileRecord + Bpc - 1) / Bpc;
+    LONGLONG Lcn, Count;
+    BOOLEAN Touches = FALSE;
+
+    if (Rec->RedoOperation != NTFS_LFS_OP_UPDATE_NONRESIDENT_VALUE)
+        return FALSE;
+    ExAcquireResourceSharedLite(&Vcb->MftContextResource, TRUE);
+    for (Vcn = 0; Vcn < Clusters && !Touches; Vcn++)
+    {
+        if (!FsRtlLookupLargeMcbEntry(&Vcb->MFTContext->DataRunsMCB, Vcn, &Lcn, &Count, NULL, NULL, NULL) || Lcn < 0)
+            continue;
+        for (i = 0; i < Rec->LcnsToFollow && !Touches; i++)
+            Touches = Lcns[i] == Lcn;
+    }
+    ExReleaseResourceLite(&Vcb->MftContextResource);
+    return Touches;
+}
+
 static NTSTATUS
 LogRedo(PLOG_READER Reader, PNTFS_LOG_RECOVERY_RESULT Result)
 {
@@ -694,6 +722,10 @@ LogRedo(PLOG_READER Reader, PNTFS_LOG_RECOVERY_RESULT Result)
             if (Op->Target < NTFS_FILE_FIRST_USER_FILE)
                 Result->SystemRecords = TRUE;
         }
+        else if (LogRangeTouchesSystemRecords(Reader, Rec))
+        {
+            Result->SystemRecords = TRUE;
+        }
         Status = LogWriteImage(Reader, Rec, Op->Target, TRUE);
         if (!NT_SUCCESS(Status))
             return Status;
@@ -718,13 +750,13 @@ LogUndo(PLOG_READER Reader, PNTFS_LOG_RECOVERY_RESULT Result)
         Status = LogReadRecord(Reader, Op->Lsn, &Rec);
         if (!NT_SUCCESS(Status))
             return Status;
+        if ((Op->RedoOperation == NTFS_LFS_OP_INITIALIZE_FILE_RECORD_SEGMENT &&
+             Op->Target < NTFS_FILE_FIRST_USER_FILE) || LogRangeTouchesSystemRecords(Reader, Rec))
+            Result->SystemRecords = TRUE;
         Status = LogWriteImage(Reader, Rec, Op->Target, FALSE);
         if (!NT_SUCCESS(Status))
             return Status;
         Result->Undone++;
-        if (Op->RedoOperation == NTFS_LFS_OP_INITIALIZE_FILE_RECORD_SEGMENT &&
-            Op->Target < NTFS_FILE_FIRST_USER_FILE)
-            Result->SystemRecords = TRUE;
     }
     return STATUS_SUCCESS;
 }
