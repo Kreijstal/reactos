@@ -304,8 +304,7 @@ typedef NTFS_LOG_FLUSH_CALLBACK *PNTFS_LOG_FLUSH_CALLBACK;
 /* Log pages buffered before a force writes them. */
 #define NTFS_LOG_QUEUE_PAGES 64
 
-NTSTATUS NtfsLfsCreateWriter(PDEVICE_EXTENSION Vcb, PNTFS_LOG_WRITE_CALLBACK Write,
-                             PNTFS_LOG_WRITE_CALLBACK WriteDirect,
+NTSTATUS NtfsLfsCreateWriter(PDEVICE_EXTENSION Vcb, PNTFS_LOG_WRITE_CALLBACK WriteDirect,
                              PNTFS_LOG_FLUSH_CALLBACK Flush, PVOID *WriterOut);
 /* Puts every record logged so far on disk: before a metadata page of the
  * volume stream is written, and wherever durability is asked for. */

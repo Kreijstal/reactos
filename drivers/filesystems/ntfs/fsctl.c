@@ -444,8 +444,7 @@ NtfsLogFlush(PDEVICE_EXTENSION Vcb, LONGLONG Offset, ULONG Length)
     return NtfsFlushDevice(Vcb->StorageDevice);
 }
 
-/* A forced log page goes to the device; its cached copy is written too,
- * so a read of the volume sees it. */
+/* A forced log page goes to the device only, once. */
 static NTSTATUS
 NtfsLogWriteDirect(PDEVICE_EXTENSION Vcb, LONGLONG Offset, ULONG Length, const PUCHAR Buffer)
 {
@@ -560,7 +559,7 @@ NtfsMountStartLog(PDEVICE_EXTENSION Vcb)
 
     if (Vcb->Flags & VCB_VOLUME_READ_ONLY)
         return STATUS_SUCCESS;
-    Status = NtfsLfsCreateWriter(Vcb, NtfsWriteDiskCached, NtfsLogWriteDirect, NtfsLogFlush,
+    Status = NtfsLfsCreateWriter(Vcb, NtfsLogWriteDirect, NtfsLogFlush,
                                  &Vcb->LfsWriter);
     if (!NT_SUCCESS(Status))
         return Status;
