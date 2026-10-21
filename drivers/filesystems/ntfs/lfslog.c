@@ -15,9 +15,9 @@
  * As LFS does, records are buffered and packed: they fill the tail page
  * (lfs.c), the pages a batch fills go onto a queue, and the log is forced
  * to disk (the queue written, the tail page written to the next of the two
- * tail-copy pages, then a storage barrier) before any metadata page of the
- * volume stream is written (NtfsLfsForce, from the paging write) and by an
- * explicit flush.  A full queue is written without a barrier.  Log pages go
+ * tail-copy pages, then a storage barrier) before a page of the volume
+ * stream that a record not on disk yet changed is written (NtfsLfsForceRange,
+ * from the paging write) and by an explicit flush.  A full queue is written without a barrier.  Log pages go
  * to the device only, each full page once: the volume stream never caches
  * them, so the lazy writer never writes them again.  The restart area is written when a session logs
  * its first record (marking the log dirty), at checkpoints and when the
@@ -60,6 +60,7 @@ typedef struct _NTFS_LOG_DIRTY_PAGE
     LIST_ENTRY Link;
     ULONGLONG Page;             /* its offset in the volume, in pages */
     ULONGLONG RecLsn;           /* the oldest change that may not be on disk */
+    ULONGLONG LastLsn;          /* the newest change */
     ULONGLONG NewLsn;           /* while a checkpoint writes it: the oldest
                                    change since it began, 0 none */
     BOOLEAN Flushing;
@@ -80,6 +81,8 @@ typedef struct _NTFS_LOG_WRITER
     ULONG QueueOffset[NTFS_LOG_QUEUE_PAGES];
     ULONG QueueCount;
     BOOLEAN Unflushed;          /* log writes not behind a barrier yet */
+    ULONGLONG QueuedLsn;        /* the last record queued */
+    ULONGLONG DurableLsn;       /* the last record a force put on disk */
     /* The tail page as the last batch left it, for the next tail copy. */
     PUCHAR TailImage;
     ULONG TailOffset;
@@ -316,6 +319,9 @@ NtfsLogForceLocked(PNTFS_LOG_WRITER Writer)
         if (NT_SUCCESS(Status))
             Writer->Unflushed = FALSE;
     }
+    /* Every record queued is on disk. */
+    if (NT_SUCCESS(Status))
+        Writer->DurableLsn = Writer->QueuedLsn;
     if (NT_SUCCESS(Status) && Writer->RestartQueued)
     {
         Status = NtfsLogRange(Writer, Writer->RestartOffset, Writer->Codec.PageSize,
@@ -392,6 +398,7 @@ NtfsLogQueueBatch(PNTFS_LOG_WRITER Writer)
     }
     if (NT_SUCCESS(Status))
     {
+        Writer->QueuedLsn = Codec->LastLsn;
         Writer->TailQueued = NtfsLfsTailHasRecords(Codec);
         if (Writer->TailQueued)
         {
@@ -446,12 +453,13 @@ NtfsLogMarkDirty(PNTFS_LOG_WRITER Writer, ULONGLONG Lsn, LONGLONG Offset, ULONG 
             }
             RtlZeroMemory(Dirty, sizeof(*Dirty));
             Dirty->Page = Page;
-            Dirty->RecLsn = Lsn;
+            Dirty->RecLsn = Dirty->LastLsn = Lsn;
             InsertTailList(Head, &Dirty->Link);
             Writer->DirtyCount++;
             continue;
         }
         NtfsLogKeepOldest(&Dirty->RecLsn, Lsn);
+        Dirty->LastLsn = max(Dirty->LastLsn, Lsn);
         if (Dirty->Flushing)
             NtfsLogKeepOldest(&Dirty->NewLsn, Lsn);
     }
@@ -867,6 +875,49 @@ NtfsLfsEndRequest(PVOID Context, PNTFS_LOG_REQUEST Request, BOOLEAN ForceLog)
 }
 
 NTSTATUS
+NtfsLfsForceRange(PVOID Context, LONGLONG Offset, ULONG Length)
+{
+    PNTFS_LOG_WRITER Writer = Context;
+    ULONGLONG Needed = 0, Page, Last;
+    PLIST_ENTRY Head, Entry;
+    NTSTATUS Status = STATUS_SUCCESS;
+    KIRQL OldIrql;
+
+    if (Writer == NULL || !Writer->Enabled || Length == 0)
+        return STATUS_SUCCESS;
+    /* The newest record of a change the pages may hold: of the pages in
+     * the dirty page table, of any write issued but not in it yet (its
+     * bytes may be in these pages), and the Noop record covering unlogged
+     * writes until a flush of the whole stream. */
+    KeAcquireSpinLock(&Writer->PendingLock, &OldIrql);
+    for (Page = Offset / PAGE_SIZE, Last = (Offset + Length - 1) / PAGE_SIZE; Page <= Last; Page++)
+    {
+        Head = &Writer->Dirty[Page % NTFS_LOG_DIRTY_BUCKETS];
+        for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
+        {
+            PNTFS_LOG_DIRTY_PAGE Dirty = CONTAINING_RECORD(Entry, NTFS_LOG_DIRTY_PAGE, Link);
+            if (Dirty->Page == Page)
+                Needed = max(Needed, Dirty->LastLsn);
+        }
+    }
+    for (Entry = Writer->PendingList.Flink; Entry != &Writer->PendingList; Entry = Entry->Flink)
+        Needed = max(Needed, CONTAINING_RECORD(Entry, NTFS_LOG_PENDING, Link)->Lsn);
+    if (Writer->FullFlushLsn != 0 || Writer->MarkerLsn != 0)
+        Needed = MAXULONGLONG;
+    KeReleaseSpinLock(&Writer->PendingLock, OldIrql);
+    if (Needed == 0)
+        return STATUS_SUCCESS;
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&Writer->ForceResource, TRUE);
+    /* A batch is queued whole: its first record on disk, all of it is. */
+    if (Needed > Writer->DurableLsn)
+        Status = NtfsLogForceLocked(Writer);
+    ExReleaseResourceLite(&Writer->ForceResource);
+    KeLeaveCriticalRegion();
+    return Status;
+}
+
+NTSTATUS
 NtfsLfsForce(PVOID Context)
 {
     PNTFS_LOG_WRITER Writer = Context;
@@ -965,6 +1016,7 @@ NtfsLfsEnableWriter(PVOID Context)
         Writer->RestartDirty = FALSE;
         Writer->QueueCount = 0;
         Writer->Unflushed = FALSE;
+        Writer->QueuedLsn = Writer->DurableLsn = Writer->Codec.LastLsn;
         Writer->TailQueued = FALSE;
         Writer->RestartQueued = FALSE;
         Writer->MarkerLsn = 0;
