@@ -9,11 +9,12 @@
  * buffers, bitmaps, $Secure, attribute lists) as UpdateNonResidentValue
  * records carrying the bytes written and the bytes they replace.
  *
- * As LFS does, records are buffered: a batch goes into the volume stream's
- * cache and onto a queue, and the queue is forced to disk (written, then a
- * storage barrier) before any metadata page of the volume stream is
- * written (NtfsLfsForce, from the paging write), by an explicit flush, and
- * when the queue fills.  The restart area is written when a session logs
+ * As LFS does, records are buffered: a batch goes onto a queue, and the
+ * queue is forced to disk (written, then a storage barrier) before any
+ * metadata page of the volume stream is written (NtfsLfsForce, from the
+ * paging write), by an explicit flush, and when the queue fills.  Log pages
+ * go to the device only, each once: the volume stream never caches them, so
+ * the lazy writer never writes them again.  The restart area is written when a session logs
  * its first record (marking the log dirty), at checkpoints and when the
  * log is closed; recovery finds the records after it by scanning forward.
  *
@@ -46,7 +47,6 @@ typedef struct _NTFS_LOG_WRITER
     PDEVICE_EXTENSION Vcb;
     ERESOURCE Resource;
     BOOLEAN InIo;
-    PNTFS_LOG_WRITE_CALLBACK Write;         /* through the volume stream */
     PNTFS_LOG_WRITE_CALLBACK WriteDirect;   /* to the device */
     PNTFS_LOG_FLUSH_CALLBACK Flush;
     /* Batches not forced yet: page images and their log offsets, and a
@@ -78,7 +78,6 @@ typedef struct _NTFS_LOG_WRITER
 
 NTSTATUS
 NtfsLfsCreateWriter(PDEVICE_EXTENSION Vcb,
-                    PNTFS_LOG_WRITE_CALLBACK Write,
                     PNTFS_LOG_WRITE_CALLBACK WriteDirect,
                     PNTFS_LOG_FLUSH_CALLBACK Flush,
                     PVOID *WriterOut)
@@ -104,7 +103,6 @@ NtfsLfsCreateWriter(PDEVICE_EXTENSION Vcb,
         return Status;
     }
     Writer->Vcb = Vcb;
-    Writer->Write = Write;
     Writer->WriteDirect = WriteDirect;
     Writer->Flush = Flush;
     KeInitializeSpinLock(&Writer->PendingLock);
@@ -131,16 +129,10 @@ NtfsLogFreeSession(PNTFS_LOG_WRITER Writer)
     RtlZeroMemory(&Writer->Codec, sizeof(Writer->Codec));
 }
 
-typedef enum _LOG_IO
-{
-    LogIoCached,    /* into the volume stream's cache */
-    LogIoDirect     /* to the device */
-} LOG_IO;
-
 /* $LogFile has a fixed, fully allocated mapping for this session. Writing
  * mapped runs cannot recurse through a read of its own MFT record. */
 static NTSTATUS
-NtfsLogRange(PNTFS_LOG_WRITER Writer, ULONG Offset, ULONG Length, PUCHAR Buffer, LOG_IO Io)
+NtfsLogRange(PNTFS_LOG_WRITER Writer, ULONG Offset, ULONG Length, PUCHAR Buffer)
 {
     PDEVICE_EXTENSION Vcb = Writer->Vcb;
     ULONGLONG Position = Offset, Available, Disk;
@@ -148,8 +140,7 @@ NtfsLogRange(PNTFS_LOG_WRITER Writer, ULONG Offset, ULONG Length, PUCHAR Buffer,
     ULONG Within, Part;
     NTSTATUS Status;
 
-    ASSERT(ExIsResourceAcquiredExclusiveLite(&Writer->Resource) ||
-           ExIsResourceAcquiredExclusiveLite(&Writer->ForceResource));
+    ASSERT(ExIsResourceAcquiredExclusiveLite(&Writer->ForceResource));
     ASSERT(Offset <= Writer->Codec.LogSize && Length <= Writer->Codec.LogSize - Offset);
     while (Length != 0)
     {
@@ -163,15 +154,37 @@ NtfsLogRange(PNTFS_LOG_WRITER Writer, ULONG Offset, ULONG Length, PUCHAR Buffer,
         Available = (ULONGLONG)RunLength * Vcb->NtfsInfo.BytesPerCluster - Within;
         Part = (ULONG)min((ULONGLONG)Length, Available);
         Disk = (ULONGLONG)Lcn * Vcb->NtfsInfo.BytesPerCluster + Within;
-        if (Io == LogIoCached)
-            Status = Writer->Write(Vcb, Disk, Part, Buffer + (Position - Offset));
-        else
-            Status = Writer->WriteDirect(Vcb, Disk, Part, Buffer + (Position - Offset));
+        Status = Writer->WriteDirect(Vcb, Disk, Part, Buffer + (Position - Offset));
         if (!NT_SUCCESS(Status)) return Status;
         Position += Part;
         Length -= Part;
     }
     return STATUS_SUCCESS;
+}
+
+/* The volume stream holds no log page the writer has written: copies it
+ * cached before (the mount's reads of the restart area) are dropped when a
+ * session starts, and pages read during one when it ends, so a read of the
+ * volume afterwards gets the device's bytes. */
+static VOID
+NtfsLogPurgeCache(PNTFS_LOG_WRITER Writer)
+{
+    PDEVICE_EXTENSION Vcb = Writer->Vcb;
+    ULONGLONG Vcn = 0, Clusters = Writer->Codec.LogSize / Vcb->NtfsInfo.BytesPerCluster;
+    LONGLONG Lcn, RunLength;
+    LARGE_INTEGER Offset;
+
+    while (Vcn < Clusters &&
+           FsRtlLookupLargeMcbEntry(&Writer->Data->DataRunsMCB, Vcn, &Lcn, &RunLength, NULL, NULL, NULL) &&
+           Lcn >= 0 && RunLength > 0)
+    {
+        RunLength = min(RunLength, (LONGLONG)(Clusters - Vcn));
+        Offset.QuadPart = Lcn * Vcb->NtfsInfo.BytesPerCluster;
+        if (!CcPurgeCacheSection(Vcb->StreamFileObject->SectionObjectPointer, &Offset,
+                                 (ULONG)(RunLength * Vcb->NtfsInfo.BytesPerCluster), FALSE))
+            DPRINT1("$LogFile pages stay cached at %I64x\n", Offset.QuadPart);
+        Vcn += RunLength;
+    }
 }
 
 /* Writes the queued batches to the device, then the queued restart page,
@@ -188,7 +201,7 @@ NtfsLogForceLocked(PNTFS_LOG_WRITER Writer)
     {
         for (i = 0; NT_SUCCESS(Status) && i < Writer->QueueCount; i++)
             Status = NtfsLogRange(Writer, Writer->QueueOffset[i], Writer->Codec.PageSize,
-                                  Writer->Queue + i * Writer->Codec.PageSize, LogIoDirect);
+                                  Writer->Queue + i * Writer->Codec.PageSize);
         if (NT_SUCCESS(Status))
             Status = Writer->Flush(Writer->Vcb, 0, MAXULONG);
         if (NT_SUCCESS(Status))
@@ -197,7 +210,7 @@ NtfsLogForceLocked(PNTFS_LOG_WRITER Writer)
     if (NT_SUCCESS(Status) && Writer->RestartQueued)
     {
         Status = NtfsLogRange(Writer, Writer->RestartOffset, Writer->Codec.PageSize,
-                              Writer->Restart, LogIoDirect);
+                              Writer->Restart);
         if (NT_SUCCESS(Status))
             Status = Writer->Flush(Writer->Vcb, 0, MAXULONG);
         if (NT_SUCCESS(Status))
@@ -219,10 +232,8 @@ NtfsLogForce(PNTFS_LOG_WRITER Writer)
     return Status;
 }
 
-/* The next restart page, into the cache now and onto the queue, written
- * after the batches queued before it.  The cached write is made without
- * ForceResource: a paging write of the volume stream, holding the stream,
- * forces the log. */
+/* The next restart page, onto the queue, written after the batches queued
+ * before it. */
 static NTSTATUS
 NtfsLogQueueRestart(PNTFS_LOG_WRITER Writer, BOOLEAN Clean)
 {
@@ -231,8 +242,6 @@ NtfsLogQueueRestart(PNTFS_LOG_WRITER Writer, BOOLEAN Clean)
 
     ASSERT(ExIsResourceAcquiredExclusiveLite(&Writer->Resource));
     Status = NtfsLfsBuildNextRestart(&Writer->Codec, Clean, Writer->RestartBuild, &Offset);
-    if (NT_SUCCESS(Status))
-        Status = NtfsLogRange(Writer, Offset, Writer->Codec.PageSize, Writer->RestartBuild, LogIoCached);
     if (!NT_SUCCESS(Status))
         return Status;
     KeEnterCriticalRegion();
@@ -251,24 +260,16 @@ NtfsLogQueueRestart(PNTFS_LOG_WRITER Writer, BOOLEAN Clean)
     return Status;
 }
 
-/* The pages of the last batch: into the cache, and onto the queue.  The
- * first record of a session marks the restart area dirty. */
+/* The pages of the last batch, onto the queue.  The first record of a
+ * session marks the restart area dirty. */
 static NTSTATUS
 NtfsLogQueueBatch(PNTFS_LOG_WRITER Writer)
 {
     PLFS_WRITE_CONTEXT Codec = &Writer->Codec;
-    ULONG i, Offset;
+    ULONG i;
     NTSTATUS Status = STATUS_SUCCESS;
 
     ASSERT(ExIsResourceAcquiredExclusiveLite(&Writer->Resource));
-    for (i = 0; NT_SUCCESS(Status) && i < Codec->StagedPages; i++)
-    {
-        Offset = NtfsLfsStagedPageOffset(Codec, i);
-        Status = NtfsLogRange(Writer, Offset, Codec->PageSize, Codec->Stage + i * Codec->PageSize,
-                              LogIoCached);
-    }
-    if (!NT_SUCCESS(Status))
-        return Status;
     KeEnterCriticalRegion();
     ExAcquireResourceExclusiveLite(&Writer->ForceResource, TRUE);
     if (Writer->QueueCount + Codec->StagedPages > NTFS_LOG_QUEUE_PAGES)
@@ -686,6 +687,7 @@ NtfsLfsEnableWriter(PVOID Context)
         Writer->MarkerLsn = 0;
         Writer->UnloggedWrites = 0;
         Writer->Enabled = TRUE;
+        NtfsLogPurgeCache(Writer);
     }
 Cleanup:
     if (!NT_SUCCESS(Status))
@@ -980,6 +982,7 @@ NtfsLfsFinishWriter(PVOID Context)
     if (NT_SUCCESS(Status)) Status = NtfsLogForce(Writer);
     if (NT_SUCCESS(Status))
     {
+        NtfsLogPurgeCache(Writer);
         Writer->Enabled = FALSE;
         Writer->Vcb->LogFileLsn = Writer->Codec.LastLsn;
         Writer->MarkerLsn = 0;
