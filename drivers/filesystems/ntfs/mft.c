@@ -2321,7 +2321,7 @@ NtfsLogMetadataRuns(PDEVICE_EXTENSION Vcb,
                     ULONGLONG Offset,
                     PNTFS_LOG_METADATA_WRITE LogWrite)
 {
-    NTFS_LOG_EXTENT Extents[NTFS_LOG_METADATA_RECORDS];
+    NTFS_LOG_EXTENT Extents[NTFS_LOG_METADATA_EXTENTS];
     ULONG i;
     NTSTATUS Status;
 
@@ -3170,11 +3170,13 @@ NtfsMirrorFileRecord(PDEVICE_EXTENSION Vcb,
     Status = ReadFileRecordInternal(Vcb, NTFS_FILE_MFTMIRR, Mirror, FALSE);
     if (NT_SUCCESS(Status))
         Status = FindAttribute(Vcb, Mirror, AttributeData, L"", 0, &Data, NULL);
+    /* Logged as the metadata write it is: recovery replays it with the
+     * record's own write. */
     if (NT_SUCCESS(Status) &&
         (MftIndex + 1) * RecordSize <= AttributeDataLength(Data->pRecord))
     {
         Status = WriteAttributeInternal(Vcb, Data, MftIndex * RecordSize, (const PUCHAR)Image,
-                                        RecordSize, &Written, Mirror, NULL, TRUE);
+                                        RecordSize, &Written, Mirror, NULL, FALSE);
     }
     if (Data != NULL)
         ReleaseAttributeContext(Data);
@@ -3210,21 +3212,25 @@ UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
 
     DPRINT("UpdateFileRecord(%p, 0x%I64x, %p)\n", Vcb, MftIndex, FileRecord);
 
-    Status = NtfsLfsLogFileRecord(Vcb->LfsWriter, MftIndex, FileRecord, LogPending);
-    if (!NT_SUCCESS(Status)) return Status;
-
     // Stamp the fixup array into a private copy: the caller's record may be
     // shared, like Vcb->MasterFileTable, and must never hold the on-disk form
     WriteImage = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     if (WriteImage == NULL)
-    {
-        NtfsLfsFileRecordWritten(Vcb->LfsWriter, LogPending);
         return STATUS_INSUFFICIENT_RESOURCES;
-    }
     RtlCopyMemory(WriteImage, FileRecord, Vcb->NtfsInfo.BytesPerFileRecord);
 
     // Add the fixup array to prepare the data for writing to disk
     AddFixupArray(Vcb, &WriteImage->Ntfs);
+
+    // The log describes the bytes the disk will hold
+    Status = NtfsLfsLogFileRecord(Vcb->LfsWriter, MftIndex, WriteImage, LogPending);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, WriteImage);
+        return Status;
+    }
+    if (LogPending->Lsn != 0)
+        FileRecord->Ntfs.Lsn = WriteImage->Ntfs.Lsn = LogPending->Lsn;
 
     // Keep the caller's update sequence number in step with the disk
     ((PFIXUP_ARRAY)((ULONG_PTR)FileRecord + FileRecord->Ntfs.UsaOffset))->USN =
