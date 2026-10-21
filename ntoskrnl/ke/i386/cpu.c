@@ -407,6 +407,7 @@ KiGetCacheInformation(VOID)
                                           ARRAYSIZE(Prcb->Cache),
                                           KiGetCpuVendor());
     Prcb->CacheCount = CacheCount;
+    PCACHE_DESCRIPTOR CacheDescriptors = Prcb->Cache;
 #else
     /* Retrieve the cache descriptors */
     CACHE_DESCRIPTOR CacheDescriptors[5];

@@ -44,6 +44,6 @@ add_library(ntfs MODULE ${SOURCE} ntfs.rc)
 
 add_definitions(-D__KERNEL__)
 set_module_type(ntfs kernelmodedriver)
-target_link_libraries(ntfs ${PSEH_LIB})
+target_link_libraries(ntfs memcmp ${PSEH_LIB})
 add_importlibs(ntfs ntoskrnl hal)
 add_cd_file(TARGET ntfs DESTINATION reactos/system32/drivers NO_CAB FOR all)
