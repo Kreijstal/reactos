@@ -33,11 +33,15 @@
  * around NtfsLfsBeginUnloggedWrite, which logs a Noop record once per
  * checkpoint interval: recovery then schedules chkdsk.
  *
- * The log is reused as a circular buffer.  When it is full, a checkpoint
- * flushes the volume: every logged write that has been issued is then on
- * disk, and only records still needed stay in the log: of writes not
- * issued yet (the pending list), of transactions still open, and the Noop
- * record of an unlogged write in progress.  A page is kept free behind
+ * The log is reused as a circular buffer.  A logged write, once issued,
+ * leaves its pages of the volume stream in the dirty page table with the
+ * oldest record of a change to them that may not be on disk yet (the
+ * page's RecLsn, as NTFS keeps it).  When the log is full, a checkpoint
+ * writes the pages whose changes keep the older half of it in use, and
+ * those only: the records still needed are then the ones of the pages left
+ * in the table, of writes not issued yet (the pending list), of
+ * transactions still open, and the Noop record of an unlogged write, until
+ * a flush of the whole volume stream has put it on disk.  A page is kept free behind
  * every batch for the records that commit; a transaction that alone keeps
  * the log full is committed early.  Storage barriers are supplied by the
  * mount layer; the codec has no dependency on cache-manager or
@@ -46,6 +50,19 @@
 #include "lfswrite.h"
 #define NDEBUG
 #include <debug.h>
+
+#define NTFS_LOG_DIRTY_BUCKETS 512
+
+/* A page of the volume stream a logged write changed. */
+typedef struct _NTFS_LOG_DIRTY_PAGE
+{
+    LIST_ENTRY Link;
+    ULONGLONG Page;             /* its offset in the volume, in pages */
+    ULONGLONG RecLsn;           /* the oldest change that may not be on disk */
+    ULONGLONG NewLsn;           /* while a checkpoint writes it: the oldest
+                                   change since it began, 0 none */
+    BOOLEAN Flushing;
+} NTFS_LOG_DIRTY_PAGE, *PNTFS_LOG_DIRTY_PAGE;
 
 typedef struct _NTFS_LOG_WRITER
 {
@@ -87,6 +104,13 @@ typedef struct _NTFS_LOG_WRITER
      * record that covers them in this checkpoint interval (0: none yet). */
     ULONG UnloggedWrites;
     ULONGLONG MarkerLsn;
+    /* The dirty page table, guarded by PendingLock, and the oldest change
+     * it does not hold (0: none): its pages are known only to a flush of
+     * the whole volume stream. */
+    LIST_ENTRY Dirty[NTFS_LOG_DIRTY_BUCKETS];
+    ULONG DirtyCount;
+    ULONGLONG FullFlushLsn;
+    NPAGED_LOOKASIDE_LIST DirtyLookaside;
 } NTFS_LOG_WRITER, *PNTFS_LOG_WRITER;
 
 NTSTATUS
@@ -97,6 +121,7 @@ NtfsLfsCreateWriter(PDEVICE_EXTENSION Vcb,
 {
     PNTFS_LOG_WRITER Writer;
     NTSTATUS Status;
+    ULONG i;
 
     *WriterOut = NULL;
     Writer = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Writer), TAG_NTFS);
@@ -121,8 +146,30 @@ NtfsLfsCreateWriter(PDEVICE_EXTENSION Vcb,
     KeInitializeSpinLock(&Writer->PendingLock);
     InitializeListHead(&Writer->PendingList);
     InitializeListHead(&Writer->Requests);
+    for (i = 0; i < NTFS_LOG_DIRTY_BUCKETS; i++)
+        InitializeListHead(&Writer->Dirty[i]);
+    ExInitializeNPagedLookasideList(&Writer->DirtyLookaside, NULL, NULL, 0, sizeof(NTFS_LOG_DIRTY_PAGE),
+                                    TAG_NTFS, 0);
     *WriterOut = Writer;
     return STATUS_SUCCESS;
+}
+
+/* Empties the dirty page table.  The caller holds PendingLock, or the
+ * writer is not in use. */
+static VOID
+NtfsLogFreeDirty(PNTFS_LOG_WRITER Writer)
+{
+    ULONG i;
+
+    for (i = 0; i < NTFS_LOG_DIRTY_BUCKETS; i++)
+    {
+        while (!IsListEmpty(&Writer->Dirty[i]))
+            ExFreeToNPagedLookasideList(&Writer->DirtyLookaside,
+                                        CONTAINING_RECORD(RemoveHeadList(&Writer->Dirty[i]),
+                                                          NTFS_LOG_DIRTY_PAGE, Link));
+    }
+    Writer->DirtyCount = 0;
+    Writer->FullFlushLsn = 0;
 }
 
 static VOID
@@ -144,6 +191,7 @@ NtfsLogFreeSession(PNTFS_LOG_WRITER Writer)
     Writer->QueueCount = 0;
     Writer->TailQueued = FALSE;
     Writer->RestartQueued = FALSE;
+    NtfsLogFreeDirty(Writer);
     RtlZeroMemory(&Writer->Codec, sizeof(Writer->Codec));
 }
 
@@ -357,68 +405,225 @@ NtfsLogQueueBatch(PNTFS_LOG_WRITER Writer)
     return Status;
 }
 
-/* The oldest logged record whose file record write has not been issued yet,
- * or zero when there is none.  The caller holds PendingLock. */
+static VOID
+NtfsLogKeepOldest(PULONGLONG Oldest, ULONGLONG Lsn)
+{
+    if (Lsn != 0 && (*Oldest == 0 || Lsn < *Oldest))
+        *Oldest = Lsn;
+}
+
+/* Puts the pages of Length volume bytes at Offset in the dirty page table,
+ * changed by the record Lsn.  The caller holds PendingLock. */
+static VOID
+NtfsLogMarkDirty(PNTFS_LOG_WRITER Writer, ULONGLONG Lsn, LONGLONG Offset, ULONG Length)
+{
+    ULONGLONG Page, Last;
+    PLIST_ENTRY Head, Entry;
+    PNTFS_LOG_DIRTY_PAGE Dirty;
+
+    if (Length == 0)
+        return;
+    for (Page = Offset / PAGE_SIZE, Last = (Offset + Length - 1) / PAGE_SIZE; Page <= Last; Page++)
+    {
+        Head = &Writer->Dirty[Page % NTFS_LOG_DIRTY_BUCKETS];
+        for (Entry = Head->Flink, Dirty = NULL; Entry != Head; Entry = Entry->Flink)
+        {
+            if (CONTAINING_RECORD(Entry, NTFS_LOG_DIRTY_PAGE, Link)->Page == Page)
+            {
+                Dirty = CONTAINING_RECORD(Entry, NTFS_LOG_DIRTY_PAGE, Link);
+                break;
+            }
+        }
+        if (Dirty == NULL)
+        {
+            Dirty = ExAllocateFromNPagedLookasideList(&Writer->DirtyLookaside);
+            if (Dirty == NULL)
+            {
+                /* Only a flush of the whole volume stream knows it now. */
+                NtfsLogKeepOldest(&Writer->FullFlushLsn, Lsn);
+                continue;
+            }
+            RtlZeroMemory(Dirty, sizeof(*Dirty));
+            Dirty->Page = Page;
+            Dirty->RecLsn = Lsn;
+            InsertTailList(Head, &Dirty->Link);
+            Writer->DirtyCount++;
+            continue;
+        }
+        NtfsLogKeepOldest(&Dirty->RecLsn, Lsn);
+        if (Dirty->Flushing)
+            NtfsLogKeepOldest(&Dirty->NewLsn, Lsn);
+    }
+}
+
+/* The oldest record still needed: of a page in the dirty page table, of a
+ * write not issued yet, of an open transaction, of a change only a flush of
+ * the whole volume stream knows, or the Noop record covering an unlogged
+ * write in progress.  0 when none is.  The caller holds PendingLock. */
 static ULONGLONG
-NtfsLogOldestPending(PNTFS_LOG_WRITER Writer)
+NtfsLogOldestNeeded(PNTFS_LOG_WRITER Writer)
 {
     PLIST_ENTRY Entry;
     ULONGLONG Oldest = 0;
+    ULONG i;
 
-    for (Entry = Writer->PendingList.Flink; Entry != &Writer->PendingList; Entry = Entry->Flink)
+    for (i = 0; i < NTFS_LOG_DIRTY_BUCKETS; i++)
     {
-        PNTFS_LOG_PENDING Pending = CONTAINING_RECORD(Entry, NTFS_LOG_PENDING, Link);
-        if (Oldest == 0 || Pending->Lsn < Oldest)
-            Oldest = Pending->Lsn;
+        for (Entry = Writer->Dirty[i].Flink; Entry != &Writer->Dirty[i]; Entry = Entry->Flink)
+            NtfsLogKeepOldest(&Oldest, CONTAINING_RECORD(Entry, NTFS_LOG_DIRTY_PAGE, Link)->RecLsn);
+    }
+    for (Entry = Writer->PendingList.Flink; Entry != &Writer->PendingList; Entry = Entry->Flink)
+        NtfsLogKeepOldest(&Oldest, CONTAINING_RECORD(Entry, NTFS_LOG_PENDING, Link)->Lsn);
+    for (Entry = Writer->Requests.Flink; Entry != &Writer->Requests; Entry = Entry->Flink)
+    {
+        PNTFS_LOG_REQUEST Request = CONTAINING_RECORD(Entry, NTFS_LOG_REQUEST, Link);
+        if (Request->Session == Writer->Session && !Request->Forced)
+            NtfsLogKeepOldest(&Oldest, Request->FirstLsn);
+    }
+    NtfsLogKeepOldest(&Oldest, Writer->FullFlushLsn);
+    if (Writer->UnloggedWrites != 0)
+    {
+        ASSERT(Writer->MarkerLsn != 0);
+        NtfsLogKeepOldest(&Oldest, Writer->MarkerLsn);
     }
     return Oldest;
 }
 
-/* Checkpoint: flushing the volume puts every issued metadata write on disk,
- * so only records still pending are needed afterwards, and the Noop record
- * of an unlogged write still in progress.  The restart area says so before
- * any of the space is reused. */
-static NTSTATUS
-NtfsLogCheckpointLocked(PNTFS_LOG_WRITER Writer)
+/* Where an LSN is in the log, as a byte count from the start of the first
+ * lap: the LSNs of one session compare as distances. */
+static ULONGLONG
+NtfsLogPosition(PLFS_WRITE_CONTEXT Codec, ULONGLONG Lsn)
 {
-    PLIST_ENTRY Entry;
-    ULONGLONG Oldest;
+    return (Lsn >> (64 - Codec->SeqNumberBits)) * (Codec->LogSize - Codec->FirstRcrdOffset) +
+           NtfsLfsLsnToOffset(Codec->SeqNumberBits, Lsn) - Codec->FirstRcrdOffset;
+}
+
+static VOID
+NtfsLogSortPages(PULONGLONG Pages, ULONG Count)
+{
+    ULONG Gap, i, j;
+    ULONGLONG Page;
+
+    for (Gap = Count / 2; Gap != 0; Gap /= 2)
+    {
+        for (i = Gap; i < Count; i++)
+        {
+            Page = Pages[i];
+            for (j = i; j >= Gap && Pages[j - Gap] > Page; j -= Gap)
+                Pages[j] = Pages[j - Gap];
+            Pages[j] = Page;
+        }
+    }
+}
+
+/* Checkpoint: writes the pages of the dirty page table whose oldest change
+ * is in the older half of the log in use (all of them with All), puts them
+ * on disk, and drops them from the table unless changed since.  The
+ * restart area then names the oldest record still needed, before any of
+ * the space is reused.  A change the table does not hold takes a flush of
+ * the whole volume stream. */
+static NTSTATUS
+NtfsLogCheckpointLocked(PNTFS_LOG_WRITER Writer, BOOLEAN All)
+{
+    PLFS_WRITE_CONTEXT Codec = &Writer->Codec;
+    PULONGLONG Pages;
+    PLIST_ENTRY Entry, Next;
+    ULONGLONG Oldest, Target, FullFlushLsn;
+    ULONG Capacity, Count = 0, i, Run;
+    BOOLEAN Full;
     NTSTATUS Status;
     KIRQL OldIrql;
 
     ASSERT(ExIsResourceAcquiredExclusiveLite(&Writer->Resource) && Writer->InIo);
     /* The log first, then everything it describes. */
     Status = NtfsLogForce(Writer);
-    if (NT_SUCCESS(Status))
-        Status = Writer->Flush(Writer->Vcb, 0, 0);
     if (!NT_SUCCESS(Status))
         return Status;
+    if (All || Codec->OldestLsn == 0)
+        Target = MAXULONGLONG;
+    else
+        Target = (NtfsLogPosition(Codec, Codec->OldestLsn) + NtfsLogPosition(Codec, NtfsLfsNextLsn(Codec))) / 2;
+    /* No record is logged until the checkpoint ends; a write issued from
+     * here on stays in the table. */
+    Capacity = Writer->DirtyCount + 64;
+    Pages = ExAllocatePoolWithTag(PagedPool, Capacity * sizeof(ULONGLONG), TAG_NTFS);
     KeAcquireSpinLock(&Writer->PendingLock, &OldIrql);
-    Oldest = NtfsLogOldestPending(Writer);
-    for (Entry = Writer->Requests.Flink; Entry != &Writer->Requests; Entry = Entry->Flink)
+    FullFlushLsn = Writer->FullFlushLsn;
+    Full = FullFlushLsn != 0 || Pages == NULL;
+    Writer->FullFlushLsn = 0;
+    for (i = 0; i < NTFS_LOG_DIRTY_BUCKETS; i++)
     {
-        PNTFS_LOG_REQUEST Request = CONTAINING_RECORD(Entry, NTFS_LOG_REQUEST, Link);
-        if (Request->Session == Writer->Session && !Request->Forced && Request->FirstLsn != 0 &&
-            (Oldest == 0 || Request->FirstLsn < Oldest))
-            Oldest = Request->FirstLsn;
+        for (Entry = Writer->Dirty[i].Flink; Entry != &Writer->Dirty[i]; Entry = Entry->Flink)
+        {
+            PNTFS_LOG_DIRTY_PAGE Dirty = CONTAINING_RECORD(Entry, NTFS_LOG_DIRTY_PAGE, Link);
+            if (!Full && (NtfsLogPosition(Codec, Dirty->RecLsn) >= Target || Count == Capacity))
+                continue;
+            Dirty->Flushing = TRUE;
+            Dirty->NewLsn = 0;
+            if (!Full)
+                Pages[Count++] = Dirty->Page;
+        }
     }
-    if (Writer->UnloggedWrites != 0)
+    KeReleaseSpinLock(&Writer->PendingLock, OldIrql);
+
+    if (Full)
     {
-        ASSERT(Writer->MarkerLsn != 0);
-        if (Oldest == 0 || Writer->MarkerLsn < Oldest)
-            Oldest = Writer->MarkerLsn;
+        Status = Writer->Flush(Writer->Vcb, 0, 0);
     }
     else
     {
-        Writer->MarkerLsn = 0;
+        /* Consecutive pages in one request. */
+        NtfsLogSortPages(Pages, Count);
+        for (i = 0; NT_SUCCESS(Status) && i < Count; i += Run)
+        {
+            for (Run = 1; i + Run < Count && Pages[i + Run] == Pages[i] + Run && Run < MAXULONG / PAGE_SIZE - 1; Run++);
+            Status = Writer->Flush(Writer->Vcb, Pages[i] * PAGE_SIZE, Run * PAGE_SIZE);
+        }
+        if (NT_SUCCESS(Status))
+            Status = Writer->Flush(Writer->Vcb, 0, MAXULONG);
     }
-    KeReleaseSpinLock(&Writer->PendingLock, OldIrql);
-    if (Oldest == Writer->Codec.OldestLsn || !Writer->RestartDirty)
+
+    KeAcquireSpinLock(&Writer->PendingLock, &OldIrql);
+    for (i = 0; i < NTFS_LOG_DIRTY_BUCKETS; i++)
     {
-        Writer->Codec.OldestLsn = Oldest;
+        for (Entry = Writer->Dirty[i].Flink; Entry != &Writer->Dirty[i]; Entry = Next)
+        {
+            PNTFS_LOG_DIRTY_PAGE Dirty = CONTAINING_RECORD(Entry, NTFS_LOG_DIRTY_PAGE, Link);
+            Next = Entry->Flink;
+            if (!Dirty->Flushing)
+                continue;
+            Dirty->Flushing = FALSE;
+            if (!NT_SUCCESS(Status))
+                continue;
+            if (Dirty->NewLsn != 0)
+            {
+                /* Changed again while it was written. */
+                Dirty->RecLsn = Dirty->NewLsn;
+                continue;
+            }
+            RemoveEntryList(&Dirty->Link);
+            Writer->DirtyCount--;
+            ExFreeToNPagedLookasideList(&Writer->DirtyLookaside, Dirty);
+        }
+    }
+    if (!NT_SUCCESS(Status))
+        NtfsLogKeepOldest(&Writer->FullFlushLsn, FullFlushLsn);
+    /* Unlogged writes that ended are on disk after a flush of the whole
+     * volume stream: their Noop record is needed no more. */
+    if (NT_SUCCESS(Status) && Full && Writer->UnloggedWrites == 0)
+        Writer->MarkerLsn = 0;
+    Oldest = NtfsLogOldestNeeded(Writer);
+    KeReleaseSpinLock(&Writer->PendingLock, OldIrql);
+    if (Pages != NULL)
+        ExFreePoolWithTag(Pages, TAG_NTFS);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    if (Oldest == Codec->OldestLsn || !Writer->RestartDirty)
+    {
+        Codec->OldestLsn = Oldest;
         return STATUS_SUCCESS;
     }
-    Writer->Codec.OldestLsn = Oldest;
+    Codec->OldestLsn = Oldest;
     /* On disk before any of the space is reused. */
     Status = NtfsLogQueueRestart(Writer, FALSE);
     if (NT_SUCCESS(Status))
@@ -487,9 +692,17 @@ NtfsLogEmit(PNTFS_LOG_WRITER Writer, PLFS_EMIT_PARAMS Params, ULONG Count, PULON
     ASSERT(ExIsResourceAcquiredExclusiveLite(&Writer->Resource) && Writer->InIo);
     Writer->Codec.ReservePages = Commit ? 0 : 1;
     Status = NtfsLfsEmitBatch(&Writer->Codec, Params, Count, Lsns);
+    /* Full: the older half of the log is freed, then all of it. */
     if (Status == STATUS_LOG_FILE_FULL)
     {
-        Status = NtfsLogCheckpointLocked(Writer);
+        Status = NtfsLogCheckpointLocked(Writer, FALSE);
+        Writer->Codec.ReservePages = Commit ? 0 : 1;
+        if (NT_SUCCESS(Status))
+            Status = NtfsLfsEmitBatch(&Writer->Codec, Params, Count, Lsns);
+    }
+    if (Status == STATUS_LOG_FILE_FULL)
+    {
+        Status = NtfsLogCheckpointLocked(Writer, TRUE);
         Writer->Codec.ReservePages = Commit ? 0 : 1;
         if (NT_SUCCESS(Status))
             Status = NtfsLfsEmitBatch(&Writer->Codec, Params, Count, Lsns);
@@ -498,7 +711,7 @@ NtfsLogEmit(PNTFS_LOG_WRITER Writer, PLFS_EMIT_PARAMS Params, ULONG Count, PULON
     {
         Status = NtfsLogForceCommit(Writer);
         if (NT_SUCCESS(Status))
-            Status = NtfsLogCheckpointLocked(Writer);
+            Status = NtfsLogCheckpointLocked(Writer, TRUE);
         if (NT_SUCCESS(Status) && OwnTransaction != 0)
         {
             /* This batch's records belong to a transaction committed early:
@@ -964,6 +1177,21 @@ NtfsLfsLogFileRecord(PVOID Context, ULONGLONG MftIndex, PFILE_RECORD_HEADER Imag
     }
     if (Batch->Count == 0)
         goto Cleanup;
+    /* The bytes the write changes, cluster by cluster. */
+    for (i = 0, Done = 0, Pending->ExtentCount = 0; Done < Size; i++, Done += Part)
+    {
+        Part = min(Bpc - (i == 0 ? Within : 0), Size - Done);
+        if (Pending->ExtentCount != 0 &&
+            Pending->Extents[Pending->ExtentCount - 1].Offset + Pending->Extents[Pending->ExtentCount - 1].Length ==
+            Lcns[i] * Bpc + (i == 0 ? Within : 0))
+        {
+            Pending->Extents[Pending->ExtentCount - 1].Length += Part;
+            continue;
+        }
+        Pending->Extents[Pending->ExtentCount].Offset = Lcns[i] * Bpc + (i == 0 ? Within : 0);
+        Pending->Extents[Pending->ExtentCount].Length = Part;
+        Pending->ExtentCount++;
+    }
     ExAcquireResourceExclusiveLite(&Writer->Resource, TRUE);
     Writer->InIo = TRUE;
     Status = NtfsLogEmitOwn(Writer, Batch->Params, Batch->Count, Batch->Lsns);
@@ -1044,6 +1272,12 @@ NtfsLfsBeginMetadataWrite(PVOID Context, const NTFS_LOG_EXTENT *Extents, ULONG C
     }
     if (Batch->Count == 0)
         goto Cleanup;
+    Write->Pending.ExtentCount = Count <= NTFS_LOG_PENDING_EXTENTS ? Count : MAXULONG;
+    for (i = 0; i < Count && i < NTFS_LOG_PENDING_EXTENTS; i++)
+    {
+        Write->Pending.Extents[i].Offset = Extents[i].DiskOffset;
+        Write->Pending.Extents[i].Length = Extents[i].Length;
+    }
 
     ExAcquireResourceExclusiveLite(&Writer->Resource, TRUE);
     Writer->InIo = TRUE;
@@ -1079,12 +1313,25 @@ VOID
 NtfsLfsFileRecordWritten(PVOID Context, PNTFS_LOG_PENDING Pending)
 {
     PNTFS_LOG_WRITER Writer = Context;
+    ULONG i;
     KIRQL OldIrql;
 
     if (Pending->Lsn == 0)
         return;
+    /* Issued: its bytes are dirty in the volume stream until a checkpoint
+     * writes them.  Under the lock a checkpoint looks for the oldest record
+     * needed with. */
     KeAcquireSpinLock(&Writer->PendingLock, &OldIrql);
     RemoveEntryList(&Pending->Link);
+    if (Pending->ExtentCount == MAXULONG)
+    {
+        NtfsLogKeepOldest(&Writer->FullFlushLsn, Pending->Lsn);
+    }
+    else
+    {
+        for (i = 0; i < Pending->ExtentCount; i++)
+            NtfsLogMarkDirty(Writer, Pending->Lsn, Pending->Extents[i].Offset, Pending->Extents[i].Length);
+    }
     KeReleaseSpinLock(&Writer->PendingLock, OldIrql);
     Pending->Lsn = 0;
 }
@@ -1143,6 +1390,9 @@ NtfsLfsEndUnloggedWrite(PVOID Context)
     KeAcquireSpinLock(&Writer->PendingLock, &OldIrql);
     ASSERT(Writer->UnloggedWrites != 0);
     Writer->UnloggedWrites--;
+    /* Its bytes are known only to a flush of the whole volume stream: until
+     * one, recovery is to see the Noop record. */
+    NtfsLogKeepOldest(&Writer->FullFlushLsn, Writer->MarkerLsn);
     KeReleaseSpinLock(&Writer->PendingLock, OldIrql);
 }
 
@@ -1156,7 +1406,7 @@ NtfsLfsCheckpoint(PVOID Context)
         return STATUS_SUCCESS;
     ExAcquireResourceExclusiveLite(&Writer->Resource, TRUE);
     Writer->InIo = TRUE;
-    Status = NtfsLogCheckpointLocked(Writer);
+    Status = NtfsLogCheckpointLocked(Writer, TRUE);
     Writer->InIo = FALSE;
     ExReleaseResourceLite(&Writer->Resource);
     return Status;
@@ -1167,6 +1417,7 @@ NtfsLfsFinishWriter(PVOID Context)
 {
     PNTFS_LOG_WRITER Writer = Context;
     NTSTATUS Status;
+    KIRQL OldIrql;
 
     if (Writer == NULL || !Writer->Enabled) return STATUS_SUCCESS;
     /* Namespace changes are quiesced; a forced dismount does not wait for
@@ -1178,6 +1429,13 @@ NtfsLfsFinishWriter(PVOID Context)
      * restart copy is marked clean; both copies are, one after the other. */
     Status = NtfsLogForce(Writer);
     if (NT_SUCCESS(Status)) Status = Writer->Flush(Writer->Vcb, 0, 0);
+    if (NT_SUCCESS(Status))
+    {
+        /* Everything logged is on disk. */
+        KeAcquireSpinLock(&Writer->PendingLock, &OldIrql);
+        NtfsLogFreeDirty(Writer);
+        KeReleaseSpinLock(&Writer->PendingLock, OldIrql);
+    }
     if (NT_SUCCESS(Status)) Status = NtfsLogQueueRestart(Writer, TRUE);
     if (NT_SUCCESS(Status)) Status = NtfsLogQueueRestart(Writer, TRUE);
     if (NT_SUCCESS(Status)) Status = NtfsLogForce(Writer);
@@ -1202,6 +1460,7 @@ NtfsLfsDestroyWriter(PVOID Context)
     ASSERT(IsListEmpty(&Writer->PendingList));
     ASSERT(IsListEmpty(&Writer->Requests));
     NtfsLogFreeSession(Writer);
+    ExDeleteNPagedLookasideList(&Writer->DirtyLookaside);
     ExDeleteResourceLite(&Writer->ForceResource);
     ExDeleteResourceLite(&Writer->Resource);
     ExFreePoolWithTag(Writer, TAG_NTFS);
