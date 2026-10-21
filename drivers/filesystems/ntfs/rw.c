@@ -92,12 +92,12 @@ NtfsReadWriteVolume(PDEVICE_EXTENSION DeviceExt,
     if (Length == 0)
         return STATUS_SUCCESS;
 
-    /* Write-ahead logging: the log reaches the disk before any page of the
-     * volume stream (metadata, or the log's own cached copy) does. */
+    /* Write-ahead logging: the records of the changes a page of the volume
+     * stream holds reach the disk before it does. */
     if (MajorFunction == IRP_MJ_WRITE && (Irp->Flags & IRP_PAGING_IO) &&
         !(DeviceExt->Flags & VCB_VOLUME_DISMOUNTED))
     {
-        Status = NtfsLfsForce(DeviceExt->LfsWriter);
+        Status = NtfsLfsForceRange(DeviceExt->LfsWriter, Offset, Length);
         if (!NT_SUCCESS(Status))
             return Status;
     }
