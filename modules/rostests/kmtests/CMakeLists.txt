@@ -157,6 +157,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_se/SeLogonSession.c
     ntos_se/SeQueryInfoToken.c
     ntos_se/SeTokenFiltering.c
+    ntos_wmi/EtwProvider.c
     rtl/RtlIsValidOemCharacter.c
     rtl/RtlRangeList.c
     ${COMMON_SOURCE}
