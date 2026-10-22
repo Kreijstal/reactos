@@ -25,7 +25,7 @@
 #define UCX_STUB_MINOR_VERSION 6
 
 /* Owned by wdfdriverentry */
-extern WDF_BIND_INFO BindInfo;
+extern WDF_BIND_INFO2 WdfBindInfo;
 extern PWDF_DRIVER_GLOBALS WdfDriverGlobals;
 
 PFN_UCXFUNC UcxFunctions[UcxFunctionTableNumEntries];
@@ -57,7 +57,7 @@ UcxStubBindClass(VOID)
     Info->ClassBindInfo = &UcxDriverGlobals;
 
     /* Typed as PWDF_COMPONENT_GLOBALS*, but clients pass the globals pointer itself */
-    Status = WdfVersionBindClass(&BindInfo, (PWDF_COMPONENT_GLOBALS *)WdfDriverGlobals, Info);
+    Status = WdfVersionBindClass(&WdfBindInfo.V1, (PWDF_COMPONENT_GLOBALS *)WdfDriverGlobals, Info);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("UCX class bind failed 0x%lx\n", Status);
@@ -78,7 +78,7 @@ UcxStubUnbindClass(VOID)
     if (!UcxStubBound)
         return;
 
-    WdfVersionUnbindClass(&BindInfo, (PWDF_COMPONENT_GLOBALS)WdfDriverGlobals, &UcxStubClassBindInfo);
+    WdfVersionUnbindClass(&WdfBindInfo.V1, (PWDF_COMPONENT_GLOBALS)WdfDriverGlobals, &UcxStubClassBindInfo);
 
     UcxStubBound = FALSE;
     UcxDriverGlobals = NULL;
