@@ -62,7 +62,7 @@ FxCmResList::BuildRegisterResourceTable(
         if (desc == NULL) {
             status = STATUS_INVALID_DEVICE_STATE;
             DoTraceLevelMessage(GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
-                        "Resource Descriptor not found %!STATUS!", status);
+                        "Resource Descriptor not found %!STATUS!", status);           
             goto exit;
         }
 
@@ -77,11 +77,11 @@ FxCmResList::BuildRegisterResourceTable(
     }
 
     //
-    // allocate table
+    // allocate table 
     //
     LockResourceTable();
     locked = TRUE;
-
+    
     status =  FxRegisterResourceInfo::_CreateAndInit(
                                                     GetDriverGlobals(),
                                                     numRegisterDesc,
@@ -90,7 +90,7 @@ FxCmResList::BuildRegisterResourceTable(
     if (!NT_SUCCESS(status)) {
         DoTraceLevelMessage(GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
                     "Failed to allocate memory for resource table"
-                    " %!STATUS!", status);
+                    " %!STATUS!", status);  
         goto exit;
     }
     m_RegisterResourceTableSizeCe = numRegisterDesc;
@@ -104,7 +104,7 @@ FxCmResList::BuildRegisterResourceTable(
         if (desc == NULL) {
             status = STATUS_INVALID_DEVICE_STATE;
             DoTraceLevelMessage(GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
-                        "Resource Descriptor not found %!STATUS!", status);
+                        "Resource Descriptor not found %!STATUS!", status);           
             goto exit;
         }
 
@@ -112,15 +112,15 @@ FxCmResList::BuildRegisterResourceTable(
             desc->Type == CmResourceTypeMemoryLarge) {
             SIZE_T len;
             PHYSICAL_ADDRESS pa;
-
+            
             //
-            // This will populate Length and StartPa
+            // This will populate Length and StartPa 
             //
             len = GetResourceLength(desc, &pa);
             if (len) {
                 m_RegisterResourceTable[index].SetPhysicalAddress(pa, len);
             }
-
+            
             index++;
         }
     }
@@ -139,7 +139,7 @@ exit:
         UnlockResourceTable();
     }
 
-    return status;
+    return status; 
 }
 
 NTSTATUS
@@ -165,7 +165,7 @@ FxCmResList::BuildPortResourceTable(
         if (desc == NULL) {
             status = STATUS_INVALID_DEVICE_STATE;
             DoTraceLevelMessage(GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
-                        "Resource Descriptor not found %!STATUS!", status);
+                        "Resource Descriptor not found %!STATUS!", status);           
             goto exit;
         }
 
@@ -179,11 +179,11 @@ FxCmResList::BuildPortResourceTable(
     }
 
     //
-    // allocate table
+    // allocate table 
     //
     LockResourceTable();
     locked = TRUE;
-
+    
     status =  FxPortResourceInfo::_CreateAndInit(
                                                 GetDriverGlobals(),
                                                 numPortDesc,
@@ -192,7 +192,7 @@ FxCmResList::BuildPortResourceTable(
     if (!NT_SUCCESS(status)) {
         DoTraceLevelMessage(GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
                     "Failed to allocate memory for resource table"
-                    " %!STATUS!", status);
+                    " %!STATUS!", status);  
         goto exit;
     }
     m_PortResourceTableSizeCe = numPortDesc;
@@ -206,14 +206,14 @@ FxCmResList::BuildPortResourceTable(
         if (desc == NULL) {
             status = STATUS_INVALID_DEVICE_STATE;
             DoTraceLevelMessage(GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
-                        "Resource Descriptor not found %!STATUS!", status);
+                        "Resource Descriptor not found %!STATUS!", status);           
             goto exit;
         }
 
         if (desc->Type == CmResourceTypePort) {
             SIZE_T len;
             PHYSICAL_ADDRESS pa;
-
+            
             //
             // This will populate Length, StartPa and EndPa
             //
@@ -221,7 +221,7 @@ FxCmResList::BuildPortResourceTable(
             if (len) {
                 m_PortResourceTable[index].SetPhysicalAddress(pa, len);
             }
-
+            
             index++;
         }
     }
@@ -240,7 +240,7 @@ exit:
         UnlockResourceTable();
     }
 
-    return status;
+    return status; 
 }
 
 
@@ -274,13 +274,13 @@ FxCmResList::ValidateRegisterPhysicalAddressRange (
 Routine Description:
 
     This routine checks whether the physical address range is part of the resources
-    assigned to the device by pnp manager. It also returns the table entry
-    corresponding to the physical address range from register resource table.
+    assigned to the device by pnp manager. It also returns the table entry 
+    corresponding to the physical address range from register resource table.  
 
 Arguments:
 
-    PhysicalAddress - Supplies physical address to validate
-
+    PhysicalAddress - Supplies physical address to validate 
+    
     Size - Supplies size of address range in bytes.
 
     TableEntry - Supplies a pointer to store the table entry that corresponds to
@@ -289,7 +289,7 @@ Arguments:
 Return Value:
 
     HRESULT
-
+    
     S_OK if physical address is one assigned by pnp manager to this device.
     E_INAVLIDARG otherwise.
 
@@ -305,11 +305,11 @@ Return Value:
 
     //
     // Physical address is of LONGLONG type (signed) we need to cast it to
-    // ULONGLONG for comparision because in a LONGLONG comprison, the
+    // ULONGLONG for comparision because in a LONGLONG comprison, the 
     // result is different when highest bit is set vs when it is not set.
     //
     driverStartPa = PhysicalAddress.QuadPart;
-
+    
     //
     //  driverEndPa = driverStartPa + Size - 1;
     //
@@ -321,34 +321,34 @@ Return Value:
     driverEndPa = tmp - 1;
 
     //
-    // We allow one physical address range mapping only. The base address and
-    // length can be flexible within the assigned range.
+    // We allow one physical address range mapping only. The base address and 
+    // length can be flexible within the assigned range. 
     //
     for (i = 0; i < m_RegisterResourceTableSizeCe; i++) {
         entry = &m_RegisterResourceTable[i];
 
         //
-        // No need to do int overflow safe additon here since start address and
+        // No need to do int overflow safe additon here since start address and 
         // length are assigned by pnp manager. Note that we don't store endPa in
-        // resource table the way we do for SystemVa is because endPa is not
+        // resource table the way we do for SystemVa is because endPa is not 
         // needed in hot path so can be computed using length.
         //
         systemStartPa = entry->m_StartPa.QuadPart;
         systemEndPa  = systemStartPa + entry->m_Length - 1;
-
+        
         if (driverStartPa >= systemStartPa &&
             driverEndPa <= systemEndPa) {
 
             FX_VERIFY_WITH_NAME(DRIVER(BadArgument, TODO), CHECK("Attempt to do multiple "
                 "mapping of same resource, or multiple mapping in same resource"
-                " range",
-                (entry->m_StartSystemVa == NULL)), GetDriverGlobals()->Public.DriverName);
+                " range", 
+                (entry->m_StartSystemVa == NULL)), GetDriverGlobals()->Public.DriverName); 
             FX_VERIFY_WITH_NAME(INTERNAL, CHECK_NULL(entry->m_EndSystemVa),
-                GetDriverGlobals()->Public.DriverName);
+                GetDriverGlobals()->Public.DriverName); 
             FX_VERIFY_WITH_NAME(INTERNAL, CHECK_NULL(entry->m_StartUsermodeVa),
-                GetDriverGlobals()->Public.DriverName);
-            FX_VERIFY_WITH_NAME(INTERNAL, CHECK("Mapped length not zero",
-                (entry->m_MappedLength == 0)), GetDriverGlobals()->Public.DriverName);
+                GetDriverGlobals()->Public.DriverName); 
+            FX_VERIFY_WITH_NAME(INTERNAL, CHECK("Mapped length not zero", 
+                (entry->m_MappedLength == 0)), GetDriverGlobals()->Public.DriverName); 
 
             *TableEntry = entry;
 
@@ -369,19 +369,19 @@ FxCmResList::ValidateAndClearMapping(
 Routine Description:
 
     This routine checks whether the mapped system base address and size is part
-    of the resources assigned to the device by pnp manager. If so it clears the
+    of the resources assigned to the device by pnp manager. If so it clears the 
     system and usermode address mapping from the table.
 
 Arguments:
 
-    Address - Supplies system base address to validate
-
+    Address - Supplies system base address to validate 
+    
     Size - Supplies size of address range in bytes.
 
 Return Value:
 
     HRESULT
-
+    
     S_OK if system address is one mapped to a register resource.
     E_INAVLIDARG otherwise.
 
@@ -390,12 +390,12 @@ Return Value:
     HRESULT hr = E_INVALIDARG;
     ULONG i;
     FxRegisterResourceInfo* entry = NULL;
-
+    
     LockResourceTable();
-
+    
     for (i = 0; i < m_RegisterResourceTableSizeCe; i++) {
         entry = &m_RegisterResourceTable[i];
-
+        
         if (NULL != entry->m_StartSystemVa &&
             Address == entry->m_StartSystemVa &&
             Length == entry->m_MappedLength) {
@@ -403,17 +403,17 @@ Return Value:
             // there is a valid mapping. clear it.
             //
             FX_VERIFY_WITH_NAME(INTERNAL, CHECK_NOT_NULL(entry->m_EndSystemVa),
-                GetDriverGlobals()->Public.DriverName);
-
+                GetDriverGlobals()->Public.DriverName); 
+            
             ClearRegisterResourceEntryLocked(entry);
 
             hr = S_OK;
             break;
         }
     }
-
+    
     UnlockResourceTable();
-
+    
     return hr;
 }
 
@@ -428,17 +428,17 @@ Routine Description:
 
     This routine checks whether the mapped system base address and size is part
     of the resources assigned to the device by pnp manager. If so, it returns
-    corresponding user-mode mapped base address. It is applicable
-    only when registers are mapped to user-mode.
+    corresponding user-mode mapped base address. It is applicable 
+    only when registers are mapped to user-mode. 
 
 Arguments:
 
-    Address - Supplies system base address to validate
-
+    Address - Supplies system base address to validate 
+    
 Return Value:
 
     HRESULT
-
+    
     S_OK if system address is one mapped to a register resource.
     E_INAVLIDARG otherwise.
 
@@ -446,13 +446,13 @@ Return Value:
 {
     ULONG i;
     FxRegisterResourceInfo* entry = NULL;
-
+    
     LockResourceTable();
     for (i = 0; i < m_RegisterResourceTableSizeCe; i++) {
         entry = &m_RegisterResourceTable[i];
 
         if (Address == entry->m_StartSystemVa) {
-
+           
             FX_VERIFY_WITH_NAME(INTERNAL, CHECK_NOT_NULL(entry->m_StartUsermodeVa),
                 GetDriverGlobals()->Public.DriverName);
 
@@ -478,13 +478,13 @@ FxCmResList::ValidateRegisterSystemAddressRange (
 Routine Description:
 
     This routine checks whether given system mapped address and length is within
-    one of the assigned resource ranges. Optionally, tt computes the usermode
+    one of the assigned resource ranges. Optionally, tt computes the usermode 
     address corresponding to the system address.
 
 Arguments:
 
-    Address - Supplies register address to validate
-
+    Address - Supplies register address to validate 
+    
     Size - Supplies size of address range in bytes.
 
     UsermodeAddress - returns usermode address corresponding to system address
@@ -492,7 +492,7 @@ Arguments:
 Return Value:
 
     HRESULT
-
+    
     S_OK if system address range is valid.
     E_INAVLIDARG otherwise.
 
@@ -507,12 +507,12 @@ Return Value:
     ULONG_PTR tmp;
 
     //
-    // compute system address range to look for
+    // compute system address range to look for 
     //
     start = SystemAddress;
 
     //
-    // Use interger overflow safe functions
+    // Use interger overflow safe functions 
     // end = ((PUCHAR)SystemAddress) + Length - 1;
     //
     hr = ULongPtrAdd((ULONG_PTR) start, Length, &tmp);
@@ -528,7 +528,7 @@ Return Value:
     hr = E_INVALIDARG;
     for (i = 0; i < m_RegisterResourceTableSizeCe; i++) {
         entry = &m_RegisterResourceTable[i];
-
+        
         if (start >= entry->m_StartSystemVa &&
             end <= entry->m_EndSystemVa) {
             hr = S_OK;
@@ -562,7 +562,7 @@ Routine Description:
 Arguments:
 
     Descriptor - Supplies resource descriptor from which to decode length
-
+    
     Start - Supplies optional buffer into which start address will be stored.
 
 Return Value:
@@ -574,17 +574,17 @@ Return Value:
     ULONGLONG length;
 
     length = 0;
-
+    
     ASSERT((Descriptor->Type == CmResourceTypeMemory) ||
           (Descriptor->Type == CmResourceTypeMemoryLarge) ||
           (Descriptor->Type == CmResourceTypePort));
 
     //
     // If it is not large memory resource than length is in u.Memory.Length.
-    // For large memory resource, the length is given by different fields in
-    // CM_PARTIAL_RESOURCE_DESCRIPTOR structure.
+    // For large memory resource, the length is given by different fields in 
+    // CM_PARTIAL_RESOURCE_DESCRIPTOR structure. 
     //
-    if ((Descriptor->Type == CmResourceTypeMemory) ||
+    if ((Descriptor->Type == CmResourceTypeMemory) || 
         (Descriptor->Type == CmResourceTypePort)) {
         length = Descriptor->u.Memory.Length;
 
@@ -593,15 +593,15 @@ Return Value:
 
     } else if (Descriptor->Flags & CM_RESOURCE_MEMORY_LARGE_48) {
         length = (((ULONGLONG)Descriptor->u.Memory48.Length48) << 16);
-
+        
     } else if (Descriptor->Flags & CM_RESOURCE_MEMORY_LARGE_64) {
         length = (((ULONGLONG)Descriptor->u.Memory64.Length64) << 32);
-
+        
     } else {
         //
-        // It should not be possible to get here.
-        //
-        ASSERT(FALSE);
+        // It should not be possible to get here. 
+        // 
+        ASSERT(FALSE);        
     }
 
     if (Start != NULL) {
@@ -619,7 +619,7 @@ HRESULT
 FxCmResList::MapIoSpaceWorker(
     __in PHYSICAL_ADDRESS PhysicalAddress,
     __in SIZE_T NumberOfBytes,
-    __in MEMORY_CACHING_TYPE  CacheType,
+    __in MEMORY_CACHING_TYPE  CacheType, 
     __deref_out VOID** PseudoBaseAddress
     )
 {
@@ -631,7 +631,7 @@ FxCmResList::MapIoSpaceWorker(
 
     //
     // check if this physical resource is among the assigned resources.
-    // If it is, retrieve the table entry corresponding to to register res.
+    // If it is, retrieve the table entry corresponding to to register res. 
     //
     LockResourceTable();
 
@@ -639,29 +639,29 @@ FxCmResList::MapIoSpaceWorker(
                                               NumberOfBytes,
                                               &resEntry);
 
-    FX_VERIFY_WITH_NAME(DRIVER(BadArgument, TODO),
+    FX_VERIFY_WITH_NAME(DRIVER(BadArgument, TODO), 
         CHECK("Invalid physical address or number of bytes provided",
-        (SUCCEEDED(hr))), GetDriverGlobals()->Public.DriverName);
+        (SUCCEEDED(hr))), GetDriverGlobals()->Public.DriverName); 
 
     *PseudoBaseAddress = NULL;
-
+      
     //
-    // Call host
+    // Call host 
     //
     deviceStack = GetDevice()->GetDeviceStack();
     systemAddress = NULL;
     usermodeAddress = NULL;
 
     if(GetDevice()->AreRegistersMappedToUsermode()) {
-        hr = deviceStack->MapIoSpace(PhysicalAddress,
-                                NumberOfBytes,
+        hr = deviceStack->MapIoSpace(PhysicalAddress, 
+                                NumberOfBytes, 
                                 CacheType,
                                 &systemAddress,
                                 &usermodeAddress);
     }
     else {
-        hr = deviceStack->MapIoSpace(PhysicalAddress,
-                                NumberOfBytes,
+        hr = deviceStack->MapIoSpace(PhysicalAddress, 
+                                NumberOfBytes, 
                                 CacheType,
                                 &systemAddress,
                                 NULL);
@@ -698,19 +698,19 @@ FxCmResList::ValidateResourceUnmap(
     FxRegisterResourceInfo* entry = NULL;
 
     //
-    // make sure driver has unmapped its resources. No need to
-    // acquire the resource validation table lock as this is called in
-    // ReleaseHardware pnp callback and cannot race with another framework
-    // pnp callback that updates this table (PrepareHardware) so no invalid
+    // make sure driver has unmapped its resources. No need to 
+    // acquire the resource validation table lock as this is called in 
+    // ReleaseHardware pnp callback and cannot race with another framework 
+    // pnp callback that updates this table (PrepareHardware) so no invalid 
     // access. If a driver thread unmaps after ReleaseHardware return then also
-    // it will be a valid access of table entry.
+    // it will be a valid access of table entry. 
     //
 
     for (i = 0; i < m_RegisterResourceTableSizeCe; i++) {
         entry = &m_RegisterResourceTable[i];
 
         FX_VERIFY_WITH_NAME(DRIVER(BadArgument, TODO), CHECK("Driver did not unmap its "
-            "register resources", (entry->m_StartSystemVa == NULL)), GetDriverGlobals()->Public.DriverName);
+            "register resources", (entry->m_StartSystemVa == NULL)), GetDriverGlobals()->Public.DriverName); 
     }
 }
 
@@ -743,7 +743,7 @@ FxCmResList::ValidatePortAddressRange(
 
         systemStartPa = entry->m_StartPa.QuadPart;
         systemEndPa = entry->m_EndPa.QuadPart;
-
+        
         if (driverStartPa >= systemStartPa  &&
             driverEndPa <= systemEndPa) {
             return S_OK;
@@ -759,7 +759,7 @@ FxCmResList::CheckForConnectionResources(
     VOID
     )
 {
-    NTSTATUS status;
+    NTSTATUS status;    
     ULONG i;
     ULONG count;
     PCM_PARTIAL_RESOURCE_DESCRIPTOR pDescriptor;
@@ -772,7 +772,7 @@ FxCmResList::CheckForConnectionResources(
         if (pDescriptor == NULL) {
             status = STATUS_INVALID_DEVICE_STATE;
             DoTraceLevelMessage(GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
-                        "Resource Descriptor not found %!STATUS!", status);
+                        "Resource Descriptor not found %!STATUS!", status);           
             goto exit;
         }
 

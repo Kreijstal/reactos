@@ -8,8 +8,8 @@ Module Name:
 
 Abstract:
 
-    User-mode specific definitions of FxIoTargetRemote
-
+    User-mode specific definitions of FxIoTargetRemote 
+    
 Author:
 
 
@@ -23,15 +23,20 @@ Revision History:
 
 #pragma once
 
-class FxIoTargetRemoteNotificationCallback :
-                    public FxGlobalsStump,
-                    public IWudfTargetCallbackDeviceChange
+class FxIoTargetRemoteNotificationCallback : 
+                    public FxGlobalsStump, 
+                    public IWudfTargetCallbackDeviceChange 
 {
 private:
-
+    
     LONG m_cRefs;
 
-    FxIoTargetRemote* m_RemoteTarget;
+    //
+    // Weak reference to Remote target. Host takes a reference on
+    // FxIoTargetRemoteNotificationCallback before invoking any of
+    // its callbacks.
+    //
+    FxIoTargetRemote* m_RemoteTarget; 
 
 public:
 
@@ -44,7 +49,7 @@ public:
         m_cRefs(1)
     {
     }
-
+    
     ~FxIoTargetRemoteNotificationCallback() {};
 
     WUDF_TARGET_CONTEXT
@@ -54,26 +59,26 @@ public:
     {
         return m_RemoteTarget->m_TargetNotifyHandle;
     }
-
-    BOOL
+    
+    BOOL 
     __stdcall
     OnQueryRemove(
         _In_ WUDF_TARGET_CONTEXT RegistrationID
         );
 
-    VOID
+    VOID 
     __stdcall
     OnRemoveCanceled(
         _In_ WUDF_TARGET_CONTEXT RegistrationID
         );
 
-    VOID
+    VOID 
     __stdcall
     OnRemoveComplete(
         _In_ WUDF_TARGET_CONTEXT RegistrationID
         );
 
-    VOID
+    VOID 
     __stdcall
     OnCustomEvent(
         _In_ WUDF_TARGET_CONTEXT  RegistrationID,
@@ -83,7 +88,7 @@ public:
         _In_ DWORD NameBufferOffset
         );
 
-    HRESULT
+    HRESULT 
     __stdcall
     QueryInterface(
         __in  const IID& iid,
@@ -109,8 +114,8 @@ public:
         this->AddRef();
         return S_OK;
     }
-
-    ULONG
+    
+    ULONG 
     __stdcall
     AddRef(
         )
@@ -119,22 +124,16 @@ public:
         return cRefs;
     }
 
-    ULONG
+    ULONG 
     __stdcall
     Release(
         )
     {
         LONG cRefs = InterlockedDecrement( &m_cRefs );
         if (0 == cRefs) {
-            //
-            // The lifetime of this object is controlled by FxIoTargetRemote
-            // object (the container object), and not by this ref count. This
-            // method is implemented just to satisfy the interface implemetation
-            // requirement.
-            //
-            DO_NOTHING();
+            delete this;
         }
-
+        
         return cRefs;
     }
 };

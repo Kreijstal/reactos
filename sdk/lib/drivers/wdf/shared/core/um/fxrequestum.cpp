@@ -62,7 +62,7 @@ FxRequest::GetMdl(
     )
 {
     UNREFERENCED_PARAMETER(pMdl);
-
+    
     ASSERTMSG("Not implemented for UMDF\n", FALSE);
 
     return STATUS_NOT_IMPLEMENTED;
@@ -118,7 +118,7 @@ Returns:
 --*/
 {
     UNREFERENCED_PARAMETER(pMdl);
-
+    
     ASSERTMSG("Not implemented for UMDF\n", FALSE);
 
     return STATUS_NOT_IMPLEMENTED;
@@ -167,7 +167,7 @@ Returns:
     UNREFERENCED_PARAMETER(Buffer);
     UNREFERENCED_PARAMETER(Length);
     UNREFERENCED_PARAMETER(MemoryObject);
-
+    
     ASSERTMSG("Not implemented for UMDF\n", FALSE);
 
     return STATUS_NOT_IMPLEMENTED;
@@ -216,7 +216,7 @@ Returns:
     UNREFERENCED_PARAMETER(Buffer);
     UNREFERENCED_PARAMETER(Length);
     UNREFERENCED_PARAMETER(MemoryObject);
-
+    
     ASSERTMSG("Not implemented for UMDF\n", FALSE);
 
     return STATUS_NOT_IMPLEMENTED;
@@ -234,7 +234,7 @@ FxRequest::Impersonate(
     NTSTATUS status;
     HRESULT hr;
     MdIrp irp;
-
+    
     status = GetIrp(&irp);
     if (!NT_SUCCESS(status)) {
         DoTraceLevelMessage(GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGREQUEST,
@@ -243,14 +243,14 @@ FxRequest::Impersonate(
         FxVerifierDbgBreakPoint(GetDriverGlobals());
         return status;
     }
-
+    
     hr = irp->ImpersonateRequestorProcess(ImpersonationLevel);
 
     if (SUCCEEDED(hr)) {
         status = STATUS_SUCCESS;
         EvtRequestImpersonate(GetHandle(), Context);
         irp->RevertImpersonation();
-    }
+    } 
     else {
         status = GetDevice()->NtStatusFromHr(hr);
         DoTraceLevelMessage(GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGREQUEST,
@@ -261,4 +261,22 @@ FxRequest::Impersonate(
     return status;
 }
 
+ULONG
+FxRequest::GetRequestorProcessId(
+    VOID
+    )
+{
+    NTSTATUS status;
+    MdIrp irp;
 
+    status = GetIrp(&irp);
+    if (!NT_SUCCESS(status)) {
+        DoTraceLevelMessage(GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGREQUEST,
+                            "Unable to obtain requestor ID. WDFREQUEST 0x%p is already completed, %!STATUS!",
+                            GetHandle(), status);
+        FxVerifierDbgBreakPoint(GetDriverGlobals());
+        return 0;
+    }
+
+    return irp->GetRequestorProcessId();
+}

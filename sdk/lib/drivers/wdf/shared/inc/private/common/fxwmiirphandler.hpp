@@ -107,7 +107,7 @@ public:
     AddPowerPolicyProviderAndInstance(
         __in    PWDF_WMI_PROVIDER_CONFIG ProviderConfig,
         __in    FxWmiInstanceInternalCallbacks* Callbacks,
-        __inout FxWmiInstanceInternal** Instance
+        _Outptr_ FxWmiInstanceInternal** Instance
         );
 
 protected:
@@ -273,7 +273,7 @@ private:
     VOID
     DecrementUpdateCount() {
         LONG count;
-
+        
         count = InterlockedDecrement(&m_UpdateCount);
         ASSERT(count >= 0);
         if (count == 0) {
@@ -309,12 +309,12 @@ protected:
     PIO_WORKITEM m_WorkItem;
 
     //
-    // count of references taken every time an update is needed
+    // count of references taken every time an update is needed 
     //
     LONG m_UpdateCount;
 
     //
-    // WMI unregister waits on this event to ensure no upadtes are allowed
+    // WMI unregister waits on this event to ensure no upadtes are allowed 
     // after unregister.
     //
     FxCREvent m_UpdateEvent;
@@ -323,7 +323,7 @@ protected:
 
     BOOLEAN m_WorkItemQueued;
 
-
+    
 };
 
 #endif // _FXWMIIRPHANDLER_H_

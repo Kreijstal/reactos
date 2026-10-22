@@ -26,11 +26,11 @@ Revision History:
 #include "fxmin.hpp"
 
 FORCEINLINE
-VOID
+VOID 
 PerformanceAnalysisIOProcess(
     __in PFX_DRIVER_GLOBALS pFxDriverGlobals,
     __in WDFREQUEST Handle,
-    __inout FxRequest** ppReq,
+    _Out_ FxRequest** ppReq,
     __inout GUID* pActivityId
     )
 {
@@ -38,11 +38,11 @@ PerformanceAnalysisIOProcess(
                          Handle,
                          FX_TYPE_REQUEST,
                          (PVOID *) ppReq);
-
+    
     if ((*ppReq)->GetFxIrp()->GetIoIrp()->IsActivityIdSet() == FALSE) {
         EventActivityIdControl(EVENT_ACTIVITY_CTRL_CREATE_ID, pActivityId);
         (*ppReq)->GetFxIrp()->GetIoIrp()->SetActivityId(pActivityId);
-    }
+    } 
     else {
         *pActivityId = *(*ppReq)->GetFxIrp()->GetIoIrp()->GetActivityId();
     }
@@ -57,23 +57,23 @@ PerfIoStart(
     FxRequest* pReq;
     GUID activityId = { 0 };
     WDFOBJECT_OFFSET offset = 0;
-
-    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset);
+    
+    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset); 
     PFX_DRIVER_GLOBALS pFxDriverGlobals = pObject->GetDriverGlobals();
     BOOLEAN status = IsFxPerformanceAnalysis(pFxDriverGlobals);
-
+    
     if(status) {
         PFN_WDF_DRIVER_DEVICE_ADD pDriverDeviceAdd = pFxDriverGlobals->Driver->GetDriverDeviceAddMethod();
         PerformanceAnalysisIOProcess(pFxDriverGlobals, Handle, &pReq,
                 &activityId);
-
+                
         UCHAR Type = pReq->GetFxIrp()->GetMajorFunction();
         WDFDEVICE Device = pReq->GetCurrentQueue()->GetDevice()->GetHandle();
         EVENT_DATA_DESCRIPTOR EventData[3];
         EventDataDescCreate(&EventData[0], &Type, sizeof(const UCHAR));
-        EventDataDescCreate(&EventData[1], &pDriverDeviceAdd, sizeof(PVOID));
-        EventDataDescCreate(&EventData[2], &Device, sizeof(PVOID));
-
+        EventDataDescCreate(&EventData[1], &pDriverDeviceAdd, sizeof(PVOID));        
+        EventDataDescCreate(&EventData[2], &Device, sizeof(PVOID)); 
+         
         EventWriteTransfer(Microsoft_Windows_DriverFrameworks_UserMode_PerformanceHandle,
                  &FX_REQUEST_START,
                  &activityId,
@@ -93,23 +93,23 @@ PerfIoComplete(
     FxRequest* pReq;
     GUID activityId = { 0 };
     WDFOBJECT_OFFSET offset = 0;
-
-    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset);
+    
+    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset); 
     PFX_DRIVER_GLOBALS pFxDriverGlobals = pObject->GetDriverGlobals();
     BOOLEAN status = IsFxPerformanceAnalysis(pFxDriverGlobals);
-
+    
     if(status) {
         PFN_WDF_DRIVER_DEVICE_ADD pDriverDeviceAdd = pFxDriverGlobals->Driver->GetDriverDeviceAddMethod();
         PerformanceAnalysisIOProcess(pFxDriverGlobals, Handle, &pReq,
                 &activityId);
-
+                
         UCHAR Type = pReq->GetFxIrp()->GetMajorFunction();
         WDFDEVICE Device = pReq->GetCurrentQueue()->GetDevice()->GetHandle();
         EVENT_DATA_DESCRIPTOR EventData[3];
         EventDataDescCreate(&EventData[0], &Type, sizeof(const UCHAR));
-        EventDataDescCreate(&EventData[1], &pDriverDeviceAdd, sizeof(PVOID));
-        EventDataDescCreate(&EventData[2], &Device, sizeof(PVOID));
-
+        EventDataDescCreate(&EventData[1], &pDriverDeviceAdd, sizeof(PVOID));   
+        EventDataDescCreate(&EventData[2], &Device, sizeof(PVOID));         
+                
         EventWriteTransfer(Microsoft_Windows_DriverFrameworks_UserMode_PerformanceHandle,
                  &FX_REQUEST_COMPLETE,
                  &activityId,
@@ -129,17 +129,17 @@ PerformanceAnalysisPowerProcess(
 )
 {
     WDFOBJECT_OFFSET offset = 0;
-    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset);
+    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset); 
     PFX_DRIVER_GLOBALS pFxDriverGlobals = pObject->GetDriverGlobals();
     BOOLEAN status = IsFxPerformanceAnalysis(pFxDriverGlobals);
-
+    
     if(status) {
         PFN_WDF_DRIVER_DEVICE_ADD pDriverDeviceAdd = pFxDriverGlobals->Driver->GetDriverDeviceAddMethod();
-
+        
         EVENT_DATA_DESCRIPTOR EventData[2];
         EventDataDescCreate(&EventData[0], &pDriverDeviceAdd, sizeof(PVOID));
         EventDataDescCreate(&EventData[1], &Handle, sizeof(PVOID));
-
+        
         EventWriteTransfer(Microsoft_Windows_DriverFrameworks_UserMode_PerformanceHandle,
                  EventDescriptor,
                  pActivityId,
@@ -147,7 +147,7 @@ PerformanceAnalysisPowerProcess(
                  2,
                  &EventData[0]);
     }
-
+    
     return status;
 }
 
@@ -247,7 +247,7 @@ PerfEvtIoStopStart(
     WDFOBJECT_OFFSET offset = 0;
     WDFDEVICE device;
 
-    FxObject *pObject = FxObject::_GetObjectFromHandle(Queue, &offset);
+    FxObject *pObject = FxObject::_GetObjectFromHandle(Queue, &offset); 
     PFX_DRIVER_GLOBALS pFxDriverGlobals = pObject->GetDriverGlobals();
 
     FxObjectHandleGetPtr(pFxDriverGlobals,
@@ -272,7 +272,7 @@ PerfEvtIoStopStop(
     WDFOBJECT_OFFSET offset = 0;
     WDFDEVICE device;
 
-    FxObject *pObject = FxObject::_GetObjectFromHandle(Queue, &offset);
+    FxObject *pObject = FxObject::_GetObjectFromHandle(Queue, &offset); 
     PFX_DRIVER_GLOBALS pFxDriverGlobals = pObject->GetDriverGlobals();
 
     FxObjectHandleGetPtr(pFxDriverGlobals,
@@ -284,35 +284,37 @@ PerfEvtIoStopStop(
     PerformanceAnalysisPowerProcess(&FX_EVTIOSTOP_STOP, pActivityId, device);
 }
 
-__inline
+__inline 
 VOID
+#pragma prefast(suppress:__WARNING_RETURN_UNINIT_VAR, "Returning uninitialized memory '*Irql'")
 VerifyIrqlEntry(
     __out KIRQL *Irql
     )
 {
-    DO_NOTHING();
+    DO_NOTHING(); 
 }
 
-__inline
+__inline 
 VOID
 VerifyIrqlExit(
     __in PWDF_DRIVER_GLOBALS DriverGlobals,
     __in KIRQL PrevIrql
     )
 {
-    DO_NOTHING();
+    DO_NOTHING(); 
 }
 
-__inline
+__inline 
 VOID
+#pragma prefast(suppress:__WARNING_RETURN_UNINIT_VAR, "Returning uninitialized memory '*CritRegion'")
 VerifyCriticalRegionEntry(
     __out BOOLEAN *CritRegion
     )
 {
-    DO_NOTHING();
+    DO_NOTHING(); 
 }
 
-__inline
+__inline 
 VOID
 VerifyCriticalRegionExit(
     __in PWDF_DRIVER_GLOBALS DriverGlobals,
@@ -320,6 +322,6 @@ VerifyCriticalRegionExit(
     __in PVOID Pfn
     )
 {
-    DO_NOTHING();
+    DO_NOTHING(); 
 }
 

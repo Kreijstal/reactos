@@ -738,7 +738,7 @@ FxIsProcessorGroupSupported(
     //
     // Groups are supported in Win 7 and forward.
     //
-    return FxLibraryGlobals.ProcessorGroupSupport;
+    return TRUE;
 }
 
 #ifdef __cplusplus

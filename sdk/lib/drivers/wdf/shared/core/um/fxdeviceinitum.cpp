@@ -13,7 +13,7 @@ Author:
 
 
 
-
+    
 Environment:
 
     User mode only
@@ -34,7 +34,7 @@ WDFDEVICE_INIT::SetPdo(
     )
 {
     UNREFERENCED_PARAMETER(Parent);
-
+    
     UfxVerifierTrapNotImpl();
 }
 
@@ -44,30 +44,30 @@ WDFDEVICE_INIT::AssignIoType(
     )
 {
     NTSTATUS status;
-
-    if (IoTypeConfig->ReadWriteIoType == WdfDeviceIoUndefined ||
+    
+    if (IoTypeConfig->ReadWriteIoType == WdfDeviceIoUndefined || 
         IoTypeConfig->ReadWriteIoType > WdfDeviceIoBufferedOrDirect) {
         status= STATUS_INVALID_PARAMETER;
         DoTraceLevelMessage(
             DriverGlobals, TRACE_LEVEL_ERROR, TRACINGDEVICE,
-            "Out of range ReadWriteIoType %d, %!status!",
+            "Out of range ReadWriteIoType %d, %!status!", 
             IoTypeConfig->ReadWriteIoType, status);
         FxVerifierDbgBreakPoint(DriverGlobals);
         return;
     }
 
-    if (IoTypeConfig->DeviceControlIoType == WdfDeviceIoUndefined ||
+    if (IoTypeConfig->DeviceControlIoType == WdfDeviceIoUndefined || 
         IoTypeConfig->DeviceControlIoType > WdfDeviceIoBufferedOrDirect) {
         status= STATUS_INVALID_PARAMETER;
         DoTraceLevelMessage(
             DriverGlobals, TRACE_LEVEL_ERROR, TRACINGDEVICE,
-            "Out of range DeviceControlIoType %d, %!status!",
+            "Out of range DeviceControlIoType %d, %!status!", 
             IoTypeConfig->DeviceControlIoType, status);
         FxVerifierDbgBreakPoint(DriverGlobals);
         return;
     }
 
-    if (IoTypeConfig->ReadWriteIoType == WdfDeviceIoNeither ||
+    if (IoTypeConfig->ReadWriteIoType == WdfDeviceIoNeither || 
         IoTypeConfig->DeviceControlIoType == WdfDeviceIoNeither) {
         status= STATUS_INVALID_PARAMETER;
         DoTraceLevelMessage(

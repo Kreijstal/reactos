@@ -23,6 +23,50 @@ Revision History:
 #ifndef _FXVERIFIERKM_H_
 #define _FXVERIFIERKM_H_
 
+#ifndef __REACTOS__
+extern "C" {
+
+BOOLEAN
+VfIsRuleClassEnabled (
+    _In_ ULONG RuleClassID
+    );
+
+VOID
+VfCheckNxPoolType (
+    _In_ POOL_TYPE PoolType,
+    _In_ PVOID CallingAddress,
+    _In_ ULONG PoolTag
+    );
+
+} // extern "C"
+#else
+//
+// The ReactOS kernel has no Driver Verifier rule classes or NX pool checks
+//
+FORCEINLINE
+BOOLEAN
+VfIsRuleClassEnabled (
+    _In_ ULONG RuleClassID
+    )
+{
+    UNREFERENCED_PARAMETER(RuleClassID);
+    return FALSE;
+}
+
+FORCEINLINE
+VOID
+VfCheckNxPoolType (
+    _In_ POOL_TYPE PoolType,
+    _In_ PVOID CallingAddress,
+    _In_ ULONG PoolTag
+    )
+{
+    UNREFERENCED_PARAMETER(PoolType);
+    UNREFERENCED_PARAMETER(CallingAddress);
+    UNREFERENCED_PARAMETER(PoolTag);
+}
+#endif
+
 FORCEINLINE
 VOID
 FxVerifierCheckNxPoolType(
@@ -57,15 +101,14 @@ Return Value:
 --*/
 
 {
-    if (FxDriverGlobals->FxVerifierOn &&
-        FxLibraryGlobals.VfCheckNxPoolType != NULL) {
+    if (FxDriverGlobals->FxVerifierOn) {
 
         //
         // Forward the call to Driver Verifier. This will provide a consistent
         // behavior across all verified drivers.
         //
 
-        FxLibraryGlobals.VfCheckNxPoolType(PoolType, _ReturnAddress(), PoolTag);
+        VfCheckNxPoolType(PoolType, _ReturnAddress(), PoolTag);
     }
 }
 

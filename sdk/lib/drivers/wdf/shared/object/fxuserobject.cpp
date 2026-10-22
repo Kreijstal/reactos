@@ -37,7 +37,7 @@ Revision History:
 // Tracing support
 extern "C" {
 #if defined(EVENT_TRACING)
-#include "FxUserObject.tmh"
+// #include "fxuserobject.tmh"
 #endif
 }
 

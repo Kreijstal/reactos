@@ -36,7 +36,7 @@ Revision History:
 // We use DoTraceMessage
 extern "C" {
 #if defined(EVENT_TRACING)
-#include "FxValidateFunctions.tmh"
+// #include "fxvalidatefunctions.tmh"
 #endif
 }
 

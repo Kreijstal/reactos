@@ -48,7 +48,7 @@ FxInterrupt::InitializeInternal(
     UNREFERENCED_PARAMETER(Parent);
 
     deviceStack = m_Device->GetDeviceStack();
-
+    
     switch (m_ShareVector) {
     case WdfTrue:
         //
@@ -75,19 +75,19 @@ FxInterrupt::InitializeInternal(
     }
 
     //
-    // Create a thread pool if not already created. An interrupt is created in
+    // Create a thread pool if not already created. An interrupt is created in 
     // one of the pnp callbacks (OnAddDevice, OnPrepareHarwdare etc) so there is
     // no race in getting and setting the theradpool pointer.
     //
     pool = m_Device->GetInterruptThreadpool();
     if (pool == NULL) {
-        hr = FxInterruptThreadpool::_CreateAndInit(GetDriverGlobals(),
+        hr = FxInterruptThreadpool::_CreateAndInit(GetDriverGlobals(), 
                                                    &pool);
-        if (FAILED(hr))
+        if (FAILED(hr)) 
         {
             goto exit;
         }
-
+        
         m_Device->SetInterruptThreadpool(pool);
     }
 
@@ -97,12 +97,12 @@ FxInterrupt::InitializeInternal(
     hr = FxInterruptWaitblock::_CreateAndInit(pool,
                                                 this,
                                                 FxInterrupt::_InterruptThunk,
-                                                &m_InterruptWaitblock);
+                                                &m_InterruptWaitblock);                                
     if (FAILED(hr)) {
-        DoTraceLevelMessage(GetDriverGlobals(),
+        DoTraceLevelMessage(GetDriverGlobals(), 
                     TRACE_LEVEL_ERROR, TRACINGPNP,
                     "Waitblock creation failed for CWdfInterrupt object"
-                    " %!hresult!", hr);
+                    " %!hresult!", hr);           
         goto exit;
     }
 
@@ -119,15 +119,15 @@ FxInterrupt::InitializeInternal(
 
     if (SUCCEEDED(hr))
     {
-        status = STATUS_SUCCESS;
+        status = STATUS_SUCCESS;        
     }
     else
     {
         PUMDF_VERSION_DATA driverVersion = deviceStack->GetMinDriverVersion();
-
-        BOOL preserveCompat =
+    
+        BOOL preserveCompat = 
              deviceStack->ShouldPreserveIrpCompletionStatusCompatibility();
-
+        
         status = CHostFxUtil::NtStatusFromHr(
                                         hr,
                                         driverVersion->MajorNumber,
@@ -135,9 +135,9 @@ FxInterrupt::InitializeInternal(
                                         preserveCompat
                                         );
     }
-
+    
     if (!NT_SUCCESS(status)) {
-        DoTraceLevelMessage(GetDriverGlobals(),
+        DoTraceLevelMessage(GetDriverGlobals(), 
             TRACE_LEVEL_ERROR, TRACINGPNP,
             "failed to initialize interrupt "
             "%!STATUS!", status);
@@ -151,7 +151,7 @@ exit:
     // Dispose will do cleanup. No need to cleanup here.
     //
 
-    return status;
+    return status;   
 }
 
 NTSTATUS
@@ -169,7 +169,7 @@ FxInterrupt::ConnectInternal(
     deviceStack = m_Device->GetDeviceStack2();
 
     //
-    // reset the interrupt event to non-signaled state to start with a
+    // reset the interrupt event to non-signaled state to start with a 
     // clean slate.
     //
     m_InterruptWaitblock->ResetEvent();
@@ -184,7 +184,7 @@ FxInterrupt::ConnectInternal(
     StartThreadpoolWaitQueue();
 
     //
-    // Tell the PnP Manager to connect the interrupt. Send a message to
+    // Tell the PnP Manager to connect the interrupt. Send a message to 
     // redirector to do so. When ConnectInterrupt returns a failure code,
     // we use isRdConnectingOrConnected to check if the failure was due
     // to an already connected or currently connecting interrupt.
@@ -201,7 +201,7 @@ FxInterrupt::ConnectInternal(
             // we want to keep the threadpool active so that we continue to receive
             // and acknowledge interrupts - otherwise RdIsrPassiveLevel may time out.
             //
-            DoTraceLevelMessage(pFxDriverGlobals,
+            DoTraceLevelMessage(pFxDriverGlobals, 
                 TRACE_LEVEL_ERROR, TRACINGPNP,
                 "Multiple connection attempts for !WDFINTERRUPT 0x%p",
                 GetHandle());
@@ -224,9 +224,9 @@ FxInterrupt::ConnectInternal(
         }
 
         PUMDF_VERSION_DATA driverVersion = deviceStack->GetMinDriverVersion();
-        BOOL preserveCompat =
+        BOOL preserveCompat = 
              deviceStack->ShouldPreserveIrpCompletionStatusCompatibility();
-
+        
         status = CHostFxUtil::NtStatusFromHr(
                                         hr,
                                         driverVersion->MajorNumber,
@@ -243,7 +243,7 @@ FxInterrupt::ConnectInternal(
     }
 
     status = STATUS_SUCCESS;
-
+    
     return status;
 }
 
@@ -266,7 +266,7 @@ FxInterrupt::DisconnectInternal(
     hr = deviceStack->ControlInterrupt(m_RdInterruptContext, controlType);
     if (FAILED(hr))
     {
-        DoTraceLevelMessage(GetDriverGlobals(),
+        DoTraceLevelMessage(GetDriverGlobals(), 
             TRACE_LEVEL_ERROR, TRACINGPNP,
             "Disconnect message to reflector returned failure "
             "%!hresult!", hr);
@@ -274,23 +274,23 @@ FxInterrupt::DisconnectInternal(
         FX_VERIFY_WITH_NAME(INTERNAL, TRAPMSG("Disconnect message to reflector returned failure. "),
             GetDriverGlobals()->Public.DriverName);
     }
-
+  
     //
     // Now that interrupt has been disconnected, flush the threadpool. Note that
     // we need to do this after disconnect because if we did it before disconnect,
-    // we might drop any spurious interrupts that were generated after
+    // we might drop any spurious interrupts that were generated after 
     // the driver disabled interrupt generation in its Disable callback,
-    // and after the DPCs were flushed. Fx can't drop spurious interrupt
+    // and after the DPCs were flushed. Fx can't drop spurious interrupt 
     // because if the interrupt is level-triggered then refelctor would be waiting
-    // for acknowledgement. The fact that disconnect command to reflector has
-    // returned to fx guarantees that there are no more interrupts pending in
-    // reflector.
+    // for acknowledgement. The fact that disconnect command to reflector has 
+    // returned to fx guarantees that there are no more interrupts pending in 
+    // reflector. 
     //
     StopAndFlushThreadpoolWaitQueue();
 
     //
-    // There might still be WorkItemForIsr running as a result of
-    // the handling of spurious interrupt by driver, so we need to flush the
+    // There might still be WorkItemForIsr running as a result of 
+    // the handling of spurious interrupt by driver, so we need to flush the 
     // workitem as well.
     //
     FlushQueuedWorkitem();
@@ -319,12 +319,12 @@ FxInterrupt::SetPolicyInternal(
                                          TargetProcessorSet);
     if (FAILED(hr))
     {
-        DoTraceLevelMessage(GetDriverGlobals(),
+        DoTraceLevelMessage(GetDriverGlobals(), 
             TRACE_LEVEL_ERROR, TRACINGPNP,
             "SetPolicy message to reflector returned failure "
             "%!hresult!", hr);
     }
-
+  
     FX_VERIFY_WITH_NAME(INTERNAL, CHECK_HR(hr), GetDriverGlobals()->Public.DriverName);
 
     return;
@@ -374,7 +374,7 @@ FxInterrupt::ResetInternal(
         //
         return;
     }
-
+        
     //
     // Send a message to redirector to reset interrupt info.
     //
@@ -384,12 +384,12 @@ FxInterrupt::ResetInternal(
     hr = deviceStack->ControlInterrupt(m_RdInterruptContext, controlType);
     if (FAILED(hr))
     {
-        DoTraceLevelMessage(GetDriverGlobals(),
+        DoTraceLevelMessage(GetDriverGlobals(), 
             TRACE_LEVEL_ERROR, TRACINGPNP,
             "ResetInterruptInfo message to reflector returned failure "
             "%!hresult!", hr);
     }
-
+  
     FX_VERIFY_WITH_NAME(INTERNAL, CHECK_HR(hr), GetDriverGlobals()->Public.DriverName);
 
     return;
@@ -411,7 +411,7 @@ FxInterrupt::RevokeResourcesInternal(
         //
         return;
     }
-
+        
     //
     // Send a message to redirector to revoke interrupt resources.
     //
@@ -421,12 +421,12 @@ FxInterrupt::RevokeResourcesInternal(
     hr = deviceStack->ControlInterrupt(m_RdInterruptContext, controlType);
     if (FAILED(hr))
     {
-        DoTraceLevelMessage(GetDriverGlobals(),
+        DoTraceLevelMessage(GetDriverGlobals(), 
             TRACE_LEVEL_ERROR, TRACINGPNP,
             "RevokeResources message to reflector returned failure "
             "%!hresult!", hr);
     }
-
+  
     FX_VERIFY_WITH_NAME(INTERNAL, CHECK_HR(hr), GetDriverGlobals()->Public.DriverName);
 
     return;
@@ -444,16 +444,16 @@ FxInterrupt::FlushQueuedDpcs(
     // Send a message to redirector to flush DPCs.
     //
     deviceStack = m_Device->GetDeviceStack();
-    hr = deviceStack->ControlInterrupt(m_RdInterruptContext,
+    hr = deviceStack->ControlInterrupt(m_RdInterruptContext, 
                                        InterruptControlTypeFlushQueuedDpcs);
     if (FAILED(hr))
     {
-        DoTraceLevelMessage(GetDriverGlobals(),
+        DoTraceLevelMessage(GetDriverGlobals(), 
             TRACE_LEVEL_ERROR, TRACINGPNP,
             "FlushQueuedDpcs message to reflector returned failure "
             "%!hresult!", hr);
 
-        FX_VERIFY_WITH_NAME(INTERNAL,
+        FX_VERIFY_WITH_NAME(INTERNAL, 
             TRAPMSG("FlushQueuedDpcs message to reflector returned failure"),
             GetDriverGlobals()->Public.DriverName);
     }
@@ -477,13 +477,13 @@ FxInterrupt::AssignResourcesInternal(
     if (IsLevelTriggered(CmDescTrans->Flags) &&
         FxIsPassiveLevelInterruptSupported() == FALSE) {
         hr = E_INVALIDARG;
-        DoTraceLevelMessage(GetDriverGlobals(),
+        DoTraceLevelMessage(GetDriverGlobals(), 
             TRACE_LEVEL_ERROR, TRACINGPNP,
             "Failed to assign interrupt resource to interrupt object"
             "because interrupt resource is for level-triggered interrupt"
             "which is not supported on this platform. See the docs for info on"
             "supported platforms. %!hresult!\n", hr);
-
+    
         FX_VERIFY_WITH_NAME(DRIVER(BadArgument, TODO), TRAPMSG(
             "Failed to assign interrupt resource to interrupt object"
             "because interrupt resource is for level-triggered interrupt"
@@ -492,7 +492,7 @@ FxInterrupt::AssignResourcesInternal(
             GetDriverGlobals()->Public.DriverName);
     }
 
-    //
+    //    
     // Sharing is only supported for level-triggered interrupts. We allow
     // shared latched interrupts in order to accomodate incorrect device
     // firmwares that mistakenly declare their exclusive resources as shared.
@@ -501,10 +501,10 @@ FxInterrupt::AssignResourcesInternal(
     // multiple registered handlers. See RdInterrupt::AssignResources
     // for details.
     //
-    if (IsLevelTriggered(CmDescTrans->Flags) == FALSE &&
+    if (IsLevelTriggered(CmDescTrans->Flags) == FALSE && 
         CmDescTrans->ShareDisposition != CmResourceShareDeviceExclusive) {
 
-        DoTraceLevelMessage(GetDriverGlobals(),
+        DoTraceLevelMessage(GetDriverGlobals(), 
             TRACE_LEVEL_WARNING, TRACINGPNP,
             "The resource descriptor indicates that this is a shared "
             "edge-triggered interrupt. UMDF only supports sharing of "
@@ -513,7 +513,7 @@ FxInterrupt::AssignResourcesInternal(
             "instead of device exclusive. If the resource is in fact "
             "shared, then UMDF does not support this device.\n");
     }
-
+ 
     //
     // Tell the PnP Manager to assign resources to the interrupt.
     // Send a message to redirector to do so.
@@ -527,12 +527,12 @@ FxInterrupt::AssignResourcesInternal(
                                                m_PassiveHandlingByRedirector);
     if (FAILED(hr))
     {
-        DoTraceLevelMessage(GetDriverGlobals(),
+        DoTraceLevelMessage(GetDriverGlobals(), 
             TRACE_LEVEL_ERROR, TRACINGPNP,
             "AssignResources message to reflector returned failure "
             "%!hresult!\n", hr);
     }
-
+    
     FX_VERIFY_WITH_NAME(INTERNAL, CHECK_HR(hr),
         GetDriverGlobals()->Public.DriverName);
 
@@ -545,7 +545,7 @@ FxInterrupt::ThreadpoolWaitCallback(
 {
     BOOLEAN claimed;
 
-    //
+    // 
     // ETW event for performance measurement
     //
     EventWriteEVENT_UMDF_FX_INTERRUPT_NOTIFICATION_RECEIVED(
@@ -561,14 +561,14 @@ FxInterrupt::ThreadpoolWaitCallback(
         // to the state machine so that it can power up the device
         // if required and then invoke the ISR callback
         //
-        claimed = WakeInterruptIsr();
+        claimed = WakeInterruptIsr();  
     } else {
         AcquireLock();
-        claimed = m_EvtInterruptIsr(GetHandle(),
+        claimed = m_EvtInterruptIsr(GetHandle(), 
                                    m_InterruptInfo.MessageNumber
                                    );
         ReleaseLock();
-    }
+    }                   
 
     //
     // Queue another wait. MSDN: You must re-register the event with the
@@ -579,7 +579,7 @@ FxInterrupt::ThreadpoolWaitCallback(
     }
 
     //
-    // Return acknowledgement to reflector if it's handled at passive level
+    // Return acknowledgement to reflector if it's handled at passive level 
     // by reflector.
     //
     if (m_PassiveHandlingByRedirector) {
@@ -587,11 +587,11 @@ FxInterrupt::ThreadpoolWaitCallback(
         HRESULT hr;
 
         deviceStack = m_Device->GetDeviceStack();
-
+        
         hr = deviceStack->AcknowledgeInterrupt(m_RdInterruptContext, claimed);
-
+        
         if (FAILED(hr)) {
-            DoTraceLevelMessage(GetDriverGlobals(),
+            DoTraceLevelMessage(GetDriverGlobals(), 
                 TRACE_LEVEL_ERROR, TRACINGPNP,
                 "AcknowledgeInterrupt message to reflector returned "
                 "failure. Check UMDF log for failure reason. %!hresult!", hr);
@@ -607,7 +607,7 @@ FxInterrupt::ThreadpoolWaitCallback(
 
 VOID
 FxInterrupt::QueueSingleWaitOnInterruptEvent(
-    VOID
+    VOID        
     )
 {
     m_InterruptWaitblock->SetThreadpoolWait();
@@ -632,7 +632,7 @@ FxInterrupt::StopAndFlushThreadpoolWaitQueue(
     // We need to stop the threadpool wait queue and accomplish the following:
     // 1) Prevent any new waits from being queued.
     // 2) Removed any waits already queued.
-    // 3) Wait for interrupt isr callback to complete.
+    // 3) Wait for interrupt isr callback to complete. 
     //
 
     //
@@ -651,7 +651,7 @@ FxInterrupt::StopAndFlushThreadpoolWaitQueue(
     m_InterruptWaitblock->ClearThreadpoolWait();
 
     //
-    // wait for callback. This additional wait for callback is needed to
+    // wait for callback. This additional wait for callback is needed to 
     // handle the follwoing race:
     // - CanQueue is set to false in this thread
     // - Callback is executing at statement after CanQueue check so it did not
@@ -659,7 +659,7 @@ FxInterrupt::StopAndFlushThreadpoolWaitQueue(
     // - this thread waits for callback
     // - callback thread queues a wait and returns
     // - the wait earlier queued is satisfied and callback runs
-    // - this thread clears the queue (there is nothing to clear) but there is
+    // - this thread clears the queue (there is nothing to clear) but there is 
     //   still a callback runnning and this thread needs to wait.
     //
     m_InterruptWaitblock->WaitForOutstandingCallbackToComplete();
@@ -676,9 +676,9 @@ FxInterrupt::_InterruptThunk(
 {
     FxInterrupt* fxInterrupt = (FxInterrupt*) Parameter;
 
-    UNREFERENCED_PARAMETER(Instance);
-    UNREFERENCED_PARAMETER(Wait);
-    UNREFERENCED_PARAMETER(WaitResult);
+    UNREFERENCED_PARAMETER(Instance);       
+    UNREFERENCED_PARAMETER(Wait);       
+    UNREFERENCED_PARAMETER(WaitResult);       
 
     fxInterrupt->ThreadpoolWaitCallback();
 
@@ -715,7 +715,7 @@ FxInterrupt::FlushAndRundownInternal(
 
     //
     // waitblock destructor will ensure event and waitblock cleanup.
-    //
+    //        
     if (m_InterruptWaitblock != NULL) {
         delete m_InterruptWaitblock;
         m_InterruptWaitblock = NULL;
@@ -723,8 +723,8 @@ FxInterrupt::FlushAndRundownInternal(
 
     //
     // No need to explicitly delete the COM wrapper (CWdfInterrupt).
-    // The COM wrapper will get deleted in fxInterrupt's destroy callback when
-    // the object tree reference taken during creation will be released.
+    // The COM wrapper will get deleted in fxInterrupt's destroy callback when 
+    // the object tree reference taken during creation will be released. 
     //
 }
 
@@ -751,7 +751,7 @@ FxInterrupt::WorkItemHandler(
     //
     ASSERT(m_EvtInterruptWorkItem != NULL || m_EvtInterruptDpc != NULL);
     ASSERT((m_EvtInterruptWorkItem != NULL && m_EvtInterruptDpc != NULL) == FALSE);
-
+    
     FX_TRACK_DRIVER(GetDriverGlobals());
 
     //
@@ -766,7 +766,7 @@ FxInterrupt::WorkItemHandler(
         }
         else {
             m_EvtInterruptDpc(GetHandle(), m_Device->GetHandle());
-        }
+        }            
         m_CallbackLock->Unlock(irql);
     }
     else {
@@ -775,13 +775,13 @@ FxInterrupt::WorkItemHandler(
         }
         else {
             m_EvtInterruptDpc(GetHandle(), m_Device->GetHandle());
-        }
+        }            
     }
 
     return;
 }
 
-BOOLEAN
+BOOLEAN 
 _SynchronizeExecution(
     __in MdInterrupt  Interrupt,
     __in MdInterruptSynchronizeRoutine  SynchronizeRoutine,
@@ -793,7 +793,7 @@ _SynchronizeExecution(
 
     UNREFERENCED_PARAMETER(Interrupt);
 
-    pParams = (FxInterruptEnableParameters*) SynchronizeContext;
+    pParams = (FxInterruptEnableParameters*) SynchronizeContext; 
     isPassive = pParams->Interrupt->IsPassiveHandling();
     FX_VERIFY(INTERNAL, CHECK("Must be Passive Interrupt", isPassive));
 
