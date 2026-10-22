@@ -622,8 +622,10 @@ WskDeregister(
 /*  line 328 so it is not repeated here.                              */
 /* ------------------------------------------------------------------ */
 
+#if (NTDDI_VERSION < NTDDI_WIN8)
 /* Buffer list used by WskSendMessages (declared before the typedef
- * that references it) */
+ * that references it). Windows 8 and later get the WDK definitions
+ * above instead. */
 typedef struct _WSK_BUF_LIST {
     struct _WSK_BUF_LIST* Next;
     WSK_BUF Buffer;
@@ -641,6 +643,7 @@ NTSTATUS
     _In_ ULONG ControlInfoLength,
     _In_reads_bytes_opt_(ControlInfoLength) PVOID ControlInfo,
     _Inout_ PIRP Irp);
+#endif /* (NTDDI_VERSION < NTDDI_WIN8) */
 
 /* PFN_WSK_CONNECT_EX — Win7 addition: connect with initial send data */
 typedef
