@@ -1325,6 +1325,7 @@
 @ stdcall RtlNumberGenericTableElementsAvl(ptr)
 @ stdcall RtlNumberOfClearBits(ptr)
 @ stdcall RtlNumberOfSetBits(ptr)
+@ stdcall RtlNumberOfSetBitsUlongPtr(ptr)
 @ stdcall RtlOemStringToCountedUnicodeString(ptr ptr long)
 @ stdcall RtlOemStringToUnicodeSize(ptr) RtlxOemStringToUnicodeSize
 @ stdcall RtlOemStringToUnicodeString(ptr ptr long)
