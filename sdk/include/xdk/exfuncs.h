@@ -1563,6 +1563,24 @@ ExTryAcquireSpinLockExclusiveAtDpcLevel(
 
 #endif /* (NTDDI_VERSION >= NTDDI_VISTASP1) */
 
+/* Windows 10 2004+ in the WDK; ReactOS targets NTDDI_WIN10 by default */
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+
+__drv_allocatesMem(Mem)
+_When_((Flags & POOL_FLAG_PAGED) != 0, _IRQL_requires_max_(APC_LEVEL))
+_When_((Flags & POOL_FLAG_PAGED) == 0, _IRQL_requires_max_(DISPATCH_LEVEL))
+_When_((Flags & POOL_FLAG_RAISE_ON_FAILURE) == 0, _Post_maybenull_ _Must_inspect_result_)
+_When_((Flags & POOL_FLAG_RAISE_ON_FAILURE) != 0, _Post_notnull_)
+_Post_writable_byte_size_(NumberOfBytes)
+NTKERNELAPI
+PVOID
+NTAPI
+ExAllocatePool2(
+  _In_ POOL_FLAGS Flags,
+  _In_ SIZE_T NumberOfBytes,
+  _In_ ULONG Tag);
+
+#endif /* (NTDDI_VERSION >= NTDDI_WIN10) */
 
 __drv_allocatesMem(Mem)
 _IRQL_requires_max_(DISPATCH_LEVEL)

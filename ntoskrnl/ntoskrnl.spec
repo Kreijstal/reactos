@@ -75,6 +75,7 @@
 @ stdcall ExAllocateCacheAwareRundownProtection(long long)
 @ stdcall ExAllocateFromPagedLookasideList(ptr) ExiAllocateFromPagedLookasideList
 @ stdcall ExAllocatePool(long long)
+@ stdcall -version=0xA00+ ExAllocatePool2(int64 long long)
 @ stdcall ExAllocatePoolWithQuota(long long)
 @ stdcall ExAllocatePoolWithQuotaTag(long long long)
 @ stdcall ExAllocatePoolWithTag(long long long)
