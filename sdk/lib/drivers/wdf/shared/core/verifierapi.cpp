@@ -29,6 +29,10 @@ Revision History:
 #include "../../kmdf/inc/private/wdf115.h"
 #endif
 
+extern "C" {
+// #include "verifierapi.tmh"
+}
+
 //
 // extern "C" all APIs
 //
@@ -72,9 +76,14 @@ Return Value:
 
     pFxDriverGlobals = GetFxDriverGlobals(DriverGlobals);
 
-    if (pFxDriverGlobals->FxVerifierDbgBreakOnError) {
-        DbgBreakPoint();
-    }
+    DoTraceLevelMessage(
+        pFxDriverGlobals, TRACE_LEVEL_WARNING, TRACINGDRIVER,
+        "WDF driver (!wdflogdump %s) called WdfVerifierDbgBreakPoint "
+        "and verifier setting is %!bool!",
+        pFxDriverGlobals->Public.DriverName,
+        pFxDriverGlobals->FxVerifierDbgBreakOnError);
+
+    FxVerifierDbgBreakPoint(pFxDriverGlobals);
 }
 
 
@@ -134,16 +143,12 @@ Return Value:
 {
     DDI_ENTRY_IMPERSONATION_OK();
 
-    //
-    // Indicate to the BugCheck callback filter which IFR to dump.
-    //
     PFX_DRIVER_GLOBALS pFxDriverGlobals;
 
     pFxDriverGlobals = GetFxDriverGlobals(DriverGlobals);
-    pFxDriverGlobals->FxForceLogsInMiniDump = TRUE;
 
-#pragma prefast(suppress:__WARNING_USE_OTHER_FUNCTION, "WDF wrapper to KeBugCheckEx.");
-    Mx::MxBugCheckEx(BugCheckCode,
+    FxVerifierDriverReportedBugcheck(pFxDriverGlobals,
+                                    BugCheckCode,
                  BugCheckParameter1,
                  BugCheckParameter2,
                  BugCheckParameter3,
@@ -213,29 +218,23 @@ Return Value:
 {
     DDI_ENTRY_IMPERSONATION_OK();
 
-    FxObject* pObject;
     PFX_DRIVER_GLOBALS pFxDriverGlobals;
 
     if (NULL == Object) {
         pFxDriverGlobals = GetFxDriverGlobals(DriverGlobals);
     }
     else {
+        FxObject* pObject;
         FxObjectHandleGetPtrAndGlobals(GetFxDriverGlobals(DriverGlobals),
                                        Object,
                                        FX_TYPE_OBJECT,
                                        (PVOID*)&pObject,
                                        &pFxDriverGlobals);
+        UNREFERENCED_PARAMETER(pObject);
     }
 
-    UNREFERENCED_PARAMETER(pObject);
-
-    //
-    // Indicate to the BugCheck callback filter which IFR to dump.
-    //
-    pFxDriverGlobals->FxForceLogsInMiniDump = TRUE;
-
-#pragma prefast(suppress:__WARNING_USE_OTHER_FUNCTION, "WDF wrapper to KeBugCheckEx.");
-    Mx::MxBugCheckEx(BugCheckCode,
+    FxVerifierDriverReportedBugcheck(pFxDriverGlobals,
+                            BugCheckCode,
                  BugCheckParameter1,
                  BugCheckParameter2,
                  BugCheckParameter3,

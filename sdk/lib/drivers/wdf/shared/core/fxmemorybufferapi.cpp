@@ -32,7 +32,7 @@ extern "C" {
 
 _Must_inspect_result_
 __drv_when(PoolType == 1 || PoolType == 257, __drv_maxIRQL(APC_LEVEL))
-__drv_when(PoolType == 0 || PoolType == 256, __drv_maxIRQL(DISPATCH_LEVEL))
+__drv_when(PoolType == 0 || PoolType == 256 || PoolType == 512, __drv_maxIRQL(DISPATCH_LEVEL))
 WDFAPI
 NTSTATUS
 NTAPI
@@ -108,12 +108,13 @@ Return Value:
 
     FxPointerNotNull(pFxDriverGlobals, Memory);
 
-    if (FxIsPagedPoolType(PoolType)) {
-        status = FxVerifierCheckIrqlLevel(pFxDriverGlobals, PASSIVE_LEVEL);
+    status = FxVerifierCheckIrqlLevel(pFxDriverGlobals,
+                                      FxIsPagedPoolType(PoolType) ?
+                                      APC_LEVEL :
+                                      DISPATCH_LEVEL);
         if (!NT_SUCCESS(status)) {
             return status;
         }
-    }
 
     if (BufferSize == 0) {
         status = STATUS_INVALID_PARAMETER;

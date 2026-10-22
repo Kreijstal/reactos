@@ -9,7 +9,7 @@ Module Name:
 Abstract:
 
     KMDF side defines for common names for the types
-
+    
 Author:
 
 
@@ -51,6 +51,6 @@ VOID
     );
 
 //
-// CSQ abstraction
-//
+// CSQ abstraction 
+// 
 typedef IO_CSQ_IRP_CONTEXT MdIoCsqIrpContext,*PMdIoCsqIrpContext;

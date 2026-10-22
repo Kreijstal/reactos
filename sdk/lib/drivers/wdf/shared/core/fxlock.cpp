@@ -53,7 +53,7 @@ Return Value:
         //
 
         (void) FxVerifierLock::CreateAndInitialize(&m_Verifier,
-                                                   pFxDriverGlobals,
+                                                   pFxDriverGlobals, 
                                                    ParentObject);
     }
 }

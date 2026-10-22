@@ -9,7 +9,7 @@ ModuleName:
 Abstract:
 
     Mode agnostic definition of WorkItem functions
-
+    
     See MxWorkItemKm.h and MxWorkItemUm.h for mode
     specific implementations
 
@@ -29,10 +29,10 @@ class MxWorkItem
 {
 
 protected:
-    MdWorkItem m_WorkItem;
+    MdWorkItem m_WorkItem;    
 
 public:
-
+    
     __inline
     MxWorkItem(
         );
@@ -40,7 +40,7 @@ public:
     //
     // This is used only by the UM implementation
     //
-
+    
 #if ((FX_CORE_MODE)==(FX_CORE_USER_MODE))
     static
     VOID
@@ -100,12 +100,12 @@ public:
 };
 
 //
-// MxAutoWorkItem adds value to MxWorkItem by automatically freeing the
+// MxAutoWorkItem adds value to MxWorkItem by automatically freeing the 
 // associated MdWorkItem when it goes out of scope
 //
 struct MxAutoWorkItem : public MxWorkItem {
 public:
-
+    
     MxAutoWorkItem(
         )
     {

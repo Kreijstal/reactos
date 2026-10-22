@@ -9,7 +9,7 @@ ModuleName:
 Abstract:
 
     Mode agnostic definition of lock
-
+    
     See MxLockKm.h and MxLockUm.h for mode
     specific implementations
 
@@ -37,7 +37,7 @@ class MxLockNoDynam
 DECLARE_DBGFLAG_INITIALIZED;
 
 protected:
-    MdLock m_Lock;
+    MdLock m_Lock;    
 public:
     MdLock &
     Get(
@@ -100,10 +100,10 @@ public:
 
 class MxLock : public MxLockNoDynam
 {
-public:
+public:    
     __inline
     MxLock();
-
+    
     __inline
     ~MxLock();
 };

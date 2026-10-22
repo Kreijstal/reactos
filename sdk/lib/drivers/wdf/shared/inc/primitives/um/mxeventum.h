@@ -23,11 +23,11 @@ Revision History:
 
 #pragma once
 
-typedef struct {
-    HANDLE Event;
-#if DBG
+typedef struct { 
+    HANDLE Event; 
+#if DBG    
     EVENT_TYPE Type; //tracked to allow ReadState only for notification events
-#endif
+#endif    
 } MdEvent;
 
 #include "DbgMacros.h"
@@ -59,7 +59,7 @@ NTSTATUS
 MxEvent::Initialize(
     __in EVENT_TYPE Type,
     __in BOOLEAN InitialState
-    )
+    ) 
 {
     NTSTATUS status = STATUS_SUCCESS;
     HANDLE event;
@@ -73,7 +73,7 @@ MxEvent::Initialize(
     {
         bManualReset = FALSE;
     }
-
+    
     event = CreateEvent(
         NULL,
         bManualReset,
@@ -88,7 +88,7 @@ MxEvent::Initialize(
     }
 
     m_Event.Event = event;
-
+    
 #if DBG
     m_Event.Type = Type;
 #endif
@@ -100,7 +100,7 @@ exit:
 }
 
 __inline
-PVOID
+PVOID        
 MxEvent::GetEvent(
     )
 {
@@ -158,12 +158,12 @@ Routine Description:
 
 Arguments:
     WaitReason  - Unused (only there to match km definition)
-
+    
     WaitMode    - Unuses (only there to match km definition)
 
     Altertable  - Whether the wait is alertable
 
-    Timout      - Timeout in 100 ns units, MUST BE NEGATIVE
+    Timout      - Timeout in 100 ns units, MUST BE NEGATIVE 
                   (negative implies relative timeout)
 
 Return Value:
@@ -174,10 +174,10 @@ Return Value:
     ASSERT_DBGFLAG_INITIALIZED;
 
     DWORD retVal;
-
+    
     UNREFERENCED_PARAMETER(WaitReason);
     UNREFERENCED_PARAMETER(WaitMode);
-
+    
     LONGLONG relativeTimeOut = 0;
     LONGLONG timeoutInMs = 0;
     DWORD dwTimeout = 0;
@@ -223,9 +223,9 @@ Return Value:
     }
 
     retVal = WaitForSingleObjectEx(
-                    m_Event.Event,
+                    m_Event.Event,                    
                     (NULL == Timeout) ? INFINITE : dwTimeout,
-                    Alertable
+                    Alertable 
                     );
 
     switch(retVal)
@@ -247,7 +247,7 @@ Return Value:
             // We shoudn't get here
             //
             Mx::MxAssert(FALSE);
-            return STATUS_UNSUCCESSFUL;
+            return STATUS_UNSUCCESSFUL; 
         }
     }
 }
@@ -259,15 +259,15 @@ MxEvent::ReadState(
 {
     ASSERT_DBGFLAG_INITIALIZED;
 
-#if DBG
+#if DBG    
     Mx::MxAssert(m_Event.Type == NotificationEvent);
 #endif
-
+    
     if (WAIT_OBJECT_0 == WaitForSingleObject(
-                m_Event.Event,
+                m_Event.Event,                    
                 0
                 )) {
-        return 1;
+        return 1;    
     }
     else {
         return 0;
@@ -283,7 +283,7 @@ MxEvent::Uninitialize(
     if (NULL != m_Event.Event) {
         CloseHandle(m_Event.Event);
         m_Event.Event = NULL;
-    }
+    }            
 
     CLEAR_DBGFLAG_INITIALIZED;
 }

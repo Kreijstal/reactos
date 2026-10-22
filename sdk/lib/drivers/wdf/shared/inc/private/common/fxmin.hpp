@@ -95,6 +95,7 @@ extern const WDFFUNC *WdfFunctions;
 #include "wdfiotarget.h"
 #include "wdfcontrol.h"
 #include "wdfcx.h"
+#include "wdfcxbase.h"
 #include "wdfio.h"
 #include "wdfqueryinterface.h"
 #include "wdfworkitem.h"
@@ -111,6 +112,17 @@ extern const WDFFUNC *WdfFunctions;
 
 #if (FX_CORE_MODE == FX_CORE_USER_MODE)
 #include "wdfhid.h"
+#endif
+
+//
+// Companion headers
+//
+#if (FX_CORE_MODE == FX_CORE_USER_MODE)
+#include "wdfcompanion.h"
+#endif
+
+#if (FX_CORE_MODE == FX_CORE_KERNEL_MODE)
+#include "wdfcompaniontarget.h"
 #endif
 
 // #pragma warning(disable:4200)  // suppress nameless struct/union warning
@@ -361,6 +373,13 @@ typedef enum _TRACE_INFORMATION_CLASS {
 #include "fxiotarget.hpp"
 #include "fxiotargetremote.hpp"
 #include "fxiotargetself.hpp"
+
+// Companion target for interaction with device companions
+#if (FX_CORE_MODE==FX_CORE_KERNEL_MODE)
+#include "wudfrdnonpnp.hpp"
+#include "fxcompanionlibrary.hpp"
+#include "fxcompaniontarget.hpp"
+#endif
 
 #include "fxusbdevice.hpp"
 #include "fxusbinterface.hpp"

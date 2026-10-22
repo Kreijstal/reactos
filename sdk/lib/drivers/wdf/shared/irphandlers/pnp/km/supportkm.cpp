@@ -25,7 +25,7 @@ Revision History:
 #include <wdmguid.h>
 
 #if defined(EVENT_TRACING)
-#include "supportKM.tmh"
+// #include "supportkm.tmh"
 #endif
 
 VOID
@@ -210,7 +210,7 @@ IdleTimeoutManagement::_SystemManagedIdleTimeoutAvailable(
     VOID
     )
 {
-    return (NULL != FxLibraryGlobals.PoxRegisterDevice);
+    return TRUE;
 }
 
 _Must_inspect_result_

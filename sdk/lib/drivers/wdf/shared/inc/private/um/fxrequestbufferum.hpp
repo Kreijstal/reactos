@@ -34,7 +34,7 @@ FxRequestBuffer::SetMdl(
 {
     UNREFERENCED_PARAMETER(Mdl);
     UNREFERENCED_PARAMETER(Length);
-
+    
     ASSERTMSG("Not implemented for UMDF\n", FALSE);
 }
 
@@ -59,9 +59,9 @@ FxRequestBuffer::GetOrAllocateMdlWorker(
     UNREFERENCED_PARAMETER(SizeOfMdl);
     UNREFERENCED_PARAMETER(UnlockWhenFreed);
     UNREFERENCED_PARAMETER(MdlToFree);
-
+    
     ASSERTMSG("Not implemented for UMDF\n", FALSE);
-
+        
     return STATUS_UNSUCCESSFUL;
 }
 

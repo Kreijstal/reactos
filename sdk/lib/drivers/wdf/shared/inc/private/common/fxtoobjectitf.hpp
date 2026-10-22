@@ -31,15 +31,15 @@ public:
     static
     VOID
     FxAddToDisposeList(
-        __in CfxDeviceBase* DeviceBase,
-        __in PFX_DRIVER_GLOBALS FxDriverGlobals,
+        __in CfxDeviceBase* DeviceBase, 
+        __in PFX_DRIVER_GLOBALS FxDriverGlobals, 
         __in FxObject * ObjectToAdd
         );
 
     static
     VOID
     FxAddToDriverDisposeList(
-        __in PFX_DRIVER_GLOBALS FxDriverGlobals,
+        __in PFX_DRIVER_GLOBALS FxDriverGlobals, 
         __in FxObject * ObjectToAdd
         );
 
@@ -50,7 +50,7 @@ public:
     static
     FxObject *
     FxGetDriverAsDefaultParent(
-        __in PFX_DRIVER_GLOBALS FxDriverGlobals,
+        __in PFX_DRIVER_GLOBALS FxDriverGlobals, 
         __in FxObject * Object
         );
 };

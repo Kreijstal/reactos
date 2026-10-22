@@ -19,7 +19,7 @@ Abstract:
 
 #ifdef __cplusplus
 extern "C"{
-#endif
+#endif 
 
 //------------------------------------------------------------------------
 // UMDF Loader interface for Flat-c framework stub.

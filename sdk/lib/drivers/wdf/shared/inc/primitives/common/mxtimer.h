@@ -12,7 +12,7 @@ Abstract:
 
     See MxTimerKm.h and MxTimerUm.h for
     mode specific implementations
-
+    
 Author:
 
 

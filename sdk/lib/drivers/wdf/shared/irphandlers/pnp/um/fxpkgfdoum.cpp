@@ -26,7 +26,7 @@ Revision History:
 
 --*/
 
-#include "../pnppriv.hpp"
+#include "pnppriv.hpp"
 
 #include <initguid.h>
 #include <wdmguid.h>
@@ -102,7 +102,7 @@ Returns:
     //
     Irp->CopyCurrentIrpStackLocationToNext();
     Irp->SetCompletionRoutine(
-        _PnpQueryCapabilitiesCompletionRoutine,
+        _PnpQueryCapabilitiesCompletionRoutine, 
         this
         );
 
@@ -177,7 +177,7 @@ Returns:
     //
     Irp->CopyCurrentIrpStackLocationToNext();
     Irp->SetCompletionRoutine(
-        FxPkgFdo::_PnpQueryPnpDeviceStateCompletionRoutine,
+        FxPkgFdo::_PnpQueryPnpDeviceStateCompletionRoutine, 
         pThis
         );
 
@@ -225,7 +225,7 @@ FxPkgFdo::_PnpQueryPnpDeviceStateCompletionRoutine(
     }
 
     //
-    // Since we already sent the request down the stack, we must complete it
+    // Since we already sent the request down the stack, we must complete it 
     // now.
     //
     pThis->CompletePnpRequest(&irp, status);
@@ -309,7 +309,7 @@ Return Value:
 
   --*/
 {
-    HRESULT hr;
+    HRESULT hr; 
     IWudfDeviceStack2* pDevStack = m_Device->GetDeviceStack2();
 
     hr = pDevStack->ReenumerateSelf();

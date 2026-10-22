@@ -50,7 +50,7 @@ FxNPagedLookasideList::Initialize(
     status = InitializeLookaside((USHORT) BufferSize,
                                  sizeof(FxMemoryBufferFromLookaside),
                                  MemoryAttributes);
-
+    
     return status;
 }
 

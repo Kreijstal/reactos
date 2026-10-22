@@ -9,7 +9,7 @@ ModuleName:
 Abstract:
 
     Mode agnostic definition of paged lock
-
+    
     See MxPagedLockKm.h and MxPagedLockUm.h for mode
     specific implementations
 
@@ -37,7 +37,7 @@ class MxPagedLockNoDynam
 DECLARE_DBGFLAG_INITIALIZED;
 
 protected:
-    MdPagedLock m_Lock;
+    MdPagedLock m_Lock;    
 public:
     _Must_inspect_result_
     __inline
@@ -45,9 +45,9 @@ public:
     Initialize(
         );
 
-    __drv_maxIRQL(APC_LEVEL)
+    __drv_maxIRQL(APC_LEVEL) 
     __drv_setsIRQL(APC_LEVEL)
-    __drv_savesIRQLGlobal(FastMutexObject, this->m_Lock)
+    __drv_savesIRQLGlobal(FastMutexObject, this->m_Lock) 
     _Acquires_lock_(this->m_Lock)
     __inline
     VOID
@@ -60,10 +60,10 @@ public:
     AcquireUnsafe(
         );
 
-    _Must_inspect_result_
-    __drv_maxIRQL(APC_LEVEL)
-    __drv_savesIRQLGlobal(FastMutexObject, this->m_Lock)
-    __drv_valueIs(==1;==0)
+    _Must_inspect_result_ 
+    __drv_maxIRQL(APC_LEVEL) 
+    __drv_savesIRQLGlobal(FastMutexObject, this->m_Lock) 
+    __drv_valueIs(==1;==0) 
     __drv_when(return==1, __drv_setsIRQL(APC_LEVEL))
     _When_(return==1, _Acquires_lock_(this->m_Lock))
     __inline
@@ -71,7 +71,7 @@ public:
     TryToAcquire(
         );
 
-    __drv_requiresIRQL(APC_LEVEL)
+    __drv_requiresIRQL(APC_LEVEL) 
     __drv_restoresIRQLGlobal(FastMutexObject,this->m_Lock)
     _Releases_lock_(this->m_Lock)
     __inline
@@ -93,10 +93,10 @@ public:
 
 class MxPagedLock : public MxPagedLockNoDynam
 {
-public:
+public:    
     __inline
     MxPagedLock();
-
+    
     __inline
     ~MxPagedLock();
 };

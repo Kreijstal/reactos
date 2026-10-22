@@ -25,8 +25,6 @@ enum FxIFRValues {
     FxIFRAvgLogSize     = FxIFRAvgLogPages * PAGE_SIZE,
 
     FxIFRMaxMessageSize = 256,
-
-    FxIFRRecordSignature = WDF_IFR_RECORD_SIGNATURE,
 };
 
 //
@@ -53,24 +51,24 @@ FxVerifyLogHeader(
 /*++
 
 Routine Description:
-    This routine is added to track the down IFR header corruption
+    This routine is added to track the down IFR header corruption 
 
 
 
 --*/
 {
     WDFCASSERT(WDF_IFR_HEADER_NAME_LEN == WDF_DRIVER_GLOBALS_NAME_LEN);
-
-    if (FxDriverGlobals->FxVerifierOn
+    
+    if (FxDriverGlobals->FxVerifierOn 
         &&
-        (strncmp(Header->DriverName, FxDriverGlobals->Public.DriverName,
+        (strncmp(Header->DriverName, FxDriverGlobals->Public.DriverName, 
                  WDF_IFR_HEADER_NAME_LEN) != 0
          ||
          FxIsEqualGuid((LPGUID)&(Header->Guid), (LPGUID)&WdfTraceGuid) == FALSE
          ||
          Header->Base != (PUCHAR) &Header[1]
          ||
-         Header->Offset.u.s.Current > Header->Size
+         Header->Offset.u.s.Current > Header->Size 
          ||
          Header->Offset.u.s.Previous > Header->Size
          ||

@@ -23,9 +23,9 @@ Revision History:
 
 //
 // FxDmaTransactionProgramDma or FxDmaTransactionReserveDma callback delegate
-// These are mutually exclusive callbacks and are packed together in
+// These are mutually exclusive callbacks and are packed together in 
 // the callback structure (C++ won't allow two classes with constructors
-// to be together in a union, so the containing class can't do the
+// to be together in a union, so the containing class can't do the 
 // packing)
 //
 class FxDmaTransactionProgramOrReserveDma : public FxCallback {
@@ -57,10 +57,10 @@ public:
             BOOLEAN cc;
 
             CallbackStart();
-            cc = Method.ProgramDma( Transaction,
-                                    Device,
-                                    Context,
-                                    Direction,
+            cc = Method.ProgramDma( Transaction, 
+                                    Device, 
+                                    Context, 
+                                    Direction, 
                                     SgList );
             CallbackEnd();
 

@@ -18,8 +18,8 @@ struct FxIrpDynamicDispatchInfo : public FxStump {
         InitializeListHead(&ListEntry);
         RtlZeroMemory(Dispatch, sizeof(Dispatch));
     }
-
-    ~FxIrpDynamicDispatchInfo()
+        
+    ~FxIrpDynamicDispatchInfo() 
     {
         ASSERT(IsListEmpty(&ListEntry));
     }
@@ -31,10 +31,10 @@ struct FxIrpDynamicDispatchInfo : public FxStump {
         DynamicDispatchInternalIoctl   = 3,
         DynamicDispatchMax
     };
-
+ 
     struct Info {
-        Info() :
-            EvtDeviceDynamicDispatch(NULL),
+        Info() : 
+            EvtDeviceDynamicDispatch(NULL), 
             DriverContext(NULL)
         {
         }
@@ -50,26 +50,26 @@ struct FxIrpDynamicDispatchInfo : public FxStump {
 
     __inline
     static
-    int
+    int 
     Mj2Index(
         UCHAR MajorFunction
         )
-    {
+    {  
         DynamicDispatchType type;
 
         switch (MajorFunction) {
         case IRP_MJ_READ:
             type = DynamicDispatchRead;
             break;
-
+            
         case IRP_MJ_WRITE:
             type = DynamicDispatchWrite;
             break;
-
+            
         case IRP_MJ_DEVICE_CONTROL:
             type = DynamicDispatchIoctl;
             break;
-
+            
         case IRP_MJ_INTERNAL_DEVICE_CONTROL:
             type = DynamicDispatchInternalIoctl;
             break;
@@ -78,10 +78,10 @@ struct FxIrpDynamicDispatchInfo : public FxStump {
             type = DynamicDispatchMax;
             break;
         }
-
+        
         return (int)type;
     }
-
+    
     LIST_ENTRY          ListEntry;
     Info                Dispatch[DynamicDispatchMax];
 

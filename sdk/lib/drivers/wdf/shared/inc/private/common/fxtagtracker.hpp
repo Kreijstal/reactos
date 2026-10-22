@@ -35,7 +35,7 @@ Revision History:
 extern "C" {
 
 #if defined(EVENT_TRACING)
-#include "FxTagTracker.hpp.tmh"
+// #include "fxtagtracker.hpp.tmh"
 #endif
 
 }
@@ -61,13 +61,12 @@ struct FxTagTrackingStackFrames : public FxStump {
 //
 // Tracks outstanding references
 //
-
 struct FxTagTrackingBlock : public FxStump {
 
     FxTagTrackingBlock(
         __in        PVOID Tag,
         __in        LONG Line,
-        __in_opt    PSTR File,
+        __in_opt    PCSTR File,
         __in_opt    BOOLEAN Initial = FALSE
         ) :
         Tag(Tag),
@@ -106,7 +105,7 @@ struct FxTagTrackingBlock : public FxStump {
 
     struct FxTagTrackingBlock* Next;
     PVOID Tag;
-    PCHAR File;
+    PCCH File;
     LONG Line;
     LARGE_INTEGER TimeLocked;
     FxTagTrackingStackFrames* StackFrames;
@@ -123,7 +122,7 @@ struct FxTagHistory {
     //       an approximation and is for wdfkd consumption only.
     //
     ULONG RefCount;
-    PCHAR File;
+    PCCH File;
     LONG Line;
     PVOID Tag;
     LARGE_INTEGER Time;
@@ -151,12 +150,12 @@ struct FxTagHistory {
 class FxTagTracker : public FxGlobalsStump {
 
 private:
-
+    
     //
     // Making constructor private to enforce usage
     // of CreateAndInitialize
     //
-
+    
     FxTagTracker(
         __in        PFX_DRIVER_GLOBALS FxDriverGlobals,
         __in        FxTagTrackerType Type,
@@ -181,7 +180,7 @@ private:
         if (m_TrackerType == FxTagTrackerTypeHandle) {
             FxDriverGlobalsDebugExtension* pExtension;
             KIRQL irql;
-
+            
             pExtension = GetDriverGlobals()->DebugExtension;
             ASSERT(pExtension != NULL);
 
@@ -234,7 +233,7 @@ public:
             FxTagTracker(FxDriverGlobals, Type, CaptureStack, Owner, CreateTag);
 
         if (NULL == tagTracker) {
-            status = STATUS_INSUFFICIENT_RESOURCES;
+            status = STATUS_INSUFFICIENT_RESOURCES;            
 
             DoTraceLevelMessage(
                 FxDriverGlobals, TRACE_LEVEL_ERROR, TRACINGDEVICE,
@@ -261,7 +260,7 @@ public:
     UpdateTagHistory(
         __in        PVOID Tag,
         __in        LONG Line,
-        __in_opt    PSTR File,
+        __in_opt    PCSTR File,
         __in        FxTagRefType RefType,
         __in        ULONG RefCount
         );

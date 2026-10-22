@@ -34,7 +34,7 @@ Revision History:
 
 extern "C" {
 #if defined(EVENT_TRACING)
-#include "FxVerifierLock.hpp.tmh"
+// #include "fxverifierlock.hpp.tmh"
 #endif
 }
 
@@ -492,13 +492,13 @@ public:
 
     VOID
     Lock(
-        __out PKIRQL PreviousIrql,
+        __out __drv_deref(__drv_savesIRQL) PKIRQL PreviousIrql,
         __in BOOLEAN AtDpc
         );
 
     VOID
     Unlock(
-        __in KIRQL PreviousIrql,
+        __in __drv_restoresIRQL KIRQL PreviousIrql,
         __in BOOLEAN AtDpc
         );
 
