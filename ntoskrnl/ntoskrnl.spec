@@ -95,9 +95,15 @@
 @ extern ExEventObjectType
 @ stdcall ExExtendZone(ptr ptr long)
 @ stdcall ExFreeCacheAwareRundownProtection(ptr)
+@ stdcall EtwEventEnabled(int64 ptr)
+@ stdcall EtwProviderEnabled(int64 long int64)
 @ stdcall EtwRegister(ptr ptr ptr ptr)
+@ stdcall -version=0x602+ EtwSetInformation(int64 long ptr long)
 @ stdcall EtwUnregister(int64)
 @ stdcall EtwWrite(int64 ptr ptr long ptr)
+@ stdcall EtwWriteEx(int64 ptr int64 long ptr ptr long ptr)
+@ stdcall EtwWriteString(int64 long int64 ptr wstr)
+@ stdcall EtwWriteTransfer(int64 ptr ptr ptr long ptr)
 @ stdcall ExFreePool(ptr)
 @ stdcall ExFreePoolWithTag(ptr long)
 @ stdcall ExFreeToPagedLookasideList(ptr ptr) ExiFreeToPagedLookasideList
