@@ -60,6 +60,7 @@ list(APPEND KMTEST_DRV_SOURCE
     npfs/NpfsVolumeInfo.c
     novp_fsrtl/FsRtlRemoveDotsFromPath.c
     ntos_cm/CmSecurity.c
+    ntos_ex/ExAllocatePool2.c
     ntos_ex/ExCallback.c
     ntos_ex/ExDoubleList.c
     ntos_ex/ExFastMutex.c
@@ -71,6 +72,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ex/ExResource.c
     ntos_ex/ExSequencedList.c
     ntos_ex/ExSingleList.c
+    ntos_ex/ExSpinLockRw.c
     ntos_ex/ExTimer.c
     ntos_ex/ExUuid.c
     ntos_fsrtl/FsRtlDissect.c
