@@ -10,6 +10,7 @@ add_subdirectory(example)
 add_subdirectory(fltmgr)
 add_subdirectory(hidparse)
 add_subdirectory(kernel32)
+add_subdirectory(kmdf)
 add_subdirectory(kmt_exit_drv)
 add_subdirectory(ntos_cc)
 add_subdirectory(ntos_io)
@@ -214,6 +215,8 @@ list(APPEND KMTEST_SOURCE
     hidparse/HidP_user.c
     kernel32/FileAttributes_user.c
     kernel32/FindFile_user.c
+    kmdf/Kmdf133_user.c
+    kmdf/KmdfUcx_user.c
     ntos_cc/CcCopyRead_user.c
     ntos_cc/CcCopyWrite_user.c
     ntos_cc/CcLazyWriteRace_user.c
@@ -262,6 +265,9 @@ add_dependencies(kmtest_drivers
     iohelper_drv
     ioreadwrite_drv
     kernel32_drv
+    kmdf133_drv
+    kmdfcx_drv
+    kmdfucx_drv
     mmmaplockedpagesspecifycache_drv
     mmpageoutsysview_drv
     ntcreatesection_drv
