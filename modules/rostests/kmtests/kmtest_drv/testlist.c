@@ -7,6 +7,7 @@
 #include <kmt_test.h>
 
 KMT_TESTFUNC Test_CmSecurity;
+KMT_TESTFUNC Test_EtwProvider;
 KMT_TESTFUNC Test_Example;
 KMT_TESTFUNC Test_ExAllocatePool2;
 KMT_TESTFUNC Test_ExCallback;
@@ -163,6 +164,7 @@ const KMT_TEST TestList[] =
     { "ExSpinLockRw",                       Test_ExSpinLockRw },
     { "-ExTimer",                           Test_ExTimer },
     { "ExUuid",                             Test_ExUuid },
+    { "EtwProvider",                        Test_EtwProvider },
     { "Example",                            Test_Example },
     { "FsRtlDissect",                       Test_FsRtlDissect },
     { "FsRtlExpression",                    Test_FsRtlExpression },
