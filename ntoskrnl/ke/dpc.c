@@ -1105,6 +1105,26 @@ KeSetTargetProcessorDpc(IN PKDPC Dpc,
 /*
  * @implemented
  */
+NTSTATUS
+NTAPI
+KeSetTargetProcessorDpcEx(
+    _Inout_ PKDPC Dpc,
+    _In_ PPROCESSOR_NUMBER ProcNumber)
+{
+    /* ReactOS only supports processor group 0 */
+    if ((ProcNumber->Group != 0) ||
+        (ProcNumber->Number >= KeQueryMaximumProcessorCount()))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    KeSetTargetProcessorDpc(Dpc, (CCHAR)ProcNumber->Number);
+    return STATUS_SUCCESS;
+}
+
+/*
+ * @implemented
+ */
 VOID
 NTAPI
 KeGenericCallDpc(IN PKDEFERRED_ROUTINE Routine,

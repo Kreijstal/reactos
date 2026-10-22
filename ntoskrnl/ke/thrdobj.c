@@ -1235,6 +1235,62 @@ KeRevertToUserAffinityThread(VOID)
 /*
  * @implemented
  */
+VOID
+NTAPI
+KeSetSystemGroupAffinityThread(
+    _In_ PGROUP_AFFINITY Affinity,
+    _Out_opt_ PGROUP_AFFINITY PreviousAffinity)
+{
+    PKTHREAD CurrentThread = KeGetCurrentThread();
+
+    /* ReactOS only supports processor group 0 */
+    ASSERT(Affinity->Group == 0);
+
+    if (PreviousAffinity)
+    {
+        RtlZeroMemory(PreviousAffinity, sizeof(*PreviousAffinity));
+
+        /* A zero mask tells KeRevertToUserGroupAffinityThread to restore
+         * the user affinity; otherwise it restores this system affinity */
+        if (CurrentThread->SystemAffinityActive)
+        {
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+            PreviousAffinity->Mask = CurrentThread->Affinity.Mask;
+#else
+            PreviousAffinity->Mask = CurrentThread->Affinity;
+#endif
+        }
+    }
+
+    KeSetSystemAffinityThread(Affinity->Mask);
+}
+
+/*
+ * @implemented
+ */
+VOID
+NTAPI
+KeRevertToUserGroupAffinityThread(
+    _In_ PGROUP_AFFINITY PreviousAffinity)
+{
+    ASSERT(PreviousAffinity->Group == 0);
+
+    if (PreviousAffinity->Mask == 0)
+    {
+        /* KeRevertToUserAffinityThread asserts this, but reverting a thread
+         * that never had a system affinity is a valid no-op here */
+        if (KeGetCurrentThread()->SystemAffinityActive)
+            KeRevertToUserAffinityThread();
+    }
+    else
+    {
+        KeSetSystemAffinityThread(PreviousAffinity->Mask);
+    }
+}
+
+/*
+ * @implemented
+ */
 UCHAR
 NTAPI
 KeSetIdealProcessorThread(IN PKTHREAD Thread,
