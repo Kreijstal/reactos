@@ -47,21 +47,21 @@ FxRequestBase::FreeMdls(
     //
     while (pMdl != NULL) {
       pNext = pMdl->Next;
-
+  
       if (pMdl->MdlFlags & MDL_PAGES_LOCKED) {
         MmUnlockPages(pMdl);
       }
       else if (GetDriverGlobals()->FxVerifierOn) {
         DbgPrint("pMdl %p, Flags 0x%x in PIRP %p should be locked",
             pMdl, pMdl->MdlFlags, m_Irp.GetIrp());
-
+  
         FxVerifierDbgBreakPoint(GetDriverGlobals());
       }
-
+  
       FxIrpMdlFree(pMdl);
       pMdl = pNext;
     }
-
+  
     m_Irp.GetIrp()->MdlAddress = NULL;
 }
 

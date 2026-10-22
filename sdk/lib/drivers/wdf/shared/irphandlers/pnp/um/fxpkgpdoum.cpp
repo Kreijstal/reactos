@@ -20,7 +20,7 @@ Revision History:
 
 --*/
 
-#include "../pnppriv.hpp"
+#include "pnppriv.hpp"
 #include <wdmguid.h>
 
 // Tracing support
@@ -106,7 +106,7 @@ Returns:
 
 {
     UNREFERENCED_PARAMETER(Irp);
-
+    
     ASSERTMSG("Not implemented for UMDF\n", FALSE);
 
     return STATUS_NOT_IMPLEMENTED;
@@ -136,7 +136,7 @@ Return Value:
 {
     UNREFERENCED_PARAMETER(This);
     UNREFERENCED_PARAMETER(Irp);
-
+    
     ASSERTMSG("Not implemented for UMDF\n", FALSE);
 
     return STATUS_NOT_IMPLEMENTED;

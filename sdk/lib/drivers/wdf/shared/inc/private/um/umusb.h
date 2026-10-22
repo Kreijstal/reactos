@@ -92,7 +92,7 @@ struct _UMURB_CONTROL_TRANSFER {
 struct _UMURB_BULK_OR_INTERRUPT_TRANSFER {
     struct _UMURB_HEADER Hdr;                 // function code indicates get or set.
     IN UCHAR PipeID;
-    IN BOOL  InPipe;   //in km this is determined based on the pipe,
+    IN BOOL  InPipe;   //in km this is determined based on the pipe, 
                        //but WinUsb has two different functions
                        //since host can't store pipe type and it would be expensive to discover it
                        //with every transfer, it is better if direction is sent in as a parameter
@@ -144,14 +144,14 @@ struct _UMURB_CONTROL_GET_INTERFACE_REQUEST {
 
 struct _UMURB_GET_ASSOCIATED_INTERFACE {
     IN struct _UMURB_HEADER Hdr;
-    IN UCHAR InterfaceIndex;
-    OUT WINUSB_INTERFACE_HANDLE InterfaceHandle;
+    IN UCHAR InterfaceIndex;    
+    OUT WINUSB_INTERFACE_HANDLE InterfaceHandle;    
 };
 
 struct _UMURB_INTERFACE_INFORMATION {
     IN struct _UMURB_HEADER Hdr;
     IN UCHAR AlternateSetting;
-    OUT USB_INTERFACE_DESCRIPTOR UsbInterfaceDescriptor;
+    OUT USB_INTERFACE_DESCRIPTOR UsbInterfaceDescriptor;        
 };
 
 struct _UMURB_DEVICE_INFORMATION {
@@ -199,7 +199,7 @@ typedef struct _UMURB {
 
         struct _UMURB_CONTROL_TRANSFER
             UmUrbControlTransfer;
-
+                
         struct _UMURB_BULK_OR_INTERRUPT_TRANSFER
             UmUrbBulkOrInterruptTransfer;
 

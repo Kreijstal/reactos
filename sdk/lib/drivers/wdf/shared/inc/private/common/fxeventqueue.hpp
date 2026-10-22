@@ -75,7 +75,7 @@ struct FxEventQueue : public FxStump {
     __drv_requiresIRQL(DISPATCH_LEVEL)
     VOID
     Unlock(
-        __in __drv_restoresIRQL
+        __in __drv_restoresIRQL 
         KIRQL Irql
         )
     {
@@ -241,10 +241,10 @@ protected:
     UCHAR m_HistoryIndex;
 
     FxPkgPnp* m_PkgPnp;
-
+    
     //
     // Context that is passed back to the the state machine as
-    // part of the event worker
+    // part of the event worker 
     //
     PVOID m_EventWorkerContext;
 
@@ -321,7 +321,7 @@ protected:
         );
 
     static
-    MX_WORKITEM_ROUTINE
+    MX_WORKITEM_ROUTINE 
     _WorkItemCallback;
 
     MxWorkItem m_WorkItem;
@@ -360,11 +360,11 @@ struct FxThreadedEventQueue : public FxEventQueue {
 
 protected:
     static
-    WORKER_THREAD_ROUTINE
+    WORKER_THREAD_ROUTINE 
     _WorkerThreadRoutine;
 
     static
-    MX_WORKITEM_ROUTINE
+    MX_WORKITEM_ROUTINE 
     _WorkItemCallback;
 
     VOID

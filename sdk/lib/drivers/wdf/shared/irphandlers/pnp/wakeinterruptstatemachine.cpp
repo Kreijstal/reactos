@@ -15,17 +15,17 @@ Abstract:
 
 extern "C" {
 #if defined(EVENT_TRACING)
-#include "WakeInterruptStateMachine.tmh"
+// #include "wakeinterruptstatemachine.tmh"
 #endif
 }
 
-const FxWakeInterruptTargetState
+const FxWakeInterruptTargetState 
 FxWakeInterruptMachine::m_FailedStates[] =
 {
     {WakeInterruptEventIsr, WakeInterruptFailed DEBUGGED_EVENT}
 };
 
-const FxWakeInterruptTargetState
+const FxWakeInterruptTargetState 
 FxWakeInterruptMachine::m_D0States[] =
 {
     {WakeInterruptEventIsr, WakeInterruptInvokingEvtIsrInD0 DEBUGGED_EVENT},
@@ -57,7 +57,7 @@ FxWakeInterruptMachine::m_WakingStates[] =
 };
 
 
-const FxWakeInterruptStateTable
+const FxWakeInterruptStateTable 
 FxWakeInterruptMachine::m_StateTable[] =
 {
     // WakeInterruptFailed
@@ -123,9 +123,9 @@ FxWakeInterruptMachine::FxWakeInterruptMachine(
     // Make sure we can fit the state into a byte
     //
     C_ASSERT(WakeInterruptMax <= 0xFF);
-
+    
     m_CurrentState = WakeInterruptD0;
-
+    
     RtlZeroMemory(&m_Queue, sizeof(m_Queue));
     RtlZeroMemory(&m_States, sizeof(m_States));
 
@@ -144,7 +144,7 @@ FxWakeInterruptMachine::ProcessEvent(
     NTSTATUS status;
     KIRQL irql;
     LONGLONG timeout = 0;
-
+ 
     //
     // Acquire state machine *queue* lock, raising to DISPATCH_LEVEL
     //
@@ -156,7 +156,7 @@ FxWakeInterruptMachine::ProcessEvent(
         //
         Unlock(irql);
 
-        ASSERTMSG("The wake interrupt state machine queue is full\n",
+        ASSERTMSG("The wake interrupt state machine queue is full\n", 
                   FALSE);
         return;
     }
@@ -172,13 +172,13 @@ FxWakeInterruptMachine::ProcessEvent(
           "%!FxWakeInterruptEvents! because of a closed queue",
           m_PkgPnp->GetDevice()->GetHandle(),
           m_PkgPnp->GetDevice()->GetDeviceObject(),
-          m_CurrentState,
+          m_CurrentState, 
           Event);
-
+            
         Unlock(irql);
-
+        
         ASSERTMSG(
-            "The wake interrupt state machine queue is closed\n",
+            "The wake interrupt state machine queue is closed\n", 
             FALSE
             );
         return;
@@ -193,7 +193,7 @@ FxWakeInterruptMachine::ProcessEvent(
     // Drop the state machine *queue* lock
     //
     Unlock(irql);
-
+    
     //
     // Now, if we are running at PASSIVE_LEVEL, attempt to run the state machine
     // on this thread. If we can't do that, then queue a work item.
@@ -203,7 +203,7 @@ FxWakeInterruptMachine::ProcessEvent(
         // Try to acquire the state machine lock
         //
         status = m_StateMachineLock.AcquireLock(
-                    m_PkgPnp->GetDriverGlobals(),
+                    m_PkgPnp->GetDriverGlobals(), 
                     &timeout
                     );
         if (FxWaitLockInternal::IsLockAcquired(status)) {
@@ -232,7 +232,7 @@ FxWakeInterruptMachine::ProcessEvent(
             return;
         }
     }
-
+    
     //
     // For one reason or another, we couldn't run the state machine on this
     // thread.  So queue a work item to do it.
@@ -248,11 +248,11 @@ FxWakeInterruptMachine::_ProcessEventInner(
     __in PVOID WorkerContext
     )
 {
-
+    
     UNREFERENCED_PARAMETER(PkgPnp);
 
     FxWakeInterruptMachine * pThis = (FxWakeInterruptMachine *) WorkerContext;
-
+    
     //
     // Take the state machine lock.
     //
@@ -324,7 +324,7 @@ FxWakeInterruptMachine::ProcessEventInner(
         // Get the state table entry for the current state
         //
         // NOTE: Prefast complains about buffer overflow if (m_CurrentState ==
-        // WakeInterruptMax), but that should never happen because WakeInterruptMax is not a real
+        // WakeInterruptMax), but that should never happen because WakeInterruptMax is not a real 
         // state. We just use it to represent the maximum value in the enum that
         // defines the states.
         //
@@ -342,52 +342,52 @@ FxWakeInterruptMachine::ProcessEventInner(
                 break;
             }
         }
-
+        
         if (newState == WakeInterruptMax) {
             //
             // Unexpected event for this state
             //
             DoTraceLevelMessage(
-                m_PkgPnp->GetDriverGlobals(),
-                TRACE_LEVEL_INFORMATION,
+                m_PkgPnp->GetDriverGlobals(), 
+                TRACE_LEVEL_INFORMATION, 
                 TRACINGPNP,
                 "WDFDEVICE 0x%p !devobj 0x%p wake interrupt state "
                 "%!FxWakeInterruptStates! dropping event "
                 "%!FxWakeInterruptEvents!",
                 m_PkgPnp->GetDevice()->GetHandle(),
                 m_PkgPnp->GetDevice()->GetDeviceObject(),
-                m_CurrentState,
+                m_CurrentState, 
                 event
                 );
 
             COVERAGE_TRAP();
         }
-
+        
         while (newState != WakeInterruptMax) {
             DoTraceLevelMessage(
-                m_PkgPnp->GetDriverGlobals(),
-                TRACE_LEVEL_INFORMATION,
+                m_PkgPnp->GetDriverGlobals(), 
+                TRACE_LEVEL_INFORMATION, 
                 TRACINGPNPPOWERSTATES,
                 "WDFDEVICE 0x%p !devobj 0x%p entering wake interrupt "
                 "state %!FxWakeInterruptStates! from "
                 "%!FxWakeInterruptStates!",
                 m_PkgPnp->GetDevice()->GetHandle(),
                 m_PkgPnp->GetDevice()->GetDeviceObject(),
-                newState,
+                newState, 
                 m_CurrentState
                 );
-
+        
             //
             // Update the state history array
             //
             m_States.History[IncrementHistoryIndex()] = (UCHAR) newState;
-
+        
             //
             // Move to the new state
             //
             m_CurrentState = (BYTE) newState;
             entry = &m_StateTable[m_CurrentState-WakeInterruptFailed];
-
+        
             //
             // Invoke the state entry function (if present) for the new state
             //
@@ -399,8 +399,8 @@ FxWakeInterruptMachine::ProcessEventInner(
             }
         }
     }
-
-    return;
+    
+    return;    
 }
 
 
@@ -421,8 +421,8 @@ FxWakeInterruptMachine::Dx(
 {
     //
     // Flush queued callbacks so that we know that nobody is still trying to
-    // synchronize against this interrupt. For KMDF this will flush DPCs and
-    // for UMDF this will send a message to reflector to flush queued DPCs.
+    // synchronize against this interrupt. For KMDF this will flush DPCs and 
+    // for UMDF this will send a message to reflector to flush queued DPCs. 
     //
     This->m_Interrupt->FlushQueuedDpcs();
 
@@ -446,12 +446,12 @@ FxWakeInterruptMachine::DxNotArmedForWake(
     )
 {
     //
-    // Ask power state machine to process the acknowledgement event
+    // Ask power state machine to process the acknowledgement event 
     // on a different thread as we could be running the state machine's
     // engine in the context of a wake ISR, and the power
     // state machine will attempt to disconnect this interrupt when
     // it processes the acknowledgement event.
-    //
+    // 
     This->m_PkgPnp->AckPendingWakeInterruptOperation(TRUE);
 
     return WakeInterruptMax;
@@ -478,7 +478,7 @@ FxWakeInterruptMachine::InvokingEvtIsrPostWake(
     This->m_Interrupt->InvokeWakeInterruptEvtIsr();
 
     This->m_IsrEvent.Set();
-
+    
     return WakeInterruptCompletingD0;
 }
 
@@ -488,7 +488,7 @@ FxWakeInterruptMachine::CompletingD0(
     )
 {
     This->m_PkgPnp->AckPendingWakeInterruptOperation(FALSE);
-
+    
     return WakeInterruptD0;
 }
 
@@ -500,7 +500,7 @@ FxWakeInterruptMachine::InvokingEvtIsrInD0(
     This->m_Interrupt->InvokeWakeInterruptEvtIsr();
 
     This->m_IsrEvent.Set();
-
+    
     return WakeInterruptD0;
 }
 
@@ -511,13 +511,13 @@ FxWakeInterruptMachine::Failed(
 {
     //
     // Device failed to power up and we are not invoking the
-    // client driver's callback. So we cannot claim the
+    // client driver's callback. So we cannot claim the 
     // interrupt
     //
     This->m_Claimed = FALSE;
 
     This->m_IsrEvent.Set();
-
+    
     return WakeInterruptMax;
 }
 

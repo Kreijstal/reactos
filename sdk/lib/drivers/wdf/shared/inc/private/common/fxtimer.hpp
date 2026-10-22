@@ -63,13 +63,13 @@ private:
     // Optional tolerance for the timer in milliseconds
     //
     ULONG               m_TolerableDelay;
-
+    
     //
     // This indicates whether a high resolution attribute is set
     // for the timer
     //
     BOOLEAN             m_UseHighResolutionTimer;
-
+    
     //
     // This is the callback lock for the object this TIMER will
     // synchronize with
@@ -98,10 +98,10 @@ private:
     // callback. This value will be used to avoid deadlock when we try
     // to stop or delete the timer.
     //
-    volatile POINTER_ALIGNMENT MxThread   m_CallbackThread;
+    volatile POINTER_ALIGNMENT MxThread   m_CallbackThread;    
 
     //
-    // This is a pointer to the Stop thread object when driver invokes the
+    // This is a pointer to the Stop thread object when driver invokes the 
     // timer's WdfTimerStop function.
     //
     MxThread            m_StopThread;
@@ -115,12 +115,12 @@ private:
     // TRUE if a start operation was aborted b/c stop was in progress.
     //
     BOOLEAN             m_StartAborted;
-
+    
     //
     // Ensures only one of either Delete or Cleanup runsdown the object
     //
     BOOLEAN             m_RunningDown;
-
+    
 public:
     static
     _Must_inspect_result_

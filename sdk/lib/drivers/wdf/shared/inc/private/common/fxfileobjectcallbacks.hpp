@@ -147,7 +147,7 @@ public:
         )
     {
         BOOLEAN claimed = FALSE;
-
+        
         if (Method != NULL) {
             KIRQL irql = 0;
 
@@ -174,19 +174,19 @@ struct FxFileObjectInfo : public FxStump {
         InitializeListHead(&ListEntry);
         RtlZeroMemory(&Attributes, sizeof(Attributes));
     }
-
-    ~FxFileObjectInfo()
+            
+    ~FxFileObjectInfo() 
     {
         ASSERT(IsListEmpty(&ListEntry));
     }
 
     LIST_ENTRY                      ListEntry;
-
+    
     FxFileObjectFileCreate          EvtFileCreate;
     FxCxFileObjectFileCreate        EvtCxFileCreate;
     FxFileObjectFileCleanup         EvtFileCleanup;
     FxFileObjectFileClose           EvtFileClose;
-
+ 
     WDF_FILEOBJECT_CLASS            FileObjectClass;
     WDF_OBJECT_ATTRIBUTES           Attributes;
     WDF_TRI_STATE                   AutoForwardCleanupClose;

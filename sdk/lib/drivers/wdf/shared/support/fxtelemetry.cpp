@@ -38,7 +38,7 @@ Notes:
 
 extern "C" {
 #if defined(EVENT_TRACING)
-#include "fxtelemetry.tmh"
+// #include "fxtelemetry.tmh"
 #endif
 }
 

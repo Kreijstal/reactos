@@ -24,7 +24,7 @@ Revision History:
 
 --*/
 #pragma once
-
+    
 #define MINIMUM_THREAD_COUNT_DEFAULT   (1)
 class FxInterrupt;
 
@@ -32,12 +32,12 @@ class FxInterruptThreadpool  : FxGlobalsStump
 {
 
 private:
-
+    
     //
     // Pointer to structure representing thread pool
     //
     PTP_POOL m_Pool;
-
+    
     //
     // Structure representing callback environment for thread pool
     //
@@ -52,12 +52,14 @@ private:
     HRESULT
     Initialize(
         );
-
+    
 public:
 
     FxInterruptThreadpool(
         PFX_DRIVER_GLOBALS FxDriverGlobals
-        );
+        );    
+
+    using FxStump::operator delete;
 
     ~FxInterruptThreadpool();
 
@@ -76,7 +78,7 @@ public:
         return &m_CallbackEnvironment;
     }
 
-    PTP_WAIT
+    PTP_WAIT 
     CreateThreadpoolWait(
         __in         PTP_WAIT_CALLBACK pfnwa,
         __inout_opt  PVOID Context
@@ -95,7 +97,7 @@ class FxInterruptWaitblock : FxGlobalsStump
 {
 
 private:
-
+    
     //
     // threadpool wait block
     //
@@ -134,9 +136,11 @@ public:
     {
     }
 
+    using FxStump::operator delete;
+
     ~FxInterruptWaitblock();
 
-    VOID
+    VOID 
     CloseThreadpoolWait(
         VOID
         )
@@ -144,7 +148,7 @@ public:
         ::CloseThreadpoolWait(m_Wait);
     }
 
-    VOID
+    VOID 
     SetThreadpoolWait(
         VOID
         )
@@ -154,9 +158,9 @@ public:
         // to thread pool queue.
         //
         ::SetThreadpoolWait(m_Wait, m_Event, NULL);
-    }
+    }    
 
-    VOID
+    VOID 
     ClearThreadpoolWait(
         VOID
         )
@@ -165,7 +169,7 @@ public:
         // Passing a NULL handle clears the wait
         //
         ::SetThreadpoolWait(m_Wait, NULL, NULL);
-    }
+    }    
 
     VOID
     WaitForOutstandingCallbackToComplete(

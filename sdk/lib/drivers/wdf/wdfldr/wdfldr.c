@@ -14,6 +14,7 @@
 //
 DEFINE_GUID(GUID_WDF_LOADER_INTERFACE_DIAGNOSTIC, 0x55905BA4, 0x1DD2, 0x45D3, 0xAB, 0xEA, 0xF7, 0xA8, 0x70, 0x11, 0xD6, 0x9F);
 DEFINE_GUID(GUID_WDF_LOADER_INTERFACE_CLASS_BIND, 0xFA4838CB, 0x1D08, 0x41E1, 0x8B, 0xA8, 0x71, 0x9C, 0xF8, 0x44, 0xEA, 0x74);
+DEFINE_GUID(GUID_WDF_LOADER_INTERFACE_DRIVER_ENTRY_FAILURE, 0x91D83FC5, 0x3D6F, 0x4E6D, 0xB6, 0x9E, 0x0E, 0xA2, 0x6C, 0xD3, 0x82, 0xE7);
 
 //
 // Global State Variables
@@ -217,6 +218,27 @@ DllUnload(VOID)
     DPRINT_TRACE_EXIT();
 }
 
+/**
+ * @brief Called by a client stub when the client's DriverEntry failed
+ *
+ * The stub unbinds the classes and the framework itself right after this,
+ * so there is nothing to release here.
+ */
+static
+VOID
+NTAPI
+WdfLdrDriverEntryFailure(
+    _In_ PWDF_BIND_INFO BindInfo,
+    _In_ PWDF_COMPONENT_GLOBALS Globals)
+{
+    UNREFERENCED_PARAMETER(Globals);
+
+    __DBGPRINT(("DriverEntry of a %ws %u.%u client failed\n",
+                BindInfo->Component,
+                BindInfo->Version.Major,
+                BindInfo->Version.Minor));
+}
+
 NTSTATUS
 NTAPI
 WdfLdrQueryInterface(
@@ -289,6 +311,23 @@ WdfLdrQueryInterface(
         lInterface->ClassUnbind = WdfVersionUnbindClass;
 
         DPRINT_VERBOSE(("Provided class bind interface\n"));
+        return STATUS_SUCCESS;
+    }
+    else if (IsEqualGUID(LoaderInterface->InterfaceType, &GUID_WDF_LOADER_INTERFACE_DRIVER_ENTRY_FAILURE))
+    {
+        PWDF_LOADER_INTERFACE_DRIVER_ENTRY_FAILURE lInterface;
+
+        if (LoaderInterface->InterfaceSize < sizeof(WDF_LOADER_INTERFACE_DRIVER_ENTRY_FAILURE))
+        {
+            DPRINT_ERROR(("Driver entry failure interface size too small: %u, expected: %u\n",
+                         LoaderInterface->InterfaceSize, sizeof(WDF_LOADER_INTERFACE_DRIVER_ENTRY_FAILURE)));
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        lInterface = (PWDF_LOADER_INTERFACE_DRIVER_ENTRY_FAILURE)LoaderInterface;
+        lInterface->DriverEntryFailure = WdfLdrDriverEntryFailure;
+
+        DPRINT_VERBOSE(("Provided driver entry failure interface\n"));
         return STATUS_SUCCESS;
     }
 
@@ -421,7 +460,6 @@ WdfVersionBind(
     CLIENT_INFO clientInfo;
     PVOID context = NULL;
 
-    UNREFERENCED_PARAMETER(DriverObject);
     PAGED_CODE();
 
     DPRINT_TRACE_ENTRY();
@@ -448,6 +486,7 @@ WdfVersionBind(
 
     clientInfo.Size = sizeof(CLIENT_INFO);
     clientInfo.RegistryPath = ServicePath;
+    clientInfo.DriverObject = DriverObject;
 
     status = LibraryLinkInClient(pLibModule, ServicePath, BindInfo, &clientInfo, &clientModule);
     if (!NT_SUCCESS(status))
@@ -479,6 +518,8 @@ WdfVersionBind(
     DPRINT_VERBOSE(("Calling LibraryRegisterClient at %p for library %wZ\n",
                    pLibModule->LibraryInfo->LibraryRegisterClient, &pLibModule->ServicePath));
 
+    /* The library takes the client info as context and replaces it with its own */
+    context = &clientInfo;
     status = pLibModule->LibraryInfo->LibraryRegisterClient(BindInfo, ComponentGlobals, &context);
     if (NT_SUCCESS(status))
     {

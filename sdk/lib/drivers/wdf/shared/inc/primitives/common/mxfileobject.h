@@ -48,7 +48,7 @@ public:
     {
         return m_FileObject;
     }
-
+    
     __inline
     MxFileObject(
         VOID

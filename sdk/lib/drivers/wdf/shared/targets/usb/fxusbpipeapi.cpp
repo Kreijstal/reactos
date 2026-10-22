@@ -23,7 +23,7 @@ Revision History:
 
 extern "C" {
 #if defined(EVENT_TRACING)
-#include "FxUsbPipeAPI.tmh"
+// #include "fxusbpipeapi.tmh"
 #endif
 }
 

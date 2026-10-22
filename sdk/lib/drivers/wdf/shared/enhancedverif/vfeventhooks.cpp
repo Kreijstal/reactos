@@ -55,7 +55,7 @@ extern WDFVERSION WdfVersion;
 
 NTSTATUS
 VfEvtDeviceD0Entry(
-    WDFDEVICE Device,
+    WDFDEVICE Device, 
     WDF_POWER_DEVICE_STATE PreviousState
 )
 {
@@ -73,7 +73,7 @@ VfEvtDeviceD0Entry(
         GUID activityId = { 0 };
         if (PerfEvtDeviceD0EntryStart(Device, &activityId)) {
             returnVal = (pfn)(
-               Device,
+               Device, 
                PreviousState
                );
 
@@ -86,7 +86,7 @@ VfEvtDeviceD0Entry(
             VerifyCriticalRegionEntry(&critRegion);
 
             returnVal = (pfn)(
-               Device,
+               Device, 
                PreviousState
                );
 
@@ -100,7 +100,7 @@ VfEvtDeviceD0Entry(
 
 NTSTATUS
 VfEvtDeviceD0EntryPostInterruptsEnabled(
-    WDFDEVICE Device,
+    WDFDEVICE Device, 
     WDF_POWER_DEVICE_STATE PreviousState
 )
 {
@@ -122,7 +122,7 @@ VfEvtDeviceD0EntryPostInterruptsEnabled(
         VerifyCriticalRegionEntry(&critRegion);
 
         returnVal = (pfn)(
-           Device,
+           Device, 
            PreviousState
            );
 
@@ -135,7 +135,7 @@ VfEvtDeviceD0EntryPostInterruptsEnabled(
 
 NTSTATUS
 VfEvtDeviceD0Exit(
-    WDFDEVICE Device,
+    WDFDEVICE Device, 
     WDF_POWER_DEVICE_STATE TargetState
 )
 {
@@ -153,7 +153,7 @@ VfEvtDeviceD0Exit(
         GUID activityId = { 0 };
         if (PerfEvtDeviceD0ExitStart(Device, &activityId)) {
             returnVal = (pfn)(
-               Device,
+               Device, 
                TargetState
                );
 
@@ -166,7 +166,7 @@ VfEvtDeviceD0Exit(
             VerifyCriticalRegionEntry(&critRegion);
 
             returnVal = (pfn)(
-               Device,
+               Device, 
                TargetState
                );
 
@@ -180,7 +180,7 @@ VfEvtDeviceD0Exit(
 
 NTSTATUS
 VfEvtDeviceD0ExitPreInterruptsDisabled(
-    WDFDEVICE Device,
+    WDFDEVICE Device, 
     WDF_POWER_DEVICE_STATE TargetState
 )
 {
@@ -202,7 +202,7 @@ VfEvtDeviceD0ExitPreInterruptsDisabled(
         VerifyCriticalRegionEntry(&critRegion);
 
         returnVal = (pfn)(
-           Device,
+           Device, 
            TargetState
            );
 
@@ -215,8 +215,8 @@ VfEvtDeviceD0ExitPreInterruptsDisabled(
 
 NTSTATUS
 VfEvtDevicePrepareHardware(
-    WDFDEVICE Device,
-    WDFCMRESLIST ResourcesRaw,
+    WDFDEVICE Device, 
+    WDFCMRESLIST ResourcesRaw, 
     WDFCMRESLIST ResourcesTranslated
 )
 {
@@ -234,8 +234,8 @@ VfEvtDevicePrepareHardware(
         GUID activityId = { 0 };
         if (PerfEvtDevicePrepareHardwareStart(Device, &activityId)) {
             returnVal = (pfn)(
-               Device,
-               ResourcesRaw,
+               Device, 
+               ResourcesRaw, 
                ResourcesTranslated
                );
 
@@ -248,8 +248,8 @@ VfEvtDevicePrepareHardware(
             VerifyCriticalRegionEntry(&critRegion);
 
             returnVal = (pfn)(
-               Device,
-               ResourcesRaw,
+               Device, 
+               ResourcesRaw, 
                ResourcesTranslated
                );
 
@@ -263,7 +263,7 @@ VfEvtDevicePrepareHardware(
 
 NTSTATUS
 VfEvtDeviceReleaseHardware(
-    WDFDEVICE Device,
+    WDFDEVICE Device, 
     WDFCMRESLIST ResourcesTranslated
 )
 {
@@ -281,7 +281,7 @@ VfEvtDeviceReleaseHardware(
         GUID activityId = { 0 };
         if (PerfEvtDeviceReleaseHardwareStart(Device, &activityId)) {
             returnVal = (pfn)(
-               Device,
+               Device, 
                ResourcesTranslated
                );
 
@@ -294,7 +294,7 @@ VfEvtDeviceReleaseHardware(
             VerifyCriticalRegionEntry(&critRegion);
 
             returnVal = (pfn)(
-               Device,
+               Device, 
                ResourcesTranslated
                );
 
@@ -569,8 +569,8 @@ VfEvtDeviceSurpriseRemoval(
 
 VOID
 VfEvtDeviceUsageNotification(
-    WDFDEVICE Device,
-    WDF_SPECIAL_FILE_TYPE NotificationType,
+    WDFDEVICE Device, 
+    WDF_SPECIAL_FILE_TYPE NotificationType, 
     BOOLEAN IsInNotificationPath
 )
 {
@@ -591,8 +591,8 @@ VfEvtDeviceUsageNotification(
         VerifyCriticalRegionEntry(&critRegion);
 
         (pfn)(
-           Device,
-           NotificationType,
+           Device, 
+           NotificationType, 
            IsInNotificationPath
            );
 
@@ -605,8 +605,8 @@ VfEvtDeviceUsageNotification(
 
 NTSTATUS
 VfEvtDeviceUsageNotificationEx(
-    WDFDEVICE Device,
-    WDF_SPECIAL_FILE_TYPE NotificationType,
+    WDFDEVICE Device, 
+    WDF_SPECIAL_FILE_TYPE NotificationType, 
     BOOLEAN IsInNotificationPath
 )
 {
@@ -628,8 +628,8 @@ VfEvtDeviceUsageNotificationEx(
         VerifyCriticalRegionEntry(&critRegion);
 
         returnVal = (pfn)(
-           Device,
-           NotificationType,
+           Device, 
+           NotificationType, 
            IsInNotificationPath
            );
 
@@ -642,7 +642,7 @@ VfEvtDeviceUsageNotificationEx(
 
 VOID
 VfEvtDeviceRelationsQuery(
-    WDFDEVICE Device,
+    WDFDEVICE Device, 
     DEVICE_RELATION_TYPE RelationType
 )
 {
@@ -663,7 +663,7 @@ VfEvtDeviceRelationsQuery(
         VerifyCriticalRegionEntry(&critRegion);
 
         (pfn)(
-           Device,
+           Device, 
            RelationType
            );
 
@@ -676,7 +676,7 @@ VfEvtDeviceRelationsQuery(
 
 VOID
 VfEvtIoDefault(
-    WDFQUEUE Queue,
+    WDFQUEUE Queue, 
     WDFREQUEST Request
 )
 {
@@ -692,7 +692,7 @@ VfEvtIoDefault(
     if (pfn != NULL) {
         if (PerfIoStart(Request)) {
             (pfn)(
-               Queue,
+               Queue, 
                Request
                );
         } else {
@@ -703,7 +703,7 @@ VfEvtIoDefault(
             VerifyCriticalRegionEntry(&critRegion);
 
             (pfn)(
-               Queue,
+               Queue, 
                Request
                );
 
@@ -717,8 +717,8 @@ VfEvtIoDefault(
 
 VOID
 VfEvtIoStop(
-    WDFQUEUE Queue,
-    WDFREQUEST Request,
+    WDFQUEUE Queue, 
+    WDFREQUEST Request, 
     ULONG ActionFlags
 )
 {
@@ -735,8 +735,8 @@ VfEvtIoStop(
         GUID activityId = { 0 };
         if (PerfEvtIoStopStart(Queue, &activityId)) {
             (pfn)(
-               Queue,
-               Request,
+               Queue, 
+               Request, 
                ActionFlags
                );
 
@@ -749,8 +749,8 @@ VfEvtIoStop(
             VerifyCriticalRegionEntry(&critRegion);
 
             (pfn)(
-               Queue,
-               Request,
+               Queue, 
+               Request, 
                ActionFlags
                );
 
@@ -764,7 +764,7 @@ VfEvtIoStop(
 
 VOID
 VfEvtIoResume(
-    WDFQUEUE Queue,
+    WDFQUEUE Queue, 
     WDFREQUEST Request
 )
 {
@@ -785,7 +785,7 @@ VfEvtIoResume(
         VerifyCriticalRegionEntry(&critRegion);
 
         (pfn)(
-           Queue,
+           Queue, 
            Request
            );
 
@@ -798,8 +798,8 @@ VfEvtIoResume(
 
 VOID
 VfEvtIoRead(
-    WDFQUEUE Queue,
-    WDFREQUEST Request,
+    WDFQUEUE Queue, 
+    WDFREQUEST Request, 
     size_t Length
 )
 {
@@ -815,8 +815,8 @@ VfEvtIoRead(
     if (pfn != NULL) {
         if (PerfIoStart(Request)) {
             (pfn)(
-               Queue,
-               Request,
+               Queue, 
+               Request, 
                Length
                );
         } else {
@@ -827,8 +827,8 @@ VfEvtIoRead(
             VerifyCriticalRegionEntry(&critRegion);
 
             (pfn)(
-               Queue,
-               Request,
+               Queue, 
+               Request, 
                Length
                );
 
@@ -842,8 +842,8 @@ VfEvtIoRead(
 
 VOID
 VfEvtIoWrite(
-    WDFQUEUE Queue,
-    WDFREQUEST Request,
+    WDFQUEUE Queue, 
+    WDFREQUEST Request, 
     size_t Length
 )
 {
@@ -859,8 +859,8 @@ VfEvtIoWrite(
     if (pfn != NULL) {
         if (PerfIoStart(Request)) {
             (pfn)(
-               Queue,
-               Request,
+               Queue, 
+               Request, 
                Length
                );
         } else {
@@ -871,8 +871,8 @@ VfEvtIoWrite(
             VerifyCriticalRegionEntry(&critRegion);
 
             (pfn)(
-               Queue,
-               Request,
+               Queue, 
+               Request, 
                Length
                );
 
@@ -886,10 +886,10 @@ VfEvtIoWrite(
 
 VOID
 VfEvtIoDeviceControl(
-    WDFQUEUE Queue,
-    WDFREQUEST Request,
-    size_t OutputBufferLength,
-    size_t InputBufferLength,
+    WDFQUEUE Queue, 
+    WDFREQUEST Request, 
+    size_t OutputBufferLength, 
+    size_t InputBufferLength, 
     ULONG IoControlCode
 )
 {
@@ -905,10 +905,10 @@ VfEvtIoDeviceControl(
     if (pfn != NULL) {
         if (PerfIoStart(Request)) {
             (pfn)(
-               Queue,
-               Request,
-               OutputBufferLength,
-               InputBufferLength,
+               Queue, 
+               Request, 
+               OutputBufferLength, 
+               InputBufferLength, 
                IoControlCode
                );
         } else {
@@ -919,10 +919,10 @@ VfEvtIoDeviceControl(
             VerifyCriticalRegionEntry(&critRegion);
 
             (pfn)(
-               Queue,
-               Request,
-               OutputBufferLength,
-               InputBufferLength,
+               Queue, 
+               Request, 
+               OutputBufferLength, 
+               InputBufferLength, 
                IoControlCode
                );
 
@@ -936,10 +936,10 @@ VfEvtIoDeviceControl(
 
 VOID
 VfEvtIoInternalDeviceControl(
-    WDFQUEUE Queue,
-    WDFREQUEST Request,
-    size_t OutputBufferLength,
-    size_t InputBufferLength,
+    WDFQUEUE Queue, 
+    WDFREQUEST Request, 
+    size_t OutputBufferLength, 
+    size_t InputBufferLength, 
     ULONG IoControlCode
 )
 {
@@ -955,10 +955,10 @@ VfEvtIoInternalDeviceControl(
     if (pfn != NULL) {
         if (PerfIoStart(Request)) {
             (pfn)(
-               Queue,
-               Request,
-               OutputBufferLength,
-               InputBufferLength,
+               Queue, 
+               Request, 
+               OutputBufferLength, 
+               InputBufferLength, 
                IoControlCode
                );
         } else {
@@ -969,10 +969,10 @@ VfEvtIoInternalDeviceControl(
             VerifyCriticalRegionEntry(&critRegion);
 
             (pfn)(
-               Queue,
-               Request,
-               OutputBufferLength,
-               InputBufferLength,
+               Queue, 
+               Request, 
+               OutputBufferLength, 
+               InputBufferLength, 
                IoControlCode
                );
 
@@ -986,7 +986,7 @@ VfEvtIoInternalDeviceControl(
 
 VOID
 VfEvtIoCanceledOnQueue(
-    WDFQUEUE Queue,
+    WDFQUEUE Queue, 
     WDFREQUEST Request
 )
 {
@@ -1007,7 +1007,7 @@ VfEvtIoCanceledOnQueue(
         VerifyCriticalRegionEntry(&critRegion);
 
         (pfn)(
-           Queue,
+           Queue, 
            Request
            );
 
