@@ -253,6 +253,22 @@ RtlFindLeastSignificantBit(ULONGLONG Value)
 #endif
     return -1;
 }
+ULONG
+NTAPI
+RtlNumberOfSetBitsUlongPtr(
+    _In_ ULONG_PTR Target)
+{
+    PUCHAR Byte = (PUCHAR)&Target;
+    ULONG BitCount = 0, i;
+
+    for (i = 0; i < sizeof(Target); i++)
+    {
+        BitCount += BitCountTable[Byte[i]];
+    }
+
+    return BitCount;
+}
+
 #endif /* !USE_RTL_BITMAP64 */
 
 VOID
