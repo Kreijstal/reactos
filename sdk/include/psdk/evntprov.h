@@ -77,6 +77,14 @@ typedef struct _EVENT_FILTER_DESCRIPTOR {
 } EVENT_FILTER_DESCRIPTOR, *PEVENT_FILTER_DESCRIPTOR;
 #endif
 
+typedef enum _EVENT_INFO_CLASS {
+  EventProviderBinaryTrackInfo,
+  EventProviderSetReserved1,
+  EventProviderSetTraits,
+  EventProviderUseDescriptorType,
+  MaxEventInfo
+} EVENT_INFO_CLASS;
+
 typedef struct _EVENT_FILTER_HEADER {
   USHORT Id;
   UCHAR Version;

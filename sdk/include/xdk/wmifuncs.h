@@ -86,7 +86,7 @@ EtwUnregister(
 
 _IRQL_requires_max_(HIGH_LEVEL)
 BOOLEAN
-NTKERNELAPI
+NTKRNLVISTAAPI
 NTAPI
 EtwEventEnabled(
   _In_ REGHANDLE RegHandle,
@@ -94,7 +94,7 @@ EtwEventEnabled(
 
 _IRQL_requires_max_(HIGH_LEVEL)
 BOOLEAN
-NTKERNELAPI
+NTKRNLVISTAAPI
 NTAPI
 EtwProviderEnabled(
   _In_ REGHANDLE RegHandle,
@@ -123,7 +123,7 @@ EtwWrite(
 
 _IRQL_requires_max_(HIGH_LEVEL)
 NTSTATUS
-NTKERNELAPI
+NTKRNLVISTAAPI
 NTAPI
 EtwWriteTransfer(
   _In_ REGHANDLE RegHandle,
@@ -135,7 +135,7 @@ EtwWriteTransfer(
 
 _IRQL_requires_max_(HIGH_LEVEL)
 NTSTATUS
-NTKERNELAPI
+NTKRNLVISTAAPI
 NTAPI
 EtwWriteString(
   _In_ REGHANDLE RegHandle,
@@ -149,7 +149,7 @@ EtwWriteString(
 #if (NTDDI_VERSION >= NTDDI_WIN7)
 _IRQL_requires_max_(HIGH_LEVEL)
 NTSTATUS
-NTKERNELAPI
+NTKRNLVISTAAPI
 NTAPI
 EtwWriteEx(
   _In_ REGHANDLE RegHandle,
@@ -160,6 +160,18 @@ EtwWriteEx(
   _In_opt_ LPCGUID RelatedActivityId,
   _In_ ULONG UserDataCount,
   _In_reads_opt_(UserDataCount) PEVENT_DATA_DESCRIPTOR UserData);
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTSTATUS
+NTKRNLVISTAAPI
+NTAPI
+EtwSetInformation(
+  _In_ REGHANDLE RegHandle,
+  _In_ EVENT_INFO_CLASS InformationClass,
+  _In_reads_bytes_opt_(InformationLength) PVOID EventInformation,
+  _In_ ULONG InformationLength);
 #endif
 
 
