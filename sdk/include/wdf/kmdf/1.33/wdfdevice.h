@@ -548,8 +548,44 @@ typedef enum _WDF_RELEASE_HARDWARE_ORDER_ON_FAILURE {
 // Declare empty definitions so that they may be referenced by
 // routines before they are defined.
 //
-typedef enum _WDF_REQUEST_TYPE WDF_REQUEST_TYPE;
 
+// enum _WDF_REQUEST_TYPE;
+// typedef enum _WDF_REQUEST_TYPE WDF_REQUEST_TYPE;
+
+typedef enum _WDF_REQUEST_TYPE { // taken from wdfrequest.h
+    WdfRequestTypeCreate = 0x0,
+    WdfRequestTypeCreateNamedPipe = 0x1,
+    WdfRequestTypeClose = 0x2,
+    WdfRequestTypeRead = 0x3,
+    WdfRequestTypeWrite = 0x4,
+    WdfRequestTypeQueryInformation = 0x5,
+    WdfRequestTypeSetInformation = 0x6,
+    WdfRequestTypeQueryEA = 0x7,
+    WdfRequestTypeSetEA = 0x8,
+    WdfRequestTypeFlushBuffers = 0x9,
+    WdfRequestTypeQueryVolumeInformation = 0xa,
+    WdfRequestTypeSetVolumeInformation = 0xb,
+    WdfRequestTypeDirectoryControl = 0xc,
+    WdfRequestTypeFileSystemControl = 0xd,
+    WdfRequestTypeDeviceControl = 0xe,
+    WdfRequestTypeDeviceControlInternal = 0xf,
+    WdfRequestTypeShutdown = 0x10,
+    WdfRequestTypeLockControl = 0x11,
+    WdfRequestTypeCleanup = 0x12,
+    WdfRequestTypeCreateMailSlot = 0x13,
+    WdfRequestTypeQuerySecurity = 0x14,
+    WdfRequestTypeSetSecurity = 0x15,
+    WdfRequestTypePower = 0x16,
+    WdfRequestTypeSystemControl = 0x17,
+    WdfRequestTypeDeviceChange = 0x18,
+    WdfRequestTypeQueryQuota = 0x19,
+    WdfRequestTypeSetQuota = 0x1A,
+    WdfRequestTypePnp = 0x1B,
+    WdfRequestTypeOther =0x1C,
+    WdfRequestTypeUsb = 0x40,
+    WdfRequestTypeNoFormat = 0xFF,
+    WdfRequestTypeMax,
+} WDF_REQUEST_TYPE;
 
 typedef
 _Function_class_(EVT_WDF_DEVICE_FILE_CREATE)
@@ -557,6 +593,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_FILE_CREATE(
     _In_
     WDFDEVICE Device,
@@ -574,6 +611,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_FILE_CLOSE(
     _In_
     WDFFILEOBJECT FileObject
@@ -587,6 +625,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_FILE_CLEANUP(
     _In_
     WDFFILEOBJECT FileObject
@@ -637,8 +676,8 @@ typedef struct _WDF_FILEOBJECT_CONFIG {
 
 } WDF_FILEOBJECT_CONFIG, *PWDF_FILEOBJECT_CONFIG;
 
-VOID
 FORCEINLINE
+VOID
 WDF_FILEOBJECT_CONFIG_INIT(
     _Out_ PWDF_FILEOBJECT_CONFIG FileEventCallbacks,
     _In_opt_ PFN_WDF_DEVICE_FILE_CREATE EvtDeviceFileCreate,
@@ -791,6 +830,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_PNP_STATE_CHANGE_NOTIFICATION(
     _In_
     WDFDEVICE Device,
@@ -806,6 +846,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_POWER_STATE_CHANGE_NOTIFICATION(
     _In_
     WDFDEVICE Device,
@@ -821,6 +862,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_POWER_POLICY_STATE_CHANGE_NOTIFICATION(
     _In_
     WDFDEVICE Device,
@@ -838,6 +880,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_D0_ENTRY(
     _In_
     WDFDEVICE Device,
@@ -853,6 +896,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_D0_ENTRY_POST_INTERRUPTS_ENABLED(
     _In_
     WDFDEVICE Device,
@@ -868,6 +912,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_D0_ENTRY_POST_HARDWARE_ENABLED(
     _In_
     WDFDEVICE Device,
@@ -883,6 +928,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_D0_EXIT(
     _In_
     WDFDEVICE Device,
@@ -898,6 +944,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_D0_EXIT_PRE_INTERRUPTS_DISABLED(
     _In_
     WDFDEVICE Device,
@@ -913,6 +960,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_D0_EXIT_PRE_HARDWARE_DISABLED(
     _In_
     WDFDEVICE Device,
@@ -928,6 +976,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_PREPARE_HARDWARE(
     _In_
     WDFDEVICE Device,
@@ -945,6 +994,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_RELEASE_HARDWARE(
     _In_
     WDFDEVICE Device,
@@ -960,6 +1010,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_SELF_MANAGED_IO_CLEANUP(
     _In_
     WDFDEVICE Device
@@ -973,6 +1024,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_SELF_MANAGED_IO_FLUSH(
     _In_
     WDFDEVICE Device
@@ -986,6 +1038,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_SELF_MANAGED_IO_INIT(
     _In_
     WDFDEVICE Device
@@ -999,6 +1052,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_SELF_MANAGED_IO_SUSPEND(
     _In_
     WDFDEVICE Device
@@ -1012,6 +1066,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_SELF_MANAGED_IO_RESTART(
     _In_
     WDFDEVICE Device
@@ -1025,6 +1080,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_QUERY_STOP(
     _In_
     WDFDEVICE Device
@@ -1038,6 +1094,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_QUERY_REMOVE(
     _In_
     WDFDEVICE Device
@@ -1051,6 +1108,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_SURPRISE_REMOVAL(
     _In_
     WDFDEVICE Device
@@ -1064,6 +1122,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_USAGE_NOTIFICATION(
     _In_
     WDFDEVICE Device,
@@ -1081,6 +1140,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_USAGE_NOTIFICATION_EX(
     _In_
     WDFDEVICE Device,
@@ -1098,6 +1158,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_RELATIONS_QUERY(
     _In_
     WDFDEVICE Device,
@@ -1113,6 +1174,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_ARM_WAKE_FROM_S0(
     _In_
     WDFDEVICE Device
@@ -1126,6 +1188,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_ARM_WAKE_FROM_SX(
     _In_
     WDFDEVICE Device
@@ -1139,6 +1202,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_ARM_WAKE_FROM_SX_WITH_REASON(
     _In_
     WDFDEVICE Device,
@@ -1156,6 +1220,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_DISARM_WAKE_FROM_S0(
     _In_
     WDFDEVICE Device
@@ -1169,6 +1234,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_DISARM_WAKE_FROM_SX(
     _In_
     WDFDEVICE Device
@@ -1182,6 +1248,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_WAKE_FROM_S0_TRIGGERED(
     _In_
     WDFDEVICE Device
@@ -1195,6 +1262,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_WAKE_FROM_SX_TRIGGERED(
     _In_
     WDFDEVICE Device
@@ -1245,8 +1313,8 @@ typedef struct _WDF_POWER_POLICY_EVENT_CALLBACKS {
 
 } WDF_POWER_POLICY_EVENT_CALLBACKS, *PWDF_POWER_POLICY_EVENT_CALLBACKS;
 
-VOID
 FORCEINLINE
+VOID
 WDF_POWER_POLICY_EVENT_CALLBACKS_INIT(
     _Out_ PWDF_POWER_POLICY_EVENT_CALLBACKS Callbacks
     )
@@ -1256,8 +1324,8 @@ WDF_POWER_POLICY_EVENT_CALLBACKS_INIT(
     Callbacks->Size = WDF_STRUCTURE_SIZE(WDF_POWER_POLICY_EVENT_CALLBACKS);
 }
 
-VOID
 FORCEINLINE
+VOID
 WDF_PNPPOWER_EVENT_CALLBACKS_INIT(
     _Out_ PWDF_PNPPOWER_EVENT_CALLBACKS Callbacks
     )
@@ -1267,8 +1335,8 @@ WDF_PNPPOWER_EVENT_CALLBACKS_INIT(
 }
 
 
-ULONG
 FORCEINLINE
+ULONG
 WdfDevStateNormalize(
     _In_ ULONG State
     )
@@ -1277,8 +1345,8 @@ WdfDevStateNormalize(
 }
 
 
-BOOLEAN
 FORCEINLINE
+BOOLEAN
 WdfDevStateIsNP(
     _In_ ULONG State
     )
@@ -1391,8 +1459,8 @@ typedef struct _WDF_DEVICE_POWER_POLICY_IDLE_SETTINGS {
 
 } WDF_DEVICE_POWER_POLICY_IDLE_SETTINGS, *PWDF_DEVICE_POWER_POLICY_IDLE_SETTINGS;
 
-VOID
 FORCEINLINE
+VOID
 WDF_DEVICE_POWER_POLICY_IDLE_SETTINGS_INIT(
     _Out_ PWDF_DEVICE_POWER_POLICY_IDLE_SETTINGS Settings,
     _In_ WDF_POWER_POLICY_S0_IDLE_CAPABILITIES IdleCaps
@@ -1420,6 +1488,12 @@ WDF_DEVICE_POWER_POLICY_IDLE_SETTINGS_INIT(
     case IdleCannotWakeFromS0:
         Settings->DxState = PowerDeviceD3;
         break;
+#ifdef __REACTOS__
+    /* Just to make GCC Happy */
+    case IdleCapsInvalid:
+        Settings->DxState = PowerDeviceUnspecified;
+        break;
+#endif
     }
 }
 
@@ -1473,8 +1547,8 @@ typedef struct _WDF_DEVICE_POWER_POLICY_WAKE_SETTINGS {
 
 } WDF_DEVICE_POWER_POLICY_WAKE_SETTINGS, *PWDF_DEVICE_POWER_POLICY_WAKE_SETTINGS;
 
-VOID
 FORCEINLINE
+VOID
 WDF_DEVICE_POWER_POLICY_WAKE_SETTINGS_INIT(
     _Out_ PWDF_DEVICE_POWER_POLICY_WAKE_SETTINGS Settings
     )
@@ -1538,8 +1612,8 @@ typedef struct _WDF_DEVICE_STATE {
 
 } WDF_DEVICE_STATE, *PWDF_DEVICE_STATE;
 
-VOID
 FORCEINLINE
+VOID
 WDF_DEVICE_STATE_INIT(
     _Out_ PWDF_DEVICE_STATE PnpDeviceState
     )
@@ -1588,8 +1662,8 @@ typedef struct _WDF_DEVICE_PNP_CAPABILITIES {
 
 } WDF_DEVICE_PNP_CAPABILITIES, *PWDF_DEVICE_PNP_CAPABILITIES;
 
-VOID
 FORCEINLINE
+VOID
 WDF_DEVICE_PNP_CAPABILITIES_INIT(
     _Out_ PWDF_DEVICE_PNP_CAPABILITIES Caps
     )
@@ -1655,8 +1729,8 @@ typedef struct _WDF_DEVICE_POWER_CAPABILITIES {
 
 } WDF_DEVICE_POWER_CAPABILITIES, *PWDF_DEVICE_POWER_CAPABILITIES;
 
-VOID
 FORCEINLINE
+VOID
 WDF_DEVICE_POWER_CAPABILITIES_INIT(
     _Out_ PWDF_DEVICE_POWER_CAPABILITIES Caps
     )
@@ -1710,8 +1784,8 @@ typedef struct _WDF_REMOVE_LOCK_OPTIONS {
 //
 // Default remove lock options initialization macro
 //
-VOID
 FORCEINLINE
+VOID
 WDF_REMOVE_LOCK_OPTIONS_INIT(
     _Out_ PWDF_REMOVE_LOCK_OPTIONS  RemoveLockOptions,
     _In_ ULONG Flags
@@ -1729,6 +1803,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDFDEVICE_WDM_IRP_PREPROCESS(
     _In_
     WDFDEVICE Device,
@@ -1744,6 +1819,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDFDEVICE_WDM_IRP_DISPATCH(
     _In_
     WDFDEVICE Device,
@@ -1772,6 +1848,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_IO_IN_CALLER_CONTEXT(
     _In_
     WDFDEVICE Device,
@@ -1787,6 +1864,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDFDEVICE_WDM_POST_PO_FX_REGISTER_DEVICE(
     _In_
     WDFDEVICE Device,
@@ -1802,6 +1880,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDFDEVICE_WDM_PRE_PO_FX_UNREGISTER_DEVICE(
     _In_
     WDFDEVICE Device,
@@ -1891,8 +1970,8 @@ typedef struct _WDF_POWER_FRAMEWORK_SETTINGS {
 
 } WDF_POWER_FRAMEWORK_SETTINGS, *PWDF_POWER_FRAMEWORK_SETTINGS;
 
-VOID
 FORCEINLINE
+VOID
 WDF_POWER_FRAMEWORK_SETTINGS_INIT(
     _Out_ PWDF_POWER_FRAMEWORK_SETTINGS PowerFrameworkSettings
     )
@@ -1955,8 +2034,8 @@ typedef struct _WDF_IO_TYPE_CONFIG {
 
 } WDF_IO_TYPE_CONFIG, *PWDF_IO_TYPE_CONFIG;
 
-VOID
 FORCEINLINE
+VOID
 WDF_IO_TYPE_CONFIG_INIT(
     _Out_ PWDF_IO_TYPE_CONFIG IoTypeConfig
     )

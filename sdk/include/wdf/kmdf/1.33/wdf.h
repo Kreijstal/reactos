@@ -39,6 +39,12 @@ Revision History:
   #endif
 #endif
 
+// reactos start
+#include <sal.h>
+#include <section_attribs.h>
+#define STDCALL __stdcall
+// reactos end
+
 WDF_EXTERN_C_START
 
 
@@ -59,7 +65,7 @@ WDF_EXTERN_C_START
 //
 #define WdfFunctions WdfFunctions_01033
 
-typedef VOID (*WDFFUNC) (VOID);
+typedef VOID (NTAPI *WDFFUNC) (VOID);
 extern const WDFFUNC *WdfFunctions;
 extern WDFFUNC WdfDriverMiniportUnloadOverride;
 
@@ -85,7 +91,7 @@ _Analysis_mode_(KMDF_INCLUDED)
 #include "wdfdriver.h"
 
 // Objects
-#include "WdfQueryInterface.h"
+#include "wdfqueryinterface.h"
 #include "wdfmemory.h"
 #include "wdfchildlist.h"
 #include "wdffileobject.h"
@@ -107,15 +113,15 @@ _Analysis_mode_(KMDF_INCLUDED)
 #include "wdfpdo.h"
 #include "wdfcontrol.h"
 
-#include "WdfWMI.h"
+#include "wdfwmi.h"
 
 #include "wdfstring.h"
 #include "wdfregistry.h"
 
 // Dma
-#include "wdfDmaEnabler.h"
-#include "wdfDmaTransaction.h"
-#include "wdfCommonBuffer.h"
+#include "wdfdmaenabler.h"
+#include "wdfdmatransaction.h"
+#include "wdfcommonbuffer.h"
 
 #include "wdfbugcodes.h"
 #include "wdfroletypes.h"

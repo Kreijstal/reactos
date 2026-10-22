@@ -44,7 +44,9 @@ Revision History:
 
 WDF_EXTERN_C_START
 
-
+#ifndef STDCALL // __REACTOS__
+#define STDCALL __stdcall
+#endif
 
 #if (NTDDI_VERSION >= NTDDI_WIN2K)
 
