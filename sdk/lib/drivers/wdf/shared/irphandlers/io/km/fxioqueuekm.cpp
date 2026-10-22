@@ -6,7 +6,7 @@
 
 extern "C" {
 #if defined(EVENT_TRACING)
-#include "FxIoQueueKm.tmh"
+// #include "fxioqueuekm.tmh"
 #endif
 }
 
@@ -497,8 +497,8 @@ Routine Description:
     }
 
     m_FwdProgContext = (PFXIO_FORWARD_PROGRESS_CONTEXT)
-                                FxPoolAllocate(GetDriverGlobals(),
-                                    NonPagedPool,
+                                FxPoolAllocate2(GetDriverGlobals(),
+                                    POOL_FLAG_NON_PAGED,
                                     sizeof(FXIO_FORWARD_PROGRESS_CONTEXT)
                                     );
     if (m_FwdProgContext == NULL) {
@@ -510,8 +510,6 @@ Routine Description:
 
         return status;
     }
-
-    *m_FwdProgContext = {};
 
     //
     // Initialize the things which will not fail first

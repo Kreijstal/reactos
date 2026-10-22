@@ -284,6 +284,10 @@ typedef struct _USBD_PIPE_INFORMATION {
 #define USBD_PF_VALID_MASK                              (USBD_PF_CHANGE_MAX_PACKET | USBD_PF_SHORT_PACKET_OPT | \
                                                          USBD_PF_ENABLE_RT_THREAD_ACCESS | USBD_PF_MAP_ADD_TRANSFERS)
 
+/* SuperSpeedPlus high bandwidth isochronous endpoints (Windows 10 1709) */
+#define USBD_PF_HANDLES_SSP_HIGH_BANDWIDTH_ISOCH        0x00000100
+#define USBD_PF_SSP_HIGH_BANDWIDTH_ISOCH                0x00010000
+
 typedef struct _USBD_INTERFACE_INFORMATION {
   USHORT Length;
   UCHAR InterfaceNumber;

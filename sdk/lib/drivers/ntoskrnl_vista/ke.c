@@ -55,3 +55,16 @@ KeSetCoalescableTimer(
 {
     return KeSetTimerEx(Timer, DueTime, Period, Dpc);
 }
+
+/*
+ * The kernel does not keep a high resolution system time yet, so return the
+ * regular one. Callers only rely on it being monotonic with KeQuerySystemTime.
+ */
+NTKRNLVISTAAPI
+VOID
+NTAPI
+KeQuerySystemTimePrecise(
+    _Out_ PLARGE_INTEGER CurrentTime)
+{
+    KeQuerySystemTime(CurrentTime);
+}

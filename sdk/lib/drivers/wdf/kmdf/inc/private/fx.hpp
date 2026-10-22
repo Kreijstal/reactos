@@ -38,9 +38,13 @@ extern "C" {
 // #include "wdfdevicepri.h"
 // #include "wdfiotargetpri.h"
 #include "wdfcx.h"
+// #include "wdftriage.h"
 #include "wdfldr.h"
 
-#include <fxdynamicswrapper.h>
+// The versioned structures need the USB and miniport types
+#include <usbdrivr.h>
+#include <wdfusb.h>
+#include <wdfminiport.h>
 
 #include "wdf10.h"
 #include "wdf11.h"
@@ -50,6 +54,11 @@ extern "C" {
 #include "wdf111.h"
 #include "wdf113.h"
 #include "wdf115.h"
+
+// Fills in for the unpublished wdftriage.h and wdfldr.h types
+#include "reactos_special.h"
+
+#include <fxdynamicswrapper.h>
 }
 
 #define KMDF_ONLY_CODE_PATH_ASSERT()
@@ -204,7 +213,10 @@ extern "C" {
 
 // DMA support
 #include "fxdmaenabler.hpp"
-#include "fxdmatransaction.hpp"
+#include "fxdmatransactionbase.hpp"
+#include "fxdmatransactionscattergather.hpp"
+#include "fxdmatransactionpacket.hpp"
+#include "fxdmatransactionsystem.hpp"
 #include "fxcommonbuffer.hpp"
 
 // Triage info.

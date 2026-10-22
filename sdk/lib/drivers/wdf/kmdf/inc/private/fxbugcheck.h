@@ -8,7 +8,7 @@ Module Name:
 
 Abstract:
     This module contains private macros/defines for crashdumps.
-
+    
 --*/
 
 #ifndef __FXBUGCHECK_H__
@@ -45,9 +45,9 @@ extern "C" {
 //
 #define EXP_ALIGN_DOWN_ON_BOUNDARY(_size, _alignment) \
         ((_size) - ((_size) % _alignment))
-
+        
 //
-// Define the max data size the bugcheck callback can write. Per callback the
+// Define the max data size the bugcheck callback can write. Per callback the 
 // total size is around 16K on 32bit OS (32K on 64bit OS).
 //
 #ifdef _WIN64
@@ -62,20 +62,20 @@ extern "C" {
 #define FX_DRIVER_TRACKER_MAX_CPUS          256     // Max Win7 processors.
 
 //
-// The initial/increment size of the array to hold driver info.
+// The initial/increment size of the array to hold driver info. 
 //
 #define FX_DUMP_DRIVER_INFO_INCREMENT       10      // # entries.
 
 //
 // The max size of the array to hold the driver info. This is the max data
-// we can write into the minidump.
+// we can write into the minidump. 
 //
 #define FX_MAX_DUMP_DRIVER_INFO_COUNT \
     (FX_MAX_DUMP_SIZE/sizeof(FX_DUMP_DRIVER_INFO_ENTRY))
 
 //
 // During run-time we store info about the loaded drivers in an array
-// of FX_DUMP_DRIVER_INFO_ENTRY struct entries, on a crash we write the
+// of FX_DUMP_DRIVER_INFO_ENTRY struct entries, on a crash we write the 
 // entire array in the minidump for postmortem analysis.
 //
 typedef struct _FX_DUMP_DRIVER_INFO_ENTRY {

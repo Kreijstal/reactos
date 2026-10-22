@@ -345,6 +345,22 @@ FxMessageDispatch::PoFxDevicePowerNotRequired(
     FxDevice::PoFxDevicePowerNotRequired(GetDeviceObject());
 }
 
+void
+FxMessageDispatch::PoFxDirectedPowerUp(
+    void
+    )
+{
+    FxDevice::PoFxDeviceDirectedPowerUp(GetDeviceObject());
+}
+
+void
+FxMessageDispatch::PoFxDirectedPowerDown(
+    void
+    )
+{
+    FxDevice::PoFxDeviceDirectedPowerDown(GetDeviceObject());
+}
+
 //
 // Additional public functions.
 //

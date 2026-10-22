@@ -59,9 +59,9 @@ FxDevice::IsRemoveLockEnabledForIo(
     )
 {
     if (m_DeviceObject.GetObject() != NULL) {
-        return (_GetFxWdmExtension(m_DeviceObject.GetObject())->RemoveLockOptionFlags &
+        return (_GetFxWdmExtension(m_DeviceObject.GetObject())->RemoveLockOptionFlags & 
             WDF_REMOVE_LOCK_OPTION_ACQUIRE_FOR_IO) ? TRUE : FALSE;
-    }
+    } 
     else {
         return FALSE;
     }
@@ -74,7 +74,7 @@ FxDevice::GetFxDevice(
     )
 {
     MxDeviceObject deviceObject((MdDeviceObject)DeviceObject);
-
+    
     //
     // DeviceExtension points to the start of the first context assigned to
     // WDFDEVICE.  We walk backwards from the context to the FxDevice*.
@@ -145,7 +145,7 @@ FxDevice::_OpenDeviceRegistryKey(
     _Out_ PHANDLE DevInstRegKey
     )
 {
-    return IoOpenDeviceRegistryKey(DeviceObject,
+    return IoOpenDeviceRegistryKey(DeviceObject, 
                                    DevInstKeyType,
                                    DesiredAccess,
                                    DevInstRegKey);

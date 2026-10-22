@@ -36,7 +36,7 @@ Revision History:
 extern "C" {
 
 #if defined(EVENT_TRACING)
-#include "FxObjectStateMachine.tmh"
+// #include "fxobjectstatemachine.tmh"
 #endif
 
 }
@@ -300,8 +300,8 @@ FxObject::ProcessDestroy(
 
 
 
-        for (pHeader = GetContextHeader();
-             pHeader != NULL;
+        for (pHeader = GetContextHeader(); 
+             pHeader != NULL; 
              pHeader = pHeader->NextHeader) {
 
             //
@@ -330,7 +330,7 @@ FxObject::ProcessDestroy(
 
         first = TRUE;
         for (pHeader = GetContextHeader(); pHeader != NULL; pHeader = pNext) {
-
+            
             pNext = pHeader->NextHeader;
 
             //
@@ -344,6 +344,37 @@ FxObject::ProcessDestroy(
             first = FALSE;
         }
     }
+
+    if (IsDebug() && (GetDebugExtension()->ObjectCounted)) {
+
+        //
+        // ObjectCounted cannot be set and have 
+        // m_Globals->FxVerifyLeakDetection == NULL
+        //
+        ASSERT(m_Globals->FxVerifyLeakDetection != NULL);
+        
+        //
+        // The object has been counted, now remove it.
+        //
+        InterlockedDecrement(&m_Globals->FxVerifyLeakDetection->ObjectCnt);
+
+        //
+        // Update the scaled limit if the device is removed, however the scaled
+        // limit should never go to zero, so we skip when device count == 0
+        //
+        if (FX_TYPE_DEVICE == m_Type) {
+            LONG c = InterlockedDecrement(&m_Globals->FxVerifyLeakDetection->DeviceCnt);
+            if (c != 0) {
+                //
+                // We don't decrement from 1->0 - limit should always be set for 
+                // 1 device
+                //
+                InterlockedExchangeAdd(&m_Globals->FxVerifyLeakDetection->LimitScaled,
+                                       -m_Globals->FxVerifyLeakDetection->Limit);
+            }
+        }
+    }
+
 
 
 
@@ -1014,7 +1045,7 @@ Routine Description:
 
     This is called with the m_SpinLock held and upon returning the lock is
     released.
-
+    
 Arguments:
     NewDeferedState - If the state transition requires defering to a dispose
                       list, this is the new state to move to

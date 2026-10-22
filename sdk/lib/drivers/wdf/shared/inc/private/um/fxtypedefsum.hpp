@@ -9,7 +9,7 @@ Module Name:
 Abstract:
 
     UMDF side defines for common names for the types
-
+    
 Author:
 
 

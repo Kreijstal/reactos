@@ -28,7 +28,7 @@ Revision History:
 
 #if defined(EVENT_TRACING)
 extern "C" {
-#include "FxRequestValidateFunctions.hpp.tmh"
+// #include "fxrequestvalidatefunctions.hpp.tmh"
 }
 #endif
 
@@ -47,7 +47,7 @@ extern "C" {
         WDF_REQUEST_SEND_OPTION_SEND_AND_FORGET     |   \
         WDF_REQUEST_SEND_OPTION_IMPERSONATE_CLIENT  |   \
         WDF_REQUEST_SEND_OPTION_IMPERSONATION_IGNORE_FAILURE)
-#endif
+#endif  
 
 NTSTATUS
 __inline
@@ -122,17 +122,17 @@ FxValidateRequestOptions(
 
         return STATUS_INVALID_PARAMETER;
     }
-
+    
     //
     // Verify the send option flags.
     //
     if ((Options->Flags & WDF_REQUEST_SEND_OPTION_IMPERSONATION_FLAGS) != 0) {
         //
-        // The request must be a create request (which also means it can never
-        // be a driver-created request).
+        // The request must be a create request (which also means it can never 
+        // be a driver-created request). 
         //
         if (Request == NULL ||
-            Request->IsAllocatedFromIo() == FALSE ||
+            Request->IsAllocatedFromIo() == FALSE ||  
             Request->GetSubmitFxIrp()->GetMajorFunction() != IRP_MJ_CREATE) {
             DoTraceLevelMessage(
                 FxDriverGlobals, TRACE_LEVEL_ERROR, TRACINGAPIERROR,
@@ -142,8 +142,8 @@ FxValidateRequestOptions(
 
             return STATUS_INVALID_PARAMETER;
         }
-
-        if ((Options->Flags & WDF_REQUEST_SEND_OPTION_IMPERSONATION_IGNORE_FAILURE) != 0 &&
+   
+        if ((Options->Flags & WDF_REQUEST_SEND_OPTION_IMPERSONATION_IGNORE_FAILURE) != 0 &&  
             (Options->Flags & WDF_REQUEST_SEND_OPTION_IMPERSONATE_CLIENT) == 0) {
             DoTraceLevelMessage(
                 FxDriverGlobals, TRACE_LEVEL_ERROR, TRACINGAPIERROR,

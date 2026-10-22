@@ -25,7 +25,7 @@ Revision History:
 extern "C" {
 
 #if defined(EVENT_TRACING)
-#include "FxObjectAPI.tmh"
+// #include "fxobjectapi.tmh"
 #endif
 
 }
@@ -47,7 +47,7 @@ WDFEXPORT(WdfObjectReferenceActual)(
     __in
     LONG Line,
     __in
-    PSTR File
+    PCSTR File
     )
 /*++
 
@@ -93,7 +93,7 @@ WDFEXPORT(WdfObjectDereferenceActual)(
     __in
     LONG Line,
     __in
-    PSTR File
+    PCSTR File
     )
 /*++
 

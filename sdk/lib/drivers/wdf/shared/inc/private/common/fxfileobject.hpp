@@ -37,14 +37,14 @@ private:
 #if (FX_CORE_MODE == FX_CORE_USER_MODE)
     //
     // KMDF retrieves the name unicode string directly from wdm file object,
-    // and returns it to caller. UMDF doesn't provide a unicode string and
-    // therefore we allocate it in this object and return that to caller after
+    // and returns it to caller. UMDF doesn't provide a unicode string and 
+    // therefore we allocate it in this object and return that to caller after 
     // populating it with name string retrieved from host.
     //
     UNICODE_STRING m_FileName;
 
     //
-    // Framework related file object
+    // Framework related file object 
     //
     FxFileObject* m_RelatedFileObject;
 
@@ -56,7 +56,7 @@ public:
     LIST_ENTRY         m_Link;
 
 private:
-
+    
     VOID
     SetFileObjectContext(
         _In_ MdFileObject WdmFileObject,
@@ -89,7 +89,7 @@ public:
     MdFileObject
     GetWdmFileObject(
         VOID
-        )
+        ) 
     {
         return m_FileObject.GetFileObject();
     }
@@ -113,7 +113,7 @@ public:
         return m_FileObject.GetFileName(NULL);
     #else
         return m_FileObject.GetFileName(&m_FileName);
-    #endif
+    #endif    
     }
 
     __inline
@@ -151,6 +151,11 @@ public:
     {
         return m_PkgContext;
     }
+
+    ULONG 
+    GetInitiatorProcessId(
+        VOID
+        );
 
     //
     // Create a WDFFILEOBJECT from the WDM PFILE_OBJECT

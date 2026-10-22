@@ -62,7 +62,7 @@ struct FxWatchdog {
             // timer start will always be successful.
             //
             WDF_VERIFY_KM_ONLY_CODE();
-
+            
             FX_ASSERT_AND_ASSUME_FOR_PREFAST(NT_SUCCESS(status));
 
             m_CallingThread = Mx::MxGetCurrentThread();

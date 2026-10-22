@@ -32,7 +32,7 @@ Revision History:
 //
 extern "C" {
 #if defined(EVENT_TRACING)
-#include "fxwmiapi.tmh"
+// #include "fxwmiapi.tmh"
 #endif
 
 _Must_inspect_result_
