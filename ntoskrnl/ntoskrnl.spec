@@ -68,6 +68,10 @@
 @ fastcall ExAcquireRundownProtectionEx(ptr long) ExfAcquireRundownProtectionEx
 @ stdcall ExAcquireSharedStarveExclusive(ptr long)
 @ stdcall ExAcquireSharedWaitForExclusive(ptr long)
+@ stdcall -version=0x600+ ExAcquireSpinLockExclusive(ptr)
+@ stdcall -version=0x600+ ExAcquireSpinLockExclusiveAtDpcLevel(ptr)
+@ stdcall -version=0x600+ ExAcquireSpinLockShared(ptr)
+@ stdcall -version=0x600+ ExAcquireSpinLockSharedAtDpcLevel(ptr)
 @ stdcall ExAllocateCacheAwareRundownProtection(long long)
 @ stdcall ExAllocateFromPagedLookasideList(ptr) ExiAllocateFromPagedLookasideList
 @ stdcall ExAllocatePool(long long)
@@ -157,6 +161,10 @@
 @ stdcall ExSetTimerResolution(long long)
 @ stdcall ExSizeOfRundownProtectionCacheAware()
 @ stdcall ExSystemExceptionFilter()
+@ stdcall -version=0x600+ ExReleaseSpinLockExclusive(ptr long)
+@ stdcall -version=0x600+ ExReleaseSpinLockExclusiveFromDpcLevel(ptr)
+@ stdcall -version=0x600+ ExReleaseSpinLockShared(ptr long)
+@ stdcall -version=0x600+ ExReleaseSpinLockSharedFromDpcLevel(ptr)
 @ stdcall ExSystemTimeToLocalTime(ptr ptr)
 @ stdcall -arch=x86_64,arm64 ExTryToAcquireFastMutex(ptr)
 @ stdcall ExUnregisterCallback(ptr)
@@ -166,6 +174,9 @@
 @ fastcall ExWaitForRundownProtectionReleaseCacheAware(ptr) ExfWaitForRundownProtectionReleaseCacheAware
 @ extern ExWindowStationObjectType
 @ fastcall ExfAcquirePushLockExclusive(ptr)
+@ stdcall -version=0x600+ ExTryAcquireSpinLockExclusiveAtDpcLevel(ptr)
+@ stdcall -version=0x600+ ExTryAcquireSpinLockSharedAtDpcLevel(ptr)
+@ stdcall -version=0x600+ ExTryConvertSharedSpinLockExclusive(ptr)
 @ fastcall ExfAcquirePushLockShared(ptr)
 @ fastcall -arch=i386 ExfInterlockedAddUlong(ptr long ptr)
 @ fastcall -arch=i386 ExfInterlockedCompareExchange64(ptr ptr ptr)
