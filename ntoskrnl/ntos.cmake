@@ -89,6 +89,7 @@ list(APPEND SOURCE
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/resource.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/reserve.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/rundown.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/rwspinlock.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/sem.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/shutdown.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/sysinfo.c
