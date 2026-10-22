@@ -59,6 +59,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_TIMER(
     _In_
     WDFTIMER Timer
@@ -69,8 +70,10 @@ typedef EVT_WDF_TIMER *PFN_WDF_TIMER;
 //
 // Disable warning C4324: structure was padded due to DECLSPEC_ALIGN
 // This padding is intentional and necessary.
+#ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 4324)
+#endif
 
 typedef struct _WDF_TIMER_CONFIG {
     ULONG Size;
@@ -100,10 +103,12 @@ typedef struct _WDF_TIMER_CONFIG {
 
 } WDF_TIMER_CONFIG, *PWDF_TIMER_CONFIG;
 
+#ifdef _MSC_VER
 #pragma warning(pop)
+#endif
 
-VOID
 FORCEINLINE
+VOID
 WDF_TIMER_CONFIG_INIT(
     _Out_ PWDF_TIMER_CONFIG Config,
     _In_  PFN_WDF_TIMER     EvtTimerFunc
@@ -117,8 +122,8 @@ WDF_TIMER_CONFIG_INIT(
     Config->TolerableDelay = 0;
 }
 
-VOID
 FORCEINLINE
+VOID
 WDF_TIMER_CONFIG_INIT_PERIODIC(
     _Out_ PWDF_TIMER_CONFIG Config,
     _In_  PFN_WDF_TIMER     EvtTimerFunc,

@@ -55,6 +55,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_DEVICE_PROCESS_QUERY_INTERFACE_REQUEST(
     _In_
     WDFDEVICE Device,
@@ -126,8 +127,8 @@ typedef struct _WDF_QUERY_INTERFACE_CONFIG {
 
 } WDF_QUERY_INTERFACE_CONFIG, *PWDF_QUERY_INTERFACE_CONFIG;
 
-VOID
 FORCEINLINE
+VOID
 WDF_QUERY_INTERFACE_CONFIG_INIT(
     _Out_ PWDF_QUERY_INTERFACE_CONFIG InterfaceConfig,
     _In_opt_ PINTERFACE Interface,
@@ -188,8 +189,9 @@ WdfDeviceAddQueryInterface(
 // interfaces which can be queried for and used independent of the PNP state of
 // the WDFDEVICE the interface was retrieved from.
 //
-VOID
 FORCEINLINE
+VOID
+NTAPI
 WdfDeviceInterfaceReferenceNoOp(
     _In_ PVOID Context
     )
@@ -197,8 +199,9 @@ WdfDeviceInterfaceReferenceNoOp(
     UNREFERENCED_PARAMETER(Context);
 }
 
-VOID
 FORCEINLINE
+VOID
+NTAPI
 WdfDeviceInterfaceDereferenceNoOp(
     _In_ PVOID Context
     )
