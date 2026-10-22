@@ -2734,6 +2734,28 @@ IoGetDeviceInterfacePropertyData(
   _Out_ PULONG RequiredSize,
   _Out_ PDEVPROPTYPE Type);
 #endif /* (NTDDI_VERSION >= NTDDI_WIN8) */
+
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+NTKRNLVISTAAPI
+PEPROCESS
+NTAPI
+IoGetInitiatorProcess(
+  _In_ PFILE_OBJECT FileObject);
+#endif /* (NTDDI_VERSION >= NTDDI_WIN10) */
+
+#if (NTDDI_VERSION >= NTDDI_WIN10_RS4)
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTKRNLVISTAAPI
+NTSTATUS
+NTAPI
+IoOpenDriverRegistryKey(
+  _In_ PDRIVER_OBJECT DriverObject,
+  _In_ DRIVER_REGKEY_TYPE RegKeyType,
+  _In_ ACCESS_MASK DesiredAccess,
+  _In_ ULONG Flags,
+  _Out_ PHANDLE DriverRegKey);
+#endif /* (NTDDI_VERSION >= NTDDI_WIN10_RS4) */
 $endif (_WDMDDK_)
 
 $if (_WDMDDK_)
