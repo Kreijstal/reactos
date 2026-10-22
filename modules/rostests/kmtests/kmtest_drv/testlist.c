@@ -8,6 +8,7 @@
 
 KMT_TESTFUNC Test_CmSecurity;
 KMT_TESTFUNC Test_Example;
+KMT_TESTFUNC Test_ExAllocatePool2;
 KMT_TESTFUNC Test_ExCallback;
 KMT_TESTFUNC Test_ExDoubleList;
 KMT_TESTFUNC Test_ExFastMutex;
@@ -22,6 +23,7 @@ KMT_TESTFUNC Test_ExResource;
 KMT_TESTFUNC Test_ExSequencedList;
 #endif
 KMT_TESTFUNC Test_ExSingleList;
+KMT_TESTFUNC Test_ExSpinLockRw;
 KMT_TESTFUNC Test_ExTimer;
 KMT_TESTFUNC Test_ExUuid;
 KMT_TESTFUNC Test_FsRtlDissect;
@@ -142,6 +144,7 @@ KMT_TESTFUNC Test_UsbStorageRead;
 const KMT_TEST TestList[] =
 {
     { "CmSecurity",                         Test_CmSecurity },
+    { "ExAllocatePool2",                    Test_ExAllocatePool2 },
     { "ExCallback",                         Test_ExCallback },
     { "ExDoubleList",                       Test_ExDoubleList },
     { "ExFastMutex",                        Test_ExFastMutex },
@@ -156,6 +159,7 @@ const KMT_TEST TestList[] =
     { "ExSequencedList",                    Test_ExSequencedList },
 #endif
     { "ExSingleList",                       Test_ExSingleList },
+    { "ExSpinLockRw",                       Test_ExSpinLockRw },
     { "-ExTimer",                           Test_ExTimer },
     { "ExUuid",                             Test_ExUuid },
     { "Example",                            Test_Example },
