@@ -74,6 +74,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_OBJECT_CONTEXT_CLEANUP(
     _In_
     WDFOBJECT Object
@@ -87,6 +88,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_OBJECT_CONTEXT_DESTROY(
     _In_
     WDFOBJECT Object
@@ -142,8 +144,8 @@ typedef struct _WDF_OBJECT_ATTRIBUTES {
 
 } WDF_OBJECT_ATTRIBUTES, *PWDF_OBJECT_ATTRIBUTES;
 
-VOID
 FORCEINLINE
+VOID
 WDF_OBJECT_ATTRIBUTES_INIT(
     _Out_ PWDF_OBJECT_ATTRIBUTES Attributes
     )
@@ -318,9 +320,8 @@ typedef struct _WDF_OBJECT_CONTEXT_TYPE_INFO {
 typedef _contexttype* WDF_TYPE_NAME_POINTER_TYPE(_contexttype);         \
                                                                         \
 WDF_EXTERN_C                                                            \
-__declspec(allocate( _section ))                                        \
-__declspec(selectany)                                                   \
-extern const WDF_OBJECT_CONTEXT_TYPE_INFO                               \
+DECLSPEC_SELECTANY                                                      \
+const WDF_OBJECT_CONTEXT_TYPE_INFO                                      \
 WDF_TYPE_NAME_TO_TYPE_INFO(_contexttype) =                              \
 {                                                                       \
     sizeof(WDF_OBJECT_CONTEXT_TYPE_INFO),                               \
@@ -329,13 +330,14 @@ WDF_TYPE_NAME_TO_TYPE_INFO(_contexttype) =                              \
     _UniqueType,                                                        \
     _GetUniqueType,                                                     \
 };                                                                      \
+//__declspec(allocate(_section))
 
 #define WDF_DECLARE_CASTING_FUNCTION(_contexttype, _castingfunction)    \
                                                                         \
 WDF_EXTERN_C                                                            \
 __drv_aliasesMem                                                        \
-WDF_TYPE_NAME_POINTER_TYPE(_contexttype)                                \
 FORCEINLINE                                                             \
+WDF_TYPE_NAME_POINTER_TYPE(_contexttype)                                \
 _castingfunction(                                                       \
    _In_ WDFOBJECT Handle                                                \
    )                                                                    \
@@ -450,8 +452,8 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(                                     \
         );                                                              \
                                                                         \
 WDF_EXTERN_C                                                            \
-NTSTATUS                                                                \
 FORCEINLINE                                                             \
+NTSTATUS                                                                \
 WDF_ADD_CUSTOM_TYPE_FUNCTION_NAME(_type)(                               \
    _In_ WDFOBJECT Handle,                                               \
    _In_opt_ ULONG_PTR Data,                                             \

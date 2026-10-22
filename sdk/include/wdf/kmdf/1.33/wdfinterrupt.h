@@ -84,6 +84,7 @@ _IRQL_requires_same_
 _IRQL_requires_min_(PASSIVE_LEVEL)
 BOOLEAN
 NTAPI
+STDCALL
 EVT_WDF_INTERRUPT_ISR(
     _In_
     WDFINTERRUPT Interrupt,
@@ -105,6 +106,7 @@ _IRQL_requires_same_
 _IRQL_requires_min_(PASSIVE_LEVEL)
 BOOLEAN
 NTAPI
+STDCALL
 EVT_WDF_INTERRUPT_SYNCHRONIZE(
     _In_
     WDFINTERRUPT Interrupt,
@@ -124,6 +126,7 @@ _IRQL_requires_same_
 _IRQL_requires_(DISPATCH_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_INTERRUPT_DPC(
     _In_
     WDFINTERRUPT Interrupt,
@@ -143,6 +146,7 @@ _IRQL_requires_same_
 _IRQL_requires_(PASSIVE_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_INTERRUPT_WORKITEM(
     _In_
     WDFINTERRUPT Interrupt,
@@ -165,6 +169,7 @@ _IRQL_requires_same_
 _IRQL_requires_min_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_INTERRUPT_ENABLE(
     _In_
     WDFINTERRUPT Interrupt,
@@ -187,6 +192,7 @@ _IRQL_requires_same_
 _IRQL_requires_min_(PASSIVE_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_INTERRUPT_DISABLE(
     _In_
     WDFINTERRUPT Interrupt,
@@ -266,8 +272,8 @@ typedef struct _WDF_INTERRUPT_CONFIG {
 } WDF_INTERRUPT_CONFIG, *PWDF_INTERRUPT_CONFIG;
 
 
-VOID
 FORCEINLINE
+VOID
 WDF_INTERRUPT_CONFIG_INIT(
     _Out_ PWDF_INTERRUPT_CONFIG Configuration,
     _In_ PFN_WDF_INTERRUPT_ISR EvtInterruptIsr,
@@ -292,8 +298,10 @@ WDF_INTERRUPT_CONFIG_INIT(
 //
 // Disable warning C4324: structure was padded due to DECLSPEC_ALIGN
 // This padding is intentional and necessary.
+#ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 4324)
+#endif
 
 typedef struct _WDF_INTERRUPT_INFO {
     //
@@ -314,10 +322,12 @@ typedef struct _WDF_INTERRUPT_INFO {
 
 } WDF_INTERRUPT_INFO, *PWDF_INTERRUPT_INFO;
 
+#ifdef _MSC_VER
 #pragma warning(pop)
+#endif
 
-VOID
 FORCEINLINE
+VOID
 WDF_INTERRUPT_INFO_INIT(
     _Out_ PWDF_INTERRUPT_INFO Info
     )
@@ -340,8 +350,8 @@ typedef struct _WDF_INTERRUPT_EXTENDED_POLICY {
 
 } WDF_INTERRUPT_EXTENDED_POLICY, *PWDF_INTERRUPT_EXTENDED_POLICY;
 
-VOID
 FORCEINLINE
+VOID
 WDF_INTERRUPT_EXTENDED_POLICY_INIT(
     _Out_ PWDF_INTERRUPT_EXTENDED_POLICY ExtendedPolicy
     )
