@@ -152,6 +152,21 @@ typedef struct _WDF_LOADER_INTERFACE_CLASS_BIND {
     PWDF_CLASS_UNBIND ClassUnbind;
 } WDF_LOADER_INTERFACE_CLASS_BIND, *PWDF_LOADER_INTERFACE_CLASS_BIND;
 
+/*
+ * Queried by the KMDF 1.25+ client stub when the driver's DriverEntry fails
+ * after class extensions were bound, before it unbinds everything.
+ */
+typedef
+VOID
+(NTAPI *PWDF_LDR_DRIVER_ENTRY_FAILURE)(
+    _In_ PWDF_BIND_INFO BindInfo,
+    _In_ PWDF_COMPONENT_GLOBALS Globals);
+
+typedef struct _WDF_LOADER_INTERFACE_DRIVER_ENTRY_FAILURE {
+    WDF_INTERFACE_HEADER Header;
+    PWDF_LDR_DRIVER_ENTRY_FAILURE DriverEntryFailure;
+} WDF_LOADER_INTERFACE_DRIVER_ENTRY_FAILURE, *PWDF_LOADER_INTERFACE_DRIVER_ENTRY_FAILURE;
+
 
 typedef struct _CLIENT_MODULE {
     LIST_ENTRY     LibListEntry;
