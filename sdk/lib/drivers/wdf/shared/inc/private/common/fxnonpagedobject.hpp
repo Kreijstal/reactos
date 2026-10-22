@@ -22,7 +22,7 @@ Revision History:
 
 
         Made mode agnostic
-
+        
         IMPORTANT: Common code must call Initialize method of
         FxNonPagedObject before using it
 
@@ -37,7 +37,7 @@ Revision History:
 extern "C" {
 
 #if defined(EVENT_TRACING)
-#include "FxNonPagedObject.hpp.tmh"
+// #include "fxnonpagedobject.hpp.tmh"
 #endif
 
 }
@@ -59,12 +59,12 @@ public:
         if (IsDebug()) {
             if (GetDriverGlobals()->FxVerifierLock) {
                 //
-                // VerifierLock CreateAndInitialize failure is not fatal,
+                // VerifierLock CreateAndInitialize failure is not fatal, 
                 // we just won't track anything
                 //
                 FxVerifierLock * verifierLock = NULL;
                 (void) FxVerifierLock::CreateAndInitialize(&verifierLock,
-                                                    GetDriverGlobals(),
+                                                    GetDriverGlobals(), 
                                                     this);
                 GetDebugExtension()->VerifierLock = verifierLock;
             }
@@ -82,12 +82,12 @@ public:
         if (IsDebug()) {
             if (GetDriverGlobals()->FxVerifierLock) {
                 //
-                // VerifierLock CreateAndInitialize failure is not fatal,
+                // VerifierLock CreateAndInitialize failure is not fatal, 
                 // we just won't track anything
                 //
                 FxVerifierLock * verifierLock = NULL;
                 (void) FxVerifierLock::CreateAndInitialize(&verifierLock,
-                                                    GetDriverGlobals(),
+                                                    GetDriverGlobals(), 
                                                     this);
                 GetDebugExtension()->VerifierLock = verifierLock;
             }
@@ -192,7 +192,7 @@ public:
             }
         }
 
-        m_NPLock.AcquireAtDpcLevel();
+        m_NPLock.AcquireAtDpcLevel();    
     }
 
     _Requires_lock_held_(this->m_NPLock.m_Lock)
@@ -221,9 +221,9 @@ public:
         }
 
         m_NPLock.ReleaseFromDpcLevel();
-    }
+    } 
 
-#endif   //FX_CORE_MODE==FX_CORE_KERNEL_MODE
+#endif   //FX_CORE_MODE==FX_CORE_KERNEL_MODE 
 };
 
 #endif // _FXNONPAGEDOBJECT_H_

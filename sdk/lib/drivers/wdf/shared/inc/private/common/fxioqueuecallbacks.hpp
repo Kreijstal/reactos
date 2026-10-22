@@ -337,7 +337,7 @@ public:
     }
 };
 
-
+          
 class FxIoQueueForwardProgressAllocateResourcesReserved : public FxCallback {
 
 public:
@@ -396,7 +396,7 @@ public:
         VOID
         )   :
         FxCallback()
-    {
+    {   
         Method = NULL;
     }
 

@@ -21,7 +21,7 @@ Revision History:
 --*/
 
 
-#include "..\..\FxTargetsShared.hpp"
+#include "FxTargetsShared.hpp"
 
 extern "C" {
 #if defined(EVENT_TRACING)
@@ -38,17 +38,17 @@ FxIoTarget::InitModeSpecific(
     NTSTATUS status;
 
     //
-    // FxCREvent can fail in UMDF so it is initialized outside of constuctor
-    // for UMDF. It always succeeds for KMDF so it gets initialized in
+    // FxCREvent can fail in UMDF so it is initialized outside of constuctor 
+    // for UMDF. It always succeeds for KMDF so it gets initialized in 
     // event's constructor.
     //
-
+    
     status = m_SentIoEvent.Initialize(SynchronizationEvent, FALSE);
     if (!NT_SUCCESS(status)) {
         DoTraceLevelMessage(GetDriverGlobals(), TRACE_LEVEL_ERROR,
                             TRACINGIOTARGET,
                             "Could not initialize m_SentIoEvent event for "
-                            "WFIOTARGET %p, %!STATUS!",
+                            "WFIOTARGET %p, %!STATUS!", 
                             GetObjectHandle(), status);
         return status;
     }
@@ -58,7 +58,7 @@ FxIoTarget::InitModeSpecific(
         DoTraceLevelMessage(GetDriverGlobals(), TRACE_LEVEL_ERROR,
                             TRACINGIOTARGET,
                             "Could not initialize m_DisposeEventUm event for "
-                            "WFIOTARGET %p, %!STATUS!",
+                            "WFIOTARGET %p, %!STATUS!", 
                             GetObjectHandle(), status);
         return status;
     }
@@ -83,7 +83,7 @@ FxIoTarget::FormatIoRequest(
     PVOID buffer;
 
     UNREFERENCED_PARAMETER(FileObject);
-
+    
     ASSERT(MajorCode == IRP_MJ_WRITE || MajorCode == IRP_MJ_READ);
 
     status = Request->ValidateTarget(this);
@@ -151,7 +151,7 @@ FxIoTarget::FormatIoRequest(
                                 NULL,
                                 ioLength,
                                 buffer);
-
+        
         irp->GetIoIrp()->SetReadParametersForNextStackLocation(
                     ioLength,
                     DeviceOffset,
@@ -193,7 +193,7 @@ FxIoTarget::FormatIoRequest(
     }
 
 exit:
-
+    
     if (NT_SUCCESS(status)) {
         Request->VerifierSetFormatted();
     }
@@ -285,7 +285,7 @@ FxIoTarget::FormatIoctlRequest(
     irp->SetMajorFunction(IRP_MJ_DEVICE_CONTROL);
 
     //
-    // copy File object and flags
+    // copy File object and flags 
     //
     CopyFileObjectAndFlags(Request);
 
@@ -301,7 +301,7 @@ FxIoTarget::FormatIoctlRequest(
                             OutputBuffer->GetBufferLength(),
                             outputBuffer);
 exit:
-
+    
     if (NT_SUCCESS(status)) {
         Request->VerifierSetFormatted();
     }

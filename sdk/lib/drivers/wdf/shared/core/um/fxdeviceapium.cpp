@@ -1459,4 +1459,61 @@ Returns:
                                            DispatchContext);
 }
 
+_Must_inspect_result_
+__drv_maxIRQL(PASSIVE_LEVEL)
+NTSTATUS
+WDFEXPORT(WdfDeviceRetrieveDeviceDirectoryString)(
+    __in
+    PWDF_DRIVER_GLOBALS DriverGlobals,
+    __in
+    WDFDEVICE Device,
+    __in
+    WDFSTRING String
+    )
+{
+    DDI_ENTRY();
+    PFX_DRIVER_GLOBALS pFxDriverGlobals;
+    FxDevice *pDevice;
+    FxString* pString;
+    NTSTATUS status;
+    HRESULT hr;
+    PCWSTR dirPath;
+
+    FxObjectHandleGetPtrAndGlobals(GetFxDriverGlobals(DriverGlobals),
+                                   Device,
+                                   FX_TYPE_DEVICE,
+                                   (PVOID *) &pDevice,
+                                   &pFxDriverGlobals);
+
+    if (pDevice->IsLegacy()) {
+        status = STATUS_INVALID_DEVICE_REQUEST;
+
+        DoTraceLevelMessage(
+            pFxDriverGlobals, TRACE_LEVEL_ERROR, TRACINGERROR,
+            "WDFDEVICE %p is not a PNP device. "
+            "WdfDeviceRetrieveDeviceDirectoryString failed %!STATUS!",
+            Device, status);
+        return status;
+    }
+
+    FxObjectHandleGetPtr(pFxDriverGlobals,
+                         String,
+                         FX_TYPE_STRING,
+                         (PVOID*) &pString);
+
+    hr = pDevice->GetDeviceStack2()->GetDeviceDirectory(&dirPath);
+    if (FAILED(hr)) {
+        status = FxDevice::NtStatusFromHr(pDevice->GetDeviceStack(), hr);
+        DoTraceLevelMessage(
+            pFxDriverGlobals, TRACE_LEVEL_ERROR, TRACINGERROR,
+            "WdfDeviceRetrieveDeviceDirectoryString for WDFDEVICE %p failed %!STATUS!",
+            Device, status);
+    }
+    else {
+        status = pString->Assign(dirPath);
+        HeapFree(GetProcessHeap(), 0, (PVOID)dirPath);
+    }
+
+    return status;
+}
 } // extern "C"

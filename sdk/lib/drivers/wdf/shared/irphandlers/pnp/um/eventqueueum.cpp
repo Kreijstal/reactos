@@ -14,7 +14,7 @@ Abstract:
     a reference on driver object because KM MxWorkItem::_Free does not wait for
     callback to return (i.e. rundown synchronously).
 
-    MxWorkItem::_Free in UM currently waits for callback to return (i.e. runs
+    MxWorkItem::_Free in UM currently waits for callback to return (i.e. runs 
     down synchronously) hence does not need a reference on driver/devstack
     object (see comments on top of MxWorkItemUm.h file).
 
@@ -41,7 +41,7 @@ FxWorkItemEventQueue::QueueWorkItem(
     VOID
     )
 {
-    //
+    // 
     // In user mode WorkItem::_Free waits for workitem callbacks to return
     // So we don't need outstanding reference on driver object or the devstack
     //
@@ -68,10 +68,10 @@ Routine Description:
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
-    //
+    // 
     // In user mode WorkItem::_Free waits for workitem callbacks to return
     // So we don't need outstanding reference on driver object
     //
-
+    
     This->EventQueueWorker();
 }

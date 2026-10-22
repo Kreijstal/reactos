@@ -27,7 +27,7 @@ Revision History:
 
 extern "C" {
 #if defined(EVENT_TRACING)
-#include "PowerPolicyStateMachineKM.tmh"
+// #include "powerpolicystatemachinekm.tmh"
 #endif
 }
 

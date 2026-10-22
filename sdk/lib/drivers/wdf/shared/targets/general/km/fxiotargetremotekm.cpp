@@ -167,42 +167,19 @@ FxIoTargetRemote::UnregisterForPnpNotification(
     )
 {
     if (Handle != NULL) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (FxLibraryGlobals.IoUnregisterPlugPlayNotificationEx != NULL) {
-            FxLibraryGlobals.IoUnregisterPlugPlayNotificationEx(Handle);
-        }
-        else {
-            IoUnregisterPlugPlayNotification(Handle);
-        }
+#ifndef __REACTOS__
+        IoUnregisterPlugPlayNotificationEx(Handle);
+#else
+        // The ReactOS kernel does not export the Ex variant yet
+        IoUnregisterPlugPlayNotification(Handle);
+#endif
     }
 }
 
 NTSTATUS
 FxIoTargetRemote::OpenTargetHandle(
     _In_ PWDF_IO_TARGET_OPEN_PARAMS OpenParams,
-    _Inout_ FxIoTargetRemoveOpenParams* pParams
+    _Inout_ FxIoTargetRemoteOpenParams* pParams
     )
 {
     OBJECT_ATTRIBUTES oa;

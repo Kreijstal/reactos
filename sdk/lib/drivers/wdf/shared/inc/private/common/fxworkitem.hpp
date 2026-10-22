@@ -51,7 +51,7 @@ private:
     // WDM work item.
     //
     MxWorkItem         m_WorkItem;
-
+    
     // Ensures only one of either Delete or Cleanup runsdown the object
     BOOLEAN            m_RunningDown;
 
@@ -219,7 +219,7 @@ private:
     WaitForSignal(
         VOID
         );
-
+    
 public:
     VOID
     FlushAndWait(
