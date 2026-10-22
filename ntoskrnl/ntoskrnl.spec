@@ -68,6 +68,10 @@
 @ fastcall ExAcquireRundownProtectionEx(ptr long) ExfAcquireRundownProtectionEx
 @ stdcall ExAcquireSharedStarveExclusive(ptr long)
 @ stdcall ExAcquireSharedWaitForExclusive(ptr long)
+@ stdcall -version=0x600+ ExAcquireSpinLockExclusive(ptr)
+@ stdcall -version=0x600+ ExAcquireSpinLockExclusiveAtDpcLevel(ptr)
+@ stdcall -version=0x600+ ExAcquireSpinLockShared(ptr)
+@ stdcall -version=0x600+ ExAcquireSpinLockSharedAtDpcLevel(ptr)
 @ stdcall ExAllocateCacheAwareRundownProtection(long long)
 @ stdcall ExAllocateFromPagedLookasideList(ptr) ExiAllocateFromPagedLookasideList
 @ stdcall ExAllocatePool(long long)
@@ -150,6 +154,10 @@
 @ fastcall ExReleaseRundownProtectionCacheAware(ptr) ExfReleaseRundownProtectionCacheAware
 @ fastcall ExReleaseRundownProtectionCacheAwareEx(ptr long) ExfReleaseRundownProtectionCacheAwareEx
 @ fastcall ExReleaseRundownProtectionEx(ptr long) ExfReleaseRundownProtectionEx
+@ stdcall -version=0x600+ ExReleaseSpinLockExclusive(ptr long)
+@ stdcall -version=0x600+ ExReleaseSpinLockExclusiveFromDpcLevel(ptr)
+@ stdcall -version=0x600+ ExReleaseSpinLockShared(ptr long)
+@ stdcall -version=0x600+ ExReleaseSpinLockSharedFromDpcLevel(ptr)
 @ fastcall ExRundownCompleted(ptr) ExfRundownCompleted
 @ fastcall ExRundownCompletedCacheAware(ptr) ExfRundownCompletedCacheAware
 @ extern ExSemaphoreObjectType
@@ -159,6 +167,9 @@
 @ stdcall ExSystemExceptionFilter()
 @ stdcall ExSystemTimeToLocalTime(ptr ptr)
 @ stdcall -arch=x86_64,arm64 ExTryToAcquireFastMutex(ptr)
+@ stdcall -version=0x600+ ExTryAcquireSpinLockExclusiveAtDpcLevel(ptr)
+@ stdcall -version=0x600+ ExTryAcquireSpinLockSharedAtDpcLevel(ptr)
+@ stdcall -version=0x600+ ExTryConvertSharedSpinLockExclusive(ptr)
 @ stdcall ExUnregisterCallback(ptr)
 @ stdcall ExUuidCreate(ptr)
 @ stdcall ExVerifySuite(long)

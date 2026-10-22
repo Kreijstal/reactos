@@ -1473,6 +1473,97 @@ ExSetResourceOwnerPointerEx(
 
 #endif /* (NTDDI_VERSION >= NTDDI_WIN7) */
 
+#if (NTDDI_VERSION >= NTDDI_VISTASP1)
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_IRQL_saves_
+_IRQL_raises_(DISPATCH_LEVEL)
+NTKERNELAPI
+KIRQL
+NTAPI
+ExAcquireSpinLockShared(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+_IRQL_requires_min_(DISPATCH_LEVEL)
+NTKERNELAPI
+VOID
+NTAPI
+ExAcquireSpinLockSharedAtDpcLevel(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_IRQL_saves_
+_IRQL_raises_(DISPATCH_LEVEL)
+NTKERNELAPI
+KIRQL
+NTAPI
+ExAcquireSpinLockExclusive(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+_IRQL_requires_min_(DISPATCH_LEVEL)
+NTKERNELAPI
+VOID
+NTAPI
+ExAcquireSpinLockExclusiveAtDpcLevel(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+_IRQL_requires_(DISPATCH_LEVEL)
+NTKERNELAPI
+VOID
+NTAPI
+ExReleaseSpinLockShared(
+  _Inout_ PEX_SPIN_LOCK SpinLock,
+  _In_ _IRQL_restores_ KIRQL OldIrql);
+
+_IRQL_requires_min_(DISPATCH_LEVEL)
+NTKERNELAPI
+VOID
+NTAPI
+ExReleaseSpinLockSharedFromDpcLevel(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+_IRQL_requires_(DISPATCH_LEVEL)
+NTKERNELAPI
+VOID
+NTAPI
+ExReleaseSpinLockExclusive(
+  _Inout_ PEX_SPIN_LOCK SpinLock,
+  _In_ _IRQL_restores_ KIRQL OldIrql);
+
+_IRQL_requires_min_(DISPATCH_LEVEL)
+NTKERNELAPI
+VOID
+NTAPI
+ExReleaseSpinLockExclusiveFromDpcLevel(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+_IRQL_requires_(DISPATCH_LEVEL)
+_Must_inspect_result_
+NTKERNELAPI
+LOGICAL
+NTAPI
+ExTryConvertSharedSpinLockExclusive(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+_IRQL_requires_min_(DISPATCH_LEVEL)
+_Must_inspect_result_
+NTKERNELAPI
+LOGICAL
+NTAPI
+ExTryAcquireSpinLockSharedAtDpcLevel(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+_IRQL_requires_min_(DISPATCH_LEVEL)
+_Must_inspect_result_
+NTKERNELAPI
+LOGICAL
+NTAPI
+ExTryAcquireSpinLockExclusiveAtDpcLevel(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+#endif /* (NTDDI_VERSION >= NTDDI_VISTASP1) */
+
+
 __drv_allocatesMem(Mem)
 _IRQL_requires_max_(DISPATCH_LEVEL)
 _Ret_maybenull_
