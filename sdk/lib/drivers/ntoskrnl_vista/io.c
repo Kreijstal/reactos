@@ -96,3 +96,95 @@ IoSetMasterIrpStatus(
         MasterIrp->IoStatus.Status = Status;
     }
 }
+
+/*
+ * Opens (creating it if needed) a per-driver key below the driver's service
+ * key: "Parameters" for DriverRegKeyParameters and "State" for
+ * DriverRegKeyPersistentState.
+ */
+NTKRNLVISTAAPI
+NTSTATUS
+NTAPI
+IoOpenDriverRegistryKey(
+    _In_ PDRIVER_OBJECT DriverObject,
+    _In_ DRIVER_REGKEY_TYPE RegKeyType,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ ULONG Flags,
+    _Out_ PHANDLE DriverRegKey)
+{
+    static const WCHAR ServicesPath[] =
+        L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\";
+    PCWSTR SubKeyName;
+    PUNICODE_STRING ServiceName;
+    UNICODE_STRING KeyPath;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    *DriverRegKey = NULL;
+
+    if (Flags != 0 || DriverObject == NULL ||
+        DriverObject->DriverExtension == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    switch (RegKeyType)
+    {
+        case DriverRegKeyParameters:
+            SubKeyName = L"\\Parameters";
+            break;
+        case DriverRegKeyPersistentState:
+            SubKeyName = L"\\State";
+            break;
+        default:
+            return STATUS_NOT_SUPPORTED;
+    }
+
+    ServiceName = &DriverObject->DriverExtension->ServiceKeyName;
+    if (ServiceName->Length == 0)
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    KeyPath.Length = 0;
+    KeyPath.MaximumLength = sizeof(ServicesPath) + ServiceName->Length +
+                            (USHORT)(wcslen(SubKeyName) * sizeof(WCHAR));
+    KeyPath.Buffer = ExAllocatePoolWithTag(PagedPool, KeyPath.MaximumLength, 'kRoI');
+    if (KeyPath.Buffer == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    RtlAppendUnicodeToString(&KeyPath, ServicesPath);
+    RtlAppendUnicodeStringToString(&KeyPath, ServiceName);
+    RtlAppendUnicodeToString(&KeyPath, SubKeyName);
+
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &KeyPath,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL,
+                               NULL);
+
+    Status = ZwCreateKey(DriverRegKey,
+                         DesiredAccess,
+                         &ObjectAttributes,
+                         0,
+                         NULL,
+                         REG_OPTION_NON_VOLATILE,
+                         NULL);
+
+    ExFreePoolWithTag(KeyPath.Buffer, 'kRoI');
+    return Status;
+}
+
+/*
+ * ReactOS does not record on whose behalf a file object was created, which
+ * is what Windows reports when no initiator was specified.
+ */
+NTKRNLVISTAAPI
+PEPROCESS
+NTAPI
+IoGetInitiatorProcess(
+    _In_ PFILE_OBJECT FileObject)
+{
+    UNREFERENCED_PARAMETER(FileObject);
+    return NULL;
+}
