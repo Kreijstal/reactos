@@ -11,6 +11,7 @@ add_subdirectory(fltmgr)
 add_subdirectory(hidparse)
 add_subdirectory(kernel32)
 add_subdirectory(kmt_exit_drv)
+add_subdirectory(netio)
 add_subdirectory(ntos_cc)
 add_subdirectory(ntos_io)
 add_subdirectory(ntos_mm)
@@ -218,6 +219,7 @@ list(APPEND KMTEST_SOURCE
     hidparse/HidP_user.c
     kernel32/FileAttributes_user.c
     kernel32/FindFile_user.c
+    netio/NetioWsk_user.c
     ntos_cc/CcCopyRead_user.c
     ntos_cc/CcCopyWrite_user.c
     ntos_cc/CcLazyWriteRace_user.c
@@ -259,6 +261,7 @@ add_dependencies(kmtest_drivers
     kmtest_drv
     cng_drv
     kmt_exit_drv
+    netiowsk_drv
     example_drv
     hidp_drv
     iocreatefile_drv
