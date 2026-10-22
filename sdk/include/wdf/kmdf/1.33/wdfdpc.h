@@ -56,6 +56,7 @@ _IRQL_requires_same_
 _IRQL_requires_(DISPATCH_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_DPC(
     _In_
     WDFDPC Dpc
@@ -78,8 +79,8 @@ typedef struct _WDF_DPC_CONFIG {
 
 } WDF_DPC_CONFIG, *PWDF_DPC_CONFIG;
 
-VOID
 FORCEINLINE
+VOID
 WDF_DPC_CONFIG_INIT(
     _Out_ PWDF_DPC_CONFIG Config,
     _In_  PFN_WDF_DPC     EvtDpcFunc

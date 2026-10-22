@@ -141,8 +141,8 @@ typedef enum _WDF_IO_QUEUE_STATE {
 // is not operating on any.
 //
 
-BOOLEAN
 FORCEINLINE
+BOOLEAN
 WDF_IO_QUEUE_IDLE(
     _In_ WDF_IO_QUEUE_STATE State
     )
@@ -155,8 +155,8 @@ WDF_IO_QUEUE_IDLE(
 // A Queue is ready if it can accept and dispatch requests and
 // queue is not held by PNP
 //
-BOOLEAN
 FORCEINLINE
+BOOLEAN
 WDF_IO_QUEUE_READY(
     _In_ WDF_IO_QUEUE_STATE State
     )
@@ -171,8 +171,8 @@ WDF_IO_QUEUE_READY(
 // is not automatically delivering them to the device driver,
 // and the queue is idle.
 //
-BOOLEAN
 FORCEINLINE
+BOOLEAN
 WDF_IO_QUEUE_STOPPED(
     _In_ WDF_IO_QUEUE_STATE State
     )
@@ -189,8 +189,8 @@ WDF_IO_QUEUE_STOPPED(
 // either in the Queue or the device driver.
 //
 
-BOOLEAN
 FORCEINLINE
+BOOLEAN
 WDF_IO_QUEUE_DRAINED(
     _In_ WDF_IO_QUEUE_STATE State
     )
@@ -207,8 +207,8 @@ WDF_IO_QUEUE_DRAINED(
 // and there are no requests either in the Queue or
 // the device driver.
 //
-BOOLEAN
 FORCEINLINE
+BOOLEAN
 WDF_IO_QUEUE_PURGED(
     _In_ WDF_IO_QUEUE_STATE State
     )
@@ -229,6 +229,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_IO_QUEUE_IO_DEFAULT(
     _In_
     WDFQUEUE Queue,
@@ -245,6 +246,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_IO_QUEUE_IO_STOP(
     _In_
     WDFQUEUE Queue,
@@ -262,6 +264,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_IO_QUEUE_IO_RESUME(
     _In_
     WDFQUEUE Queue,
@@ -277,6 +280,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_IO_QUEUE_IO_READ(
     _In_
     WDFQUEUE Queue,
@@ -294,6 +298,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_IO_QUEUE_IO_WRITE(
     _In_
     WDFQUEUE Queue,
@@ -311,6 +316,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL(
     _In_
     WDFQUEUE Queue,
@@ -332,6 +338,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_IO_QUEUE_IO_INTERNAL_DEVICE_CONTROL(
     _In_
     WDFQUEUE Queue,
@@ -354,6 +361,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_IO_QUEUE_IO_CANCELED_ON_QUEUE(
     _In_
     WDFQUEUE Queue,
@@ -370,6 +378,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
 NTAPI
+STDCALL
 EVT_WDF_IO_QUEUE_STATE(
     _In_
     WDFQUEUE Queue,
@@ -421,8 +430,8 @@ typedef struct _WDF_IO_QUEUE_CONFIG {
     WDFDRIVER                                   Driver;
 } WDF_IO_QUEUE_CONFIG, *PWDF_IO_QUEUE_CONFIG;
 
-VOID
 FORCEINLINE
+VOID
 WDF_IO_QUEUE_CONFIG_INIT(
     _Out_ PWDF_IO_QUEUE_CONFIG      Config,
     _In_ WDF_IO_QUEUE_DISPATCH_TYPE DispatchType
@@ -438,8 +447,8 @@ WDF_IO_QUEUE_CONFIG_INIT(
     }
 }
 
-VOID
 FORCEINLINE
+VOID
 WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(
     _Out_ PWDF_IO_QUEUE_CONFIG      Config,
     _In_ WDF_IO_QUEUE_DISPATCH_TYPE DispatchType
@@ -475,6 +484,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_IO_ALLOCATE_RESOURCES_FOR_RESERVED_REQUEST(
     _In_
     WDFQUEUE Queue,
@@ -490,6 +500,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 NTSTATUS
 NTAPI
+STDCALL
 EVT_WDF_IO_ALLOCATE_REQUEST_RESOURCES(
     _In_
     WDFQUEUE Queue,
@@ -505,6 +516,7 @@ _IRQL_requires_same_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 WDF_IO_FORWARD_PROGRESS_ACTION
 NTAPI
+STDCALL
 EVT_WDF_IO_WDM_IRP_FOR_FORWARD_PROGRESS(
     _In_
     WDFQUEUE Queue,
@@ -551,8 +563,8 @@ typedef struct _WDF_IO_QUEUE_FORWARD_PROGRESS_POLICY {
 
 }  WDF_IO_QUEUE_FORWARD_PROGRESS_POLICY, *PWDF_IO_QUEUE_FORWARD_PROGRESS_POLICY;
 
-VOID
 FORCEINLINE
+VOID
 WDF_IO_QUEUE_FORWARD_PROGRESS_POLICY_DEFAULT_INIT(
     _Out_ PWDF_IO_QUEUE_FORWARD_PROGRESS_POLICY Policy,
     _In_ ULONG TotalForwardProgressRequests
@@ -566,8 +578,8 @@ WDF_IO_QUEUE_FORWARD_PROGRESS_POLICY_DEFAULT_INIT(
 }
 
 
-VOID
 FORCEINLINE
+VOID
 WDF_IO_QUEUE_FORWARD_PROGRESS_POLICY_EXAMINE_INIT(
     _Out_ PWDF_IO_QUEUE_FORWARD_PROGRESS_POLICY      Policy,
     _In_ ULONG TotalForwardProgressRequests,
@@ -583,8 +595,8 @@ WDF_IO_QUEUE_FORWARD_PROGRESS_POLICY_EXAMINE_INIT(
             EvtIoWdmIrpForForwardProgress;
 }
 
-VOID
 FORCEINLINE
+VOID
 WDF_IO_QUEUE_FORWARD_PROGRESS_POLICY_PAGINGIO_INIT(
     _Out_ PWDF_IO_QUEUE_FORWARD_PROGRESS_POLICY      Policy,
     _In_ ULONG TotalForwardProgressRequests
