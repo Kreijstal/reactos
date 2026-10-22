@@ -119,6 +119,18 @@ typedef struct _WDF_CLASS_BIND_INFO2 {
     size_t** StructTable;
 } WDF_CLASS_BIND_INFO2, *PWDF_CLASS_BIND_INFO2;
 
+/*
+ * Puts a client's WDF_CLASS_BIND_INFO(2) where the KMDF client stub
+ * (wdfdriverentry) finds it, so the class extension is bound before the
+ * client's DriverEntry runs. Use it on a global definition.
+ */
+#ifdef _MSC_VER
+#pragma section(".kmdfclassbind$b", read, write)
+#define WDF_CLASS_BIND_INFO_ALLOCATE __declspec(allocate(".kmdfclassbind$b"))
+#else
+#define WDF_CLASS_BIND_INFO_ALLOCATE __attribute__((section(".kmdfclassbind$b"), used, aligned(8)))
+#endif
+
 typedef struct _WDF_CLASS_LIBRARY_INFO {
     ULONG Size;
     WDF_CLASS_VERSION Version;
