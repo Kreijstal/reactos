@@ -129,6 +129,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeIrql.c
     ntos_ke/KeMutex.c
     ntos_ke/KeProcessor.c
+    ntos_ke/KeProcessorGroup.c
     ntos_ke/KeSpinLock.c
     ntos_ke/KeTimer.c
     ntos_ke/KeTimerTableStress.c
