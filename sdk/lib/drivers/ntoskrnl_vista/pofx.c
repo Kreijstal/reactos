@@ -103,3 +103,12 @@ PoFxReportDevicePoweredOn(
 {
     UNIMPLEMENTED;
 }
+
+NTKRNLVISTAAPI
+VOID
+NTAPI
+PoFxCompleteDirectedPowerDown(
+    _In_ POHANDLE Handle)
+{
+    UNIMPLEMENTED;
+}
