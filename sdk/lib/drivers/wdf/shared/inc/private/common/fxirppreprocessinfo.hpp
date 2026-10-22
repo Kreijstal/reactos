@@ -10,15 +10,15 @@ struct FxIrpPreprocessInfo : public FxStump {
     {
         InitializeListHead(&ListEntry);
     }
-
-    ~FxIrpPreprocessInfo()
+        
+    ~FxIrpPreprocessInfo() 
     {
         ASSERT(IsListEmpty(&ListEntry));
     }
-
+    
     struct Info {
-        Info() :
-            EvtDevicePreprocess(NULL),
+        Info() : 
+            EvtDevicePreprocess(NULL), 
             NumMinorFunctions(0),
             MinorFunctions(NULL)
         {
@@ -35,7 +35,7 @@ struct FxIrpPreprocessInfo : public FxStump {
             PFN_WDFDEVICE_WDM_IRP_PREPROCESS        EvtDevicePreprocess;
             PFN_WDFCXDEVICE_WDM_IRP_PREPROCESS      EvtCxDevicePreprocess;
         };
-
+        
         ULONG       NumMinorFunctions;
         PUCHAR      MinorFunctions;
     };

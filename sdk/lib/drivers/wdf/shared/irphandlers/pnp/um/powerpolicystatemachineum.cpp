@@ -17,7 +17,7 @@ Revision History:
 
 --*/
 
-#include "../pnppriv.hpp"
+#include "pnppriv.hpp"
 
 #include "FxUsbIdleInfo.hpp"
 
@@ -37,7 +37,7 @@ Routine Description:
     Gets source of wake if OS supports this.
 
 Arguments:
-    Irp
+    Irp 
 
 Return Value:
     None
@@ -49,7 +49,7 @@ Return Value:
     UNREFERENCED_PARAMETER(Irp);
 
     if (m_Device->IsPdo()) {
-
+        
         pFxDriverGlobals = GetDriverGlobals();
 
         DoTraceLevelMessage(
@@ -70,26 +70,26 @@ Routine Description:
 
     This function returns whether the power policy state machine should process
     the current event on the same thread or on a different one.
-
-    This function has been added to work around a bug in the state machines.
+   
+    This function has been added to work around a bug in the state machines. 
     The idle state machine always calls PowerPolicyProcessEvent with the idle
-    state machine lock held. Some events sent by the idle state machine can
-    cause the power policy state machine to invoke
-    FxPowerIdleMachine::QueryReturnToIdle().
+    state machine lock held. Some events sent by the idle state machine can 
+    cause the power policy state machine to invoke 
+    FxPowerIdleMachine::QueryReturnToIdle(). 
     FxPowerIdleMachine::QueryReturnToIdle() will try to acquire the idle state
     machine lock, which is already being held, so it will result in a recursive
     acquire of the idle state machine lock.
-
-    The above bug only affects UMDF, but not KMDF. In KMDF, the idle state
-    machine lock is a spinlock. When PowerPolicyProcessEvent is called, it is
-    called with the spinlock held and hence at dispatch level. Note that if
-    called at a non-passive IRQL, PowerPolicyProcessEvent will always queue a
-    work item to process the event at passive IRQL later. Queuing a work item
-    forces processing to happen on a different thread and hence we don't
-    attempt to recursively acquire the spinlock. On the other hand, with UMDF
-    we are always at passive IRQL and hence we process the event on the same
+    
+    The above bug only affects UMDF, but not KMDF. In KMDF, the idle state 
+    machine lock is a spinlock. When PowerPolicyProcessEvent is called, it is 
+    called with the spinlock held and hence at dispatch level. Note that if 
+    called at a non-passive IRQL, PowerPolicyProcessEvent will always queue a 
+    work item to process the event at passive IRQL later. Queuing a work item 
+    forces processing to happen on a different thread and hence we don't 
+    attempt to recursively acquire the spinlock. On the other hand, with UMDF 
+    we are always at passive IRQL and hence we process the event on the same 
     thread and run into the recursive acquire problem.
-
+    
 
 
 
@@ -100,22 +100,22 @@ Routine Description:
 Arguments:
 
     CurrentIrql - The current IRQL
-
-    CallerSpecifiedProcessingOnDifferentThread - Whether or not caller of
-        PowerPolicyProcessEvent specified that the event be processed on a
+    
+    CallerSpecifiedProcessingOnDifferentThread - Whether or not caller of 
+        PowerPolicyProcessEvent specified that the event be processed on a 
         different thread.
 
 Returns:
-    TRUE if the power policy state machine should process the event on a
+    TRUE if the power policy state machine should process the event on a 
        different thread.
-
-    FALSE if the power policy state machine should process the event on the
+       
+    FALSE if the power policy state machine should process the event on the 
        same thread
 
 --*/
 {
     //
-    // For UMDF, we ignore the IRQL and just do what the caller of
+    // For UMDF, we ignore the IRQL and just do what the caller of 
     // PowerPolicyProcessEvent wants.
     //
     UNREFERENCED_PARAMETER(CurrentIrql);
@@ -141,11 +141,11 @@ FxUsbIdleInfo::Initialize(
     if (S_OK == hr) {
         status = STATUS_SUCCESS;
     }
-    else {
+    else { 
         PUMDF_VERSION_DATA driverVersion = devStack->GetMinDriverVersion();
-        BOOL preserveCompat =
+        BOOL preserveCompat = 
              devStack->ShouldPreserveIrpCompletionStatusCompatibility();
-
+    
         status = CHostFxUtil::NtStatusFromHr(hr,
                                              driverVersion->MajorNumber,
                                              driverVersion->MinorNumber,
@@ -164,7 +164,7 @@ FxPkgPnp::PowerPolicySubmitUsbIdleNotification(
     // This will be set to TRUE if USBSS completion event gets dropped.
     //
     m_PowerPolicyMachine.m_Owner->m_UsbIdle->m_EventDropped = FALSE;
-
+    
     m_Device->GetDeviceStack()->SubmitUsbIdleNotification(
         &(m_PowerPolicyMachine.m_Owner->m_UsbIdle->m_CallbackInfo),
         _PowerPolicyUsbSelectiveSuspendCompletionRoutine,
@@ -179,7 +179,7 @@ FxPkgPnp::PowerPolicyCancelUsbSS(
     m_Device->GetDeviceStack()->CancelUsbSS();
 }
 
-__drv_maxIRQL(PASSIVE_LEVEL)
+__drv_maxIRQL(PASSIVE_LEVEL) 
 VOID
 FxUsbIdleInfo::_UsbIdleCallback(
     __in PVOID Context
@@ -203,11 +203,11 @@ FxPowerPolicyMachine::UsbSSCallbackProcessingComplete(
     )
 {
     FxDevice* device = m_PkgPnp->GetDevice();
-
+    
     DoTraceLevelMessage(
         m_PkgPnp->GetDriverGlobals(), TRACE_LEVEL_VERBOSE, TRACINGPNP,
         "USB Selective Suspend Idle callback processing is complete");
 
-    device->GetDeviceStack()->SignalUsbSSCallbackProcessingComplete();
+    device->GetDeviceStack()->SignalUsbSSCallbackProcessingComplete();    
 }
 

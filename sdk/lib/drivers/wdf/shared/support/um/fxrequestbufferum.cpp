@@ -51,13 +51,13 @@ Arguments:
 
 Return Value:
     FxDriverGlobals - Driver globals
-
+    
     Mdl - on return it contains the MDL allocated/reused
 
-    MdlToFree - pointer to any MDL
+    MdlToFree - pointer to any MDL 
                   * to be reused, if the size is <= current size, or
                   * freed and set to newly allocated MDL
-
+                
     UnlockWhenFreed - whether to unlock pages when freeing MDL
                       (if FALSE, MDL may represent just MDL buffer but the pages
                       might have already been unlocked)
@@ -69,7 +69,7 @@ Return Value:
 
     SizeOfMdl - on input contains size of *MdlToFree,
                 on return contains size of *Mdl
-
+    
 Remarks:
 
     *MdlToFree is modified only when this function frees the passed in MDL

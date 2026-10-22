@@ -28,7 +28,7 @@ Revision History:
 
 
 //
-// Delegate which contains EvtRequestCancel
+// Delegate which contains EvtRequestCancel 
 //
 class FxRequestCancelCallback : public FxCallback {
 
@@ -79,7 +79,7 @@ public:
 };
 
 //
-// Delegate which contains EvtRequestCompletion
+// Delegate which contains EvtRequestCompletion 
 //
 class FxRequestCompletionCallback : public FxCallback {
 

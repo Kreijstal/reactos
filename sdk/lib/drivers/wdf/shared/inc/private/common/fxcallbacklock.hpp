@@ -31,7 +31,7 @@ Revision History:
 extern "C" {
 
 #if defined(EVENT_TRACING)
-#include "FxCallbackLock.hpp.tmh"
+// #include "fxcallbacklock.hpp.tmh"
 #endif
 
 }

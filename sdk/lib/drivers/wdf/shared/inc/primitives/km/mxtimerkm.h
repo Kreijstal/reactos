@@ -274,7 +274,7 @@ MxTimer::Stop(
     VOID
     )
 {
-    BOOLEAN bRetVal;
+    BOOLEAN bRetVal = TRUE;
 
     if (m_Timer.m_IsExtTimer) {
         bRetVal = FALSE;

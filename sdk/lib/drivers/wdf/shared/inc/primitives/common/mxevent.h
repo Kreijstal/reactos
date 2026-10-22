@@ -9,7 +9,7 @@ ModuleName:
 Abstract:
 
     Mode agnostic definition of event
-
+    
     See MxEventKm.h and MxEventUm.h for mode
     specific implementations
 
@@ -27,7 +27,7 @@ Revision History:
 
 class MxEvent
 {
-
+    
 private:
     //
     // MdEvent is typedef'ed to appropriate type for the mode
@@ -36,12 +36,12 @@ private:
     MdEvent m_Event;
 
     DECLARE_DBGFLAG_INITIALIZED;
-
+    
 public:
     __inline
     MxEvent(
         );
-
+    
     __inline
     ~MxEvent(
         );
@@ -59,7 +59,7 @@ public:
     // PKEVENT in case of kernel mode and event HANDLE in case of user-mode
     //
     __inline
-    PVOID
+    PVOID        
     GetEvent(
         );
 
@@ -139,5 +139,5 @@ private:
         ASSERT(FALSE);
         return NULL;
     }
-
+    
 };

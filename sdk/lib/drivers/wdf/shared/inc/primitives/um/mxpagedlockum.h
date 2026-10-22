@@ -10,7 +10,7 @@ Abstract:
 
     User mode implementation of paged lock defined in
     MxPagedLock.h
-
+    
 Author:
 
 
@@ -23,10 +23,10 @@ Revision History:
 
 #pragma once
 
-typedef struct {
-    CRITICAL_SECTION Lock;
-    bool Initialized;
-    DWORD OwnerThreadId;
+typedef struct { 
+    CRITICAL_SECTION Lock; 
+    bool Initialized; 
+    DWORD OwnerThreadId; 
 } MdPagedLock;
 
 #include "MxPagedLock.h"
@@ -36,7 +36,7 @@ MxPagedLock::MxPagedLock(
     )
 {
     m_Lock.Initialized = false;
-    m_Lock.OwnerThreadId = 0;
+    m_Lock.OwnerThreadId = 0;    
 }
 
 _Must_inspect_result_
@@ -47,13 +47,13 @@ MxPagedLockNoDynam::Initialize(
 {
     if (InitializeCriticalSectionAndSpinCount(&m_Lock.Lock, 0)) {
         m_Lock.Initialized = true;
-
+        
         return S_OK;
     }
     else {
         DWORD err = GetLastError();
         return WinErrorToNtStatus(err);
-    }
+    }    
 }
 
 __inline
@@ -70,7 +70,7 @@ MxPagedLockNoDynam::Acquire(
         Mx::MxAssertMsg("Recursive acquision of the lock is not allowed", FALSE);
     }
 
-    m_Lock.OwnerThreadId = GetCurrentThreadId();
+    m_Lock.OwnerThreadId = GetCurrentThreadId();            
 }
 
 __inline
@@ -99,7 +99,7 @@ MxPagedLockNoDynam::Release(
 {
     m_Lock.OwnerThreadId = 0;
 
-    LeaveCriticalSection(&m_Lock.Lock);
+    LeaveCriticalSection(&m_Lock.Lock);    
 }
 
 __inline

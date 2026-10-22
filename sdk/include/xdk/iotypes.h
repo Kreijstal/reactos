@@ -823,6 +823,14 @@ typedef ULONG
   _In_ ULONG Length);
 typedef GET_SET_DEVICE_DATA *PGET_SET_DEVICE_DATA;
 
+#if (NTDDI_VERSION >= NTDDI_WIN10_RS4)
+typedef enum _DRIVER_REGKEY_TYPE {
+  DriverRegKeyParameters,
+  DriverRegKeyPersistentState,
+  DriverRegKeySharedPersistentState
+} DRIVER_REGKEY_TYPE, *PDRIVER_REGKEY_TYPE;
+#endif
+
 typedef enum _DEVICE_INSTALL_STATE {
   InstallStateInstalled,
   InstallStateNeedsReinstall,
@@ -1004,6 +1012,8 @@ typedef ULONG PNP_DEVICE_STATE, *PPNP_DEVICE_STATE;
 #define PNP_DEVICE_REMOVED                       0x00000008
 #define PNP_DEVICE_RESOURCE_REQUIREMENTS_CHANGED 0x00000010
 #define PNP_DEVICE_NOT_DISABLEABLE               0x00000020
+#define PNP_DEVICE_DISCONNECTED                  0x00000040
+#define PNP_DEVICE_ASSIGNED_TO_GUEST             0x00000100
 
 typedef struct _TARGET_DEVICE_CUSTOM_NOTIFICATION {
   USHORT Version;

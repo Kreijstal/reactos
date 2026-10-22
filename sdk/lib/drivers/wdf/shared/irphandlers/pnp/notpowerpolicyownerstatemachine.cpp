@@ -30,7 +30,7 @@ Revision History:
 
 extern "C" {
 #if defined(EVENT_TRACING)
-#include "NotPowerPolicyOwnerStateMachine.tmh"
+// #include "notpowerpolicyownerstatemachine.tmh"
 #endif
 }
 
@@ -122,7 +122,7 @@ const POWER_POLICY_EVENT_TARGET_STATE FxPkgPnp::m_NotPowerPolOwnerRemovedStates[
     { PwrPolStart, WdfDevStatePwrPolStarting DEBUGGED_EVENT },
     { PwrPolRemove, WdfDevStatePwrPolRemoved DEBUGGED_EVENT },
 };
-
+ 
 const NOT_POWER_POLICY_OWNER_STATE_TABLE FxPkgPnp::m_WdfNotPowerPolicyOwnerStates[] =
 {
     // current state
@@ -585,7 +585,7 @@ Return Value:
   --*/
 {
     //
-    // Since we are not the power policy owner, there is nothing to be done.
+    // Since we are not the power policy owner, there is nothing to be done. 
     // Indicate to the PNP state machine that we are ready for removal.
     //
     This->PnpProcessEvent(PnpEventPwrPolRemoved);

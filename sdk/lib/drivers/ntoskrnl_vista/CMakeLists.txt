@@ -15,6 +15,9 @@ list(APPEND SOURCE
     ke.c
     ${REACTOS_SOURCE_DIR}/sdk/lib/rtl/utf8.c)
 
+# IoOpenDriverRegistryKey is a Windows 10 1803 API
+set_source_files_properties(io.c PROPERTIES COMPILE_DEFINITIONS NTDDI_VERSION=0x0A000005)
+
 add_library(ntoskrnl_vista ${SOURCE})
 target_link_libraries(ntoskrnl_vista PRIVATE pseh) # rtl_vista)
 add_dependencies(ntoskrnl_vista bugcodes xdk)

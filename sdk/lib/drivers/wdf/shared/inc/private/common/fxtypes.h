@@ -47,7 +47,7 @@ enum FX_OBJECT_TYPES {
     FX_TYPE_DEVICE               = FX_TYPES_BASE+0x2,
     FX_TYPE_QUEUE                = FX_TYPES_BASE+0x3,
     FX_TYPE_WMI_PROVIDER         = FX_TYPES_BASE+0x4,
-    // can be reused             = FX_TYPES_BASE+0x5,
+    // can be reused             = FX_TYPES_BASE+0x5, 
     FX_TYPE_REG_KEY              = FX_TYPES_BASE+0x6,
     FX_TYPE_STRING               = FX_TYPES_BASE+0x7,
     FX_TYPE_REQUEST              = FX_TYPES_BASE+0x8,
@@ -88,6 +88,9 @@ enum FX_OBJECT_TYPES {
     FX_TYPE_IO_RES_LIST          = FX_TYPES_BASE+0x35,
     FX_TYPE_CM_RES_LIST          = FX_TYPES_BASE+0x36,
     FX_TYPE_IO_RES_REQ_LIST      = FX_TYPES_BASE+0x37,
+    FX_TYPE_COMPANION_TARGET     = FX_TYPES_BASE+0x38,
+    FX_TYPE_COMPANION            = FX_TYPES_BASE+0x39,
+    FX_TYPE_TASK_QUEUE           = FX_TYPES_BASE+0x40,
 
     FX_TYPE_PACKAGE_IO           = FX_TYPES_PACKAGES_BASE+0x0,
     FX_TYPE_PACKAGE_FDO          = FX_TYPES_PACKAGES_BASE+0x1,

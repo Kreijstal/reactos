@@ -19,16 +19,16 @@ Abstract:
     This implies that _Free cannot be invoked from within the callback otherwise
     it would lead to a deadlock.
 
-    PLEASE NOTE that _Free cannot be made to return without waiting without
+    PLEASE NOTE that _Free cannot be made to return without waiting without 
     significant changes.
 
-    If Free is not made to wait synchronously there is a potential for binary
-    unload while workitem is running - even with waiting for an event/reference
-    count etc., the tail instructions may be running.
-    The only way to resolve that is to move work-item code out of framework
-    binary and into the host so that host can take a reference on framework
-    binary around the work item callback invocation (similar to the way I/O
-    manager keeps a reference on the device object around the invocation of
+    If Free is not made to wait synchronously there is a potential for binary 
+    unload while workitem is running - even with waiting for an event/reference 
+    count etc., the tail instructions may be running. 
+    The only way to resolve that is to move work-item code out of framework 
+    binary and into the host so that host can take a reference on framework 
+    binary around the work item callback invocation (similar to the way I/O 
+    manager keeps a reference on the device object around the invocation of 
 
     workitem callback).
     ****************************************************
@@ -68,7 +68,7 @@ typedef struct {
     HANDLE WorkItemEvent;
 
     PMX_WORKITEM_ROUTINE Callback;
-
+    
     PVOID Context;
 
     //
@@ -108,16 +108,16 @@ MxWorkItem::Allocate(
 
     if (NULL == m_WorkItem) {
         return STATUS_INSUFFICIENT_RESOURCES;
-    }
+    }        
 
     ZeroMemory(m_WorkItem, sizeof(UmWorkItem));
-
+    
     m_WorkItem->WorkItemEvent = CreateEvent(
         NULL,
         FALSE,
         FALSE,
         NULL);
-
+    
     if (NULL == m_WorkItem->WorkItemEvent) {
         err = GetLastError();
         goto exit;
@@ -151,7 +151,7 @@ exit:
         ::HeapFree(GetProcessHeap(), 0, m_WorkItem);
         m_WorkItem = NULL;
     }
-
+    
     return NTSTATUS_FROM_WIN32(err);
 }
 
@@ -170,28 +170,28 @@ MxWorkItem::Enqueue(
     // It is up to a higher layer/caller to ensure this.
     // For example: FxSystemWorkItem layered on top of MxWorkItem ensures this.
     //
-
+    
     //
     // Since multiple calls to Enqueue cannot be made at the same time
-    // as explained above, it is OK to store callback and context in
+    // as explained above, it is OK to store callback and context in 
     // the workitem itself.
     //
     // This behavior is similar to that of IoQueueWorkItem which accepts
     // a callback and a context which are stored within the work-item.
     //
-
+    
     m_WorkItem->Callback = Callback;
     m_WorkItem->Context = Context;
 
     //
-    // We must register the event with the wait object before signaling it
+    // We must register the event with the wait object before signaling it 
     // to trigger the wait callback.
     //
-    SetThreadpoolWait(m_WorkItem->WaitBlock,
+    SetThreadpoolWait(m_WorkItem->WaitBlock, 
                       m_WorkItem->WorkItemEvent,
                       NULL  // timeout
                       );
-
+    
     SetEvent(m_WorkItem->WorkItemEvent);
 }
 
@@ -204,7 +204,7 @@ MxWorkItem::GetWorkItem(
 }
 
 __inline
-VOID
+VOID    
 MxWorkItem::_Free(
     __in MdWorkItem Item
     )
@@ -217,14 +217,14 @@ MxWorkItem::_Free(
     //
     // Please see comments on the top of the file.
     //
-
+    
     if (NULL != Item) {
         //
         // Wait indefinitely for work item to complete
         //
-        if (NULL != Item->WaitBlock) {
+        if (NULL != Item->WaitBlock) {    
             //
-            // this will prevent any new waits to be queued but callbacks
+            // this will prevent any new waits to be queued but callbacks 
             // already queued will still occur.
             //
             SetThreadpoolWait(Item->WaitBlock, NULL, NULL);
@@ -274,7 +274,7 @@ MxWorkItem::Free(
     //
     // Please see comments on the top of the file.
     //
-
+    
     if (NULL != m_WorkItem) {
         MxWorkItem::_Free(m_WorkItem);
         m_WorkItem = NULL;

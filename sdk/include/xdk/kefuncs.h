@@ -1325,6 +1325,15 @@ ULONGLONG
 NTAPI
 KeQueryUnbiasedInterruptTime(VOID);
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+_IRQL_requires_max_(HIGH_LEVEL)
+NTKRNLVISTAAPI
+VOID
+NTAPI
+KeQuerySystemTimePrecise(
+  _Out_ PLARGE_INTEGER CurrentTime);
+#endif
+
 _Must_inspect_result_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 _Ret_range_(<=, 0)

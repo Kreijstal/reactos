@@ -279,4 +279,11 @@ NTAPI
 PoFxReportDevicePoweredOn(
     _In_ POHANDLE Handle);
 
+_IRQL_requires_max_(DISPATCH_LEVEL)
+NTKRNLVISTAAPI
+VOID
+NTAPI
+PoFxCompleteDirectedPowerDown(
+    _In_ POHANDLE Handle);
+
 #endif /* (NTDDI_VERSION >= NTDDI_WIN8) */
