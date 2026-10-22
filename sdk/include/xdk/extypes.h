@@ -332,6 +332,9 @@ typedef struct _EXT_DELETE_PARAMETERS
 
 #endif // NTDDI_WINBLUE
 
+typedef volatile LONG EX_SPIN_LOCK, *PEX_SPIN_LOCK;
+#define ALIGNED_EX_SPINLOCK DECLSPEC_CACHEALIGN EX_SPIN_LOCK
+
 $endif (_WDMDDK_)
 $if (_NTDDK_)
 typedef struct _ZONE_SEGMENT_HEADER {
