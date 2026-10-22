@@ -49,23 +49,23 @@ Revision History:
 
 //
 // READ/WRITE_REGISTER_Xxx macros need compiler and memory barrier. Each
-// platform has a different set of compiler intrinsics to support that.
-// In kernel, x86 READ/WRITE macros are implemented in assembly and use
-// lock prefix to force real access. For amd64, _ReadWriteBarrier
-// (compiler barrier) is used for reads and __faststorefence (CPU barrier) for
-// writes. For ARM, _ReadWriteBarrier (compiler barrier) is used for reads and
-// both _ReadWriteBarrier and __emit(Value) for writes.
-//
+// platform has a different set of compiler intrinsics to support that. 
+// In kernel, x86 READ/WRITE macros are implemented in assembly and use 
+// lock prefix to force real access. For amd64, _ReadWriteBarrier 
+// (compiler barrier) is used for reads and __faststorefence (CPU barrier) for 
+// writes. For ARM, _ReadWriteBarrier (compiler barrier) is used for reads and 
+// both _ReadWriteBarrier and __emit(Value) for writes. 
+// 
 // Because of this variation, UMDF will use the macros directly from wdm.h
-// by autogenerating those macros from wdm.h into a private UMDF header.
+// by autogenerating those macros from wdm.h into a private UMDF header. 
 // For x86, there are no macros so either UMDF could directly link to the
 // ntosrtl.lib (that has these macros implemented in assembly), or implement
-// its own macros that use MemoryBarrier() macro from winnt.h.
+// its own macros that use MemoryBarrier() macro from winnt.h. 
 //
 // Below is UMDF's implementation for x86. The macros for other platforms are
 // in WudfWdm_private.h.
 //
-#if defined(_X86_)
+#if defined(_X86_) 
 
 #define READ_REGISTER_UCHAR(x) \
     (MemoryBarrier(), *(volatile UCHAR * const)(x))
@@ -195,7 +195,7 @@ FxDevice::ReadRegister(
     //
     EventWriteEVENT_UMDF_FX_READ_FROM_HARDWARE_START(
         WdfDeviceHwAccessTargetTypeRegister, Size, 0);
-
+    
     switch(Size) {
     case WdfDeviceHwAccessTargetSizeUchar:
         value = READ_REGISTER_UCHAR((PUCHAR)Register);
@@ -447,13 +447,13 @@ FxDevice::GetDeviceStack2(
     IWudfDeviceStack2 *pDeviceStack2;
     HRESULT hrQI;
 
-    hrQI = m_DevStack->QueryInterface(IID_IWudfDeviceStack2,
+    hrQI = m_DevStack->QueryInterface(IID_IWudfDeviceStack2, 
                                       (PVOID*)&pDeviceStack2);
     FX_VERIFY(INTERNAL, CHECK_QI(hrQI, pDeviceStack2));
-
+    
     m_DevStack->Release();
-
-    return pDeviceStack2;
+    
+    return pDeviceStack2;    
 }
 
 #endif //_FXDEVICEUM_H_

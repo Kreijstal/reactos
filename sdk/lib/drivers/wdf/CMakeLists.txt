@@ -50,6 +50,8 @@ list(APPEND SOURCE_SHARED
     shared/irphandlers/io/fxioqueueapi.cpp
     shared/irphandlers/io/fxpkgio.cpp
     shared/irphandlers/package/fxpackage.cpp
+    shared/irphandlers/pnp/cxpnppowercallbacks.cpp
+    shared/irphandlers/pnp/devicepowerirptracker.cpp
     shared/irphandlers/pnp/devicepwrreqstatemachine.cpp
     shared/irphandlers/pnp/eventqueue.cpp
     shared/irphandlers/pnp/fdopower.cpp
@@ -59,6 +61,7 @@ list(APPEND SOURCE_SHARED
     shared/irphandlers/pnp/fxpkgpnp.cpp
     shared/irphandlers/pnp/interruptobject.cpp
     shared/irphandlers/pnp/notpowerpolicyownerstatemachine.cpp
+    shared/irphandlers/pnp/pnpcallbacks.cpp
     shared/irphandlers/pnp/pdopower.cpp
     shared/irphandlers/pnp/pnpstatemachine.cpp
     shared/irphandlers/pnp/poweridlestatemachine.cpp
@@ -126,7 +129,10 @@ list(APPEND SOURCE_KM
     kmdf/src/dma/base/fxcommonbufferapi.cpp # requires DMA stuff
     kmdf/src/dma/base/fxdmaenabler.cpp
     kmdf/src/dma/base/fxdmaenablerapi.cpp
-    kmdf/src/dma/base/fxdmatransaction.cpp
+    kmdf/src/dma/base/fxdmatransactionbase.cpp
+    kmdf/src/dma/base/fxdmatransactionpacket.cpp
+    kmdf/src/dma/base/fxdmatransactionscattergather.cpp
+    kmdf/src/dma/base/fxdmatransactionsystem.cpp
     kmdf/src/dma/base/fxdmatransactionapi.cpp
     kmdf/src/dynamic/version/version.cpp
     kmdf/src/fxtosharedinterface/fxobject/fxobjectinfokm.cpp
@@ -134,12 +140,14 @@ list(APPEND SOURCE_KM
     kmdf/src/irphandlers/wmi/fxwmiinstance.cpp
     kmdf/src/irphandlers/wmi/fxwmiirphandler.cpp
     kmdf/src/irphandlers/wmi/fxwmiprovider.cpp
+    kmdf/src/librarycommon/fxbindclienthelper.cpp
     kmdf/src/librarycommon/fxlibrarycommon.cpp
     kmdf/src/support/fxqueryinterface.cpp
     kmdf/src/support/fxqueryinterfaceapi.cpp
     kmdf/src/support/fxrelateddevice.cpp
     kmdf/src/support/fxrelateddevicelist.cpp
     kmdf/src/support/probeandlock.c
+    shared/core/km/fxcompanionstubskm.cpp
     shared/core/km/fxdeviceapikm.cpp
     shared/core/km/fxdevicebasekm.cpp
     shared/core/km/fxdeviceinitkm.cpp
@@ -193,15 +201,15 @@ add_cd_file(TARGET wdf01000 DESTINATION reactos/system32/drivers NO_CAB FOR all)
 add_registry_inf(wdf01000_reg.inf)
 
 target_compile_definitions(wdf01000
-    PUBLIC WDF_DEVICE_NO_WDMSEC_H _WIN32_WINNT=0x603 NTDDI_VERSION=0x06030000 # NTDDI_WINBLUE
-    PRIVATE FX_CORE_MODE=1 FX_CORE_KERNEL_MODE=1
-    PRIVATE __WDF_MAJOR_VERSION=1 __WDF_MINOR_VERSION=17 __WDF_BUILD_NUMBER=7600
-    PRIVATE __WDF_MAJOR_VERSION_STRING=01
+    PUBLIC WDF_DEVICE_NO_WDMSEC_H _WIN32_WINNT=0x0A00 NTDDI_VERSION=0x0A000005 # NTDDI_WIN10_RS4
+    PRIVATE FX_CORE_MODE=1 FX_CORE_KERNEL_MODE=1 WDF_EVERYTHING_ALWAYS_AVAILABLE
+    PRIVATE __WDF_MAJOR_VERSION=1 __WDF_MINOR_VERSION=33 __WDF_BUILD_NUMBER=7600
+    PRIVATE __WDF_MAJOR_VERSION_STRING=01 __WDF_MINOR_VERSION_STRING=33
     # wdf01000 is primarily 3rd party code, and we cannot control what crap vendor drivers do
     PRIVATE NO_KERNEL_LIST_ENTRY_CHECKS)
 
 target_include_directories(wdf01000
-    PUBLIC ${REACTOS_SOURCE_DIR}/sdk/include/wdf/kmdf/1.17
+    PUBLIC ${REACTOS_SOURCE_DIR}/sdk/include/wdf/kmdf/1.33
     PRIVATE
         ${REACTOS_SOURCE_DIR}/sdk/lib/drivers/wdf/wdfldr
         shared/inc/primitives/common

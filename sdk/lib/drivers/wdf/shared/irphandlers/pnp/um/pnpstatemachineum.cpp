@@ -25,7 +25,7 @@ Revision History:
 
 --*/
 
-#include "../pnppriv.hpp"
+#include "pnppriv.hpp"
 
 extern "C" {
 #if defined(EVENT_TRACING)
@@ -89,27 +89,27 @@ FxPkgPnp::ShouldProcessPnpEventOnDifferentThread(
 /*++
 Routine Description:
 
-    This function returns whether the PnP state machine should process the
+    This function returns whether the PnP state machine should process the 
     current event on the same thread or on a different one.
-
-    This function has been added to work around a bug in the state machines.
-    The idle state machine always calls PnpProcessEvent with the idle state
+   
+    This function has been added to work around a bug in the state machines. 
+    The idle state machine always calls PnpProcessEvent with the idle state 
     machine lock held. Some events sent by the idle state machine can cause the
-    Pnp state machine to invoke FxPowerIdleMachine::IoDecrement().
-    FxPowerIdleMachine::IoDecrement() will try to acquire the idle state
+    Pnp state machine to invoke FxPowerIdleMachine::IoDecrement(). 
+    FxPowerIdleMachine::IoDecrement() will try to acquire the idle state 
     machine lock, which is already being held, so it will result in a recursive
     acquire of the idle state machine lock.
-
-    The above bug only affects UMDF, but not KMDF. In KMDF, the idle state
-    machine lock is a spinlock. When PnpProcessEvent is called, it is called
+    
+    The above bug only affects UMDF, but not KMDF. In KMDF, the idle state 
+    machine lock is a spinlock. When PnpProcessEvent is called, it is called 
     with the spinlock held and hence at dispatch level. Note that if called at
-    a non-passive IRQL, PnpProcessEvent will always queue a work item to
-    process the event at passive IRQL later. Queuing a work item forces
+    a non-passive IRQL, PnpProcessEvent will always queue a work item to 
+    process the event at passive IRQL later. Queuing a work item forces 
     processing to happen on a different thread and hence we don't attempt to
-    recursively acquire the spinlock. On the other hand, with UMDF we are
-    always at passive IRQL and hence we process the event on the same thread
+    recursively acquire the spinlock. On the other hand, with UMDF we are 
+    always at passive IRQL and hence we process the event on the same thread 
     and run into the recursive acquire problem.
-
+    
 
 
 
@@ -120,21 +120,21 @@ Routine Description:
 Arguments:
 
     CurrentIrql - The current IRQL
-
-    CallerSpecifiedProcessingOnDifferentThread - Whether or not caller of
-        PnpProcessEvent specified that the event be processed on a different
+    
+    CallerSpecifiedProcessingOnDifferentThread - Whether or not caller of 
+        PnpProcessEvent specified that the event be processed on a different 
         thread.
 
 Returns:
     TRUE if the PnP state machine should process the event on a different
        thread.
-
+       
     FALSE if the PnP state machine should process the event on the same thread
 
 --*/
 {
     //
-    // For UMDF, we ignore the IRQL and just do what the caller of
+    // For UMDF, we ignore the IRQL and just do what the caller of 
     // PnpProcessEvent wants.
     //
     UNREFERENCED_PARAMETER(CurrentIrql);
@@ -150,10 +150,10 @@ FxPkgPnp::CreatePowerThreadIfNeeded(
 /*++
 Routine description:
     If needed, creates a thread for processing power IRPs
-
+    
 Arguments:
     None
-
+    
 Return value:
     An NTSTATUS code indicating success or failure of this function
 --*/

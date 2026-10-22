@@ -29,7 +29,7 @@ Revision History:
 
 extern "C" {
 #if defined(EVENT_TRACING)
-#include "EventQueue.tmh"
+// #include "eventqueue.tmh"
 #endif
 }
 
@@ -57,13 +57,13 @@ FxEventQueue::Initialize(
     )
 {
     NTSTATUS status;
-
+    
     //
     // For KM, lock initialize always succeeds. For UM, it might fail.
     //
     status = m_StateMachineLock.Initialize();
     if (!NT_SUCCESS(status)) {
-        DoTraceLevelMessage(DriverGlobals,
+        DoTraceLevelMessage(DriverGlobals, 
             TRACE_LEVEL_ERROR, TRACINGPNP,
             "Initializing state machine lock failed for EventQueue 0x%p, "
             "status %!STATUS!",
@@ -233,7 +233,7 @@ FxEventQueue::EventQueueWorker(
 
 Routine Description:
     This is the work item that attempts to run the queue state machine on
-    the special power thread.
+    the special power thread. 
 
 
 --*/
@@ -241,7 +241,7 @@ Routine Description:
     FxPostProcessInfo info;
     KIRQL irql;
     FxPkgPnp* pPkgPnp;
-
+    
 #if (FX_CORE_MODE==FX_CORE_KERNEL_MODE)
     FX_TRACK_DRIVER(m_PkgPnp->GetDriverGlobals());
 #endif
@@ -432,7 +432,7 @@ Routine Description:
     FxThreadedEventQueue* This = (FxThreadedEventQueue *)Context;
 
     UNREFERENCED_PARAMETER(DeviceObject);
-
+    
     This->EventQueueWorker();
 }
 

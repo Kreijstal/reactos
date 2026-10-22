@@ -13,7 +13,7 @@ ConvertWinErrorToNtstatus(
     BOOL found = FALSE;
 
     *Status = INVALID_STATUS;
-
+    
     for ( ULONG i = 0; i < ARRAYSIZE(ErrorBucketTable); i++ )
     {
         if (WinError < ErrorBucketTable[i].BaseErrorCode)
@@ -24,7 +24,7 @@ ConvertWinErrorToNtstatus(
             //
             break;
         }
-
+        
         if ( WinError < (ErrorBucketTable[i].BaseErrorCode +
                                                 ErrorBucketTable[i].RunLength) )
         {
@@ -57,7 +57,7 @@ ConvertWinErrorToNtstatus(
 }
 
 NTSTATUS
-WinErrorToNtStatus(
+WinErrorToNtStatus(    
     __in ULONG WinError
     )
 {
@@ -70,5 +70,5 @@ WinErrorToNtStatus(
     else
     {
         return STATUS_UNSUCCESSFUL;
-    }
+    }    
 }

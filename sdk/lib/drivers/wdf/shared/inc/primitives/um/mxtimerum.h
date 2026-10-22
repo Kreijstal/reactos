@@ -29,7 +29,7 @@ typedef struct _MdTimer {
     //
     MdDeferredRoutine m_TimerCallback;
     PVOID m_TimerContext;
-
+    
     //
     // The timer period
     //
@@ -42,7 +42,7 @@ typedef struct _MdTimer {
 
     //
     // Work object to be executed by threadpool upon timer expiration
-    //
+    // 
     PTP_WORK m_WorkObject;
 
     //
@@ -81,7 +81,7 @@ typedef struct _MdTimer {
             CloseThreadpoolTimer(m_TimerHandle);
             m_TimerHandle = NULL;
         }
-
+    
         //
         // Release the work object
         //
@@ -104,25 +104,25 @@ typedef struct _MdTimer {
         if (!m_TimerWasStarted) {
             return FALSE;
         }
-
+        
         //
         // Periodic timers are always in the system timer queue.
         //
         if (m_Period != 0) {
             return TRUE;
         }
-
+        
         //
         // Non-periodic timer:
         //
-        // At this point, the timer callback function has either been canceled or
+        // At this point, the timer callback function has either been canceled or 
         // has finished running. Examine the m_CallbackStartedRunning value to see
         // which one of these happened.
         //
         if (m_CallbackStartedRunning)
         {
             //
-            // Timer cancellation was too late. Timer callback already started
+            // Timer cancellation was too late. Timer callback already started 
             // running and the timer was removed from the system timer queue.
             //
             return FALSE;
@@ -146,11 +146,11 @@ typedef struct _MdTimer {
         )
     {
         NTSTATUS ntStatus = STATUS_SUCCESS;
-
+    
         m_TimerCallback = TimerCallback;
         m_TimerContext = TimerContext;
         m_Period = Period;
-
+    
         //
         // Create the timer object
         //
@@ -161,7 +161,7 @@ typedef struct _MdTimer {
         {
             ntStatus = WinErrorToNtStatus(GetLastError());
         }
-
+    
         //
         // Create the work object
         //
@@ -175,7 +175,7 @@ typedef struct _MdTimer {
                 ntStatus = WinErrorToNtStatus(GetLastError());
             }
         }
-
+    
         return ntStatus;
     }
 
@@ -200,9 +200,9 @@ typedef struct _MdTimer {
         // Return TRUE if the timer is in the system timer queue.
         //
         bRetVal = IsInSystemQueue();
-
+    
         //
-        // This is a fresh start for the timer, so clear the flag that the
+        // This is a fresh start for the timer, so clear the flag that the 
         // timer callback function may have previously set.
         //
         m_CallbackStartedRunning = FALSE;
@@ -217,15 +217,15 @@ typedef struct _MdTimer {
         //
         dueFileTime.dwLowDateTime = DueTime.LowPart;
         dueFileTime.dwHighDateTime = (DWORD) DueTime.HighPart;
-
+    
         //
         // Start the timer
         //
-        SetThreadpoolTimer(m_TimerHandle,
+        SetThreadpoolTimer(m_TimerHandle, 
                            &dueFileTime,
                            (DWORD) m_Period,
                            TolerableDelay);
-
+    
         return bRetVal;
     }
 
@@ -238,7 +238,7 @@ typedef struct _MdTimer {
         BOOLEAN bRetVal;
 
         bRetVal = IsInSystemQueue();
-
+    
         //
         // Stop the timer
         //
@@ -247,9 +247,9 @@ typedef struct _MdTimer {
                            0, // msPeriod
                            0 // msWindowLength
                            );
-
+    
         //
-        // Cancel pending callbacks that have not yet started to execute and wait
+        // Cancel pending callbacks that have not yet started to execute and wait 
         // for outstanding callbacks to complete.
         //
         WaitForThreadpoolTimerCallbacks(m_TimerHandle,
@@ -260,7 +260,7 @@ typedef struct _MdTimer {
         // Reset the timer started flag.
         //
         m_TimerWasStarted = FALSE;
-
+    
         return bRetVal;
     }
 
@@ -277,7 +277,7 @@ typedef struct _MdTimer {
                         NULL, /* Reserved2 */
                         NULL /* Reserved3 */
                         );
-
+    
         return;
     }
 
@@ -290,13 +290,13 @@ typedef struct _MdTimer {
         )
     {
         struct _MdTimer *pThis = NULL;
-
+    
         UNREFERENCED_PARAMETER(Instance);
         UNREFERENCED_PARAMETER(Work);
-
+    
         pThis = (struct _MdTimer*) Context;
         pThis->TimerCallback();
-
+    
         return;
     }
 
@@ -309,35 +309,35 @@ typedef struct _MdTimer {
         )
     {
         struct _MdTimer *pThis = NULL;
-
+    
         UNREFERENCED_PARAMETER(Instance);
         UNREFERENCED_PARAMETER(Timer);
-
+    
         pThis = (struct _MdTimer*) Context;
-
+    
         //
         // First, indicate that the callback has started running
         //
         pThis->m_CallbackStartedRunning = TRUE;
-
+    
         //
-        // Post a work object to execute the callback function supplied by the
-        // user of MxTimer.
+        // Post a work object to execute the callback function supplied by the 
+        // user of MxTimer. 
         //
-        // We do not execute the user-supplied callback here because we could
-        // run into a deadlock if the user is trying to cancel the timer by
-        // calling MxTimer::Stop. MxTimer::Stop actually blocks waiting for
+        // We do not execute the user-supplied callback here because we could 
+        // run into a deadlock if the user is trying to cancel the timer by 
+        // calling MxTimer::Stop. MxTimer::Stop actually blocks waiting for 
         // MdTimer::s_MdTimerCallback to finish executing, so that it can know
         // where its attempt to cancel the timer was successful. If we were to
         // execute the user's callback in MdTimer::s_MdTimerCallback, the user
         // would have to be careful not to call MxTimer::Stop while holding a
         // lock that the user's callback tries to acquire. In order to avoid
-        // imposing such a restriction on the user, we allow
-        // MdTimer::s_MdTimerCallback to return immediately after posting a
+        // imposing such a restriction on the user, we allow 
+        // MdTimer::s_MdTimerCallback to return immediately after posting a 
         // work object to run the user's callback.
         //
         SubmitThreadpoolWork(pThis->m_WorkObject);
-
+    
         return;
     }
 
@@ -382,25 +382,25 @@ Routine description:
 Arguments:
     TimerContext - Context information that will be passed in to the timer
         callback function.
-
-    TimerCallback - The timer callback function.
-
+    
+    TimerCallback - The timer callback function. 
+    
         *** IMPORTANT NOTE ***
         MxTimer object must not be freed inside the timer callback function
-        because in the pre-Vista, user mode implementation of MxTimer, the
-        destructor blocks waiting for all callback functions to finish
-        executing. Hence freeing the MxTimer object inside the callback
+        because in the pre-Vista, user mode implementation of MxTimer, the 
+        destructor blocks waiting for all callback functions to finish 
+        executing. Hence freeing the MxTimer object inside the callback 
         function will result in a deadlock.
-
+        
     Period - The period of the timer in milliseconds.
 
 Return value:
-    An NTSTATUS value that indicates whether or not we succeeded in
+    An NTSTATUS value that indicates whether or not we succeeded in 
     initializing the MxTimer
 --*/
 {
     NTSTATUS ntStatus;
-
+    
     ntStatus = m_Timer.Initialize(TimerContext,
                                   TimerCallback,
                                   Period);
@@ -418,9 +418,9 @@ MxTimer::InitializeEx(
     __in BOOLEAN UseHighResolutionTimer
     )
 {
-
+    
     UNREFERENCED_PARAMETER(TolerableDelay);
-    UNREFERENCED_PARAMETER(UseHighResolutionTimer);
+    UNREFERENCED_PARAMETER(UseHighResolutionTimer);  
     UNREFERENCED_PARAMETER(TimerCallback);
     UNREFERENCED_PARAMETER(TimerContext);
     UNREFERENCED_PARAMETER(Period);
@@ -462,7 +462,7 @@ MxTimer::StartWithReturn(
 {
     BOOLEAN bRetVal = TRUE;
 
-    bRetVal = m_Timer.StartWithReturn(DueTime, TolerableDelay);
+    bRetVal = m_Timer.StartWithReturn(DueTime, TolerableDelay);   
 
     return bRetVal;
 }

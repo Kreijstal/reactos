@@ -9,7 +9,7 @@ ModuleName:
 Abstract:
 
     Work item callback thunk implementation for user mode
-
+    
     We need this thunk to wire the um callback to a mode agnostic work item
     callback.
 
@@ -36,12 +36,12 @@ MxWorkItem::_WorkerThunk (
 {
     MdWorkItem workItem = (MdWorkItem) Parameter;
 
-    UNREFERENCED_PARAMETER(Instance);
-    UNREFERENCED_PARAMETER(Wait);
-    UNREFERENCED_PARAMETER(WaitResult);
+    UNREFERENCED_PARAMETER(Instance);       
+    UNREFERENCED_PARAMETER(Wait);       
+    UNREFERENCED_PARAMETER(WaitResult);       
 
     (*workItem->Callback)(
-        workItem->DeviceObject,
+        workItem->DeviceObject, 
         workItem->Context
         );
 
@@ -53,7 +53,7 @@ MxWorkItem::WaitForCallbacksToComplete(
     VOID
     )
 {
-    Mx::MxAssert(NULL != m_WorkItem->WaitBlock);
+    Mx::MxAssert(NULL != m_WorkItem->WaitBlock);    
 
     //
     // Wait for outstanding callbacks to complete.
@@ -61,6 +61,6 @@ MxWorkItem::WaitForCallbacksToComplete(
     WaitForThreadpoolWaitCallbacks(m_WorkItem->WaitBlock,
                            FALSE  // donot cancel pending waits
                            );
-
+    
 }
 

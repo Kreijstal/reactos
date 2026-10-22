@@ -104,6 +104,21 @@ typedef struct _WDF_CLASS_BIND_INFO {
     PVOID ClassModule;
 } WDF_CLASS_BIND_INFO, *PWDF_CLASS_BIND_INFO;
 
+/*
+ * Class bind info v2 (KMDF 1.25+). Lets a client built against a newer class
+ * extension run on an older one; same layout idea as WDF_BIND_INFO2. The
+ * KMDF 1.33 client stub accepts entries of sizeof(WDF_CLASS_BIND_INFO) (0x50
+ * on x64) and sizeof(WDF_CLASS_BIND_INFO2) (0x78 on x64).
+ */
+typedef struct _WDF_CLASS_BIND_INFO2 {
+    WDF_CLASS_BIND_INFO V1;
+    ULONG* MinimumVersionRequired;
+    BOOLEAN* ClientVersionHigherThanFramework;
+    ULONG* FuncCountPtr;
+    ULONG* StructCountPtr;
+    size_t** StructTable;
+} WDF_CLASS_BIND_INFO2, *PWDF_CLASS_BIND_INFO2;
+
 typedef struct _WDF_CLASS_LIBRARY_INFO {
     ULONG Size;
     WDF_CLASS_VERSION Version;

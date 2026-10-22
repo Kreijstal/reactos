@@ -8,8 +8,8 @@ Module Name:
 
 Abstract:
 
-    Kernel-mode specific definitions of FxIoTargetRemote
-
+    Kernel-mode specific definitions of FxIoTargetRemote 
+    
 Author:
 
 
@@ -31,7 +31,7 @@ FxIoTargetRemote::InitRemoteModeSpecific(
     )
 {
     UNREFERENCED_PARAMETER(Device);
-
+    
     //
     // Nothing mode-specific work to do for KM here.
     //
@@ -60,7 +60,7 @@ FxIoTargetRemote::OpenLocalTargetByFile(
     )
 {
     UNREFERENCED_PARAMETER(OpenParams);
-
+    
     //
     // Nothing mode-specific work to do for KM here.
     //

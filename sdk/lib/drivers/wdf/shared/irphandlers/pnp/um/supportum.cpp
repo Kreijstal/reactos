@@ -21,7 +21,7 @@ Revision History:
 
 --*/
 
-#include "../pnppriv.hpp"
+#include "pnppriv.hpp"
 
 VOID
 CopyQueryInterfaceToIrpStack(
@@ -62,7 +62,7 @@ GetStackCapabilities(
     }
     else {
         PUMDF_VERSION_DATA driverVersion = deviceStack->GetMinDriverVersion();
-        BOOL preserveCompat =
+        BOOL preserveCompat = 
              deviceStack->ShouldPreserveIrpCompletionStatusCompatibility();
 
         status = CHostFxUtil::NtStatusFromHr(hr,
@@ -101,10 +101,10 @@ GetIoMgrObjectForWorkItemAllocation(
 /*++
 Routine description:
     Returns an IO manager object that can be passed in to IoAllocateWorkItem
-
+    
 Arguments:
     None
-
+    
 Return value:
     Pointer to the object that can be passed in to IoAllocateWorkItem
 --*/
@@ -120,7 +120,7 @@ BOOLEAN
 IdleTimeoutManagement::_SystemManagedIdleTimeoutAvailable(
     VOID
     )
-{
+{    
 
     return TRUE;
 }

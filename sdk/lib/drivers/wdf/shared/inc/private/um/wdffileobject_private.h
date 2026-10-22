@@ -54,7 +54,7 @@ typedef struct _WDFP_FILEOBJECT_INTERFACE {
 
     //
     // Private DDIs exposed through WdfObjectQuery
-    //
+    // 
     PFN_WDFP_FILEOBJECT_INCREMENT_PROCESS_KEEP_ALIVE_COUNT
         WdfpFileObjectIncrementProcessKeepAliveCount;
 

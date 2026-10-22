@@ -71,12 +71,12 @@ private:
     MxThread          m_WorkItemThread;
 
     FxSystemWorkItem*  m_SystemWorkItem;
-
+    
     //
     // WDM PDRIVER or PDEVICE_OBJECT for allocating PIO_WORKITEMS
     //
     PVOID             m_WdmObject;
-
+    
 private:
     static
     VOID

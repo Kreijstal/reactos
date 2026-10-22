@@ -26,7 +26,7 @@ Revision History:
 extern "C" {
 
 #if defined(EVENT_TRACING)
-#include "FxObjectKm.tmh"
+// #include "fxobjectkm.tmh"
 #endif
 
 }

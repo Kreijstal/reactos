@@ -34,7 +34,7 @@ public:
         m_DeviceObject(DeviceObject)
     {
     }
-
+    
     __inline
     MxDeviceObject(
         VOID
@@ -82,7 +82,7 @@ public:
 
     VOID
     DereferenceObject(
-        );
+        );            
 
     ULONG
     GetFlags(
@@ -134,7 +134,7 @@ public:
     SetDeviceType(
         DEVICE_TYPE Value
         );
-
+    
     VOID
     SetCharacteristics(
         ULONG Characteristics
@@ -144,7 +144,7 @@ public:
     SetAlignmentRequirement(
         _In_ ULONG Value
         );
-
+    
     ULONG
     GetAlignmentRequirement(
         VOID

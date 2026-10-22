@@ -31,16 +31,16 @@ extern "C" {
 
 extern "C" {
 
-__inline
+__inline 
 VOID
 VerifyIrqlEntry(
     __out KIRQL *Irql
     )
 {
-    *Irql = KeGetCurrentIrql();
+    *Irql = KeGetCurrentIrql();   
 }
 
-__inline
+__inline 
 VOID
 VerifyIrqlExit(
     __in PWDF_DRIVER_GLOBALS DriverGlobals,
@@ -48,7 +48,7 @@ VerifyIrqlExit(
     )
 {
     KIRQL currIrql;
-
+   
     currIrql = KeGetCurrentIrql();
     if (PrevIrql != currIrql) {
         KdPrint(("WDF VERIFIER: Irql at entry of event is not same as at exit.\n"));
@@ -60,8 +60,9 @@ VerifyIrqlExit(
     }
 }
 
-__inline
+__inline 
 VOID
+#pragma prefast(suppress:__WARNING_RETURN_UNINIT_VAR, "Returning uninitialized memory '*CritRegion'")
 VerifyCriticalRegionEntry(
     __out BOOLEAN *CritRegion
     )
@@ -71,7 +72,7 @@ VerifyCriticalRegionEntry(
     }
 }
 
-__inline
+__inline 
 VOID
 VerifyCriticalRegionExit(
     __in PWDF_DRIVER_GLOBALS DriverGlobals,
@@ -93,7 +94,7 @@ VerifyCriticalRegionExit(
 } // extern "C"
 
 FORCEINLINE
-VOID
+VOID 
 PerformanceAnalysisIOProcess(
     __in PFX_DRIVER_GLOBALS pFxDriverGlobals,
     __in WDFREQUEST Handle,
@@ -106,7 +107,7 @@ PerformanceAnalysisIOProcess(
                          Handle,
                          FX_TYPE_REQUEST,
                          (PVOID *) ppReq);
-
+                         
     if (IoGetActivityIdIrp((*ppReq)->GetFxIrp()->GetIrp(), pActivityId) == STATUS_NOT_FOUND)
     {
         EtwActivityIdControl(EVENT_ACTIVITY_CTRL_CREATE_ID, pActivityId);
@@ -123,18 +124,18 @@ PerfIoStart(
     FxRequest* pReq;
     GUID activityId = { 0 };
     WDFOBJECT_OFFSET offset = 0;
-
-    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset);
+    
+    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset); 
     PFX_DRIVER_GLOBALS pFxDriverGlobals = pObject->GetDriverGlobals();
     BOOLEAN status = IsFxPerformanceAnalysis(pFxDriverGlobals);
-
+    
     if(status)
     {
         PFN_WDF_DRIVER_DEVICE_ADD pDriverDeviceAdd = pFxDriverGlobals->Driver->GetDriverDeviceAddMethod();
         PerformanceAnalysisIOProcess(pFxDriverGlobals, Handle, &pReq,
                 &activityId);
-
-        EventWriteFX_REQUEST_START(&activityId, pReq->GetFxIrp()->GetMajorFunction(),
+                
+        EventWriteFX_REQUEST_START(&activityId, pReq->GetFxIrp()->GetMajorFunction(), 
                     pDriverDeviceAdd, pReq->GetCurrentQueue()->GetDevice()->GetHandle());
     }
     return status;
@@ -149,18 +150,18 @@ PerfIoComplete(
     FxRequest* pReq;
     GUID activityId = { 0 };
     WDFOBJECT_OFFSET offset = 0;
-
-    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset);
+    
+    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset); 
     PFX_DRIVER_GLOBALS pFxDriverGlobals = pObject->GetDriverGlobals();
     BOOLEAN status = IsFxPerformanceAnalysis(pFxDriverGlobals);
-
+    
     if(status)
     {
         PFN_WDF_DRIVER_DEVICE_ADD pDriverDeviceAdd = pFxDriverGlobals->Driver->GetDriverDeviceAddMethod();
         PerformanceAnalysisIOProcess(pFxDriverGlobals, Handle, &pReq,
                 &activityId);
-
-        EventWriteFX_REQUEST_COMPLETE(&activityId, pReq->GetFxIrp()->GetMajorFunction(),
+                
+        EventWriteFX_REQUEST_COMPLETE(&activityId, pReq->GetFxIrp()->GetMajorFunction(), 
                     pDriverDeviceAdd, pReq->GetCurrentQueue()->GetDevice()->GetHandle());
     }
     return status;
@@ -173,9 +174,9 @@ PerformanceGetDriverDeviceAdd(
 )
 {
     WDFOBJECT_OFFSET offset = 0;
-    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset);
+    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset); 
     PFX_DRIVER_GLOBALS pFxDriverGlobals = pObject->GetDriverGlobals();
-
+    
     return pFxDriverGlobals->Driver->GetDriverDeviceAddMethod();
 }
 
@@ -187,7 +188,7 @@ PerfEvtDeviceD0EntryStart(
 )
 {
     WDFOBJECT_OFFSET offset = 0;
-    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset);
+    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset); 
     PFX_DRIVER_GLOBALS pFxDriverGlobals = pObject->GetDriverGlobals();
     BOOLEAN status = IsFxPerformanceAnalysis(pFxDriverGlobals);
 
@@ -196,7 +197,7 @@ PerfEvtDeviceD0EntryStart(
         EtwActivityIdControl(EVENT_ACTIVITY_CTRL_CREATE_ID, pActivityId);
         EventWriteFX_POWER_D0_ENTRY_START(pActivityId, pDriverDeviceAdd, Handle);
     }
-
+    
     return status;
 }
 
@@ -218,7 +219,7 @@ PerfEvtDeviceD0ExitStart(
 )
 {
     WDFOBJECT_OFFSET offset = 0;
-    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset);
+    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset); 
     PFX_DRIVER_GLOBALS pFxDriverGlobals = pObject->GetDriverGlobals();
     BOOLEAN status = IsFxPerformanceAnalysis(pFxDriverGlobals);
 
@@ -249,7 +250,7 @@ PerfEvtDevicePrepareHardwareStart(
 {
 
     WDFOBJECT_OFFSET offset = 0;
-    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset);
+    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset); 
     PFX_DRIVER_GLOBALS pFxDriverGlobals = pObject->GetDriverGlobals();
     BOOLEAN status = IsFxPerformanceAnalysis(pFxDriverGlobals);
 
@@ -279,7 +280,7 @@ PerfEvtDeviceReleaseHardwareStart(
 )
 {
     WDFOBJECT_OFFSET offset = 0;
-    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset);
+    FxObject *pObject = FxObject::_GetObjectFromHandle(Handle, &offset); 
     PFX_DRIVER_GLOBALS pFxDriverGlobals = pObject->GetDriverGlobals();
     BOOLEAN status = IsFxPerformanceAnalysis(pFxDriverGlobals);
 
@@ -314,7 +315,7 @@ PerfEvtIoStopStart(
     FxIoQueue* pQueue;
     PFN_WDF_DRIVER_DEVICE_ADD pDriverDeviceAdd;
 
-    FxObject *pObject = FxObject::_GetObjectFromHandle(Queue, &offset);
+    FxObject *pObject = FxObject::_GetObjectFromHandle(Queue, &offset); 
     PFX_DRIVER_GLOBALS pFxDriverGlobals = pObject->GetDriverGlobals();
     BOOLEAN status = IsFxPerformanceAnalysis(pFxDriverGlobals);
 
@@ -344,7 +345,7 @@ PerfEvtIoStopStop(
     FxIoQueue* pQueue;
     PFN_WDF_DRIVER_DEVICE_ADD pDriverDeviceAdd;
 
-    FxObject *pObject = FxObject::_GetObjectFromHandle(Queue, &offset);
+    FxObject *pObject = FxObject::_GetObjectFromHandle(Queue, &offset); 
     PFX_DRIVER_GLOBALS pFxDriverGlobals = pObject->GetDriverGlobals();
     FxObjectHandleGetPtr(pFxDriverGlobals,
                       Queue,

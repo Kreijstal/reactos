@@ -23,7 +23,7 @@ Revision History:
 
 extern "C" {
 #if defined(EVENT_TRACING)
-#include "FxUsbDeviceAPI.tmh"
+// #include "fxusbdeviceapi.tmh"
 #endif
 }
 
@@ -261,7 +261,7 @@ WDFEXPORT(WdfUsbTargetDeviceRetrieveInformation)(
     PWDF_DRIVER_GLOBALS DriverGlobals,
     __in
     WDFUSBDEVICE UsbDevice,
-    __out
+    _Inout_
     PWDF_USB_DEVICE_INFORMATION Information
     )
 {
@@ -1310,6 +1310,7 @@ Return Value:
         return status;
     }
 
+    #pragma prefast(suppress:__WARNING_USING_UNINIT_VAR, "Using uninitialized memory '**Urb'")
     status = pUsbDevice->CreateIsochUrb(Attributes,
                                         NumberOfIsochPackets,
                                         UrbMemory,

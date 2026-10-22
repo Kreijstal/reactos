@@ -24,7 +24,7 @@ Revision History:
 
 --*/
 
-#include "../pnppriv.hpp"
+#include "pnppriv.hpp"
 
 extern "C" {
 #if defined(EVENT_TRACING)
@@ -86,7 +86,7 @@ Routine Description:
     Set source of wake if OS supports this.
 
 Arguments:
-    Irp
+    Irp 
 
 Return Value:
     None

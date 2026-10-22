@@ -8,9 +8,9 @@ Module Name:
 
 Abstract:
 
-    This file contains common types for device objects that are used in
+    This file contains common types for device objects that are used in 
     all three components (Wudfx, Wudfhost, WudfRd).
-
+    
 Author:
 
 

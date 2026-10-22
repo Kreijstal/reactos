@@ -27,6 +27,48 @@ extern "C" {
 // #include "FxDmaEnablerAPI.tmh"
 }
 
+
+
+
+
+
+
+
+#ifndef __REACTOS__ // Provided by wdf19.h
+typedef struct _WDF_DMA_ENABLER_CONFIG_V1_9 {
+    //
+    // Size of this structure in bytes
+    //
+    ULONG                Size;
+
+    //
+    // One of the above WDF_DMA_PROFILES
+    //
+    WDF_DMA_PROFILE      Profile;
+
+    //
+    // Maximum DMA Transfer handled in bytes.
+    //
+    size_t               MaximumLength;
+
+    //
+    // The various DMA PnP/Power event callbacks
+    //
+    PFN_WDF_DMA_ENABLER_FILL                  EvtDmaEnablerFill;
+
+    PFN_WDF_DMA_ENABLER_FLUSH                 EvtDmaEnablerFlush;
+
+    PFN_WDF_DMA_ENABLER_DISABLE               EvtDmaEnablerDisable;
+
+    PFN_WDF_DMA_ENABLER_ENABLE                EvtDmaEnablerEnable;
+
+    PFN_WDF_DMA_ENABLER_SELFMANAGED_IO_START  EvtDmaEnablerSelfManagedIoStart;
+
+    PFN_WDF_DMA_ENABLER_SELFMANAGED_IO_STOP   EvtDmaEnablerSelfManagedIoStop;
+
+} WDF_DMA_ENABLER_CONFIG_V1_9, *PWDF_DMA_ENABLER_CONFIG_V1_9;
+#endif
+
 //
 // Extern "C" the entire file
 //
@@ -352,7 +394,19 @@ WDFEXPORT(WdfDmaEnablerSetMaximumScatterGatherElements)(
         return;
     }
 
-    pDmaEnabler->SetMaxSGElements(MaximumElements);
+    if (MaximumElements > WDF_DMA_ENABLER_UNLIMITED_FRAGMENTS) {
+        DoTraceLevelMessage(
+            pFxDriverGlobals, TRACE_LEVEL_WARNING, TRACINGDMA,
+            "Cannot set MaximumElements to %Iu on WDFDMAENABLER %p, "
+            "restricting to 0x%x",
+            MaximumElements,
+            DmaEnabler,
+            WDF_DMA_ENABLER_UNLIMITED_FRAGMENTS);
+
+        MaximumElements = WDF_DMA_ENABLER_UNLIMITED_FRAGMENTS;
+    }
+
+    pDmaEnabler->SetMaxSGElements((ULONG)MaximumElements);
 }
 
 __drv_maxIRQL(DISPATCH_LEVEL)

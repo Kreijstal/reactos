@@ -39,7 +39,7 @@ FxSystemThread::FxSystemThread(
     UfxVerifierTrapNotImpl();
 }
 
-FxSystemThread::~FxSystemThread()
+FxSystemThread::~FxSystemThread() 
 {
     UfxVerifierTrapNotImpl();
 }

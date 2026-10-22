@@ -26,7 +26,7 @@ Revision History:
 extern "C" {
 
 #if defined(EVENT_TRACING)
-#include "FxPoolInlines.hpp.tmh"
+// #include "fxpoolinlines.hpp.tmh"
 #endif
 
 }

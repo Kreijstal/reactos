@@ -31,7 +31,7 @@ Revision History:
 
 extern "C" {
 #if defined(EVENT_TRACING)
-#include "PnpStateMachineKM.tmh"
+// #include "pnpstatemachinekm.tmh"
 #endif
 }
 
