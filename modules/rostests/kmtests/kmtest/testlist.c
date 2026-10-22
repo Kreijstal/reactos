@@ -26,6 +26,7 @@ KMT_TESTFUNC Test_IoReadWrite;
 KMT_TESTFUNC Test_MmMapLockedPagesSpecifyCache;
 KMT_TESTFUNC Test_MmPageoutSysView;
 KMT_TESTFUNC Test_MmProcessChurnStress;
+KMT_TESTFUNC Test_NetioWsk;
 KMT_TESTFUNC Test_NtCreateSection;
 KMT_TESTFUNC Test_NtfsDirIndex;
 KMT_TESTFUNC Test_NtfsFormat;
@@ -78,6 +79,7 @@ const KMT_TEST TestList[] =
     { "FindFile",                     Test_FindFile },
     { "-FltMgrLoad",                  Test_FltMgrLoad }, // TODO: WIP/untested/crashes.
     { "-FltMgrReg",                   Test_FltMgrReg }, // TODO: WIP/untested/crashes.
+    { "NetioWsk",                     Test_NetioWsk },
     { "HidPDescription",              Test_HidPDescription },
     { "IoCreateFile",                 Test_IoCreateFile },
     { "IoDeviceObject",               Test_IoDeviceObject },
