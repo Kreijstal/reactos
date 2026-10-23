@@ -528,6 +528,7 @@ typedef enum _DEVICE_ACTION
     PiActionAddBootDevices,
     PiActionStartDevice,
     PiActionQueryState,
+    PiActionQueryRemoveDevice,
     PiActionRemovePendingCloses,
 } DEVICE_ACTION;
 
