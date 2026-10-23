@@ -528,6 +528,8 @@ typedef enum _DEVICE_ACTION
     PiActionAddBootDevices,
     PiActionStartDevice,
     PiActionQueryState,
+    PiActionQueryRemoveDevice,
+    PiActionRemovePendingCloses,
 } DEVICE_ACTION;
 
 //
@@ -900,6 +902,10 @@ IoGetRelatedTargetDevice(
     IN PFILE_OBJECT FileObject,
     OUT PDEVICE_OBJECT *DeviceObject
 );
+
+VOID
+IopCheckUnloadDriver(
+    _In_ PDRIVER_OBJECT DriverObject);
 
 VOID
 NTAPI
@@ -1364,6 +1370,10 @@ PiQueueDeviceAction(
     _In_ DEVICE_ACTION Action,
     _In_opt_ PKEVENT CompletionEvent,
     _Out_opt_ NTSTATUS *CompletionStatus);
+
+VOID
+PiNotifyDeviceObjectClosed(
+    _In_ PDEVICE_OBJECT DeviceObject);
 
 NTSTATUS
 PiPerformSyncDeviceAction(
