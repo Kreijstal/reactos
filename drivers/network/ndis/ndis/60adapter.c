@@ -786,6 +786,127 @@ NdisMRestartComplete(
 }
 
 /* ============================================================================
+ *  Ndis6UnbindProtocolsFromAdapter — unbind every protocol before removal
+ * ============================================================================ */
+
+static
+BOOLEAN
+Ndis6ListContains(
+    _In_ PLIST_ENTRY ListHead,
+    _In_ PLIST_ENTRY Entry)
+{
+    PLIST_ENTRY Current;
+
+    for (Current = ListHead->Flink; Current != ListHead; Current = Current->Flink)
+    {
+        if (Current == Entry)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/*
+ * Waits for a protocol to close its binding (NdisCloseAdapter[Ex]) after its
+ * unbind handler pended or returned. Only compares list entries: the protocol
+ * may have freed the binding. Unlinks it when the protocol never closes it.
+ */
+static
+VOID
+Ndis6WaitForBindingClose(
+    _In_ PLIST_ENTRY ListHead,
+    _In_ PKSPIN_LOCK Lock,
+    _In_ PLIST_ENTRY Entry)
+{
+    LARGE_INTEGER Delay;
+    BOOLEAN Linked;
+    KIRQL OldIrql;
+    ULONG i;
+
+    Delay.QuadPart = -10 * 1000 * 10; /* 10 ms */
+    for (i = 0; i < 500; i++)
+    {
+        KeAcquireSpinLock(Lock, &OldIrql);
+        Linked = Ndis6ListContains(ListHead, Entry);
+        KeReleaseSpinLock(Lock, OldIrql);
+        if (!Linked)
+            return;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+
+    DbgPrint("NDIS6: a protocol did not close its binding %p, dropping it\n", Entry);
+    KeAcquireSpinLock(Lock, &OldIrql);
+    if (Ndis6ListContains(ListHead, Entry))
+    {
+        RemoveEntryList(Entry);
+        InitializeListHead(Entry);
+    }
+    KeReleaseSpinLock(Lock, OldIrql);
+}
+
+/*
+ * The adapter is going away: let every bound protocol unbind from it, so
+ * that none of them keeps a binding to a freed adapter.
+ */
+VOID
+Ndis6UnbindProtocolsFromAdapter(
+    _In_ PLOGICAL_ADAPTER Adapter)
+{
+    PNDIS6_ADAPTER_EXT Ext;
+    PLIST_ENTRY Entry;
+    NDIS_STATUS Status;
+    KIRQL OldIrql;
+
+    PAGED_CODE();
+
+    if (Adapter == NULL)
+        return;
+
+    /* NDIS 6 protocols (NdisOpenAdapterEx) */
+    Ext = Adapter->IsNdis6 ? NDIS6_EXT(Adapter) : NULL;
+    while (Ext != NULL)
+    {
+        PNDIS6_PROTOCOL_BINDING Binding;
+        PROTOCOL_UNBIND_ADAPTER_EX_HANDLER Unbind;
+
+        KeAcquireSpinLock(&Ext->ProtocolBindingListLock, &OldIrql);
+        Entry = IsListEmpty(&Ext->ProtocolBindingList) ? NULL : Ext->ProtocolBindingList.Flink;
+        KeReleaseSpinLock(&Ext->ProtocolBindingListLock, OldIrql);
+        if (Entry == NULL)
+            break;
+
+        Binding = CONTAINING_RECORD(Entry, NDIS6_PROTOCOL_BINDING, AdapterLink);
+        Unbind = Binding->DriverBlock ? Binding->DriverBlock->Characteristics.UnbindAdapterHandlerEx : NULL;
+        if (Unbind != NULL)
+            Unbind((NDIS_HANDLE)Binding, Binding->ProtocolBindingContext);
+
+        Ndis6WaitForBindingClose(&Ext->ProtocolBindingList, &Ext->ProtocolBindingListLock, Entry);
+    }
+
+    /* NDIS 5 protocols (NdisOpenAdapter) */
+    for (;;)
+    {
+        PADAPTER_BINDING Binding;
+        UNBIND_HANDLER Unbind;
+
+        KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+        Entry = IsListEmpty(&Adapter->ProtocolListHead) ? NULL : Adapter->ProtocolListHead.Flink;
+        KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+        if (Entry == NULL)
+            break;
+
+        Binding = CONTAINING_RECORD(Entry, ADAPTER_BINDING, AdapterListEntry);
+        Unbind = Binding->ProtocolBinding ? Binding->ProtocolBinding->Chars.UnbindAdapterHandler : NULL;
+        if (Unbind != NULL)
+        {
+            Status = NDIS_STATUS_SUCCESS;
+            Unbind(&Status, Binding->NdisOpenBlock.ProtocolBindingContext, (NDIS_HANDLE)Binding);
+        }
+
+        Ndis6WaitForBindingClose(&Adapter->ProtocolListHead, &Adapter->NdisMiniportBlock.Lock, Entry);
+    }
+}
+
+/* ============================================================================
  *  Ndis6DestroyLogicalAdapter — full tear-down (called from REMOVE_DEVICE)
  * ============================================================================ */
 
@@ -804,6 +925,9 @@ Ndis6DestroyLogicalAdapter(
 
     Ext = NDIS6_EXT(Adapter);
     Fdo = Ext ? Ext->FunctionalDeviceObject : NULL;
+
+    /* No protocol may keep a binding to the adapter we free */
+    Ndis6UnbindProtocolsFromAdapter(Adapter);
 
     /* Phase 7B: detach any NDIS 6 filter modules attached to this adapter
      * BEFORE we tear anything else down — filters may try to issue OID
