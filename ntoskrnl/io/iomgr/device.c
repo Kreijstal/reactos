@@ -392,12 +392,82 @@ IopEditDeviceList(IN PDRIVER_OBJECT DriverObject,
     KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
 }
 
+/**
+ * @brief      Unloads a PnP driver whose last device object is gone
+ *
+ * Must be called on a clean stack: not from the driver itself (IoDeleteDevice)
+ * and not while the driver is still processing a request.
+ */
+VOID
+IopCheckUnloadDriver(
+    _In_ PDRIVER_OBJECT DriverObject)
+{
+    KIRQL OldIrql;
+
+    /* We can't unload a non-PnP driver here */
+    if (DriverObject->Flags & DRVO_LEGACY_DRIVER)
+    {
+        DPRINT("Not a PnP driver! '%wZ' will not be unloaded!\n", &DriverObject->DriverName);
+        return;
+    }
+
+    /* Bail if there are still devices present, or if we've already called unload */
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueIoDatabaseLock);
+    if (DriverObject->DeviceObject || (DriverObject->Flags & DRVO_UNLOAD_INVOKED))
+    {
+        KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
+        DPRINT("Devices still present! '%wZ' will not be unloaded!\n", &DriverObject->DriverName);
+        return;
+    }
+
+    /* We can't unload unless there's an unload handler */
+    if (!DriverObject->DriverUnload)
+    {
+        KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
+        DPRINT1("No DriverUnload function on PnP driver! '%wZ' will not be unloaded!\n", &DriverObject->DriverName);
+        return;
+    }
+
+    /* Set the unload invoked flag */
+    DriverObject->Flags |= DRVO_UNLOAD_INVOKED;
+    KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
+
+    DPRINT1("Unloading driver '%wZ' (automatic)\n", &DriverObject->DriverName);
+
+    /* Unload it */
+    DriverObject->DriverUnload(DriverObject);
+
+    /* Make object temporary so it can be deleted */
+    ObMakeTemporaryObject(DriverObject);
+}
+
+typedef struct _IOP_UNLOAD_DRIVER_WORK_ITEM
+{
+    WORK_QUEUE_ITEM WorkItem;
+    PDRIVER_OBJECT DriverObject;
+} IOP_UNLOAD_DRIVER_WORK_ITEM, *PIOP_UNLOAD_DRIVER_WORK_ITEM;
+
+static
+VOID
+NTAPI
+IopUnloadDriverWorker(
+    _In_ PVOID Context)
+{
+    PIOP_UNLOAD_DRIVER_WORK_ITEM Item = Context;
+
+    IopCheckUnloadDriver(Item->DriverObject);
+    ObDereferenceObject(Item->DriverObject);
+    ExFreePoolWithTag(Item, TAG_IO);
+}
+
 VOID
 NTAPI
 IopUnloadDevice(IN PDEVICE_OBJECT DeviceObject)
 {
     PDRIVER_OBJECT DriverObject = DeviceObject->DriverObject;
     PEXTENDED_DEVOBJ_EXTENSION ThisExtension = IoGetDevObjExtension(DeviceObject);
+    PIOP_UNLOAD_DRIVER_WORK_ITEM Item;
+    BOOLEAN PnpRemoval;
 
     /* Check if deletion is pending */
     if (ThisExtension->ExtensionFlags & DOE_DELETE_PENDING)
@@ -424,44 +494,41 @@ IopUnloadDevice(IN PDEVICE_OBJECT DeviceObject)
         /* Remove the device from the list */
         IopEditDeviceList(DeviceObject->DriverObject, DeviceObject, IopRemove);
 
+        /*
+         * Deleted while processing IRP_MN_REMOVE_DEVICE: the PnP manager
+         * unloads the drivers of the stack once the IRP returned, see
+         * IopSendRemoveDevice.
+         */
+        PnpRemoval = (ThisExtension->ExtensionFlags & (DOE_REMOVE_PENDING | DOE_REMOVE_PROCESSED)) ==
+                     DOE_REMOVE_PENDING;
+
         /* Dereference the keep-alive */
         ObDereferenceObject(DeviceObject);
+
+        if (PnpRemoval)
+            return;
     }
 
     /* We can't unload a non-PnP driver here */
-    if (DriverObject->Flags & DRVO_LEGACY_DRIVER)
+    if ((DriverObject->Flags & (DRVO_LEGACY_DRIVER | DRVO_UNLOAD_INVOKED)) ||
+        !DriverObject->DriverUnload ||
+        DriverObject->DeviceObject)
     {
-        DPRINT("Not a PnP driver! '%wZ' will not be unloaded!\n", &DriverObject->DriverName);
         return;
     }
 
-    /* Return if we've already called unload (maybe we're in it?) */
-    if (DriverObject->Flags & DRVO_UNLOAD_INVOKED) return;
-
-    /* We can't unload unless there's an unload handler */
-    if (!DriverObject->DriverUnload)
-    {
-        DPRINT1("No DriverUnload function on PnP driver! '%wZ' will not be unloaded!\n", &DriverObject->DriverName);
+    /*
+     * Do not unload the driver from here: this may be its own IoDeleteDevice
+     * call, with the driver still on the stack. Unload it from a worker.
+     */
+    Item = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Item), TAG_IO);
+    if (!Item)
         return;
-    }
 
-    /* Bail if there are still devices present */
-    if (DriverObject->DeviceObject)
-    {
-        DPRINT("Devices still present! '%wZ' will not be unloaded!\n", &DriverObject->DriverName);
-        return;
-    }
-
-    DPRINT1("Unloading driver '%wZ' (automatic)\n", &DriverObject->DriverName);
-
-    /* Set the unload invoked flag */
-    DriverObject->Flags |= DRVO_UNLOAD_INVOKED;
-
-    /* Unload it */
-    DriverObject->DriverUnload(DriverObject);
-
-    /* Make object temporary so it can be deleted */
-    ObMakeTemporaryObject(DriverObject);
+    ObReferenceObject(DriverObject);
+    Item->DriverObject = DriverObject;
+    ExInitializeWorkItem(&Item->WorkItem, IopUnloadDriverWorker, Item);
+    ExQueueWorkItem(&Item->WorkItem, DelayedWorkQueue);
 }
 
 VOID
@@ -469,19 +536,28 @@ NTAPI
 IopDereferenceDeviceObject(IN PDEVICE_OBJECT DeviceObject,
                            IN BOOLEAN ForceUnload)
 {
+    ULONG ExtensionFlags;
+    LONG ReferenceCount;
+    KIRQL OldIrql;
+
     /* Sanity check */
     ASSERT(DeviceObject->ReferenceCount);
-
-    /* Dereference the device */
-    InterlockedDecrement(&DeviceObject->ReferenceCount);
+    ASSERT(!ForceUnload);
 
     /*
-     * Check if we can unload it and it's safe to unload (or if we're forcing
-     * an unload, which is OK too).
+     * Dereference the device. This and IoDeleteDevice decide under the
+     * database lock, so that only one of them unloads the device.
      */
-    ASSERT(!ForceUnload);
-    if (!(DeviceObject->ReferenceCount) &&
-        (IoGetDevObjExtension(DeviceObject)->ExtensionFlags & DOE_DELETE_PENDING))
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueIoDatabaseLock);
+    ReferenceCount = InterlockedDecrement(&DeviceObject->ReferenceCount);
+    ExtensionFlags = IoGetDevObjExtension(DeviceObject)->ExtensionFlags;
+    KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
+
+    if (ReferenceCount != 0)
+        return;
+
+    /* Check if we can unload it and it's safe to unload */
+    if (ExtensionFlags & DOE_DELETE_PENDING)
     {
         /* Unload it */
         IopUnloadDevice(DeviceObject);
@@ -1261,6 +1337,8 @@ NTAPI
 IoDeleteDevice(IN PDEVICE_OBJECT DeviceObject)
 {
     PIO_TIMER Timer;
+    BOOLEAN Unload;
+    KIRQL OldIrql;
 
     /* Check if the device is registered for shutdown notifications */
     if (DeviceObject->Flags & DO_SHUTDOWN_REGISTERED)
@@ -1285,14 +1363,19 @@ IoDeleteDevice(IN PDEVICE_OBJECT DeviceObject)
         ObMakeTemporaryObject(DeviceObject);
     }
 
-    /* Set the pending delete flag */
-    IoGetDevObjExtension(DeviceObject)->ExtensionFlags |= DOE_DELETE_PENDING;
-
     /* Unlink with the power manager */
     if (DeviceObject->Vpb) PoRemoveVolumeDevice(DeviceObject);
 
-    /* Check if the device object can be unloaded */
-    if (!DeviceObject->ReferenceCount) IopUnloadDevice(DeviceObject);
+    /*
+     * Set the pending delete flag and check if the device object can be
+     * unloaded. IopDereferenceDeviceObject decides under the same lock.
+     */
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueIoDatabaseLock);
+    IoGetDevObjExtension(DeviceObject)->ExtensionFlags |= DOE_DELETE_PENDING;
+    Unload = (DeviceObject->ReferenceCount == 0);
+    KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
+
+    if (Unload) IopUnloadDevice(DeviceObject);
 }
 
 /*

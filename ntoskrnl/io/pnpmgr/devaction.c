@@ -1736,11 +1736,43 @@ NTAPI
 IopSendRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
 {
     PDEVICE_NODE DeviceNode = IopGetDeviceNode(DeviceObject);
+    PDEVICE_OBJECT StackDevices[16], Current;
+    ULONG StackCount = 0, i;
+    KIRQL OldIrql;
 
     ASSERT(DeviceNode->State == DeviceNodeAwaitingQueuedRemoval);
 
+    /*
+     * Keep the device objects of the stack while their drivers process the
+     * IRP: they get deleted, and their drivers get unloaded once the IRP has
+     * returned, not from within the drivers' IoDeleteDevice.
+     */
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueIoDatabaseLock);
+    for (Current = DeviceObject;
+         Current != NULL && StackCount < RTL_NUMBER_OF(StackDevices);
+         Current = Current->AttachedDevice)
+    {
+        IoGetDevObjExtension(Current)->ExtensionFlags |= DOE_REMOVE_PENDING;
+        ObReferenceObject(Current);
+        StackDevices[StackCount++] = Current;
+    }
+    KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
+
     /* Drivers should never fail a IRP_MN_REMOVE_DEVICE request */
     PiIrpSendRemoveCheckVpb(DeviceObject, IRP_MN_REMOVE_DEVICE);
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueIoDatabaseLock);
+    for (i = 0; i < StackCount; i++)
+    {
+        IoGetDevObjExtension(StackDevices[i])->ExtensionFlags |= DOE_REMOVE_PROCESSED;
+    }
+    KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
+
+    for (i = 0; i < StackCount; i++)
+    {
+        IopCheckUnloadDriver(StackDevices[i]->DriverObject);
+        ObDereferenceObject(StackDevices[i]);
+    }
 
     /* Start of HACK: update resources stored in registry, so IopDetectResourceConflict works */
     if (DeviceNode->ResourceList)
@@ -2631,6 +2663,9 @@ PipDeviceActionWorker(
                 // for removed nodes, it returns them back to DeviceNodeUninitialized
                 if (deviceNode->State == DeviceNodeRemoved)
                 {
+                    /* The PDO may get a new stack */
+                    IoGetDevObjExtension(Request->DeviceObject)->ExtensionFlags &=
+                        ~(DOE_REMOVE_PENDING | DOE_REMOVE_PROCESSED);
                     deviceNode->State = DeviceNodeUninitialized;
                 }
                 status = STATUS_SUCCESS;
