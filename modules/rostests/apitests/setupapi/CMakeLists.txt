@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    CM_Get_Device_Interface_List.c
     devclass.c
     SetupDiInstallClassExA.c
     SetupDiGetActualModelsSection.c
