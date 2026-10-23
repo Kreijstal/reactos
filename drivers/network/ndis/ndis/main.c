@@ -74,6 +74,10 @@ VOID NTAPI MainUnload(
   NDIS_DbgPrint(MAX_TRACE, ("Leaving.\n"));
 }
 
+
+/* 60wdf.c: NetAdapterCx adapters live in device objects of NDIS's own */
+VOID Ndis6WdfInit(PDRIVER_OBJECT NdisDriverObject);
+
 CODE_SEG("INIT")
 NTSTATUS
 NTAPI
@@ -101,6 +105,8 @@ DriverEntry(
   KeInitializeSpinLock(&AdapterListLock);
 
   DriverObject->DriverUnload = MainUnload;
+
+  Ndis6WdfInit(DriverObject);
 
   CancelId = 0;
 

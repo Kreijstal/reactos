@@ -54,6 +54,11 @@ typedef struct _NDIS6_DRIVER_BLOCK
      * IRPs for KMDF-owned device objects to the saved original dispatch. */
     BOOLEAN                                 IsWdfHybrid;
     PDRIVER_DISPATCH                        OriginalMajorFunction[IRP_MJ_MAXIMUM_FUNCTION + 1];
+
+    /* Registered by NetAdapterCx through NdisWdfRegisterMiniportDriver: the
+     * client keeps its AddDevice and dispatch table, and the class
+     * extension drives the adapters through NdisWdfPnpPowerEventHandler. */
+    BOOLEAN                                 IsNetCx;
 } NDIS6_DRIVER_BLOCK, *PNDIS6_DRIVER_BLOCK;
 
 extern LIST_ENTRY g_Ndis6DriverList;
@@ -209,6 +214,12 @@ typedef struct _NDIS6_ADAPTER_EXT
      * the legacy NDIS 5 bridge datapath runs. */
     LIST_ENTRY                      ProtocolBindingList;
     KSPIN_LOCK                      ProtocolBindingListLock;
+
+    /* NetAdapterCx adapter (60wdf.c): FunctionalDeviceObject is a named
+     * device object of NDIS's own that carries the LOGICAL_ADAPTER, and
+     * WdfDeviceObject is the client's WDFDEVICE, the real FDO. */
+    BOOLEAN                         IsNetCx;
+    PDEVICE_OBJECT                  WdfDeviceObject;
 } NDIS6_ADAPTER_EXT, *PNDIS6_ADAPTER_EXT;
 
 /* ============================================================================
@@ -252,6 +263,18 @@ typedef struct _NDIS6_OID_WAITER
 /* 60driver.c */
 VOID Ndis6DriverInit(VOID);
 
+/* Records a miniport driver. HijackDispatch takes over AddDevice and the
+ * dispatch table (NdisMRegisterMiniportDriver); NetAdapterCx clients keep
+ * theirs. */
+NDIS_STATUS
+Ndis6RegisterMiniportDriverBlock(
+    _In_     PDRIVER_OBJECT                          DriverObject,
+    _In_opt_ PUNICODE_STRING                         RegistryPath,
+    _In_opt_ NDIS_HANDLE                             MiniportDriverContext,
+    _In_     PNDIS_MINIPORT_DRIVER_CHARACTERISTICS   MiniportDriverCharacteristics,
+    _In_     BOOLEAN                                 HijackDispatch,
+    _Out_    PNDIS6_DRIVER_BLOCK*                    BlockOut);
+
 /* Returns KMDF's saved dispatch when DeviceObject is a KMDF-owned device
  * object on a hybrid driver, NULL when the IRP is ours to handle. */
 PDRIVER_DISPATCH
@@ -283,6 +306,26 @@ Ndis6CreateLogicalAdapter(
 VOID
 Ndis6DestroyLogicalAdapter(
     _In_ PLOGICAL_ADAPTER       Adapter);
+
+/* NetAdapterCx adapter: a named device object owned by OwnerDriverObject
+ * carries the LOGICAL_ADAPTER; it is not attached to the PnP stack. */
+NDIS_STATUS
+Ndis6CreateNetCxAdapter(
+    _In_  PNDIS6_DRIVER_BLOCK   DriverBlock,
+    _In_  PDRIVER_OBJECT        OwnerDriverObject,
+    _In_  PDEVICE_OBJECT        Pdo,
+    _In_  PDEVICE_OBJECT        WdfDeviceObject,
+    _In_  NDIS_HANDLE           AddDeviceContext,
+    _Out_ PLOGICAL_ADAPTER*     AdapterOut);
+
+VOID
+Ndis6ImSeedTcpipRegistry(
+    _In_ PCUNICODE_STRING       DeviceName);
+
+/* 60wdf.c */
+VOID
+Ndis6WdfInit(
+    _In_ PDRIVER_OBJECT         NdisDriverObject);
 
 NDIS_STATUS
 Ndis6CallMiniportInitializeEx(
