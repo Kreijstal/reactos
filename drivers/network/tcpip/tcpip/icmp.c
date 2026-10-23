@@ -178,7 +178,8 @@ ReceiveDatagram(
     KeWaitForSingleObject(&Context->InitializationFinishedEvent, Executive, KernelMode, FALSE, NULL);
     KeClearEvent(&Context->DatagramProcessedEvent);
 
-    ASSERT(SourceAddressLength == sizeof(IPAddr));
+    /* The source is a TRANSPORT_ADDRESS (TA_IP_ADDRESS for IPv4) */
+    ASSERT(SourceAddressLength == sizeof(TA_IP_ADDRESS));
     TI_DbgPrint(DEBUG_ICMP, ("Received datagram Context: 0x%p\n", TdiEventContext));
 
     CurrentTime = KeQueryPerformanceCounter(NULL).QuadPart;
@@ -189,7 +190,7 @@ ReceiveDatagram(
     {
         TI_DbgPrint(DEBUG_ICMP, ("RemainingSize: %u, RoundTripTime: %u\n", Context->RemainingSize, RoundTripTime));
 
-        memcpy(&CurrentReply->Address, SourceAddress, sizeof(CurrentReply->Address));
+        CurrentReply->Address = ((PTA_IP_ADDRESS)SourceAddress)->Address[0].Address[0].in_addr;
         CurrentReply->Status = GetReplyStatus(IcmpHeader);
         CurrentReply->RoundTripTime = RoundTripTime;
         CurrentReply->Reserved = 0;
