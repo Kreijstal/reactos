@@ -46,3 +46,33 @@ target_link_libraries(kmdfucx_drv kmtest_printf memcmp ${PSEH_LIB})
 add_importlibs(kmdfucx_drv ntoskrnl hal)
 target_compile_definitions(kmdfucx_drv PRIVATE KMT_STANDALONE_DRIVER)
 add_rostests_file(TARGET kmdfucx_drv)
+
+#
+# NetAdapterCx loopback client, once per NetAdapterCx version
+#
+function(add_netcxloop_driver _minor)
+    set(_target netcxloop2${_minor}_drv)
+    add_library(${_target} MODULE NetCxLoop_drv.c)
+    set_module_type(${_target} kmdfdriver)
+    target_link_libraries(${_target} netadaptercxstub_2_${_minor} memcmp)
+    target_compile_definitions(${_target} PRIVATE WDF_DEVICE_NO_WDMSEC_H)
+    add_importlibs(${_target} ntoskrnl hal)
+    add_rostests_file(TARGET ${_target})
+endfunction()
+
+add_netcxloop_driver(0)
+add_netcxloop_driver(1)
+
+#
+# NDIS 6 protocol that sends through the loopback adapter
+#
+list(APPEND NETCXPROTO_DRV_SOURCE
+    ../kmtest_drv/kmtest_standalone.c
+    NetCxProto_drv.c)
+
+add_library(netcxproto_drv MODULE ${NETCXPROTO_DRV_SOURCE})
+set_module_type(netcxproto_drv kernelmodedriver)
+target_link_libraries(netcxproto_drv kmtest_printf memcmp ${PSEH_LIB})
+add_importlibs(netcxproto_drv ndis ntoskrnl hal)
+target_compile_definitions(netcxproto_drv PRIVATE KMT_STANDALONE_DRIVER NDIS60 NDIS_LEGACY_DRIVER=1 NDIS_LEGACY_PROTOCOL=1)
+add_rostests_file(TARGET netcxproto_drv)
