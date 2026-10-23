@@ -48,6 +48,16 @@ target_compile_definitions(kmdfucx_drv PRIVATE KMT_STANDALONE_DRIVER)
 add_rostests_file(TARGET kmdfucx_drv)
 
 #
+# Plain KMDF function driver whose devices get removed
+#
+add_library(kmdfremove_drv MODULE KmdfRemove_drv.c)
+set_module_type(kmdfremove_drv kmdfdriver)
+target_link_libraries(kmdfremove_drv memcmp)
+target_compile_definitions(kmdfremove_drv PRIVATE WDF_DEVICE_NO_WDMSEC_H)
+add_importlibs(kmdfremove_drv ntoskrnl hal)
+add_rostests_file(TARGET kmdfremove_drv)
+
+#
 # NetAdapterCx loopback client, once per NetAdapterCx version
 #
 function(add_netcxloop_driver _minor)
