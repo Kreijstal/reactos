@@ -17,6 +17,7 @@
 #include <ntstatus.h>
 #include <strsafe.h>
 #include <winsock2.h>
+#include <ws2ipdef.h>
 #include <iphlpapi.h>
 #include <ip2string.h>
 #include <iphlpapi_undoc.h>
