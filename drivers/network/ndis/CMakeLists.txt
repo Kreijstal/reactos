@@ -45,6 +45,7 @@ list(APPEND SOURCE
 #   60driver.c  - NdisMRegisterMiniportDriver + AddDevice + attributes
 #   60adapter.c - LOGICAL_ADAPTER lifecycle + MiniportInitializeEx
 #   60oid.c     - Legacy NDIS 5 OID dispatcher for NDIS 6 adapters
+#   60wdf.c     - NdisWdf* private interface for NetAdapterCx
 set(NDIS6_SOURCE
     ndis/60stubs.c
     ndis/60nbl.c
@@ -56,6 +57,7 @@ set(NDIS6_SOURCE
     ndis/60thunk_rx.c
     ndis/60filter.c
     ndis/60util.c
+    ndis/60wdf.c
     include/ndis6_internal.h)
 set_source_files_properties(${NDIS6_SOURCE} PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
