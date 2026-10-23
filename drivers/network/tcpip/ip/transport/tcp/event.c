@@ -185,13 +185,21 @@ TCPFinEventHandler(void *arg, const err_t err)
    const NTSTATUS Status = TCPTranslateError(err);
 
    ASSERT(Connection->SocketContext == NULL);
-   ASSERT(Connection->AddressFile);
    ASSERT(err != ERR_OK);
 
    LockObject(Connection);
 
    /* Complete all outstanding requests now */
    FlushAllQueues(Connection, Status);
+
+   /* A connection endpoint that was never associated with an address
+    * file (opened and closed again without connect or listen) still has
+    * a PCB, so closing it gets here too: there is nothing to unlink. */
+   if (!Connection->AddressFile)
+   {
+       UnlockObject(Connection);
+       return;
+   }
 
    LockObject(Connection->AddressFile);
 
@@ -209,9 +217,9 @@ TCPFinEventHandler(void *arg, const err_t err)
    else
    {
        LastConnection = Connection->AddressFile->Connection;
-       while (LastConnection->Next != Connection && LastConnection->Next != NULL)
+       while (LastConnection && LastConnection->Next != Connection && LastConnection->Next != NULL)
            LastConnection = LastConnection->Next;
-       if (LastConnection->Next == Connection)
+       if (LastConnection && LastConnection->Next == Connection)
        {
            LastConnection->Next = Connection->Next;
            DereferenceObject(Connection);
