@@ -557,8 +557,11 @@ PNEIGHBOR_CACHE_ENTRY NBFindOrCreateNeighbor(
         TI_DbgPrint(MID_TRACE,("BCAST: %s\n", A2S(&Interface->Broadcast)));
         if( AddrIsEqual(Address, &Interface->Broadcast) ||
             Address->Address.IPv4Address == IP_BCASTADDR_IPv4 ||
-            AddrIsUnspecified(Address) ) {
-            TI_DbgPrint(MID_TRACE,("Packet targeted at broadcast addr\n"));
+            AddrIsUnspecified(Address) ||
+            (Interface != Loopback && Interface->AddressLength == 0) ) {
+            /* A link without hardware addresses (raw IP, point-to-point)
+             * has nothing to resolve: the adapter is the next hop */
+            TI_DbgPrint(MID_TRACE,("Packet targeted at broadcast addr or point-to-point link\n"));
             NCE = NBAddNeighbor(Interface, Address, NULL,
                                 Interface->AddressLength, NUD_PERMANENT, 0);
         } else {
