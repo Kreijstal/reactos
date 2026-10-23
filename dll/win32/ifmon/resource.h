@@ -69,3 +69,4 @@
 #define IDS_ERROR_GET_PROPERTIES            2003
 #define IDS_ERROR_ADD_DHCP_ADDRESS          2004
 #define IDS_ERROR_DELETE_DHCP_ADDRESS       2005
+#define IDS_ERROR_SET_ADDRESS               2006
