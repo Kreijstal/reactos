@@ -222,6 +222,7 @@ list(APPEND KMTEST_SOURCE
     kernel32/FindFile_user.c
     kmdf/Kmdf133_user.c
     kmdf/KmdfNetCx_user.c
+    kmdf/KmdfRemove_user.c
     kmdf/KmdfUcx_user.c
     netio/NetioWsk_user.c
     ntos_cc/CcCopyRead_user.c
@@ -274,6 +275,7 @@ add_dependencies(kmtest_drivers
     ioreadwrite_drv
     kernel32_drv
     kmdf133_drv
+    kmdfremove_drv
     kmdfcx_drv
     kmdfucx_drv
     netcxloop20_drv
