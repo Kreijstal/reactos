@@ -89,6 +89,21 @@ Examples:\n\n\
        %1!s! ""Local Area Connection"" 10.0.0.1\n\
        %1!s! ""Local Area Connection"" all\n"
 
+    IDS_HLP_IP_DELETE_WINS    "Deletes the WINS server from the specified interface.\n"
+    IDS_HLP_IP_DELETE_WINS_EX "\nUsage: %1!s! [name=]<string> [[addr=]<IP address>|ALL ]\n\n\
+Parameters:\n\n\
+      Tag            Value\n\
+      name         - The name of the interface where WINS servers are deleted.\n\
+      addr         - One of the following values:\n\
+                     <IP address>: A specific IP address of a WINS server\n\
+                                   you are deleting.\n\
+                     ALL: Deletes all configured IP addresses for WINS servers.\n\n\
+Remarks: Deletes statically configured WINS server IP addresses for a\n\
+         specific interface.\n\n\
+Examples:\n\n\
+       %1!s! ""Local Area Connection"" 10.0.0.1\n\
+       %1!s! ""Local Area Connection"" all\n"
+
     IDS_HLP_IP_SET             "Sets configuration information.\n"
     IDS_HLP_IP_SET_ADDRESS     "Sets the IP address or default gateway to the specified interface.\n"
     IDS_HLP_IP_SET_ADDRESS_EX  "\nUsage: %1!s! [name=]<string> \n\
