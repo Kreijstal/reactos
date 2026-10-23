@@ -82,6 +82,13 @@ extern HANDLE hDeviceInstallListNotEmpty;
 BOOL
 SetupIsActive(VOID);
 
+VOID
+InitializeDoNotInstallList(VOID);
+
+VOID
+AddDoNotInstallDevice(
+    _In_ PCWSTR DeviceInstance);
+
 DWORD
 WINAPI
 DeviceInstallThread(
