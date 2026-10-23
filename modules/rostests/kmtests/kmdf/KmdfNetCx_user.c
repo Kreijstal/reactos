@@ -711,7 +711,36 @@ START_TEST(KmdfNetCxOvpnDco)
         {
             ok(FALSE, "tcpip did not configure 10.8.1.2 on the ovpn-dco adapter\n");
         }
+        /* Closing it stops the VPN and takes the link down */
         CloseHandle(Handle);
+    }
+
+    /*
+     * Remove the adapter with its link down: TCPIP must drop its IP
+     * interface as well, not keep one for the removed adapter.
+     */
+    if (Row.dwIndex != 0)
+    {
+        MIB_IFROW IfRow;
+        ULONG i;
+
+        RtlZeroMemory(&IfRow, sizeof(IfRow));
+        for (i = 0; i < 50; i++)
+        {
+            IfRow.dwIndex = Row.dwIndex;
+            if (GetIfEntry(&IfRow) != NO_ERROR ||
+                IfRow.dwOperStatus != MIB_IF_OPER_STATUS_OPERATIONAL)
+            {
+                break;
+            }
+            Sleep(100);
+        }
+        ok(IfRow.dwOperStatus != MIB_IF_OPER_STATUS_OPERATIONAL, "Link still up\n");
+
+        RemoveDevice(&Device);
+
+        IfRow.dwIndex = Row.dwIndex;
+        ok(GetIfEntry(&IfRow) != NO_ERROR, "Interface %lu of the removed adapter is still there\n", Row.dwIndex);
     }
 
 Exit:
