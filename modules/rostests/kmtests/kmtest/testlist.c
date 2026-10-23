@@ -24,6 +24,7 @@ KMT_TESTFUNC Test_IoCreateFile;
 KMT_TESTFUNC Test_IoDeviceObject;
 KMT_TESTFUNC Test_IoReadWrite;
 KMT_TESTFUNC Test_Kmdf133;
+KMT_TESTFUNC Test_KmdfNetCx;
 KMT_TESTFUNC Test_KmdfUcx;
 KMT_TESTFUNC Test_MmMapLockedPagesSpecifyCache;
 KMT_TESTFUNC Test_MmPageoutSysView;
@@ -87,6 +88,7 @@ const KMT_TEST TestList[] =
     { "IoDeviceObject",               Test_IoDeviceObject },
     { "IoReadWrite",                  Test_IoReadWrite },
     { "Kmdf133",                      Test_Kmdf133 },
+    { "KmdfNetCx",                    Test_KmdfNetCx },
     { "KmdfUcx",                      Test_KmdfUcx },
     { "MmMapLockedPagesSpecifyCache", Test_MmMapLockedPagesSpecifyCache },
     { "MmPageoutSysView",             Test_MmPageoutSysView },

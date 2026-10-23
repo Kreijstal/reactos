@@ -221,6 +221,7 @@ list(APPEND KMTEST_SOURCE
     kernel32/FileAttributes_user.c
     kernel32/FindFile_user.c
     kmdf/Kmdf133_user.c
+    kmdf/KmdfNetCx_user.c
     kmdf/KmdfUcx_user.c
     netio/NetioWsk_user.c
     ntos_cc/CcCopyRead_user.c
@@ -251,7 +252,7 @@ list(APPEND KMTEST_SOURCE
 add_executable(kmtest ${KMTEST_SOURCE})
 set_module_type(kmtest win32cui)
 target_link_libraries(kmtest ${PSEH_LIB})
-add_importlibs(kmtest fltlib advapi32 ws2_32 msvcrt kernel32 ntdll)
+add_importlibs(kmtest fltlib advapi32 setupapi ws2_32 msvcrt kernel32 ntdll)
 target_compile_definitions(kmtest PRIVATE KMT_USER_MODE NTDDI_VERSION=${REACTOS_TARGET_NTDDI})
 #add_pch(kmtest include/kmt_test.h)
 add_rostests_file(TARGET kmtest)
@@ -275,6 +276,9 @@ add_dependencies(kmtest_drivers
     kmdf133_drv
     kmdfcx_drv
     kmdfucx_drv
+    netcxloop20_drv
+    netcxloop21_drv
+    netcxproto_drv
     mmmaplockedpagesspecifycache_drv
     mmpageoutsysview_drv
     ntcreatesection_drv
