@@ -1800,7 +1800,8 @@ err_out:
  * with IoBuildDeviceIoControlRequest, which queues them to the current
  * thread and needs IRQL <= APC_LEVEL, and the transport expects
  * PASSIVE_LEVEL callers, so a send made above PASSIVE_LEVEL is issued from
- * a worker thread. The client's IRP completes as usual.
+ * a worker thread, in the order of the calls. The client's IRP completes as
+ * usual.
  */
 typedef enum _NETIO_SEND_KIND
 {
@@ -1811,7 +1812,7 @@ typedef enum _NETIO_SEND_KIND
 
 typedef struct _NETIO_DEFERRED_SEND
 {
-    WORK_QUEUE_ITEM WorkItem;
+    struct _NETIO_DEFERRED_SEND *Next;
     NETIO_SEND_KIND Kind;
     PWSK_SOCKET Socket;
     WSK_BUF Buffer;
@@ -1844,27 +1845,53 @@ WskSendMessages(
     _In_reads_bytes_opt_(ControlInfoLength) PVOID ControlInfo,
     _Inout_ PIRP Irp);
 
+/* Deferred sends go out one at a time and in order, from one work item */
+static KSPIN_LOCK DeferredSendLock;
+static PNETIO_DEFERRED_SEND DeferredSendHead, DeferredSendTail;
+static BOOLEAN DeferredSendActive;
+static WORK_QUEUE_ITEM DeferredSendWorkItem;
+
 static VOID NTAPI
 DeferredSendWorker(_In_ PVOID Parameter)
 {
-    PNETIO_DEFERRED_SEND Send = Parameter;
-    PWSK_SOCKET_INTERNAL Socket = CONTAINING_RECORD(Send->Socket, WSK_SOCKET_INTERNAL, Socket);
+    PNETIO_DEFERRED_SEND Send;
+    PWSK_SOCKET_INTERNAL Socket;
+    KIRQL OldIrql;
 
-    switch (Send->Kind)
+    UNREFERENCED_PARAMETER(Parameter);
+
+    for (;;)
     {
-        case NetioSendStream:
-            WskSend(Send->Socket, &Send->Buffer, Send->Flags, Send->Irp);
-            break;
-        case NetioSendDatagram:
-            WskSendTo(Send->Socket, &Send->Buffer, Send->Flags, Send->RemoteAddress, 0, NULL, Send->Irp);
-            break;
-        case NetioSendMessages:
-            WskSendMessages(Send->Socket, Send->BufferList, Send->Flags, Send->RemoteAddress, 0, NULL, Send->Irp);
-            break;
-    }
+        KeAcquireSpinLock(&DeferredSendLock, &OldIrql);
+        Send = DeferredSendHead;
+        if (Send == NULL)
+        {
+            DeferredSendActive = FALSE;
+            KeReleaseSpinLock(&DeferredSendLock, OldIrql);
+            return;
+        }
+        DeferredSendHead = Send->Next;
+        if (DeferredSendHead == NULL)
+            DeferredSendTail = NULL;
+        KeReleaseSpinLock(&DeferredSendLock, OldIrql);
 
-    DereferenceSocket(Socket);
-    ExFreePoolWithTag(Send, TAG_NETIO);
+        Socket = CONTAINING_RECORD(Send->Socket, WSK_SOCKET_INTERNAL, Socket);
+        switch (Send->Kind)
+        {
+            case NetioSendStream:
+                WskSend(Send->Socket, &Send->Buffer, Send->Flags, Send->Irp);
+                break;
+            case NetioSendDatagram:
+                WskSendTo(Send->Socket, &Send->Buffer, Send->Flags, Send->RemoteAddress, 0, NULL, Send->Irp);
+                break;
+            case NetioSendMessages:
+                WskSendMessages(Send->Socket, Send->BufferList, Send->Flags, Send->RemoteAddress, 0, NULL, Send->Irp);
+                break;
+        }
+
+        DereferenceSocket(Socket);
+        ExFreePoolWithTag(Send, TAG_NETIO);
+    }
 }
 
 static NTSTATUS
@@ -1879,6 +1906,8 @@ DeferSend(
 {
     PWSK_SOCKET_INTERNAL Socket = CONTAINING_RECORD(SocketParam, WSK_SOCKET_INTERNAL, Socket);
     PNETIO_DEFERRED_SEND Send;
+    BOOLEAN Start;
+    KIRQL OldIrql;
 
     Send = ExAllocatePoolZero(NonPagedPool, sizeof(*Send), TAG_NETIO);
     if (Send == NULL)
@@ -1900,8 +1929,22 @@ DeferSend(
     Send->Irp = Irp;
 
     ReferenceSocket(Socket);
-    ExInitializeWorkItem(&Send->WorkItem, DeferredSendWorker, Send);
-    ExQueueWorkItem(&Send->WorkItem, CriticalWorkQueue);
+
+    KeAcquireSpinLock(&DeferredSendLock, &OldIrql);
+    if (DeferredSendTail != NULL)
+        DeferredSendTail->Next = Send;
+    else
+        DeferredSendHead = Send;
+    DeferredSendTail = Send;
+    Start = !DeferredSendActive;
+    DeferredSendActive = TRUE;
+    KeReleaseSpinLock(&DeferredSendLock, OldIrql);
+
+    if (Start)
+    {
+        ExInitializeWorkItem(&DeferredSendWorkItem, DeferredSendWorker, NULL);
+        ExQueueWorkItem(&DeferredSendWorkItem, CriticalWorkQueue);
+    }
     return STATUS_PENDING;
 }
 
