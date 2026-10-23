@@ -14,6 +14,8 @@
  */
 
 #include <kmt_test.h>
+#include <winsock2.h>
+#include <iphlpapi.h>
 #include <cfgmgr32.h>
 
 #include "../kmtest/kmtest.h"
@@ -26,6 +28,7 @@
 #define NET_CLASS_GUID      L"{4d36e972-e325-11ce-bfc1-08002be10318}"
 #define NET_CLASS_KEY       L"SYSTEM\\CurrentControlSet\\Control\\Class\\" NET_CLASS_GUID
 #define NETCX_VERSIONS_KEY  L"SYSTEM\\CurrentControlSet\\Control\\Wdf\\Kmdf\\NetAdapterCx\\Versions\\2\\1"
+#define TCPIP_IF_KEY        L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces"
 
 typedef struct _NETCX_TEST_DEVICE
 {
@@ -413,6 +416,121 @@ TestVersion(
     FinishDevice(&Device);
 }
 
+static
+LONG
+SetMultiSz(
+    _In_ HKEY Key,
+    _In_ PCWSTR Name,
+    _In_ PCWSTR Value)
+{
+    WCHAR Buffer[64];
+    SIZE_T Length = wcslen(Value);
+
+    RtlZeroMemory(Buffer, sizeof(Buffer));
+    wcscpy(Buffer, Value);
+    /* "" is a list with no strings: just its terminator */
+    return RegSetValueExW(Key, Name, 0, REG_MULTI_SZ, (const BYTE *)Buffer,
+                          (DWORD)((Length ? Length + 2 : 1) * sizeof(WCHAR)));
+}
+
+/*
+ * A static IPv4 address for the adapter, the way the TCP/IP property page
+ * or "netsh interface ip set address ... static" leave it for tcpip
+ */
+static
+BOOLEAN
+WriteStaticAddress(
+    _In_ PCWSTR NetCfgInstanceId,
+    _In_ PCWSTR Address,
+    _In_ PCWSTR Mask)
+{
+    WCHAR Path[256];
+    DWORD Zero = 0;
+    HKEY Key;
+    LONG Error;
+
+    FORMAT(Path, L"%s\\%s", TCPIP_IF_KEY, NetCfgInstanceId);
+    Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, Path, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Key, NULL);
+    ok_eq_int(Error, ERROR_SUCCESS);
+    if (Error != ERROR_SUCCESS)
+        return FALSE;
+
+    ok_eq_int(RegSetValueExW(Key, L"EnableDHCP", 0, REG_DWORD, (const BYTE *)&Zero, sizeof(Zero)), ERROR_SUCCESS);
+    ok_eq_int(SetMultiSz(Key, L"IPAddress", Address), ERROR_SUCCESS);
+    ok_eq_int(SetMultiSz(Key, L"SubnetMask", Mask), ERROR_SUCCESS);
+    ok_eq_int(SetMultiSz(Key, L"DefaultGateway", L""), ERROR_SUCCESS);
+    RegCloseKey(Key);
+    return TRUE;
+}
+
+/* Waits for tcpip to put Address (network order) on an interface */
+static
+BOOLEAN
+WaitForAddress(
+    _In_ ULONG Address,
+    _In_ ULONG TimeoutMs,
+    _Out_ PMIB_IPADDRROW Row)
+{
+    PMIB_IPADDRTABLE Table;
+    ULONG Size, Waited, i;
+    DWORD Error;
+
+    RtlZeroMemory(Row, sizeof(*Row));
+    for (Waited = 0; ; Waited += 100)
+    {
+        Size = 0;
+        Error = GetIpAddrTable(NULL, &Size, FALSE);
+        if (Error == ERROR_INSUFFICIENT_BUFFER && Size != 0)
+        {
+            Table = HeapAlloc(GetProcessHeap(), 0, Size);
+            if (Table != NULL)
+            {
+                Error = GetIpAddrTable(Table, &Size, FALSE);
+                for (i = 0; Error == NO_ERROR && i < Table->dwNumEntries; i++)
+                {
+                    if (Table->table[i].dwAddr == Address)
+                    {
+                        *Row = Table->table[i];
+                        HeapFree(GetProcessHeap(), 0, Table);
+                        return TRUE;
+                    }
+                }
+                HeapFree(GetProcessHeap(), 0, Table);
+            }
+        }
+        if (Waited >= TimeoutMs)
+            return FALSE;
+        Sleep(100);
+    }
+}
+
+/* What tcpip reports for the interface; it must be the raw IP one */
+static
+VOID
+CheckRawIpInterface(
+    _In_ DWORD Index,
+    _In_ BOOLEAN Connected)
+{
+    MIB_IFROW IfRow;
+    DWORD Error;
+
+    RtlZeroMemory(&IfRow, sizeof(IfRow));
+    IfRow.dwIndex = Index;
+    Error = GetIfEntry(&IfRow);
+    ok_eq_ulong(Error, (DWORD)NO_ERROR);
+    if (Error != NO_ERROR)
+        return;
+
+    trace("Interface %lu: type %lu, mtu %lu, physaddr length %lu, oper status %lu, \"%.*s\"\n",
+          IfRow.dwIndex, IfRow.dwType, IfRow.dwMtu, IfRow.dwPhysAddrLen, IfRow.dwOperStatus,
+          (int)min(IfRow.dwDescrLen, sizeof(IfRow.bDescr)), IfRow.bDescr);
+    ok_eq_ulong(IfRow.dwType, (DWORD)IF_TYPE_PROP_VIRTUAL);
+    ok_eq_ulong(IfRow.dwMtu, 1500UL);
+    ok_eq_ulong(IfRow.dwPhysAddrLen, 0UL);
+    if (Connected)
+        ok_eq_ulong(IfRow.dwOperStatus, (DWORD)MIB_IF_OPER_STATUS_OPERATIONAL);
+}
+
 START_TEST(KmdfNetCx)
 {
     SC_HANDLE CxService;
@@ -434,6 +552,9 @@ START_TEST(KmdfNetCx)
  * way ovpn-dco.inf sets it up (raw IP, IF_TYPE_PROP_VIRTUAL).
  */
 #define OVPN_IOCTL_GET_VERSION CTL_CODE(FILE_DEVICE_UNKNOWN, 8, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define OVPN_IOCTL_SET_MODE    CTL_CODE(FILE_DEVICE_UNKNOWN, 10, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define OVPN_MODE_MP           1
+#define OVPN_LOCAL_IP          0x0201080AUL    /* 10.8.1.2, network order */
 
 START_TEST(KmdfNetCxOvpnDco)
 {
@@ -441,6 +562,8 @@ START_TEST(KmdfNetCxOvpnDco)
     SC_HANDLE CxService;
     HANDLE Handle;
     LONG Version[3] = { 0 };
+    LONG Mode = OVPN_MODE_MP;
+    MIB_IPADDRROW Row;
     DWORD Returned = 0;
     WCHAR Path[MAX_PATH];
     BOOL Ok;
@@ -474,7 +597,9 @@ START_TEST(KmdfNetCxOvpnDco)
     wcscpy(Device.ClassInstance, L"0930");
     wcscpy(Device.NetCfgInstanceId, L"{6E4E4358-0000-4000-8000-000000000300}");
 
-    if (!InstallDevice(&Device))
+    /* The address openvpn.exe would give the adapter (netsh/iphlpapi) */
+    if (!WriteStaticAddress(Device.NetCfgInstanceId, L"10.8.1.2", L"255.255.255.0") ||
+        !InstallDevice(&Device))
         goto Exit;
 
     ok(NdisAdapterPresent(Device.ExportName), "No NDIS adapter %S\n", Device.ExportName);
@@ -492,11 +617,322 @@ START_TEST(KmdfNetCxOvpnDco)
         CloseHandle(Handle);
     }
 
+    /* The adapter's link is down until openvpn.exe starts the VPN */
+    ok(!WaitForAddress(OVPN_LOCAL_IP, 0, &Row), "10.8.1.2 is up before the link\n");
+
     /* The adapter's own device: what openvpn.exe opens */
     Handle = CreateFileW(L"\\\\.\\ovpn-dco", GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     ok(Handle != INVALID_HANDLE_VALUE, "Opening ovpn-dco failed with %lu\n", GetLastError());
     if (Handle != INVALID_HANDLE_VALUE)
+    {
+        /* Multipeer (server) mode connects the link without a peer */
+        Ok = DeviceIoControl(Handle, OVPN_IOCTL_SET_MODE, &Mode, sizeof(Mode), NULL, 0, &Returned, NULL);
+        ok(Ok, "OVPN_IOCTL_SET_MODE failed with %lu\n", GetLastError());
+
+        /* tcpip is bound to the raw IP adapter and configures it */
+        if (Ok && WaitForAddress(OVPN_LOCAL_IP, 5000, &Row))
+        {
+            ok_eq_hex(Row.dwMask, 0x00FFFFFFUL);
+            trace("10.8.1.2 is on interface %lu\n", Row.dwIndex);
+            CheckRawIpInterface(Row.dwIndex, TRUE);
+        }
+        else if (Ok)
+        {
+            ok(FALSE, "tcpip did not configure 10.8.1.2 on the ovpn-dco adapter\n");
+        }
         CloseHandle(Handle);
+    }
+
+Exit:
+    if (Device.Service)
+        KmtCloseService(&Device.Service);
+    if (CxService)
+        KmtCloseService(&CxService);
+}
+
+/*
+ * tcpip on a raw IP (NdisMediumIP) NetAdapterCx adapter, the kind
+ * ovpn-dco-win is: the tunnel client keeps what tcpip sends it and
+ * receives what we inject. The adapter gets a static address from the
+ * registry, the way OpenVPN's adapters are configured.
+ */
+#define TUN_LOCAL_ADDRESS   L"10.8.0.2"
+#define TUN_LOCAL_IP        0x0200080AUL    /* 10.8.0.2, network order */
+#define TUN_REMOTE_IP       0x0100080AUL    /* 10.8.0.1 */
+#define TUN_MASK            0x00FFFFFFUL    /* 255.255.255.0 */
+#define TUN_LOCAL_PORT      47001
+#define TUN_REMOTE_PORT     47002
+
+static
+BOOLEAN
+TunIoctl(
+    _In_ DWORD Code,
+    _In_reads_bytes_opt_(InLength) PVOID In,
+    _In_ DWORD InLength,
+    _Out_writes_bytes_opt_(OutLength) PVOID Out,
+    _In_ DWORD OutLength,
+    _Out_opt_ PDWORD Returned)
+{
+    HANDLE Handle;
+    DWORD Bytes = 0;
+    BOOL Ok;
+
+    Handle = CreateFileW(NETCXTUN_DOS_NAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    ok(Handle != INVALID_HANDLE_VALUE, "Opening the tunnel device failed with %lu\n", GetLastError());
+    if (Handle == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    Ok = DeviceIoControl(Handle, Code, In, InLength, Out, OutLength, &Bytes, NULL);
+    CloseHandle(Handle);
+    if (Returned)
+        *Returned = Bytes;
+    return Ok != FALSE;
+}
+
+static
+USHORT
+IpChecksum(
+    _In_reads_bytes_(Length) const UCHAR *Data,
+    _In_ ULONG Length)
+{
+    ULONG Sum = 0, i;
+
+    for (i = 0; i + 1 < Length; i += 2)
+        Sum += (Data[i] << 8) | Data[i + 1];
+    if (Length & 1)
+        Sum += Data[Length - 1] << 8;
+    while (Sum >> 16)
+        Sum = (Sum & 0xFFFF) + (Sum >> 16);
+    return (USHORT)~Sum;
+}
+
+/* A raw IPv4/UDP packet, checksummed IP header, no UDP checksum */
+static
+ULONG
+BuildUdpPacket(
+    _Out_writes_bytes_(2048) PUCHAR Packet,
+    _In_ ULONG Source,
+    _In_ USHORT SourcePort,
+    _In_ ULONG Destination,
+    _In_ USHORT DestinationPort,
+    _In_ PCSTR Payload)
+{
+    ULONG PayloadLength = (ULONG)strlen(Payload);
+    ULONG Total = 20 + 8 + PayloadLength;
+    USHORT Checksum;
+
+    RtlZeroMemory(Packet, 28);
+    Packet[0] = 0x45;
+    Packet[2] = (UCHAR)(Total >> 8);
+    Packet[3] = (UCHAR)Total;
+    Packet[4] = 0x12;
+    Packet[5] = 0x34;
+    Packet[8] = 64;
+    Packet[9] = IPPROTO_UDP;
+    RtlCopyMemory(&Packet[12], &Source, 4);
+    RtlCopyMemory(&Packet[16], &Destination, 4);
+    Checksum = IpChecksum(Packet, 20);
+    Packet[10] = (UCHAR)(Checksum >> 8);
+    Packet[11] = (UCHAR)Checksum;
+
+    Packet[20] = (UCHAR)(SourcePort >> 8);
+    Packet[21] = (UCHAR)SourcePort;
+    Packet[22] = (UCHAR)(DestinationPort >> 8);
+    Packet[23] = (UCHAR)DestinationPort;
+    Packet[24] = (UCHAR)((8 + PayloadLength) >> 8);
+    Packet[25] = (UCHAR)(8 + PayloadLength);
+    RtlCopyMemory(&Packet[28], Payload, PayloadLength);
+    return Total;
+}
+
+/* Reads what tcpip transmitted; returns the UDP datagram we look for */
+static
+BOOLEAN
+WaitForTxDatagram(
+    _In_ ULONG TimeoutMs,
+    _Out_writes_bytes_(2048) PUCHAR Frame,
+    _Out_ PULONG FrameLength,
+    _Inout_ PULONG Frames,
+    _Inout_ PULONG NonIpFrames)
+{
+    ULONG Waited;
+    DWORD Returned;
+
+    for (Waited = 0; ; )
+    {
+        if (TunIoctl(IOCTL_NETCXLOOP_GET_TX_FRAME, NULL, 0, Frame, 2048, &Returned))
+        {
+            (*Frames)++;
+            if (Returned == 0 || ((Frame[0] >> 4) != 4 && (Frame[0] >> 4) != 6))
+            {
+                (*NonIpFrames)++;
+                trace("Not an IP packet: %lu bytes, %02x %02x %02x %02x\n", Returned,
+                      Frame[0], Frame[1], Frame[2], Frame[3]);
+                continue;
+            }
+            if (Returned >= 28 && Frame[0] == 0x45 && Frame[9] == IPPROTO_UDP &&
+                *(ULONG UNALIGNED *)&Frame[16] == TUN_REMOTE_IP &&
+                ((Frame[22] << 8) | Frame[23]) == TUN_REMOTE_PORT)
+            {
+                *FrameLength = Returned;
+                return TRUE;
+            }
+            trace("Other IP packet: %lu bytes, protocol %u\n", Returned, Frame[9]);
+            continue;
+        }
+        if (Waited >= TimeoutMs)
+            return FALSE;
+        Sleep(100);
+        Waited += 100;
+    }
+}
+
+static
+VOID
+TestRawIpTraffic(VOID)
+{
+    static const CHAR TxPayload[] = "rawip-tx-probe";
+    static const CHAR RxPayload[] = "rawip-rx-probe";
+    UCHAR Frame[2048];
+    CHAR Buffer[64];
+    struct sockaddr_in Local, Remote, From;
+    ULONG FrameLength = 0, Frames = 0, NonIpFrames = 0;
+    int FromLength, Received, Result;
+    struct timeval Timeout;
+    fd_set Readable;
+    WSADATA WsaData;
+    SOCKET Socket;
+    DWORD Returned;
+
+    Result = WSAStartup(MAKEWORD(2, 2), &WsaData);
+    ok_eq_int(Result, 0);
+    Socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ok(Socket != INVALID_SOCKET, "socket failed with %d\n", WSAGetLastError());
+    if (Socket == INVALID_SOCKET)
+        goto Cleanup;
+
+    RtlZeroMemory(&Local, sizeof(Local));
+    Local.sin_family = AF_INET;
+    Local.sin_port = htons(TUN_LOCAL_PORT);
+    Local.sin_addr.s_addr = TUN_LOCAL_IP;
+    Result = bind(Socket, (struct sockaddr *)&Local, sizeof(Local));
+    ok(Result == 0, "bind failed with %d\n", WSAGetLastError());
+
+    /* Whatever tcpip sent before: it all has to be IP */
+    while (TunIoctl(IOCTL_NETCXLOOP_GET_TX_FRAME, NULL, 0, Frame, sizeof(Frame), &Returned))
+    {
+        Frames++;
+        if (Returned == 0 || ((Frame[0] >> 4) != 4 && (Frame[0] >> 4) != 6))
+            NonIpFrames++;
+    }
+
+    /* Out: 10.8.0.2 -> 10.8.0.1 is on-link, no ARP, no link header */
+    RtlZeroMemory(&Remote, sizeof(Remote));
+    Remote.sin_family = AF_INET;
+    Remote.sin_port = htons(TUN_REMOTE_PORT);
+    Remote.sin_addr.s_addr = TUN_REMOTE_IP;
+    Result = sendto(Socket, TxPayload, sizeof(TxPayload) - 1, 0, (struct sockaddr *)&Remote, sizeof(Remote));
+    ok(Result == sizeof(TxPayload) - 1, "sendto returned %d, error %d\n", Result, WSAGetLastError());
+
+    if (WaitForTxDatagram(5000, Frame, &FrameLength, &Frames, &NonIpFrames))
+    {
+        /* The IP header is the first byte of the frame */
+        ok_eq_hex(Frame[0], 0x45);
+        ok_eq_ulong(FrameLength, (ULONG)((Frame[2] << 8) | Frame[3]));
+        ok_eq_ulong(FrameLength, 20UL + 8 + sizeof(TxPayload) - 1);
+        ok_eq_hex(*(ULONG UNALIGNED *)&Frame[12], TUN_LOCAL_IP);
+        ok_eq_hex(*(ULONG UNALIGNED *)&Frame[16], TUN_REMOTE_IP);
+        ok_eq_int(IpChecksum(Frame, 20), 0);
+        ok_eq_int((Frame[20] << 8) | Frame[21], TUN_LOCAL_PORT);
+        ok(FrameLength >= 28 + sizeof(TxPayload) - 1 &&
+           RtlEqualMemory(&Frame[28], TxPayload, sizeof(TxPayload) - 1), "Wrong payload\n");
+    }
+    else
+    {
+        ok(FALSE, "The datagram to 10.8.0.1 never reached the transmit ring\n");
+    }
+    ok_eq_ulong(NonIpFrames, 0UL);
+    trace("%lu frames transmitted, %lu not IP\n", Frames, NonIpFrames);
+
+    /* In: a raw IP datagram 10.8.0.1 -> 10.8.0.2 on the receive ring */
+    FrameLength = BuildUdpPacket(Frame, TUN_REMOTE_IP, TUN_REMOTE_PORT, TUN_LOCAL_IP, TUN_LOCAL_PORT, RxPayload);
+    ok(TunIoctl(IOCTL_NETCXLOOP_INJECT_RX_FRAME, Frame, FrameLength, NULL, 0, NULL),
+       "Injecting failed with %lu\n", GetLastError());
+
+    FD_ZERO(&Readable);
+    FD_SET(Socket, &Readable);
+    Timeout.tv_sec = 5;
+    Timeout.tv_usec = 0;
+    Result = select(0, &Readable, NULL, NULL, &Timeout);
+    ok(Result == 1, "select returned %d, error %d\n", Result, WSAGetLastError());
+    if (FD_ISSET(Socket, &Readable))
+    {
+        RtlZeroMemory(Buffer, sizeof(Buffer));
+        FromLength = sizeof(From);
+        Received = recvfrom(Socket, Buffer, sizeof(Buffer), 0, (struct sockaddr *)&From, &FromLength);
+        ok_eq_int(Received, (int)sizeof(RxPayload) - 1);
+        ok(Received == sizeof(RxPayload) - 1 && RtlEqualMemory(Buffer, RxPayload, Received),
+           "Wrong payload '%s'\n", Buffer);
+        ok_eq_hex(From.sin_addr.s_addr, TUN_REMOTE_IP);
+        ok_eq_int(ntohs(From.sin_port), TUN_REMOTE_PORT);
+    }
+    else
+    {
+        ok(FALSE, "The injected datagram was not delivered\n");
+    }
+
+    closesocket(Socket);
+Cleanup:
+    WSACleanup();
+}
+
+START_TEST(KmdfNetCxRawIp)
+{
+    NETCX_TEST_DEVICE Device;
+    SC_HANDLE CxService;
+    MIB_IPADDRROW Row;
+    HANDLE Handle;
+
+    Handle = CreateFileW(NETCXTUN_DOS_NAME, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (Handle != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(Handle);
+        skip(FALSE, "Tunnel device left from an earlier run\n");
+        return;
+    }
+
+    RegisterClassExtension(&CxService);
+
+    RtlZeroMemory(&Device, sizeof(Device));
+    Device.Minor = 1;
+    wcscpy(Device.DeviceId, L"KmtNetCxTun");
+    wcscpy(Device.Description, L"NetAdapterCx raw IP tunnel test adapter");
+    wcscpy(Device.ServiceName, L"KmtNetCxTun");
+    wcscpy(Device.ImageName, L"netcxtun21_drv.sys");
+    wcscpy(Device.ClassInstance, L"0940");
+    wcscpy(Device.NetCfgInstanceId, L"{6E4E4358-0000-4000-8000-000000000400}");
+
+    /* Configured before the adapter exists, as an installed VPN adapter is */
+    if (!WriteStaticAddress(Device.NetCfgInstanceId, TUN_LOCAL_ADDRESS, L"255.255.255.0") ||
+        !InstallDevice(&Device))
+    {
+        skip(FALSE, "Tunnel device did not start\n");
+        goto Exit;
+    }
+
+    ok(NdisAdapterPresent(Device.ExportName), "No NDIS adapter %S\n", Device.ExportName);
+
+    /* tcpip bound the raw IP adapter and took the static address */
+    if (!WaitForAddress(TUN_LOCAL_IP, 5000, &Row))
+    {
+        ok(FALSE, "tcpip did not configure 10.8.0.2 on the raw IP adapter\n");
+        goto Exit;
+    }
+    ok_eq_hex(Row.dwMask, TUN_MASK);
+    trace("10.8.0.2 is on interface %lu\n", Row.dwIndex);
+    CheckRawIpInterface(Row.dwIndex, TRUE);
+
+    TestRawIpTraffic();
 
 Exit:
     if (Device.Service)

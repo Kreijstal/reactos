@@ -50,18 +50,20 @@ add_rostests_file(TARGET kmdfucx_drv)
 #
 # NetAdapterCx loopback client, once per NetAdapterCx version
 #
-function(add_netcxloop_driver _minor)
-    set(_target netcxloop2${_minor}_drv)
+function(add_netcxloop_driver _target _minor)
     add_library(${_target} MODULE NetCxLoop_drv.c)
     set_module_type(${_target} kmdfdriver)
     target_link_libraries(${_target} netadaptercxstub_2_${_minor} memcmp)
-    target_compile_definitions(${_target} PRIVATE WDF_DEVICE_NO_WDMSEC_H)
+    target_compile_definitions(${_target} PRIVATE WDF_DEVICE_NO_WDMSEC_H ${ARGN})
     add_importlibs(${_target} ntoskrnl hal)
     add_rostests_file(TARGET ${_target})
 endfunction()
 
-add_netcxloop_driver(0)
-add_netcxloop_driver(1)
+add_netcxloop_driver(netcxloop20_drv 0)
+add_netcxloop_driver(netcxloop21_drv 1)
+
+# The same client as a raw IP adapter for tcpip
+add_netcxloop_driver(netcxtun21_drv 1 NETCXLOOP_TUN)
 
 #
 # NDIS 6 protocol that sends through the loopback adapter
