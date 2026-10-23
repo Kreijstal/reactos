@@ -144,6 +144,55 @@ GetUniqueConnectionName(
     return ERROR_SUCCESS;
 }
 
+/*
+ * Standardized keywords a network adapter INF sets in its DDInstall section
+ * rather than with AddReg. They go to the driver key, where NDIS and the
+ * network adapter class extension read them; a NetAdapterCx client like
+ * ovpn-dco tells its medium (*MediaType = NdisMediumIP) this way.
+ */
+static const PCWSTR NetDDInstallKeywords[] =
+{
+    L"*IfType",
+    L"*MediaType",
+    L"*PhysicalMediaType",
+    L"*IfConnectorPresent",
+    L"*ConnectionType",
+    L"*DirectionType",
+    L"*AccessType",
+    L"*HardwareLoopback",
+};
+
+#define NET_DDINSTALL_KEYWORD_COUNT (sizeof(NetDDInstallKeywords) / sizeof(NetDDInstallKeywords[0]))
+
+typedef struct _NET_DDINSTALL_KEYWORDS
+{
+    BOOL Present[NET_DDINSTALL_KEYWORD_COUNT];
+    DWORD Value[NET_DDINSTALL_KEYWORD_COUNT];
+} NET_DDINSTALL_KEYWORDS, *PNET_DDINSTALL_KEYWORDS;
+
+static
+VOID
+ReadNetDDInstallKeywords(
+    IN HINF hInf,
+    IN PCWSTR SectionName,
+    OUT PNET_DDINSTALL_KEYWORDS Keywords)
+{
+    INFCONTEXT InfContext;
+    INT Value;
+    ULONG i;
+
+    ZeroMemory(Keywords, sizeof(*Keywords));
+    for (i = 0; i < NET_DDINSTALL_KEYWORD_COUNT; i++)
+    {
+        if (SetupFindFirstLineW(hInf, SectionName, NetDDInstallKeywords[i], &InfContext) &&
+            SetupGetIntField(&InfContext, 1, &Value))
+        {
+            Keywords->Present[i] = TRUE;
+            Keywords->Value[i] = (DWORD)Value;
+        }
+    }
+}
+
 static
 DWORD
 InstallNetDevice(
@@ -151,7 +200,8 @@ InstallNetDevice(
     IN PSP_DEVINFO_DATA DeviceInfoData,
     LPCWSTR UuidString,
     DWORD Characteristics,
-    LPCWSTR BusType)
+    LPCWSTR BusType,
+    PNET_DDINSTALL_KEYWORDS Keywords)
 {
     SP_DEVINSTALL_PARAMS_W DeviceInstallParams;
     LPWSTR InstanceId = NULL;
@@ -165,6 +215,7 @@ InstallNetDevice(
     HKEY hLinkageKey = NULL;
     HKEY hConnectionKey = NULL;
     DWORD dwShowIcon, dwLength, dwValue;
+    ULONG i;
     PWSTR pszNameBuffer = NULL;
     DWORD dwRegType;
 
@@ -315,6 +366,20 @@ InstallNetDevice(
     {
         ERR("RegSetValueExW() failed with error 0x%lx\n", rc);
         goto cleanup;
+    }
+
+    for (i = 0; i < NET_DDINSTALL_KEYWORD_COUNT; i++)
+    {
+        if (!Keywords->Present[i])
+            continue;
+
+        rc = RegSetValueExW(hKey, NetDDInstallKeywords[i], 0, REG_DWORD,
+                            (const BYTE*)&Keywords->Value[i], sizeof(DWORD));
+        if (rc != ERROR_SUCCESS)
+        {
+            ERR("RegSetValueExW(%S) failed with error 0x%lx\n", NetDDInstallKeywords[i], rc);
+            goto cleanup;
+        }
     }
 
     /* Get ComponentId (from MatchingDeviceId value) */
@@ -564,6 +629,7 @@ NetClassInstaller(
     UINT ErrorLine;
     INT CharacteristicsInt;
     DWORD Characteristics;
+    NET_DDINSTALL_KEYWORDS Keywords;
     LPWSTR BusType = NULL;
     RPC_STATUS RpcStatus;
     UUID Uuid;
@@ -629,6 +695,8 @@ NetClassInstaller(
     Characteristics = (DWORD)CharacteristicsInt;
     if (IsEqualIID(&DeviceInfoData->ClassGuid, &GUID_DEVCLASS_NET))
     {
+        ReadNetDDInstallKeywords(hInf, SectionName, &Keywords);
+
         if (SetupFindFirstLineW(hInf, SectionName, L"BusType", &InfContext))
         {
             if (!SetupGetStringFieldW(&InfContext, 1, NULL, 0, &dwLength))
@@ -686,7 +754,7 @@ NetClassInstaller(
     wcscat(UuidString, L"}");
 
     if (IsEqualIID(&DeviceInfoData->ClassGuid, &GUID_DEVCLASS_NET))
-        rc = InstallNetDevice(DeviceInfoSet, DeviceInfoData, UuidString, Characteristics, BusType);
+        rc = InstallNetDevice(DeviceInfoSet, DeviceInfoData, UuidString, Characteristics, BusType, &Keywords);
     else if (IsEqualIID(&DeviceInfoData->ClassGuid, &GUID_DEVCLASS_NETCLIENT))
         rc = InstallNetClient();
     else if (IsEqualIID(&DeviceInfoData->ClassGuid, &GUID_DEVCLASS_NETSERVICE))
