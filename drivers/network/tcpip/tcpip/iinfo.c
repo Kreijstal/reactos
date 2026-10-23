@@ -139,6 +139,12 @@ TDI_STATUS InfoTdiQueryGetInterfaceMIB(TDIEntityID ID,
                     case NdisMediumFddi:
                         OutData->if_type = MIB_IF_TYPE_FDDI;
                         break;
+
+                    case NdisMediumIP:
+                        /* Raw IP virtual adapters (VPNs): what NetAdapterCx
+                         * clients such as ovpn-dco-win register as *IfType */
+                        OutData->if_type = IF_TYPE_PROP_VIRTUAL;
+                        break;
 #if 0
                     case NdisMediumWan,
                     case NdisMediumLocalTalk:

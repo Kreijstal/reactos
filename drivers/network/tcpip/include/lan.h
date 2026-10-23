@@ -9,8 +9,9 @@
 
 /* Media we support */
 #define MEDIA_ETH 0
+#define MEDIA_IP  1 /* Raw IP packets, no link header (VPN adapters) */
 
-#define MAX_MEDIA 1
+#define MAX_MEDIA 2
 
 #define IEEE_802_ADDR_LENGTH 6
 

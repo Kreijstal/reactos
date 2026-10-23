@@ -124,6 +124,10 @@ GetPacketTypeFromHeaderBuffer(PLAN_ADAPTER Adapter,
             *PacketType = EthHeader->EType;
             break;
 
+        case NdisMediumIP:
+            /* No link header: the caller looks at the IP version */
+            return NDIS_STATUS_NOT_ACCEPTED;
+
         default:
             TI_DbgPrint(MIN_TRACE, ("Unsupported media.\n"));
 
@@ -136,6 +140,28 @@ GetPacketTypeFromHeaderBuffer(PLAN_ADAPTER Adapter,
     return NDIS_STATUS_SUCCESS;
 }
 
+/* A raw IP packet has no link header: its first nibble is the IP version */
+static
+NDIS_STATUS
+GetPacketTypeFromIpVersion(UCHAR FirstByte,
+                           PULONG PacketType)
+{
+    switch (FirstByte >> 4)
+    {
+        case 4:
+            *PacketType = ETYPE_IPv4;
+            return NDIS_STATUS_SUCCESS;
+
+        case 6:
+            *PacketType = ETYPE_IPv6;
+            return NDIS_STATUS_SUCCESS;
+
+        default:
+            TI_DbgPrint(DEBUG_DATALINK, ("Not an IP packet (0x%02x).\n", FirstByte));
+            return NDIS_STATUS_NOT_ACCEPTED;
+    }
+}
+
 /* Used by ProtocolReceivePacket for packet type */
 NDIS_STATUS
 GetPacketTypeFromNdisPacket(PLAN_ADAPTER Adapter,
@@ -145,6 +171,14 @@ GetPacketTypeFromNdisPacket(PLAN_ADAPTER Adapter,
     PVOID HeaderBuffer;
     ULONG BytesCopied;
     NDIS_STATUS Status;
+    UCHAR FirstByte;
+
+    if (Adapter->Media == NdisMediumIP)
+    {
+        if (CopyPacketToBuffer((PCHAR)&FirstByte, NdisPacket, 0, 1) != 1)
+            return NDIS_STATUS_NOT_ACCEPTED;
+        return GetPacketTypeFromIpVersion(FirstByte, PacketType);
+    }
 
     HeaderBuffer = ExAllocatePoolWithTag(NonPagedPool,
                                          Adapter->HeaderSize,
@@ -511,10 +545,20 @@ NDIS_STATUS NTAPI ProtocolReceive(
         return NDIS_STATUS_NOT_ACCEPTED;
     }
 
-    NdisStatus = GetPacketTypeFromHeaderBuffer(Adapter,
-                                               HeaderBuffer,
-                                               HeaderBufferSize,
-                                               &PacketType);
+    if (Adapter->Media == NdisMediumIP)
+    {
+        /* The IP header starts the lookahead data */
+        if (LookaheadBufferSize == 0)
+            return NDIS_STATUS_NOT_ACCEPTED;
+        NdisStatus = GetPacketTypeFromIpVersion(*(PUCHAR)LookaheadBuffer, &PacketType);
+    }
+    else
+    {
+        NdisStatus = GetPacketTypeFromHeaderBuffer(Adapter,
+                                                   HeaderBuffer,
+                                                   HeaderBufferSize,
+                                                   &PacketType);
+    }
     if (NdisStatus != NDIS_STATUS_SUCCESS)
         return NDIS_STATUS_NOT_ACCEPTED;
 
@@ -1017,6 +1061,12 @@ VOID LANTransmit(
 		 Adapter->HWAddress[4] & 0xff,
 		 Adapter->HWAddress[5] & 0xff));
 
+    /* A raw IP link carries IP and nothing else (no ARP) */
+    if (Adapter->Media == NdisMediumIP && Type != LAN_PROTO_IPv4 && Type != LAN_PROTO_IPv6) {
+        (*PC(NdisPacket)->DLComplete)(PC(NdisPacket)->Context, NdisPacket, NDIS_STATUS_NOT_SUPPORTED);
+        return;
+    }
+
     GetDataPtr( NdisPacket, 0, &OldData, &OldSize );
 
     NdisStatus = AllocatePacketWithBuffer(&XmitPacket, NULL, OldSize + Adapter->HeaderSize);
@@ -1059,6 +1109,10 @@ VOID LANTransmit(
                     ASSERT(FALSE);
                     return;
             }
+            break;
+
+        case NdisMediumIP:
+            /* The IP header is the first thing on the wire */
             break;
 
         default:
@@ -1511,6 +1565,7 @@ NDIS_STATUS LANRegisterAdapter(
 
     /* Initialize array with media IDs we support */
     MediaArray[MEDIA_ETH] = NdisMedium802_3;
+    MediaArray[MEDIA_IP]  = NdisMediumIP;
 
     TI_DbgPrint(DEBUG_DATALINK,("opening adapter %wZ\n", AdapterName));
     /* Open the adapter. */
@@ -1553,6 +1608,22 @@ NDIS_STATUS LANRegisterAdapter(
             NDIS_PACKET_TYPE_MULTICAST;
         break;
 
+    case NdisMediumIP:
+        /* Point-to-point: no link header, no hardware address, no ARP.
+         * Every neighbor is reached by handing the packet to the adapter */
+        IF->HWAddressLength = 0;
+        IF->BCastMask       = 0;
+        IF->BCastCheck      = 0;
+        IF->BCastOffset     = 0;
+        IF->HeaderSize      = 0;
+        IF->MinFrameSize    = 0;
+        AddressOID          = 0;
+        IF->PacketFilter    =
+            NDIS_PACKET_TYPE_BROADCAST |
+            NDIS_PACKET_TYPE_DIRECTED  |
+            NDIS_PACKET_TYPE_MULTICAST;
+        break;
+
     default:
         /* Unsupported media */
         TI_DbgPrint(MIN_TRACE, ("Unsupported media.\n"));
@@ -1572,11 +1643,14 @@ NDIS_STATUS LANRegisterAdapter(
         IF->MaxSendPackets = 1;
 
     /* Get current hardware address */
-    NdisStatus = NDISCall(IF,
-                          NdisRequestQueryInformation,
-                          AddressOID,
-                          &IF->HWAddress,
-                          IF->HWAddressLength);
+    if (AddressOID == 0)
+        NdisStatus = NDIS_STATUS_SUCCESS;
+    else
+        NdisStatus = NDISCall(IF,
+                              NdisRequestQueryInformation,
+                              AddressOID,
+                              &IF->HWAddress,
+                              IF->HWAddressLength);
     if (NdisStatus != NDIS_STATUS_SUCCESS) {
         TI_DbgPrint(MIN_TRACE, ("Query for current hardware address failed.\n"));
         ExFreePoolWithTag(IF, LAN_ADAPTER_TAG);
