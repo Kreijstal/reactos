@@ -500,7 +500,8 @@ Ndis6CallMiniportInitializeEx(
             &Ext->AllocatedResourcesTranslated->List[0].PartialResourceList;
     }
     Params.IMDeviceInstanceContext   = NULL;
-    Params.MiniportAddDeviceContext  = NULL;
+    /* NetAdapterCx: the context given to NdisWdfPnPAddDevice */
+    Params.MiniportAddDeviceContext  = Ext->IsNetCx ? Adapter->NdisMiniportBlock.DeviceContext : NULL;
     Params.IfIndex                   = 0;
     Params.NetLuid.Value             = 0;
     Params.DefaultPortAuthStates     = NULL;
@@ -878,6 +879,73 @@ Ndis6DestroyLogicalAdapter(
 }
 
 /* ============================================================================
+ *  Ndis6AllocateAdapterExt — NDIS 6 extension of an adapter instance that
+ *  is not a plain PnP FDO (IM upper miniport, NetAdapterCx adapter).
+ * ============================================================================ */
+static PNDIS6_ADAPTER_EXT
+Ndis6AllocateAdapterExt(
+    _In_ PLOGICAL_ADAPTER    Adapter,
+    _In_ PNDIS6_DRIVER_BLOCK DriverBlock,
+    _In_ PDEVICE_OBJECT      Pdo,
+    _In_ PDEVICE_OBJECT      Fdo)
+{
+    PNDIS6_ADAPTER_EXT Ext;
+
+    Ext = (PNDIS6_ADAPTER_EXT)ExAllocatePoolWithTag(
+        NonPagedPool, sizeof(NDIS6_ADAPTER_EXT), NDIS6_ADAPTER_TAG);
+    if (Ext == NULL)
+        return NULL;
+
+    RtlZeroMemory(Ext, sizeof(*Ext));
+    Ext->Adapter                = Adapter;
+    Ext->DriverBlock            = DriverBlock;
+    Ext->PhysicalDeviceObject   = Pdo;
+    Ext->FunctionalDeviceObject = Fdo;
+    KeInitializeSpinLock(&Ext->IsrLock);
+    KeInitializeSpinLock(&Ext->TxLookupLock);
+    InitializeListHead(&Ext->InFlightNblsTx);
+    Ext->TxInFlightCount = 0;
+    KeInitializeEvent(&Ext->TxDrainEvent, NotificationEvent, TRUE);
+    Ext->PauseState    = NDIS6_PAUSE_STATE_PAUSED;
+    Ext->PauseStatus   = NDIS_STATUS_SUCCESS;
+    Ext->RestartStatus = NDIS_STATUS_SUCCESS;
+    KeInitializeEvent(&Ext->PauseEvent, SynchronizationEvent, FALSE);
+    KeInitializeEvent(&Ext->RestartEvent, SynchronizationEvent, FALSE);
+    KeInitializeSpinLock(&Ext->OidWaiterLock);
+    InitializeListHead(&Ext->OidWaiters);
+    KeInitializeSpinLock(&Ext->FilterModuleListLock);
+    InitializeListHead(&Ext->FilterModuleList);
+    KeInitializeSpinLock(&Ext->ProtocolBindingListLock);
+    InitializeListHead(&Ext->ProtocolBindingList);
+
+    {
+        NET_BUFFER_LIST_POOL_PARAMETERS PoolParams;
+        NdisZeroMemory(&PoolParams, sizeof(PoolParams));
+        PoolParams.Header.Type        = NDIS_OBJECT_TYPE_DEFAULT;
+        PoolParams.Header.Revision    = NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
+        PoolParams.Header.Size        = sizeof(NET_BUFFER_LIST_POOL_PARAMETERS);
+        PoolParams.ProtocolId         = NDIS_PROTOCOL_ID_DEFAULT;
+        PoolParams.fAllocateNetBuffer = TRUE;
+        PoolParams.ContextSize        = 0;
+        PoolParams.PoolTag            = 'TxNb';
+        PoolParams.DataSize           = 0;
+        Ext->TxWrapperNblPool = NdisAllocateNetBufferListPool(NULL, &PoolParams);
+    }
+    {
+        NDIS_STATUS PoolStatus;
+        NdisAllocateBufferPool(&PoolStatus, &Ext->RxLegacyBufferPool, 64);
+        if (PoolStatus != NDIS_STATUS_SUCCESS)
+            Ext->RxLegacyBufferPool = NULL;
+        NdisAllocatePacketPool(&PoolStatus, &Ext->RxLegacyPacketPool, 64,
+                               sizeof(PVOID) * 4);
+        if (PoolStatus != NDIS_STATUS_SUCCESS)
+            Ext->RxLegacyPacketPool = NULL;
+    }
+
+    return Ext;
+}
+
+/* ============================================================================
  *  Ndis6CreateImInstance
  *
  *  Like Ndis6CreateLogicalAdapter, but for an intermediate driver's upper
@@ -924,59 +992,13 @@ Ndis6CreateImInstance(
     RtlZeroMemory(Adapter, sizeof(*Adapter));
     Adapter->IsNdis6 = TRUE;
 
-    Ext = (PNDIS6_ADAPTER_EXT)ExAllocatePoolWithTag(
-        NonPagedPool, sizeof(NDIS6_ADAPTER_EXT), NDIS6_ADAPTER_TAG);
+    /* The FDO doubles as the PDO: there is no bus underneath */
+    Ext = Ndis6AllocateAdapterExt(Adapter, DriverBlock, Fdo, Fdo);
     if (Ext == NULL)
     {
         IoDeleteDevice(Fdo);
         Ndis6FreeAdapterName(&AdapterName);
         return NDIS_STATUS_RESOURCES;
-    }
-
-    RtlZeroMemory(Ext, sizeof(*Ext));
-    Ext->Adapter                = Adapter;
-    Ext->DriverBlock            = DriverBlock;
-    Ext->PhysicalDeviceObject   = Fdo;   /* self-PDO: no bus underneath */
-    Ext->FunctionalDeviceObject = Fdo;
-    KeInitializeSpinLock(&Ext->IsrLock);
-    KeInitializeSpinLock(&Ext->TxLookupLock);
-    InitializeListHead(&Ext->InFlightNblsTx);
-    Ext->TxInFlightCount = 0;
-    KeInitializeEvent(&Ext->TxDrainEvent, NotificationEvent, TRUE);
-    Ext->PauseState    = NDIS6_PAUSE_STATE_PAUSED;
-    Ext->PauseStatus   = NDIS_STATUS_SUCCESS;
-    Ext->RestartStatus = NDIS_STATUS_SUCCESS;
-    KeInitializeEvent(&Ext->PauseEvent, SynchronizationEvent, FALSE);
-    KeInitializeEvent(&Ext->RestartEvent, SynchronizationEvent, FALSE);
-    KeInitializeSpinLock(&Ext->OidWaiterLock);
-    InitializeListHead(&Ext->OidWaiters);
-    KeInitializeSpinLock(&Ext->FilterModuleListLock);
-    InitializeListHead(&Ext->FilterModuleList);
-    KeInitializeSpinLock(&Ext->ProtocolBindingListLock);
-    InitializeListHead(&Ext->ProtocolBindingList);
-
-    {
-        NET_BUFFER_LIST_POOL_PARAMETERS PoolParams;
-        NdisZeroMemory(&PoolParams, sizeof(PoolParams));
-        PoolParams.Header.Type        = NDIS_OBJECT_TYPE_DEFAULT;
-        PoolParams.Header.Revision    = NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
-        PoolParams.Header.Size        = sizeof(NET_BUFFER_LIST_POOL_PARAMETERS);
-        PoolParams.ProtocolId         = NDIS_PROTOCOL_ID_DEFAULT;
-        PoolParams.fAllocateNetBuffer = TRUE;
-        PoolParams.ContextSize        = 0;
-        PoolParams.PoolTag            = 'TxNb';
-        PoolParams.DataSize           = 0;
-        Ext->TxWrapperNblPool = NdisAllocateNetBufferListPool(NULL, &PoolParams);
-    }
-    {
-        NDIS_STATUS PoolStatus;
-        NdisAllocateBufferPool(&PoolStatus, &Ext->RxLegacyBufferPool, 64);
-        if (PoolStatus != NDIS_STATUS_SUCCESS)
-            Ext->RxLegacyBufferPool = NULL;
-        NdisAllocatePacketPool(&PoolStatus, &Ext->RxLegacyPacketPool, 64,
-                               sizeof(PVOID) * 4);
-        if (PoolStatus != NDIS_STATUS_SUCCESS)
-            Ext->RxLegacyPacketPool = NULL;
     }
 
     Adapter->Ndis6Context = Ext;
@@ -999,6 +1021,151 @@ Ndis6CreateImInstance(
     KeAcquireSpinLock(&AdapterListLock, &OldIrql);
     InsertTailList(&AdapterListHead, &Adapter->ListEntry);
     KeReleaseSpinLock(&AdapterListLock, OldIrql);
+
+    *AdapterOut = Adapter;
+    return NDIS_STATUS_SUCCESS;
+}
+
+/* ============================================================================
+ *  Ndis6CreateNetCxAdapter
+ *
+ *  NDIS side of a NetAdapterCx adapter (see ndiswdf.h). The client's
+ *  WDFDEVICE is the FDO of the PnP stack and keeps every IRP, so the
+ *  LOGICAL_ADAPTER lives in a separate named device object, \Device\{guid},
+ *  owned by OwnerDriverObject (NDIS itself) and not attached to the stack.
+ *  The PnP physical device object is still recorded so the adapter's
+ *  registry keys (NdisOpenConfigurationEx) and properties resolve.
+ * ============================================================================ */
+static NTSTATUS
+Ndis6MakeNetCxAdapterName(
+    _Out_ PUNICODE_STRING AdapterName)
+{
+    UNICODE_STRING GuidString;
+    GUID Guid;
+    NTSTATUS Status;
+
+    RtlInitUnicodeString(AdapterName, NULL);
+
+    Status = ExUuidCreate(&Guid);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = RtlStringFromGUID(&Guid, &GuidString);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    AdapterName->MaximumLength = (USHORT)(sizeof(L"\\Device\\") + GuidString.Length);
+    AdapterName->Buffer = ExAllocatePoolWithTag(PagedPool, AdapterName->MaximumLength, NDIS6_ADAPTER_TAG);
+    if (AdapterName->Buffer == NULL)
+    {
+        RtlFreeUnicodeString(&GuidString);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlStringCbPrintfW(AdapterName->Buffer, AdapterName->MaximumLength,
+                       L"\\Device\\%wZ", &GuidString);
+    AdapterName->Length = (USHORT)(AdapterName->MaximumLength - sizeof(WCHAR));
+    RtlFreeUnicodeString(&GuidString);
+    return STATUS_SUCCESS;
+}
+
+NDIS_STATUS
+Ndis6CreateNetCxAdapter(
+    _In_  PNDIS6_DRIVER_BLOCK DriverBlock,
+    _In_  PDRIVER_OBJECT      OwnerDriverObject,
+    _In_  PDEVICE_OBJECT      Pdo,
+    _In_  PDEVICE_OBJECT      WdfDeviceObject,
+    _In_  NDIS_HANDLE         AddDeviceContext,
+    _Out_ PLOGICAL_ADAPTER*   AdapterOut)
+{
+    PLOGICAL_ADAPTER    Adapter;
+    PNDIS6_ADAPTER_EXT  Ext;
+    PDEVICE_OBJECT      DeviceObject;
+    UNICODE_STRING      AdapterName;
+    UNICODE_STRING      ExportName;
+    NTSTATUS            Status;
+    KIRQL               OldIrql;
+    extern LIST_ENTRY   AdapterListHead;
+    extern KSPIN_LOCK   AdapterListLock;
+
+    if (DriverBlock == NULL || OwnerDriverObject == NULL || Pdo == NULL ||
+        AdapterOut == NULL)
+    {
+        return NDIS_STATUS_INVALID_PARAMETER;
+    }
+
+    *AdapterOut = NULL;
+
+    /* The name protocols bind by: Linkage\Export of the device's class key
+     * when the network class installer wrote one, else a fresh GUID. */
+    Status = Ndis6ReadExportName(Pdo, &ExportName);
+    if (NT_SUCCESS(Status))
+    {
+        /* RtlQueryRegistryValues allocated it; keep our own pool copy so
+         * Ndis6FreeAdapterName can treat both cases alike. */
+        if (!RtlCreateUnicodeString(&AdapterName, ExportName.Buffer))
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        RtlFreeUnicodeString(&ExportName);
+    }
+    else
+    {
+        Status = Ndis6MakeNetCxAdapterName(&ExportName);
+        if (NT_SUCCESS(Status))
+        {
+            if (!RtlCreateUnicodeString(&AdapterName, ExportName.Buffer))
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+            ExFreePoolWithTag(ExportName.Buffer, NDIS6_ADAPTER_TAG);
+        }
+    }
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = IoCreateDevice(OwnerDriverObject, sizeof(LOGICAL_ADAPTER), &AdapterName,
+                            FILE_DEVICE_PHYSICAL_NETCARD, FILE_DEVICE_SECURE_OPEN,
+                            FALSE, &DeviceObject);
+    if (!NT_SUCCESS(Status))
+    {
+        DbgPrint("NDIS6: NetAdapterCx adapter device %wZ failed 0x%08lx\n", &AdapterName, Status);
+        Ndis6FreeAdapterName(&AdapterName);
+        return Status;
+    }
+
+    Adapter = (PLOGICAL_ADAPTER)DeviceObject->DeviceExtension;
+    RtlZeroMemory(Adapter, sizeof(*Adapter));
+    Adapter->IsNdis6 = TRUE;
+
+    Ext = Ndis6AllocateAdapterExt(Adapter, DriverBlock, Pdo, DeviceObject);
+    if (Ext == NULL)
+    {
+        IoDeleteDevice(DeviceObject);
+        Ndis6FreeAdapterName(&AdapterName);
+        return NDIS_STATUS_RESOURCES;
+    }
+    Ext->IsNetCx         = TRUE;
+    Ext->WdfDeviceObject = WdfDeviceObject;
+
+    Adapter->Ndis6Context = Ext;
+    InitializeListHead(&Adapter->ProtocolListHead);
+    KeInitializeSpinLock(&Adapter->NdisMiniportBlock.Lock);
+    Adapter->NdisMiniportBlock.MiniportName          = AdapterName;
+    Adapter->NdisMiniportBlock.PhysicalDeviceObject  = Pdo;
+    Adapter->NdisMiniportBlock.DeviceObject          = DeviceObject;
+    Adapter->NdisMiniportBlock.BusType               = NdisInterfaceInternal;
+    Adapter->NdisMiniportBlock.BusNumber             = 0;
+    /* Handed to MiniportInitializeEx as MiniportAddDeviceContext */
+    Adapter->NdisMiniportBlock.DeviceContext         = AddDeviceContext;
+    /* The client's WDFDEVICE owns the stack: nothing to forward to */
+    Adapter->NdisMiniportBlock.NextDeviceObject      = NULL;
+
+    DeviceObject->Flags |= DO_DIRECT_IO | DO_POWER_PAGABLE;
+    DeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+
+    KeAcquireSpinLock(&AdapterListLock, &OldIrql);
+    InsertTailList(&AdapterListHead, &Adapter->ListEntry);
+    KeReleaseSpinLock(&AdapterListLock, OldIrql);
+
+    DbgPrint("NDIS6: NetAdapterCx adapter %wZ (adapter %p, pdo %p, wdf fdo %p)\n",
+             &AdapterName, Adapter, Pdo, WdfDeviceObject);
 
     *AdapterOut = Adapter;
     return NDIS_STATUS_SUCCESS;
