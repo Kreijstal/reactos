@@ -2776,7 +2776,23 @@ PNP_GetInterfaceDeviceList(
                                sizeof(PLUGPLAY_CONTROL_INTERFACE_DEVICE_LIST_DATA));
     if (NT_SUCCESS(Status))
     {
+        PWSTR pszInterface;
+        BOOL bFilled = (PlugPlayData.BufferSize <= *pulLength);
+
         *pulLength = PlugPlayData.BufferSize;
+
+        /*
+         * The kernel names the interfaces "\??\...". Callers open them
+         * with CreateFile, so give them the Win32 form "\\?\..." like
+         * Windows does.
+         */
+        for (pszInterface = (PWSTR)Buffer;
+             bFilled && *pszInterface != UNICODE_NULL;
+             pszInterface += wcslen(pszInterface) + 1)
+        {
+            if (wcsncmp(pszInterface, L"\\??\\", 4) == 0)
+                pszInterface[1] = L'\\';
+        }
     }
     else
     {
