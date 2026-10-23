@@ -3626,15 +3626,6 @@ BOOL WINAPI CancelIPChangeNotify(LPOVERLAPPED notifyOverlapped)
     return 0L;
 }
 
-/*
- * @unimplemented
- */
-DWORD WINAPI GetBestInterfaceEx(struct sockaddr *pDestAddr,PDWORD pdwBestIfIndex)
-{
-    FIXME(":stub\n");
-    return 0L;
-}
-
 #ifdef GetAdaptersAddressesV1
 /*
  * @unimplemented
@@ -3832,4 +3823,395 @@ NhGetGuidFromInterfaceName(_In_ PWCHAR pInterfaceName,
     RegCloseKey(hAdaptersKey);
 
     return bFound ? ERROR_SUCCESS : ERROR_NOT_FOUND;
+}
+
+/*
+ * IP Helper v2 functions for IPv4. The TCP/IP driver has no IPv6, so
+ * IPv6 rows are not found and IPv6 requests are not supported.
+ */
+
+static DWORD
+resolveInterfaceIndex(const NET_LUID *InterfaceLuid, NET_IFINDEX InterfaceIndex, PNET_IFINDEX Index)
+{
+    MIB_IFROW IfRow;
+
+    if (InterfaceLuid && InterfaceLuid->Value)
+        return ConvertInterfaceLuidToIndex(InterfaceLuid, Index);
+
+    /* The loopback interface of the TCP/IP driver has index 0 */
+    IfRow.dwIndex = InterfaceIndex;
+    if (GetIfEntry(&IfRow) != NO_ERROR)
+        return ERROR_NOT_FOUND;
+
+    *Index = InterfaceIndex;
+    return NO_ERROR;
+}
+
+/******************************************************************
+ *    InitializeIpInterfaceEntry (IPHLPAPI.@)
+ */
+VOID WINAPI InitializeIpInterfaceEntry(PMIB_IPINTERFACE_ROW Row)
+{
+    TRACE("Row %p\n", Row);
+
+    if (!Row)
+        return;
+
+    ZeroMemory(Row, sizeof(*Row));
+    Row->Family = AF_UNSPEC;
+    Row->SitePrefixLength = (ULONG)-1;
+    Row->Metric = (ULONG)-1;
+    Row->NlMtu = (ULONG)-1;
+}
+
+/******************************************************************
+ *    GetIpInterfaceEntry (IPHLPAPI.@)
+ */
+DWORD WINAPI GetIpInterfaceEntry(PMIB_IPINTERFACE_ROW Row)
+{
+    MIB_IFROW IfRow;
+    NET_IFINDEX Index;
+    DWORD ret;
+
+    TRACE("Row %p\n", Row);
+
+    if (!Row)
+        return ERROR_INVALID_PARAMETER;
+    if (Row->Family != AF_INET && Row->Family != AF_INET6)
+        return ERROR_INVALID_PARAMETER;
+    if (Row->Family == AF_INET6)
+        return ERROR_NOT_FOUND;
+
+    ret = resolveInterfaceIndex(&Row->InterfaceLuid, Row->InterfaceIndex, &Index);
+    if (ret != NO_ERROR)
+        return ERROR_NOT_FOUND;
+
+    IfRow.dwIndex = Index;
+    ret = GetIfEntry(&IfRow);
+    if (ret != NO_ERROR)
+        return ERROR_NOT_FOUND;
+
+    ZeroMemory(Row, sizeof(*Row));
+    Row->Family = AF_INET;
+    luidFromMibIfRow(&IfRow, &Row->InterfaceLuid);
+    Row->InterfaceIndex = Index;
+    Row->MaxReassemblySize = 0xFFFF;
+    Row->UseAutomaticMetric = TRUE;
+    Row->UseNeighborUnreachabilityDetection = (IfRow.dwPhysAddrLen != 0);
+    Row->RouterDiscoveryBehavior = RouterDiscoveryDhcp;
+    Row->BaseReachableTime = 30000;
+    Row->ReachableTime = 30000;
+    Row->RetransmitTime = 1000;
+    Row->PathMtuDiscoveryTimeout = 600000;
+    Row->LinkLocalAddressBehavior = LinkLocalDelayed;
+    Row->ZoneIndices[ScopeLevelInterface] = Index;
+    Row->ZoneIndices[ScopeLevelLink] = Index;
+    Row->Metric = 0;
+    Row->NlMtu = IfRow.dwMtu;
+    Row->Connected = (IfRow.dwOperStatus >= MIB_IF_OPER_STATUS_CONNECTED);
+    Row->SupportsNeighborDiscovery = (IfRow.dwPhysAddrLen != 0);
+    return NO_ERROR;
+}
+
+/******************************************************************
+ *    SetIpInterfaceEntry (IPHLPAPI.@)
+ *
+ * NOTES
+ *  The TCP/IP driver takes the MTU from the adapter and has nothing
+ *  to change, so only a row matching the current one is accepted.
+ */
+DWORD WINAPI SetIpInterfaceEntry(PMIB_IPINTERFACE_ROW Row)
+{
+    MIB_IPINTERFACE_ROW Current;
+    DWORD ret;
+
+    TRACE("Row %p\n", Row);
+
+    if (!Row)
+        return ERROR_INVALID_PARAMETER;
+
+    Current.Family = Row->Family;
+    Current.InterfaceLuid = Row->InterfaceLuid;
+    Current.InterfaceIndex = Row->InterfaceIndex;
+    ret = GetIpInterfaceEntry(&Current);
+    if (ret != NO_ERROR)
+        return ret;
+
+    if (Row->NlMtu != Current.NlMtu)
+    {
+        FIXME("Changing the MTU of interface %lu from %lu to %lu is not supported\n",
+              Current.InterfaceIndex, Current.NlMtu, Row->NlMtu);
+        return ERROR_NOT_SUPPORTED;
+    }
+
+    return NO_ERROR;
+}
+
+/******************************************************************
+ *    GetBestInterfaceEx (IPHLPAPI.@)
+ */
+DWORD WINAPI GetBestInterfaceEx(struct sockaddr *pDestAddr, PDWORD pdwBestIfIndex)
+{
+    TRACE("pDestAddr %p, pdwBestIfIndex %p\n", pDestAddr, pdwBestIfIndex);
+
+    if (!pDestAddr || !pdwBestIfIndex)
+        return ERROR_INVALID_PARAMETER;
+
+    if (pDestAddr->sa_family != AF_INET)
+        return ERROR_NOT_SUPPORTED;
+
+    return GetBestInterface(((struct sockaddr_in *)pDestAddr)->sin_addr.S_un.S_addr, pdwBestIfIndex);
+}
+
+static UINT8
+prefixLengthFromMask(DWORD Mask)
+{
+    UINT8 Length = 0;
+
+    Mask = ntohl(Mask);
+    while (Mask & 0x80000000)
+    {
+        Length++;
+        Mask <<= 1;
+    }
+    return Length;
+}
+
+static VOID
+forwardRow2FromRow(const MIB_IPFORWARDROW *Route, PMIB_IPFORWARD_ROW2 Row)
+{
+    MIB_IFROW IfRow;
+
+    ZeroMemory(Row, sizeof(*Row));
+    IfRow.dwIndex = Route->dwForwardIfIndex;
+    if (GetIfEntry(&IfRow) == NO_ERROR)
+        luidFromMibIfRow(&IfRow, &Row->InterfaceLuid);
+    Row->InterfaceIndex = Route->dwForwardIfIndex;
+    Row->DestinationPrefix.Prefix.si_family = AF_INET;
+    Row->DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr = Route->dwForwardDest;
+    Row->DestinationPrefix.PrefixLength = prefixLengthFromMask(Route->dwForwardMask);
+    Row->NextHop.si_family = AF_INET;
+    Row->NextHop.Ipv4.sin_addr.S_un.S_addr = Route->dwForwardNextHop;
+    Row->ValidLifetime = 0xFFFFFFFF;
+    Row->PreferredLifetime = 0xFFFFFFFF;
+    Row->Metric = Route->dwForwardMetric1;
+    Row->Protocol = Route->dwForwardProto;
+    Row->Loopback = ((Route->dwForwardDest & 0xFF) == 127);
+    Row->Immortal = TRUE;
+    Row->Age = Route->dwForwardAge;
+    Row->Origin = NlroManual;
+}
+
+static DWORD
+forwardRowFromRow2(const MIB_IPFORWARD_ROW2 *Row, PMIB_IPFORWARDROW Route)
+{
+    NET_IFINDEX Index;
+    UINT8 Length;
+    DWORD ret;
+
+    if (Row->DestinationPrefix.Prefix.si_family == AF_INET6 || Row->NextHop.si_family == AF_INET6)
+        return ERROR_NOT_SUPPORTED;
+    if (Row->DestinationPrefix.Prefix.si_family != AF_INET)
+        return ERROR_INVALID_PARAMETER;
+
+    Length = Row->DestinationPrefix.PrefixLength;
+    if (Length > 32)
+        return ERROR_INVALID_PARAMETER;
+
+    ret = resolveInterfaceIndex(&Row->InterfaceLuid, Row->InterfaceIndex, &Index);
+    if (ret != NO_ERROR)
+        return ERROR_NOT_FOUND;
+
+    ZeroMemory(Route, sizeof(*Route));
+    Route->dwForwardMask = Length ? htonl(0xFFFFFFFF << (32 - Length)) : 0;
+    Route->dwForwardDest = Row->DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr & Route->dwForwardMask;
+    Route->dwForwardNextHop = (Row->NextHop.si_family == AF_INET) ? Row->NextHop.Ipv4.sin_addr.S_un.S_addr : 0;
+    Route->dwForwardIfIndex = Index;
+    /* A route without a gateway is on the link */
+    Route->dwForwardType = Route->dwForwardNextHop ? MIB_IPROUTE_TYPE_INDIRECT : MIB_IPROUTE_TYPE_DIRECT;
+    Route->dwForwardProto = Row->Protocol ? Row->Protocol : MIB_IPPROTO_NETMGMT;
+    /* (ULONG)-1 asks for the default metric */
+    Route->dwForwardMetric1 = (Row->Metric == (ULONG)-1) ? 1 : Row->Metric;
+    Route->dwForwardMetric2 = (DWORD)-1;
+    Route->dwForwardMetric3 = (DWORD)-1;
+    Route->dwForwardMetric4 = (DWORD)-1;
+    Route->dwForwardMetric5 = (DWORD)-1;
+    return NO_ERROR;
+}
+
+static DWORD
+findForwardRow(const MIB_IPFORWARDROW *Key, PMIB_IPFORWARDROW Found)
+{
+    PMIB_IPFORWARDTABLE Table;
+    DWORD ret = ERROR_NOT_FOUND, i;
+
+    AllocateAndGetIpForwardTableFromStack(&Table, FALSE, GetProcessHeap(), 0);
+    if (!Table)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    for (i = 0; i < Table->dwNumEntries; i++)
+    {
+        if (Table->table[i].dwForwardDest == Key->dwForwardDest &&
+            Table->table[i].dwForwardMask == Key->dwForwardMask &&
+            Table->table[i].dwForwardIfIndex == Key->dwForwardIfIndex &&
+            Table->table[i].dwForwardNextHop == Key->dwForwardNextHop)
+        {
+            *Found = Table->table[i];
+            ret = NO_ERROR;
+            break;
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, Table);
+    return ret;
+}
+
+/******************************************************************
+ *    GetIpForwardEntry2 (IPHLPAPI.@)
+ */
+DWORD WINAPI GetIpForwardEntry2(PMIB_IPFORWARD_ROW2 Row)
+{
+    MIB_IPFORWARDROW Key, Route;
+    DWORD ret;
+
+    TRACE("Row %p\n", Row);
+
+    if (!Row)
+        return ERROR_INVALID_PARAMETER;
+
+    ret = forwardRowFromRow2(Row, &Key);
+    if (ret != NO_ERROR)
+        return ret;
+
+    ret = findForwardRow(&Key, &Route);
+    if (ret == NO_ERROR)
+        forwardRow2FromRow(&Route, Row);
+    return ret;
+}
+
+/******************************************************************
+ *    CreateIpForwardEntry2 (IPHLPAPI.@)
+ */
+DWORD WINAPI CreateIpForwardEntry2(const MIB_IPFORWARD_ROW2 *Row)
+{
+    MIB_IPFORWARDROW Route, Existing;
+    DWORD ret;
+
+    TRACE("Row %p\n", Row);
+
+    if (!Row)
+        return ERROR_INVALID_PARAMETER;
+
+    ret = forwardRowFromRow2(Row, &Route);
+    if (ret != NO_ERROR)
+        return ret;
+
+    if (findForwardRow(&Route, &Existing) == NO_ERROR)
+        return ERROR_OBJECT_ALREADY_EXISTS;
+
+    return CreateIpForwardEntry(&Route);
+}
+
+/******************************************************************
+ *    DeleteIpForwardEntry2 (IPHLPAPI.@)
+ */
+DWORD WINAPI DeleteIpForwardEntry2(const MIB_IPFORWARD_ROW2 *Row)
+{
+    MIB_IPFORWARDROW Key, Route;
+    DWORD ret;
+
+    TRACE("Row %p\n", Row);
+
+    if (!Row)
+        return ERROR_INVALID_PARAMETER;
+
+    ret = forwardRowFromRow2(Row, &Key);
+    if (ret != NO_ERROR)
+        return ret;
+
+    ret = findForwardRow(&Key, &Route);
+    if (ret != NO_ERROR)
+        return ret;
+
+    return DeleteIpForwardEntry(&Route);
+}
+
+/******************************************************************
+ *    GetBestRoute2 (IPHLPAPI.@)
+ */
+DWORD WINAPI GetBestRoute2(NET_LUID *InterfaceLuid, NET_IFINDEX InterfaceIndex,
+                           const SOCKADDR_INET *SourceAddress, const SOCKADDR_INET *DestinationAddress,
+                           ULONG AddressSortOptions, PMIB_IPFORWARD_ROW2 BestRoute,
+                           SOCKADDR_INET *BestSourceAddress)
+{
+    PMIB_IPFORWARDTABLE Table;
+    NET_IFINDEX Index = 0;
+    DWORD Dest, Source = 0, i, Best = (DWORD)-1, ret;
+    int BestLength = -1;
+
+    TRACE("InterfaceLuid %p, InterfaceIndex %lu, SourceAddress %p, DestinationAddress %p, "
+          "AddressSortOptions 0x%lx, BestRoute %p, BestSourceAddress %p\n",
+          InterfaceLuid, InterfaceIndex, SourceAddress, DestinationAddress,
+          AddressSortOptions, BestRoute, BestSourceAddress);
+
+    if (!DestinationAddress || !BestRoute || !BestSourceAddress)
+        return ERROR_INVALID_PARAMETER;
+
+    ZeroMemory(BestRoute, sizeof(*BestRoute));
+    ZeroMemory(BestSourceAddress, sizeof(*BestSourceAddress));
+
+    if (DestinationAddress->si_family == AF_INET6)
+        return ERROR_NOT_SUPPORTED;
+    if (DestinationAddress->si_family != AF_INET)
+        return ERROR_INVALID_PARAMETER;
+    Dest = DestinationAddress->Ipv4.sin_addr.S_un.S_addr;
+
+    if ((InterfaceLuid && InterfaceLuid->Value) || InterfaceIndex)
+    {
+        ret = resolveInterfaceIndex(InterfaceLuid, InterfaceIndex, &Index);
+        if (ret != NO_ERROR)
+            return ERROR_FILE_NOT_FOUND;
+    }
+
+    if (SourceAddress && SourceAddress->si_family == AF_INET)
+        Source = SourceAddress->Ipv4.sin_addr.S_un.S_addr;
+
+    AllocateAndGetIpForwardTableFromStack(&Table, FALSE, GetProcessHeap(), 0);
+    if (!Table)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    /* Longest prefix, then lowest metric, on the given interface if any */
+    for (i = 0; i < Table->dwNumEntries; i++)
+    {
+        const MIB_IPFORWARDROW *Route = &Table->table[i];
+        int Length;
+
+        if (Index && Route->dwForwardIfIndex != Index)
+            continue;
+        if ((Dest & Route->dwForwardMask) != (Route->dwForwardDest & Route->dwForwardMask))
+            continue;
+        if (Source && getInterfaceIPAddrByIndex(Route->dwForwardIfIndex) != Source)
+            continue;
+
+        Length = prefixLengthFromMask(Route->dwForwardMask);
+        if (Length > BestLength ||
+            (Length == BestLength && Route->dwForwardMetric1 < Table->table[Best].dwForwardMetric1))
+        {
+            BestLength = Length;
+            Best = i;
+        }
+    }
+
+    if (Best == (DWORD)-1)
+    {
+        HeapFree(GetProcessHeap(), 0, Table);
+        return ERROR_NETWORK_UNREACHABLE;
+    }
+
+    forwardRow2FromRow(&Table->table[Best], BestRoute);
+    BestSourceAddress->si_family = AF_INET;
+    BestSourceAddress->Ipv4.sin_addr.S_un.S_addr = getInterfaceIPAddrByIndex(Table->table[Best].dwForwardIfIndex);
+
+    HeapFree(GetProcessHeap(), 0, Table);
+    return NO_ERROR;
 }

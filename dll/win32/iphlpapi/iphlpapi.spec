@@ -27,10 +27,12 @@
 @ stdcall -stub -version=0x600+ ConvertLengthToIpv4Mask(long ptr)
 @ stdcall -stub -version=0x600+ ConvertStringToGuidW(wstr ptr)
 @ stdcall CreateIpForwardEntry(ptr)
+@ stdcall -version=0x600+ CreateIpForwardEntry2(ptr)
 @ stdcall CreateIpNetEntry(ptr)
 @ stdcall CreateProxyArpEntry(long long long)
 @ stdcall DeleteIPAddress(long)
 @ stdcall DeleteIpForwardEntry(ptr)
+@ stdcall -version=0x600+ DeleteIpForwardEntry2(ptr)
 @ stdcall DeleteIpNetEntry(ptr)
 @ stdcall DeleteProxyArpEntry(long long long)
 @ stdcall DisableMediaSense(ptr ptr)
@@ -46,6 +48,7 @@
 @ stdcall GetBestInterfaceEx(ptr ptr)
 @ stub GetBestInterfaceFromStack
 @ stdcall GetBestRoute(long long long)
+@ stdcall -version=0x600+ GetBestRoute2(ptr long ptr ptr long ptr ptr)
 @ stub GetBestRouteFromStack
 @ stdcall -stub -version=0x600+ GetCurrentThreadCompartmentId()
 @ stdcall GetExtendedTcpTable(ptr ptr long long long long)
@@ -69,7 +72,9 @@
 @ stub GetIpAddrTableFromStack
 @ stdcall GetIpErrorString(long ptr ptr)
 @ stdcall GetIpForwardTable(ptr ptr long)
+@ stdcall -version=0x600+ GetIpForwardEntry2(ptr)
 @ stdcall -stub -version=0x600+ GetIpForwardTable2(long ptr)
+@ stdcall -version=0x600+ GetIpInterfaceEntry(ptr)
 @ stub GetIpForwardTableFromStack
 @ stdcall GetIpNetTable(ptr ptr long)
 @ stdcall -stub -version=0x600+ GetIpNetTable2(long ptr)
@@ -113,6 +118,7 @@
 @ stdcall IcmpSendEcho(ptr long ptr long ptr ptr long long)
 @ stdcall -stub -version=0x600+ if_indextoname(long ptr)
 @ stdcall -stub -version=0x600+ if_nametoindex(str)
+@ stdcall -version=0x600+ InitializeIpInterfaceEntry(ptr)
 @ stub InternalCreateIpForwardEntry
 @ stub InternalCreateIpNetEntry
 @ stub InternalDeleteIpForwardEntry
@@ -165,6 +171,7 @@
 @ stdcall SetIfEntry(ptr)
 @ stub SetIfEntryToStack
 @ stdcall SetIpForwardEntry(ptr)
+@ stdcall -version=0x600+ SetIpInterfaceEntry(ptr)
 @ stdcall SetIpForwardEntryToStack(ptr)
 @ stub SetIpMultihopRouteEntryToStack
 @ stdcall SetIpNetEntry(ptr)
