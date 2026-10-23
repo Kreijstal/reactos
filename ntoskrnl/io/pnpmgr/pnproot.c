@@ -116,6 +116,7 @@ PnpRootRegisterDevice(
 
     Device = ExAllocatePoolWithTag(PagedPool, sizeof(PNPROOT_DEVICE), TAG_PNP_ROOT);
     if (!Device) return STATUS_NO_MEMORY;
+    RtlZeroMemory(Device, sizeof(PNPROOT_DEVICE));
 
     DeviceNode = IopGetDeviceNode(DeviceObject);
     if (!RtlCreateUnicodeString(&InstancePathCopy, DeviceNode->InstancePath.Buffer))
