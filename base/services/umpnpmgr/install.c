@@ -45,6 +45,72 @@ HANDLE hDeviceInstallListMutex;
 LIST_ENTRY DeviceInstallListHead;
 HANDLE hDeviceInstallListNotEmpty;
 
+/*
+ * Devices created with CM_CREATE_DEVINST_DO_NOT_INSTALL: whoever created them
+ * installs them (SetupDiRegisterDeviceInfo and then SetupDiInstallDevice or
+ * UpdateDriverForPlugAndPlayDevices), so their arrival must not start a
+ * second, concurrent installation here.
+ */
+typedef struct _DO_NOT_INSTALL_ENTRY
+{
+    LIST_ENTRY ListEntry;
+    WCHAR DeviceInstance[MAX_DEVICE_ID_LEN];
+} DO_NOT_INSTALL_ENTRY, *PDO_NOT_INSTALL_ENTRY;
+
+static LIST_ENTRY DoNotInstallListHead = { &DoNotInstallListHead, &DoNotInstallListHead };
+static RTL_CRITICAL_SECTION DoNotInstallListLock;
+
+VOID
+InitializeDoNotInstallList(VOID)
+{
+    RtlInitializeCriticalSection(&DoNotInstallListLock);
+}
+
+VOID
+AddDoNotInstallDevice(
+    _In_ PCWSTR DeviceInstance)
+{
+    PDO_NOT_INSTALL_ENTRY Entry;
+
+    Entry = HeapAlloc(GetProcessHeap(), 0, sizeof(*Entry));
+    if (Entry == NULL)
+        return;
+    lstrcpynW(Entry->DeviceInstance, DeviceInstance, ARRAYSIZE(Entry->DeviceInstance));
+
+    RtlEnterCriticalSection(&DoNotInstallListLock);
+    InsertTailList(&DoNotInstallListHead, &Entry->ListEntry);
+    RtlLeaveCriticalSection(&DoNotInstallListLock);
+}
+
+/* Takes the device off the list: only its first arrival is skipped */
+static
+BOOL
+TakeDoNotInstallDevice(
+    _In_ PCWSTR DeviceInstance)
+{
+    PLIST_ENTRY ListEntry;
+    PDO_NOT_INSTALL_ENTRY Entry;
+    BOOL Found = FALSE;
+
+    RtlEnterCriticalSection(&DoNotInstallListLock);
+    for (ListEntry = DoNotInstallListHead.Flink;
+         ListEntry != &DoNotInstallListHead;
+         ListEntry = ListEntry->Flink)
+    {
+        Entry = CONTAINING_RECORD(ListEntry, DO_NOT_INSTALL_ENTRY, ListEntry);
+        if (_wcsicmp(Entry->DeviceInstance, DeviceInstance) == 0)
+        {
+            RemoveEntryList(&Entry->ListEntry);
+            HeapFree(GetProcessHeap(), 0, Entry);
+            Found = TRUE;
+            break;
+        }
+    }
+    RtlLeaveCriticalSection(&DoNotInstallListLock);
+
+    return Found;
+}
+
 DWORD
 CreatePnpInstallEventSecurity(
     _Out_ PSECURITY_DESCRIPTOR *EventSd);
@@ -75,6 +141,12 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
     WCHAR UuidString[39];
 
     DPRINT("InstallDevice(%S, %d)\n", DeviceInstance, ShowWizard);
+
+    if (TakeDoNotInstallDevice(DeviceInstance))
+    {
+        DPRINT("Not installing %S: its creator does\n", DeviceInstance);
+        return TRUE;
+    }
 
     ZeroMemory(&ProcessInfo, sizeof(ProcessInfo));
 
