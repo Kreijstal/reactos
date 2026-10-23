@@ -21,6 +21,7 @@ extern void func_GetEnvironmentVariable(void);
 extern void func_GetFinalPathNameByHandle(void);
 extern void func_GetLocaleInfo(void);
 extern void func_GetModuleFileName(void);
+extern void func_GetOverlappedResultEx(void);
 extern void func_GetVolumeInformation(void);
 extern void func_InitOnce(void);
 extern void func_interlck(void);
@@ -69,6 +70,7 @@ const struct test winetest_testlist[] =
     { "GetFinalPathNameByHandle",    func_GetFinalPathNameByHandle },
     { "GetLocaleInfo",               func_GetLocaleInfo },
     { "GetModuleFileName",           func_GetModuleFileName },
+    { "GetOverlappedResultEx",       func_GetOverlappedResultEx },
     { "GetVolumeInformation",        func_GetVolumeInformation },
     { "InitOnce",                    func_InitOnce },
     { "interlck",                    func_interlck },
