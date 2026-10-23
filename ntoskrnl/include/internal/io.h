@@ -528,6 +528,7 @@ typedef enum _DEVICE_ACTION
     PiActionAddBootDevices,
     PiActionStartDevice,
     PiActionQueryState,
+    PiActionRemovePendingCloses,
 } DEVICE_ACTION;
 
 //
@@ -1368,6 +1369,10 @@ PiQueueDeviceAction(
     _In_ DEVICE_ACTION Action,
     _In_opt_ PKEVENT CompletionEvent,
     _Out_opt_ NTSTATUS *CompletionStatus);
+
+VOID
+PiNotifyDeviceObjectClosed(
+    _In_ PDEVICE_OBJECT DeviceObject);
 
 NTSTATUS
 PiPerformSyncDeviceAction(

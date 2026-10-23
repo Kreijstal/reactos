@@ -556,6 +556,10 @@ IopDereferenceDeviceObject(IN PDEVICE_OBJECT DeviceObject,
     if (ReferenceCount != 0)
         return;
 
+    /* A surprise-removed device may be waiting for its last handle to be closed */
+    if (ExtensionFlags & DOE_REMOVE_PENDING)
+        PiNotifyDeviceObjectClosed(DeviceObject);
+
     /* Check if we can unload it and it's safe to unload */
     if (ExtensionFlags & DOE_DELETE_PENDING)
     {
