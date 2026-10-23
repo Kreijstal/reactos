@@ -370,6 +370,12 @@ IoReportDetectedDevice(
     if (DeviceObject && *DeviceObject)
         PnpRootRegisterDevice(*DeviceObject);
 
+    /*
+     * The device node keeps a reference on its PDO, as on the PDOs that bus
+     * drivers report; IopSendRemoveDevice releases it.
+     */
+    ObReferenceObject(Pdo);
+
     PiInsertDevNode(DeviceNode, IopRootDeviceNode);
     DeviceNode->Flags |= DNF_MADEUP | DNF_ENUMERATED;
 

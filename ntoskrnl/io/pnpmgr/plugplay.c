@@ -406,6 +406,12 @@ PiControlInitializeDevice(
     // Finish the root device registration
     PnpRootRegisterDevice(DeviceObject);
 
+    /*
+     * The device node keeps a reference on its PDO, as on the PDOs that bus
+     * drivers report; IopSendRemoveDevice releases it.
+     */
+    ObReferenceObject(DeviceObject);
+
     /* Insert as a root enumerated device node */
     PiInsertDevNode(DeviceNode, IopRootDeviceNode);
 
