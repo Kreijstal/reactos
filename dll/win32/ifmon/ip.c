@@ -97,6 +97,38 @@ IpTopCommands[] =
 };
 
 
+/*
+ * Like Windows, take an interface index wherever an interface name is
+ * expected: "netsh interface ip set address 42 static ..."
+ */
+static
+DWORD
+GetInterfaceGuid(
+    _In_ PWSTR pszName,
+    _Out_ GUID *pInterfaceGuid)
+{
+    NET_LUID InterfaceLuid;
+    PWSTR pszEnd;
+    ULONG ulIndex;
+    DWORD dwError;
+
+    dwError = NhGetGuidFromInterfaceName(pszName, pInterfaceGuid, 0, 0);
+    if (dwError == ERROR_SUCCESS)
+        return dwError;
+
+    ulIndex = wcstoul(pszName, &pszEnd, 10);
+    if ((pszEnd == pszName) || (*pszEnd != UNICODE_NULL))
+        return dwError;
+
+    if ((ConvertInterfaceIndexToLuid(ulIndex, &InterfaceLuid) != NO_ERROR) ||
+        (ConvertInterfaceLuidToGuid(&InterfaceLuid, pInterfaceGuid) != NO_ERROR))
+    {
+        return dwError;
+    }
+
+    return ERROR_SUCCESS;
+}
+
 static
 HRESULT
 GetInterfaceProperties(
@@ -570,12 +602,10 @@ IpAddAddress(
         {
             case 0: /* name */
                 DPRINT("Tag: name (%S)\n", argv[i + dwCurrentIndex]);
-                dwError = NhGetGuidFromInterfaceName(argv[i + dwCurrentIndex],
-                                                     &InterfaceGUID,
-                                                     0, 0);
+                dwError = GetInterfaceGuid(argv[i + dwCurrentIndex], &InterfaceGUID);
                 if (dwError != ERROR_SUCCESS)
                 {
-                    DPRINT1("NhGetGuidFromInterfaceName() failed (Error %lu)\n", dwError);
+                    DPRINT1("GetInterfaceGuid() failed (Error %lu)\n", dwError);
                     PrintMessageFromModule(hDllInstance,
                                            IDS_ERROR_INVALID_INTERFACE,
                                            argv[i + dwCurrentIndex]);
@@ -848,12 +878,10 @@ IpAddDns(
         {
             case 0: /* name */
                 DPRINT1("Tag: name (%S)\n", argv[i + dwCurrentIndex]);
-                dwError = NhGetGuidFromInterfaceName(argv[i + dwCurrentIndex],
-                                                     &InterfaceGUID,
-                                                     0, 0);
+                dwError = GetInterfaceGuid(argv[i + dwCurrentIndex], &InterfaceGUID);
                 if (dwError != ERROR_SUCCESS)
                 {
-                    DPRINT1("NhGetGuidFromInterfaceName() failed (Error %lu)\n", dwError);
+                    DPRINT1("GetInterfaceGuid() failed (Error %lu)\n", dwError);
                     PrintMessageFromModule(hDllInstance,
                                            IDS_ERROR_INVALID_INTERFACE,
                                            argv[i + dwCurrentIndex]);
@@ -1028,12 +1056,10 @@ IpDeleteAddress(
         {
             case 0: /* name */
                 DPRINT("Tag: name (%S)\n", argv[i + dwCurrentIndex]);
-                dwError = NhGetGuidFromInterfaceName(argv[i + dwCurrentIndex],
-                                                     &InterfaceGUID,
-                                                     0, 0);
+                dwError = GetInterfaceGuid(argv[i + dwCurrentIndex], &InterfaceGUID);
                 if (dwError != ERROR_SUCCESS)
                 {
-                    DPRINT1("NhGetGuidFromInterfaceName() failed (Error %lu)\n", dwError);
+                    DPRINT1("GetInterfaceGuid() failed (Error %lu)\n", dwError);
                     PrintMessageFromModule(hDllInstance,
                                            IDS_ERROR_INVALID_INTERFACE,
                                            argv[i + dwCurrentIndex]);
@@ -1246,12 +1272,10 @@ IpDeleteArpCache(
         {
             case 0: /* name */
                 DPRINT("Tag: name (%S)\n", argv[i + dwCurrentIndex]);
-                dwError = NhGetGuidFromInterfaceName(argv[i + dwCurrentIndex],
-                                                     &InterfaceGUID,
-                                                     0, 0);
+                dwError = GetInterfaceGuid(argv[i + dwCurrentIndex], &InterfaceGUID);
                 if (dwError != ERROR_SUCCESS)
                 {
-                    DPRINT("NhGetGuidFromInterfaceName() failed (Error %lu)\n", dwError);
+                    DPRINT("GetInterfaceGuid() failed (Error %lu)\n", dwError);
                     PrintMessageFromModule(hDllInstance,
                                            IDS_ERROR_INVALID_INTERFACE,
                                            argv[i + dwCurrentIndex]);
@@ -1376,12 +1400,10 @@ IpDeleteDns(
         {
             case 0: /* name */
                 DPRINT1("Tag: name (%S)\n", argv[i + dwCurrentIndex]);
-                dwError = NhGetGuidFromInterfaceName(argv[i + dwCurrentIndex],
-                                                     &InterfaceGUID,
-                                                     0, 0);
+                dwError = GetInterfaceGuid(argv[i + dwCurrentIndex], &InterfaceGUID);
                 if (dwError != ERROR_SUCCESS)
                 {
-                    DPRINT1("NhGetGuidFromInterfaceName() failed (Error %lu)\n", dwError);
+                    DPRINT1("GetInterfaceGuid() failed (Error %lu)\n", dwError);
                     PrintMessageFromModule(hDllInstance,
                                            IDS_ERROR_INVALID_INTERFACE,
                                            argv[i + dwCurrentIndex]);
@@ -1563,12 +1585,10 @@ IpSetAddress(
         {
             case 0: /* name */
                 DPRINT("Tag: name (%S)\n", argv[i + dwCurrentIndex]);
-                dwError = NhGetGuidFromInterfaceName(argv[i + dwCurrentIndex],
-                                                     &InterfaceGUID,
-                                                     0, 0);
+                dwError = GetInterfaceGuid(argv[i + dwCurrentIndex], &InterfaceGUID);
                 if (dwError != ERROR_SUCCESS)
                 {
-                    DPRINT("NhGetGuidFromInterfaceName() failed (Error %lu)\n", dwError);
+                    DPRINT("GetInterfaceGuid() failed (Error %lu)\n", dwError);
                     PrintMessageFromModule(hDllInstance,
                                            IDS_ERROR_INVALID_INTERFACE,
                                            argv[i + dwCurrentIndex]);
@@ -1877,12 +1897,10 @@ IpSetDns(
         {
             case 0: /* name */
                 DPRINT("Tag: name (%S)\n", argv[i + dwCurrentIndex]);
-                dwError = NhGetGuidFromInterfaceName(argv[i + dwCurrentIndex],
-                                                     &InterfaceGUID,
-                                                     0, 0);
+                dwError = GetInterfaceGuid(argv[i + dwCurrentIndex], &InterfaceGUID);
                 if (dwError != ERROR_SUCCESS)
                 {
-                    DPRINT("NhGetGuidFromInterfaceName() failed (Error %lu)\n", dwError);
+                    DPRINT("GetInterfaceGuid() failed (Error %lu)\n", dwError);
                     PrintMessageFromModule(hDllInstance,
                                            IDS_ERROR_INVALID_INTERFACE,
                                            argv[i + dwCurrentIndex]);
