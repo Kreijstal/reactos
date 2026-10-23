@@ -29,11 +29,11 @@ THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR I
  * interface (TDI). Other than that, following features are implemented
  * and should work:
  *
- *     * TCP/IP networking: connect, listen, accept, read, write
- *     * UDP/IP networking: write
+ *     * TCP/IP networking: connect, listen, accept, read, write,
+ *       receive and disconnect event callbacks
+ *     * UDP/IP networking: write, read, receive event callbacks
  *
- * So in a nutshell TCP/IP support is completed, UDP support is
- * partially complete and ICMP support does not exist yet.
+ * ICMP support does not exist yet, and neither does IPv6.
  * In particular the listen/accept mechanism allows one to write
  * kernel side TCP servers that one can connect to via the internet.
  */
@@ -58,6 +58,7 @@ THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR I
 #include <tdiconn.h>
 
 #define TAG_NETIO 'OIEN'
+#define TAG_NETIO_RECV 'rIEN'
 
 #ifndef TAG_AFD_TDI_CONNECTION_INFORMATION
 #define TAG_AFD_TDI_CONNECTION_INFORMATION 'cTfA'
@@ -98,9 +99,40 @@ typedef struct _WSK_SOCKET_INTERNAL
     HANDLE ConnectionHandle;            /* Returned by TdiOpenConnectionEndpointFile() */
     BOOLEAN ConnectionFileAssociated;
 
-    /* Incoming connection callback function */
-    const WSK_CLIENT_LISTEN_DISPATCH *ListenDispatch;
-    UINT CallbackMask;
+    /* Client event callbacks given to WskSocket (or returned by the
+     * client's WskAcceptEvent): a WSK_CLIENT_LISTEN_DISPATCH,
+     * WSK_CLIENT_DATAGRAM_DISPATCH or WSK_CLIENT_CONNECTION_DISPATCH
+     * depending on the socket type. */
+    const VOID *ClientDispatch;
+    volatile ULONG CallbackMask;
+
+    /* Receive side, protected by RecvLock */
+    KSPIN_LOCK RecvLock;
+    LIST_ENTRY RecvRequests;       /* NETIO_RECV_REQUEST: pending WskReceive(From) IRPs */
+    BOOLEAN Closing;               /* WskCloseSocket was called */
+
+    /* Datagram sockets: inbound datagrams come from a TDI receive
+     * datagram event handler on LocalAddressFile. Those nobody took yet
+     * wait on the backlog. */
+    LIST_ENTRY DatagramBacklog;    /* NETIO_DATAGRAM */
+    ULONG BacklogCount;
+    ULONG BacklogBytes;
+    BOOLEAN DatagramHandlerRegistered;
+    EX_RUNDOWN_REF EventRundown;   /* held while the TDI event handler runs */
+
+    /* Connection oriented sockets: once connected, a TDI receive into a
+     * NETIO_CHUNK is kept posted while someone wants data. What was
+     * received and not consumed yet is in Chunk. */
+    BOOLEAN Connected;
+    BOOLEAN PumpActive;            /* receive work item queued or TDI receive pending */
+    BOOLEAN RecvShutdown;          /* the peer closed or the connection broke */
+    BOOLEAN DisconnectIndicated;
+    BOOLEAN IndicationBlocked;     /* client did not accept all data: wait for WskReceive */
+    BOOLEAN Delivering;
+    BOOLEAN DeliverAgain;
+    NTSTATUS RecvShutdownStatus;
+    struct _NETIO_CHUNK *Chunk;
+    WORK_QUEUE_ITEM PumpWorkItem;
 
     UINT Flags;                    /* SO_REUSEADDR, ... see ws2def.h */
     LONG RefCount;                 /* See ReferenceSocket/DereferenceSocket */
@@ -145,6 +177,12 @@ ReferenceSocket(_In_ PWSK_SOCKET_INTERNAL Socket)
 static void
 DereferenceSocket(_In_ PWSK_SOCKET_INTERNAL Socket);
 
+static VOID
+ReceiveShutdown(_In_ PWSK_SOCKET_INTERNAL Socket);
+
+static VOID
+FreeChunk(_In_ struct _NETIO_CHUNK *Chunk);
+
 /* This function can be called several times on the same socket.
    In particular it will be called by WskClose and later by the
    DereferenceSocket() of the socket.
@@ -156,6 +194,8 @@ void SocketShutdown(_In_ PWSK_SOCKET_INTERNAL Socket)
     NTSTATUS status;
 
     FUNCTION_TRACE;
+
+    ReceiveShutdown(Socket);
 
     if (Socket->ListenSocket != NULL)
     {
@@ -225,6 +265,12 @@ SocketDestroy(_In_ PWSK_SOCKET_INTERNAL Socket)
     {
         ZwClose(Socket->LocalAddressHandle);
         Socket->LocalAddressHandle = NULL;
+    }
+    /* Received stream data nobody consumed */
+    if (Socket->Chunk != NULL)
+    {
+        FreeChunk(Socket->Chunk);
+        Socket->Chunk = NULL;
     }
     ExFreePoolWithTag(Socket, TAG_NETIO);
 }
@@ -342,6 +388,790 @@ DereferenceSocket(_In_ PWSK_SOCKET_INTERNAL Socket)
     DereferenceSocketSynchronous(Socket);
 }
 
+/* ---------------------------------------------------------------------
+ * Receive support
+ *
+ * Datagram sockets register a TDI_EVENT_RECEIVE_DATAGRAM handler on their
+ * address file when they are bound. Each inbound datagram goes to the
+ * oldest pending WskReceiveFrom IRP, else to the client's
+ * WskReceiveFromEvent callback, else to a bounded backlog that later
+ * WskReceiveFrom calls drain.
+ *
+ * Connection oriented sockets keep one TDI receive posted into a
+ * NETIO_CHUNK while there is a consumer (a pending WskReceive IRP or an
+ * enabled WSK_EVENT_RECEIVE callback). The data received is handed to
+ * WskReceive IRPs or indicated to WskReceiveEvent; the next TDI receive
+ * is posted only once it is consumed, so the transport's flow control
+ * keeps working. A receive that completes with no data (graceful close)
+ * or with an error ends the receive side and is reported through
+ * WskDisconnectEvent.
+ * --------------------------------------------------------------------- */
+
+#define NETIO_CHUNK_SIZE          0x4000
+#define NETIO_BACKLOG_MAX_COUNT   128
+#define NETIO_BACKLOG_MAX_BYTES   (256 * 1024)
+
+typedef struct _NETIO_RECV_REQUEST
+{
+    LIST_ENTRY Entry;
+    PIRP Irp;
+    PWSK_SOCKET_INTERNAL Socket;
+    WSK_BUF Buffer;
+    /* WskReceiveFrom only */
+    PSOCKADDR RemoteAddress;
+    PULONG ControlLength;
+    PULONG ControlFlags;
+    BOOLEAN Queued;
+} NETIO_RECV_REQUEST, *PNETIO_RECV_REQUEST;
+
+typedef struct _NETIO_DATAGRAM
+{
+    WSK_DATAGRAM_INDICATION Indication;     /* must stay first */
+    LIST_ENTRY Entry;
+    SOCKADDR_IN Remote;
+    PMDL Mdl;
+    ULONG Length;
+    UCHAR Data[ANYSIZE_ARRAY];
+} NETIO_DATAGRAM, *PNETIO_DATAGRAM;
+
+typedef struct _NETIO_CHUNK
+{
+    WSK_DATA_INDICATION Indication;         /* must stay first */
+    PWSK_SOCKET_INTERNAL Socket;
+    PMDL Mdl;
+    ULONG Offset;                           /* unconsumed data */
+    ULONG Length;
+    ULONG Size;
+    UCHAR Data[ANYSIZE_ARRAY];
+} NETIO_CHUNK, *PNETIO_CHUNK;
+
+static ULONG
+CallbackFlags(VOID)
+{
+    return (KeGetCurrentIrql() >= DISPATCH_LEVEL) ? WSK_FLAG_AT_DISPATCH_LEVEL : 0;
+}
+
+/* Copies Length bytes from Source into the memory a WSK_BUF describes,
+ * an MDL chain whose first Offset bytes are skipped. Returns how much
+ * fit. Callable at DISPATCH_LEVEL. */
+static SIZE_T
+CopyToWskBuf(_In_ const WSK_BUF *Buffer, _In_reads_bytes_(Length) const UCHAR *Source, _In_ SIZE_T Length)
+{
+    PMDL Mdl = Buffer->Mdl;
+    ULONG Offset = Buffer->Offset;
+    SIZE_T Room = Buffer->Length;
+    SIZE_T Done = 0, Count;
+    ULONG MdlLength;
+    PUCHAR Va;
+
+    while (Mdl != NULL && Done < Length && Room > 0)
+    {
+        MdlLength = MmGetMdlByteCount(Mdl);
+        if (Offset >= MdlLength)
+        {
+            Offset -= MdlLength;
+            Mdl = Mdl->Next;
+            continue;
+        }
+        Va = MmGetSystemAddressForMdlSafe(Mdl, NormalPagePriority);
+        if (Va == NULL)
+            break;
+        Count = min(MdlLength - Offset, Length - Done);
+        Count = min(Count, Room);
+        RtlCopyMemory(Va + Offset, Source + Done, Count);
+        Done += Count;
+        Room -= Count;
+        Offset = 0;
+        Mdl = Mdl->Next;
+    }
+    return Done;
+}
+
+static VOID
+CompleteRecvRequest(_In_ PNETIO_RECV_REQUEST Request, _In_ NTSTATUS Status, _In_ ULONG_PTR Information)
+{
+    PWSK_SOCKET_INTERNAL Socket = Request->Socket;
+    PIRP Irp = Request->Irp;
+
+    ExFreePoolWithTag(Request, TAG_NETIO_RECV);
+
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = Information;
+    IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+
+    DereferenceSocket(Socket);
+}
+
+static VOID NTAPI
+CancelRecvRequest(_Inout_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
+{
+    PNETIO_RECV_REQUEST Request = Irp->Tail.Overlay.DriverContext[0];
+    PWSK_SOCKET_INTERNAL Socket = Request->Socket;
+    KIRQL OldIrql;
+
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+
+    /* Whoever cleared the cancel routine owns the IRP: that is us. Just
+     * make sure it is no longer queued. */
+    KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+    if (Request->Queued)
+    {
+        RemoveEntryList(&Request->Entry);
+        Request->Queued = FALSE;
+    }
+    KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+
+    CompleteRecvRequest(Request, STATUS_CANCELLED, 0);
+}
+
+/* Allocates the request tracking a WskReceive(From) IRP. The IRP is
+ * marked pending and holds a socket reference until it completes. */
+static PNETIO_RECV_REQUEST
+CreateRecvRequest(_In_ PWSK_SOCKET_INTERNAL Socket, _In_ PWSK_BUF Buffer, _In_ PIRP Irp)
+{
+    PNETIO_RECV_REQUEST Request;
+
+    Request = ExAllocatePoolZero(NonPagedPool, sizeof(*Request), TAG_NETIO_RECV);
+    if (Request == NULL)
+        return NULL;
+    Request->Irp = Irp;
+    Request->Socket = Socket;
+    Request->Buffer = *Buffer;
+    Irp->Tail.Overlay.DriverContext[0] = Request;
+    IoMarkIrpPending(Irp);
+    ReferenceSocket(Socket);
+    return Request;
+}
+
+/* Puts a request on the socket's queue. Fails it if the socket is closing,
+ * and completes it if it was cancelled already. */
+static VOID
+QueueRecvRequest(_In_ PNETIO_RECV_REQUEST Request)
+{
+    PWSK_SOCKET_INTERNAL Socket = Request->Socket;
+    PIRP Irp = Request->Irp;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+    if (Socket->Closing)
+    {
+        KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+        CompleteRecvRequest(Request, STATUS_INVALID_DEVICE_STATE, 0);
+        return;
+    }
+    IoSetCancelRoutine(Irp, CancelRecvRequest);
+    if (Irp->Cancel && IoSetCancelRoutine(Irp, NULL) != NULL)
+    {
+        KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+        CompleteRecvRequest(Request, STATUS_CANCELLED, 0);
+        return;
+    }
+    /* If the cancel routine is already running, it will dequeue it */
+    InsertTailList(&Socket->RecvRequests, &Request->Entry);
+    Request->Queued = TRUE;
+    KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+}
+
+/* Takes the oldest request that is not being cancelled. RecvLock held. */
+static PNETIO_RECV_REQUEST
+PopRecvRequest(_In_ PWSK_SOCKET_INTERNAL Socket)
+{
+    PNETIO_RECV_REQUEST Request;
+
+    while (!IsListEmpty(&Socket->RecvRequests))
+    {
+        Request = CONTAINING_RECORD(RemoveHeadList(&Socket->RecvRequests), NETIO_RECV_REQUEST, Entry);
+        Request->Queued = FALSE;
+        if (IoSetCancelRoutine(Request->Irp, NULL) != NULL)
+            return Request;
+        /* Being cancelled: the cancel routine completes it */
+    }
+    return NULL;
+}
+
+/* Datagrams */
+
+static PNETIO_DATAGRAM
+AllocateDatagram(_In_reads_bytes_(Length) const VOID *Data, _In_ ULONG Length, _In_ const SOCKADDR_IN *Remote)
+{
+    PNETIO_DATAGRAM Datagram;
+
+    Datagram = ExAllocatePoolUninitialized(NonPagedPool,
+                                           FIELD_OFFSET(NETIO_DATAGRAM, Data[max(Length, 1)]),
+                                           TAG_NETIO_RECV);
+    if (Datagram == NULL)
+        return NULL;
+
+    Datagram->Mdl = IoAllocateMdl(Datagram->Data, max(Length, 1), FALSE, FALSE, NULL);
+    if (Datagram->Mdl == NULL)
+    {
+        ExFreePoolWithTag(Datagram, TAG_NETIO_RECV);
+        return NULL;
+    }
+    MmBuildMdlForNonPagedPool(Datagram->Mdl);
+
+    RtlCopyMemory(Datagram->Data, Data, Length);
+    Datagram->Length = Length;
+    Datagram->Remote = *Remote;
+
+    Datagram->Indication.Next = NULL;
+    Datagram->Indication.Buffer.Mdl = Datagram->Mdl;
+    Datagram->Indication.Buffer.Offset = 0;
+    Datagram->Indication.Buffer.Length = Length;
+    Datagram->Indication.ControlInfo = NULL;
+    Datagram->Indication.ControlInfoLength = 0;
+    Datagram->Indication.RemoteAddress = (PSOCKADDR)&Datagram->Remote;
+    return Datagram;
+}
+
+static VOID
+FreeDatagram(_In_ PNETIO_DATAGRAM Datagram)
+{
+    IoFreeMdl(Datagram->Mdl);
+    ExFreePoolWithTag(Datagram, TAG_NETIO_RECV);
+}
+
+static VOID
+CompleteDatagramRequest(
+    _In_ PNETIO_RECV_REQUEST Request,
+    _In_reads_bytes_(Length) const VOID *Data,
+    _In_ ULONG Length,
+    _In_ const SOCKADDR_IN *Remote)
+{
+    SIZE_T Copied;
+
+    Copied = CopyToWskBuf(&Request->Buffer, Data, Length);
+    if (Request->RemoteAddress != NULL)
+        RtlCopyMemory(Request->RemoteAddress, Remote, sizeof(*Remote));
+    if (Request->ControlLength != NULL)
+        *Request->ControlLength = 0;
+    if (Request->ControlFlags != NULL)
+        *Request->ControlFlags = (Copied < Length) ? MSG_TRUNC : 0;
+    CompleteRecvRequest(Request, STATUS_SUCCESS, Copied);
+}
+
+/* Hands backlogged datagrams to pending WskReceiveFrom IRPs */
+static VOID
+DrainDatagramBacklog(_In_ PWSK_SOCKET_INTERNAL Socket)
+{
+    PNETIO_RECV_REQUEST Request;
+    PNETIO_DATAGRAM Datagram;
+    KIRQL OldIrql;
+
+    for (;;)
+    {
+        KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+        if (IsListEmpty(&Socket->DatagramBacklog))
+        {
+            KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+            return;
+        }
+        Request = PopRecvRequest(Socket);
+        if (Request == NULL)
+        {
+            KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+            return;
+        }
+        Datagram = CONTAINING_RECORD(RemoveHeadList(&Socket->DatagramBacklog), NETIO_DATAGRAM, Entry);
+        Socket->BacklogCount--;
+        Socket->BacklogBytes -= Datagram->Length;
+        KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+
+        CompleteDatagramRequest(Request, Datagram->Data, Datagram->Length, &Datagram->Remote);
+        FreeDatagram(Datagram);
+    }
+}
+
+/* Indicates backlogged datagrams once the client enabled WskReceiveFromEvent */
+static VOID
+IndicateDatagramBacklog(_In_ PWSK_SOCKET_INTERNAL Socket)
+{
+    const WSK_CLIENT_DATAGRAM_DISPATCH *Dispatch = Socket->ClientDispatch;
+    PNETIO_DATAGRAM Datagram;
+    NTSTATUS Status;
+    KIRQL OldIrql;
+
+    if (Dispatch == NULL || Dispatch->WskReceiveFromEvent == NULL)
+        return;
+
+    for (;;)
+    {
+        KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+        if (Socket->Closing || !(Socket->CallbackMask & WSK_EVENT_RECEIVE_FROM) ||
+            IsListEmpty(&Socket->DatagramBacklog) || !IsListEmpty(&Socket->RecvRequests))
+        {
+            KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+            break;
+        }
+        Datagram = CONTAINING_RECORD(RemoveHeadList(&Socket->DatagramBacklog), NETIO_DATAGRAM, Entry);
+        Socket->BacklogCount--;
+        Socket->BacklogBytes -= Datagram->Length;
+        KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+
+        Status = Dispatch->WskReceiveFromEvent(Socket->user_context, CallbackFlags(), &Datagram->Indication);
+        if (Status == STATUS_PENDING)
+            continue;
+        if (Status != STATUS_DATA_NOT_ACCEPTED)
+        {
+            FreeDatagram(Datagram);
+            continue;
+        }
+
+        /* Not accepted: it waits for WskReceiveFrom, in front */
+        KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+        InsertHeadList(&Socket->DatagramBacklog, &Datagram->Entry);
+        Socket->BacklogCount++;
+        Socket->BacklogBytes += Datagram->Length;
+        KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+        break;
+    }
+
+    /* A WskReceiveFrom may have been queued meanwhile */
+    DrainDatagramBacklog(Socket);
+}
+
+/* TDI_EVENT_RECEIVE_DATAGRAM handler, runs at DISPATCH_LEVEL */
+static NTSTATUS NTAPI
+ReceiveDatagramEventHandler(
+    _In_opt_ PVOID TdiEventContext,
+    _In_ LONG SourceAddressLength,
+    _In_reads_bytes_(SourceAddressLength) PVOID SourceAddress,
+    _In_ LONG OptionsLength,
+    _In_reads_bytes_opt_(OptionsLength) PVOID Options,
+    _In_ ULONG ReceiveDatagramFlags,
+    _In_ ULONG BytesIndicated,
+    _In_ ULONG BytesAvailable,
+    _Out_ ULONG *BytesTaken,
+    _In_ PVOID Tsdu,
+    _Out_opt_ PIRP *IoRequestPacket)
+{
+    PWSK_SOCKET_INTERNAL Socket = TdiEventContext;
+    const WSK_CLIENT_DATAGRAM_DISPATCH *Dispatch;
+    PTA_IP_ADDRESS Source = SourceAddress;
+    PNETIO_RECV_REQUEST Request;
+    PNETIO_DATAGRAM Datagram;
+    SOCKADDR_IN Remote;
+    BOOLEAN Indicate;
+    NTSTATUS Status;
+    KIRQL OldIrql;
+
+    *BytesTaken = BytesAvailable;
+    if (IoRequestPacket != NULL)
+        *IoRequestPacket = NULL;
+
+    if (!ExAcquireRundownProtection(&Socket->EventRundown))
+        return STATUS_SUCCESS;
+
+    RtlZeroMemory(&Remote, sizeof(Remote));
+    Remote.sin_family = AF_INET;
+    if (SourceAddressLength >= (LONG)sizeof(TA_IP_ADDRESS) &&
+        Source->TAAddressCount >= 1 &&
+        Source->Address[0].AddressType == TDI_ADDRESS_TYPE_IP)
+    {
+        Remote.sin_port = Source->Address[0].Address[0].sin_port;
+        Remote.sin_addr.s_addr = Source->Address[0].Address[0].in_addr;
+    }
+
+    /* The transport indicates whole datagrams */
+    KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+    if (Socket->Closing)
+    {
+        KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+        goto out;
+    }
+    Request = PopRecvRequest(Socket);
+    Dispatch = Socket->ClientDispatch;
+    Indicate = (Request == NULL &&
+                (Socket->CallbackMask & WSK_EVENT_RECEIVE_FROM) &&
+                Dispatch != NULL && Dispatch->WskReceiveFromEvent != NULL &&
+                IsListEmpty(&Socket->DatagramBacklog));
+    KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+
+    if (Request != NULL)
+    {
+        CompleteDatagramRequest(Request, Tsdu, BytesIndicated, &Remote);
+        goto out;
+    }
+
+    Datagram = AllocateDatagram(Tsdu, BytesIndicated, &Remote);
+    if (Datagram == NULL)
+        goto out;
+
+    if (Indicate)
+    {
+        Status = Dispatch->WskReceiveFromEvent(Socket->user_context, CallbackFlags(), &Datagram->Indication);
+        if (Status == STATUS_PENDING)
+        {
+            /* Retained by the client until it calls WskRelease */
+            goto out;
+        }
+        if (Status != STATUS_DATA_NOT_ACCEPTED)
+        {
+            FreeDatagram(Datagram);
+            goto out;
+        }
+        /* Not accepted: keep it for WskReceiveFrom */
+    }
+
+    KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+    if (!Socket->Closing &&
+        Socket->BacklogCount < NETIO_BACKLOG_MAX_COUNT &&
+        Socket->BacklogBytes + Datagram->Length <= NETIO_BACKLOG_MAX_BYTES)
+    {
+        InsertTailList(&Socket->DatagramBacklog, &Datagram->Entry);
+        Socket->BacklogCount++;
+        Socket->BacklogBytes += Datagram->Length;
+        Datagram = NULL;
+    }
+    KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+
+    if (Datagram != NULL)
+    {
+        /* Backlog full: drop it, like a full socket buffer would */
+        FreeDatagram(Datagram);
+    }
+    else
+    {
+        /* A WskReceiveFrom may have been queued meanwhile */
+        DrainDatagramBacklog(Socket);
+    }
+
+out:
+    ExReleaseRundownProtection(&Socket->EventRundown);
+    return STATUS_SUCCESS;
+}
+
+/* Connection oriented sockets */
+
+static PNETIO_CHUNK
+AllocateChunk(_In_ PWSK_SOCKET_INTERNAL Socket)
+{
+    PNETIO_CHUNK Chunk;
+
+    Chunk = ExAllocatePoolUninitialized(NonPagedPool,
+                                        FIELD_OFFSET(NETIO_CHUNK, Data[NETIO_CHUNK_SIZE]),
+                                        TAG_NETIO_RECV);
+    if (Chunk == NULL)
+        return NULL;
+    Chunk->Mdl = IoAllocateMdl(Chunk->Data, NETIO_CHUNK_SIZE, FALSE, FALSE, NULL);
+    if (Chunk->Mdl == NULL)
+    {
+        ExFreePoolWithTag(Chunk, TAG_NETIO_RECV);
+        return NULL;
+    }
+    MmBuildMdlForNonPagedPool(Chunk->Mdl);
+    Chunk->Socket = Socket;
+    Chunk->Size = NETIO_CHUNK_SIZE;
+    Chunk->Offset = 0;
+    Chunk->Length = 0;
+    Chunk->Indication.Next = NULL;
+    return Chunk;
+}
+
+static VOID
+FreeChunk(_In_ PNETIO_CHUNK Chunk)
+{
+    IoFreeMdl(Chunk->Mdl);
+    ExFreePoolWithTag(Chunk, TAG_NETIO_RECV);
+}
+
+static VOID NTAPI StreamReceiveWorker(_In_ PVOID Parameter);
+
+/* Starts a TDI receive if someone wants data and none is pending.
+ * Callable at DISPATCH_LEVEL: the receive is posted from a work item. */
+static VOID
+StreamKickReceive(_In_ PWSK_SOCKET_INTERNAL Socket)
+{
+    BOOLEAN Queue = FALSE;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+    if (!Socket->Closing && Socket->Connected && !Socket->RecvShutdown &&
+        !Socket->PumpActive && Socket->Chunk == NULL &&
+        ((Socket->CallbackMask & WSK_EVENT_RECEIVE) || !IsListEmpty(&Socket->RecvRequests)))
+    {
+        Socket->PumpActive = TRUE;
+        Queue = TRUE;
+    }
+    KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+
+    if (Queue)
+    {
+        ReferenceSocket(Socket);
+        ExInitializeWorkItem(&Socket->PumpWorkItem, StreamReceiveWorker, Socket);
+        ExQueueWorkItem(&Socket->PumpWorkItem, DelayedWorkQueue);
+    }
+}
+
+/* Hands received stream data to WskReceive IRPs and WskReceiveEvent, and
+ * reports the end of the stream. Only one caller delivers at a time;
+ * others ask it to go around again. */
+static VOID
+StreamDeliver(_In_ PWSK_SOCKET_INTERNAL Socket)
+{
+    const WSK_CLIENT_CONNECTION_DISPATCH *Dispatch = Socket->ClientDispatch;
+    PNETIO_RECV_REQUEST Request;
+    PNETIO_CHUNK Chunk, Done;
+    SIZE_T Copied, Accepted;
+    NTSTATUS Status;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+    if (Socket->Delivering)
+    {
+        Socket->DeliverAgain = TRUE;
+        KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+        return;
+    }
+    Socket->Delivering = TRUE;
+
+    do
+    {
+        Socket->DeliverAgain = FALSE;
+        Done = NULL;
+
+        /* Pending WskReceive IRPs first: they were asked for */
+        while ((Chunk = Socket->Chunk) != NULL && Chunk->Length > 0 &&
+               (Request = PopRecvRequest(Socket)) != NULL)
+        {
+            KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+            /* Only the deliverer consumes the chunk, no need to hold the lock */
+            Copied = CopyToWskBuf(&Request->Buffer, Chunk->Data + Chunk->Offset, Chunk->Length);
+            CompleteRecvRequest(Request, STATUS_SUCCESS, Copied);
+            KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+            Chunk->Offset += (ULONG)Copied;
+            Chunk->Length -= (ULONG)Copied;
+        }
+
+        Chunk = Socket->Chunk;
+        if (Chunk != NULL && Chunk->Length == 0)
+        {
+            Socket->Chunk = NULL;
+            Socket->IndicationBlocked = FALSE;
+            Done = Chunk;
+            Chunk = NULL;
+        }
+
+        if (Chunk != NULL && !Socket->IndicationBlocked && !Socket->Closing &&
+            (Socket->CallbackMask & WSK_EVENT_RECEIVE) &&
+            Dispatch != NULL && Dispatch->WskReceiveEvent != NULL)
+        {
+            KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+
+            Chunk->Indication.Next = NULL;
+            Chunk->Indication.Buffer.Mdl = Chunk->Mdl;
+            Chunk->Indication.Buffer.Offset = Chunk->Offset;
+            Chunk->Indication.Buffer.Length = Chunk->Length;
+            /* Clients only set it when they take part of the data */
+            Accepted = Chunk->Length;
+            Status = Dispatch->WskReceiveEvent(Socket->user_context, CallbackFlags(),
+                                               &Chunk->Indication, Chunk->Length, &Accepted);
+
+            KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+            if (Status == STATUS_PENDING)
+            {
+                /* Retained by the client until it calls WskRelease */
+                Socket->Chunk = NULL;
+            }
+            else if (Status == STATUS_SUCCESS && Accepted >= Chunk->Length)
+            {
+                Socket->Chunk = NULL;
+                Done = Chunk;
+            }
+            else
+            {
+                /* Partly or not accepted: the rest waits for WskReceive */
+                if (Status == STATUS_SUCCESS)
+                {
+                    Chunk->Offset += (ULONG)Accepted;
+                    Chunk->Length -= (ULONG)Accepted;
+                }
+                Socket->IndicationBlocked = TRUE;
+            }
+            Socket->DeliverAgain = TRUE;
+        }
+
+        if (Socket->Chunk == NULL && Socket->RecvShutdown && !Socket->Closing)
+        {
+            /* End of stream: a graceful close completes receives with no
+             * data, a broken connection with its error */
+            while ((Request = PopRecvRequest(Socket)) != NULL)
+            {
+                KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+                CompleteRecvRequest(Request, Socket->RecvShutdownStatus, 0);
+                KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+            }
+
+            if (!Socket->DisconnectIndicated &&
+                (Socket->CallbackMask & WSK_EVENT_DISCONNECT) &&
+                Dispatch != NULL && Dispatch->WskDisconnectEvent != NULL)
+            {
+                Socket->DisconnectIndicated = TRUE;
+                KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+                Dispatch->WskDisconnectEvent(Socket->user_context,
+                                             NT_SUCCESS(Socket->RecvShutdownStatus) ? 0 : WSK_FLAG_ABORTIVE);
+                KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+            }
+        }
+
+        if (Done != NULL)
+        {
+            KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+            FreeChunk(Done);
+            KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+        }
+    } while (Socket->DeliverAgain);
+
+    Socket->Delivering = FALSE;
+    KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+
+    StreamKickReceive(Socket);
+}
+
+static NTSTATUS NTAPI
+StreamReceiveComplete(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp, _In_ PVOID Context)
+{
+    PNETIO_CHUNK Chunk = Context;
+    PWSK_SOCKET_INTERNAL Socket = Chunk->Socket;
+    NTSTATUS Status = Irp->IoStatus.Status;
+    ULONG_PTR Received = Irp->IoStatus.Information;
+    PMDL Mdl, NextMdl;
+    KIRQL OldIrql;
+
+    /* TdiReceive allocated the IRP and locked an MDL of its own */
+    for (Mdl = Irp->MdlAddress; Mdl != NULL; Mdl = NextMdl)
+    {
+        NextMdl = Mdl->Next;
+        MmUnlockPages(Mdl);
+        IoFreeMdl(Mdl);
+    }
+    Irp->MdlAddress = NULL;
+    IoFreeIrp(Irp);
+
+    KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+    Socket->PumpActive = FALSE;
+    if (Socket->Closing)
+    {
+        /* Nothing to report any more */
+    }
+    else if (NT_SUCCESS(Status) && Received > 0)
+    {
+        ASSERT(Socket->Chunk == NULL);
+        Chunk->Offset = 0;
+        Chunk->Length = (ULONG)min(Received, Chunk->Size);
+        Socket->Chunk = Chunk;
+        Chunk = NULL;
+    }
+    else
+    {
+        Socket->RecvShutdown = TRUE;
+        Socket->RecvShutdownStatus = NT_SUCCESS(Status) ? STATUS_SUCCESS : Status;
+    }
+    KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+
+    if (Chunk != NULL)
+        FreeChunk(Chunk);
+
+    StreamDeliver(Socket);
+    DereferenceSocket(Socket);
+
+    return STATUS_MORE_PROCESSING_REQUIRED;
+}
+
+static VOID NTAPI
+StreamReceiveWorker(_In_ PVOID Parameter)
+{
+    PWSK_SOCKET_INTERNAL Socket = Parameter;
+    PFILE_OBJECT ConnectionFile = NULL;
+    PNETIO_CHUNK Chunk;
+    NTSTATUS Status;
+    KIRQL OldIrql;
+    PIRP Irp;
+
+    Chunk = AllocateChunk(Socket);
+
+    KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+    if (Chunk != NULL && !Socket->Closing && Socket->ConnectionFile != NULL)
+    {
+        ConnectionFile = Socket->ConnectionFile;
+        ObReferenceObject(ConnectionFile);
+    }
+    KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+
+    Status = STATUS_INVALID_DEVICE_STATE;
+    if (ConnectionFile != NULL)
+    {
+        Irp = NULL;
+        Status = TdiReceive(&Irp, ConnectionFile, TDI_RECEIVE_NORMAL, (PCHAR)Chunk->Data, Chunk->Size,
+                            StreamReceiveComplete, Chunk);
+        ObDereferenceObject(ConnectionFile);
+        if (Irp != NULL)
+        {
+            /* StreamReceiveComplete takes it from here */
+            return;
+        }
+    }
+
+    /* Closing the socket meanwhile is not worth a message */
+    if (ConnectionFile != NULL)
+        DPRINT1("Could not post a stream receive, status 0x%08lx\n", Status);
+    KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+    Socket->PumpActive = FALSE;
+    KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+    if (Chunk != NULL)
+        FreeChunk(Chunk);
+    DereferenceSocket(Socket);
+}
+
+/* Called when the socket is closed, at PASSIVE_LEVEL: stops the event
+ * callbacks and fails what is still waiting for data. */
+static VOID
+ReceiveShutdown(_In_ PWSK_SOCKET_INTERNAL Socket)
+{
+    LIST_ENTRY Backlog;
+    PNETIO_RECV_REQUEST Request;
+    PNETIO_DATAGRAM Datagram;
+    KIRQL OldIrql;
+    NTSTATUS Status;
+
+    KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+    Socket->Closing = TRUE;
+    Socket->CallbackMask = 0;
+    KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+
+    if (Socket->DatagramHandlerRegistered)
+    {
+        Status = TdiSetEventHandler(Socket->LocalAddressFile, TDI_EVENT_RECEIVE_DATAGRAM, NULL, NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Could not remove the receive datagram handler, status 0x%08lx\n", Status);
+        }
+        /* Wait for handlers still running */
+        ExWaitForRundownProtectionRelease(&Socket->EventRundown);
+        Socket->DatagramHandlerRegistered = FALSE;
+    }
+
+    InitializeListHead(&Backlog);
+    KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+    while (!IsListEmpty(&Socket->DatagramBacklog))
+        InsertTailList(&Backlog, RemoveHeadList(&Socket->DatagramBacklog));
+    Socket->BacklogCount = 0;
+    Socket->BacklogBytes = 0;
+    while ((Request = PopRecvRequest(Socket)) != NULL)
+    {
+        KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+        CompleteRecvRequest(Request, STATUS_CANCELLED, 0);
+        KeAcquireSpinLock(&Socket->RecvLock, &OldIrql);
+    }
+    KeReleaseSpinLock(&Socket->RecvLock, OldIrql);
+
+    while (!IsListEmpty(&Backlog))
+    {
+        Datagram = CONTAINING_RECORD(RemoveHeadList(&Backlog), NETIO_DATAGRAM, Entry);
+        FreeDatagram(Datagram);
+    }
+}
+
 NTSTATUS NTAPI
 DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
 {
@@ -372,23 +1202,18 @@ NetioComplete(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp, _In_ PVOID Contex
 
     FUNCTION_TRACE;
 
-    if (Irp->IoStatus.Status != STATUS_CANCELLED)
-    {
-        UserIrp->IoStatus.Status = Irp->IoStatus.Status;
-        UserIrp->IoStatus.Information = Irp->IoStatus.Information;
-    }
+    UserIrp->IoStatus.Status = Irp->IoStatus.Status;
+    UserIrp->IoStatus.Information = Irp->IoStatus.Information;
 
-    if (Context->PeerAddrRet != NULL)
+    if (Context->PeerAddrRet != NULL && NT_SUCCESS(Irp->IoStatus.Status))
     {
         PSOCKADDR RemoteAddress =
             (PSOCKADDR)(&((PTRANSPORT_ADDRESS)Context->PeerAddrRet->RemoteAddress)->Address[0].AddressType);
 
         memcpy(&Context->socket->RemoteAddress, RemoteAddress, sizeof(Context->socket->RemoteAddress));
     }
-    if (Irp->IoStatus.Status != STATUS_CANCELLED)
-    {
-        IoCompleteRequest(UserIrp, IO_NETWORK_INCREMENT);
-    }
+    /* Cancelled too (e.g. by closing the socket): the client waits for it */
+    IoCompleteRequest(UserIrp, IO_NETWORK_INCREMENT);
 
     DereferenceSocket(Context->socket);
     if (Context->TargetConnectionInfo != NULL)
@@ -402,33 +1227,6 @@ NetioComplete(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp, _In_ PVOID Contex
     ExFreePoolWithTag(Context, TAG_NETIO);
 
     return STATUS_SUCCESS;
-}
-
-/* Completion routine for the WskReceive path.  TdiReceive now allocates its IRP
- * with IoAllocateIrp (so a receive left pending when its arming thread exits is
- * not cancelled), which means the IRP -- and the MDL TdiReceive locked over the
- * caller's buffer -- are not freed by the I/O manager.  Do the common
- * NetioComplete work, then free the MDL and IRP ourselves and tell the I/O
- * manager we are done with it. */
-static NTSTATUS NTAPI
-NetioReceiveComplete(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp, _In_ PVOID ContextParam)
-{
-    PMDL Mdl, NextMdl;
-
-    FUNCTION_TRACE;
-
-    NetioComplete(DeviceObject, Irp, ContextParam);
-
-    for (Mdl = Irp->MdlAddress; Mdl != NULL; Mdl = NextMdl)
-    {
-        NextMdl = Mdl->Next;
-        MmUnlockPages(Mdl);
-        IoFreeMdl(Mdl);
-    }
-    Irp->MdlAddress = NULL;
-
-    IoFreeIrp(Irp);
-    return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
 typedef struct _LISTEN_CONTEXT
@@ -504,8 +1302,7 @@ ListenComplete(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp, _In_ PVOID Conte
     PLISTEN_CONTEXT ListenContext = (PLISTEN_CONTEXT)Context;
     PWSK_SOCKET_INTERNAL ListenSocket = ListenContext->ListenSocket;
     PWSK_SOCKET_INTERNAL AcceptSocket = ListenContext->AcceptSocket;
-    PWSK_CLIENT_LISTEN_DISPATCH ListenDispatch =
-        (PWSK_CLIENT_LISTEN_DISPATCH)ListenSocket->ListenDispatch;
+    const WSK_CLIENT_LISTEN_DISPATCH *ListenDispatch = ListenSocket->ClientDispatch;
 
     /* A PTRANSPORT_ADDRESS address field has an additional
      * AddressLength field so the struct sockaddr_in starts
@@ -529,6 +1326,12 @@ ListenComplete(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp, _In_ PVOID Conte
     {
         ListenSocket->ListenIrp = NULL;
 
+        AcceptSocketContext = NULL;
+        AcceptSocketDispatch = NULL;
+        memcpy(&AcceptSocket->RemoteAddress, RemoteAddress, sizeof(AcceptSocket->RemoteAddress));
+        memcpy(&AcceptSocket->LocalAddress, &ListenSocket->LocalAddress, sizeof(AcceptSocket->LocalAddress));
+        AcceptSocket->Connected = TRUE;
+
         Status = ListenDispatch->WskAcceptEvent(ListenSocket->user_context,
                                                 0,
                                                 &ListenSocket->LocalAddress,
@@ -543,7 +1346,9 @@ ListenComplete(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp, _In_ PVOID Conte
         }
         else
         {
-            memcpy(&AcceptSocket->RemoteAddress, RemoteAddress, sizeof(AcceptSocket->RemoteAddress));
+            /* The client's context and callbacks for the new connection */
+            AcceptSocket->user_context = AcceptSocketContext;
+            AcceptSocket->ClientDispatch = AcceptSocketDispatch;
         }
     }
     else
@@ -770,16 +1575,35 @@ WskControlSocket(
                                 break;
                             }
                             PWSK_EVENT_CALLBACK_CONTROL Control = (WSK_EVENT_CALLBACK_CONTROL *)InputBuffer;
+                            ULONG Events = Control->EventMask & ~WSK_EVENT_DISABLE;
+                            ULONG OldMask = Socket->CallbackMask;
 
-                            if (((Socket->CallbackMask & WSK_EVENT_ACCEPT) == 0) &&
-                                ((Control->EventMask & WSK_EVENT_ACCEPT) == WSK_EVENT_ACCEPT))
+                            if (Control->EventMask & WSK_EVENT_DISABLE)
                             {
-                                Socket->CallbackMask = Control->EventMask;
+                                /* Disables the given events, the others stay */
+                                InterlockedAnd((volatile LONG *)&Socket->CallbackMask, ~(LONG)Events);
+                                status = STATUS_SUCCESS;
+                                break;
+                            }
+
+                            /* Enables the given events, the others stay */
+                            InterlockedOr((volatile LONG *)&Socket->CallbackMask, (LONG)Events);
+
+                            if (((OldMask & WSK_EVENT_ACCEPT) == 0) &&
+                                ((Events & WSK_EVENT_ACCEPT) == WSK_EVENT_ACCEPT))
+                            {
                                 QueueListening(Socket);
                             }
-                            else
+                            if (Socket->type == SOCK_DGRAM && (Events & WSK_EVENT_RECEIVE_FROM))
                             {
-                                Socket->CallbackMask = Control->EventMask;
+                                /* Datagrams that arrived before */
+                                IndicateDatagramBacklog(Socket);
+                            }
+                            if (Socket->type == SOCK_STREAM &&
+                                (Events & (WSK_EVENT_RECEIVE | WSK_EVENT_DISCONNECT)))
+                            {
+                                /* Indicate what arrived already, start receiving */
+                                StreamDeliver(Socket);
                             }
 
                             status = STATUS_SUCCESS;
@@ -944,18 +1768,31 @@ WskBind(_In_ PWSK_SOCKET SocketParam, _In_ PSOCKADDR LocalAddress, _Reserved_ UL
 
     ExFreePoolWithTag(ta, TAG_NETIO);
 
+    if (NT_SUCCESS(status) && Socket->type == SOCK_DGRAM)
+    {
+        /* Inbound datagrams are indicated to us from now on */
+        status = TdiSetEventHandler(Socket->LocalAddressFile, TDI_EVENT_RECEIVE_DATAGRAM,
+                                    (PVOID)ReceiveDatagramEventHandler, Socket);
+        if (NT_SUCCESS(status))
+        {
+            Socket->DatagramHandlerRegistered = TRUE;
+        }
+        else
+        {
+            DPRINT1("Could not set the receive datagram handler, status 0x%08lx\n", status);
+            ObDereferenceObject(Socket->LocalAddressFile);
+            Socket->LocalAddressFile = NULL;
+            ZwClose(Socket->LocalAddressHandle);
+            Socket->LocalAddressHandle = NULL;
+        }
+    }
+
 err_out:
     Irp->IoStatus.Status = status;
     IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
 
     return STATUS_PENDING;
 }
-
-enum direction
-{
-    DIR_SEND,
-    DIR_RECEIVE
-};
 
 static NTSTATUS WSKAPI
 WskSendTo(
@@ -1054,35 +1891,82 @@ WskReceiveFrom(
     _Out_writes_bytes_opt_(*ControlLength) PCMSGHDR ControlInfo,
     _Out_opt_ PULONG ControlFlags, _Inout_ PIRP Irp)
 {
+    PWSK_SOCKET_INTERNAL Socket = CONTAINING_RECORD(SocketParam, WSK_SOCKET_INTERNAL, Socket);
+    PNETIO_RECV_REQUEST Request;
+    NTSTATUS Status;
+
     FUNCTION_TRACE;
 
-    UNIMPLEMENTED;
-    if (Irp != NULL)
+    IoSetNextIrpStackLocation(Irp);
+
+    if (Buffer == NULL || Buffer->Mdl == NULL)
     {
-        Irp->IoStatus.Status = STATUS_NOT_IMPLEMENTED;
-        IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+        Status = STATUS_INVALID_PARAMETER;
+        goto err_out;
     }
-    return STATUS_NOT_IMPLEMENTED;
+    if (!Socket->DatagramHandlerRegistered)
+    {
+        /* Not bound */
+        Status = STATUS_INVALID_DEVICE_STATE;
+        goto err_out;
+    }
+
+    Request = CreateRecvRequest(Socket, Buffer, Irp);
+    if (Request == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto err_out;
+    }
+    Request->RemoteAddress = RemoteAddress;
+    Request->ControlLength = ControlLength;
+    Request->ControlFlags = ControlFlags;
+
+    /* Completed by the next datagram, or one waiting already */
+    QueueRecvRequest(Request);
+    DrainDatagramBacklog(Socket);
+    return STATUS_PENDING;
+
+err_out:
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+    return STATUS_PENDING;
 }
 
+/* Gives back datagrams the client retained by returning STATUS_PENDING
+ * from its WskReceiveFromEvent */
 static NTSTATUS WSKAPI
 WskReleaseUdp(_In_ PWSK_SOCKET SocketParam, _In_ PWSK_DATAGRAM_INDICATION DatagramIndication)
 {
+    PWSK_DATAGRAM_INDICATION Next;
+
     FUNCTION_TRACE;
 
-    UNIMPLEMENTED;
-
-    return STATUS_NOT_IMPLEMENTED;
+    while (DatagramIndication != NULL)
+    {
+        Next = DatagramIndication->Next;
+        FreeDatagram(CONTAINING_RECORD(DatagramIndication, NETIO_DATAGRAM, Indication));
+        DatagramIndication = Next;
+    }
+    return STATUS_SUCCESS;
 }
 
+/* Gives back data the client retained by returning STATUS_PENDING from
+ * its WskReceiveEvent */
 static NTSTATUS WSKAPI
 WskReleaseTcp(_In_ PWSK_SOCKET SocketParam, _In_ PWSK_DATA_INDICATION DataIndication)
 {
+    PWSK_DATA_INDICATION Next;
+
     FUNCTION_TRACE;
 
-    UNIMPLEMENTED;
-
-    return STATUS_NOT_IMPLEMENTED;
+    while (DataIndication != NULL)
+    {
+        Next = DataIndication->Next;
+        FreeChunk(CONTAINING_RECORD(DataIndication, NETIO_CHUNK, Indication));
+        DataIndication = Next;
+    }
+    return STATUS_SUCCESS;
 }
 
 /* Asks the transport which address, including the port it picked for a
@@ -1414,6 +2298,25 @@ static NETIO_DATAGRAM_DISPATCH UdpDispatch = {
 
 /* Connection oriented routines (TCP/IP) */
 
+static NTSTATUS NTAPI
+ConnectComplete(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp, _In_ PVOID ContextParam)
+{
+    PNETIO_CONTEXT Context = ContextParam;
+    PWSK_SOCKET_INTERNAL Socket = Context->socket;
+
+    /* Before the client's completion routine runs: it may enable the
+     * receive events right away. */
+    if (NT_SUCCESS(Irp->IoStatus.Status))
+        Socket->Connected = TRUE;
+
+    ReferenceSocket(Socket);
+    NetioComplete(DeviceObject, Irp, ContextParam);
+    StreamKickReceive(Socket);
+    DereferenceSocket(Socket);
+
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS WSKAPI
 WskConnect(_In_ PWSK_SOCKET SocketParam, _In_ PSOCKADDR RemoteAddress, _Reserved_ ULONG Flags, _Inout_ PIRP Irp)
 {
@@ -1471,7 +2374,7 @@ WskConnect(_In_ PWSK_SOCKET SocketParam, _In_ PSOCKADDR RemoteAddress, _Reserved
     IoMarkIrpPending(Irp);
     ReferenceSocket(Socket);
 
-    status = TdiConnect(&tdiIrp, Socket->ConnectionFile, TargetConnectionInfo, PeerAddrRet, NetioComplete, NetioContext);
+    status = TdiConnect(&tdiIrp, Socket->ConnectionFile, TargetConnectionInfo, PeerAddrRet, ConnectComplete, NetioContext);
 
     if (!NT_SUCCESS(status))
     {
@@ -1507,12 +2410,7 @@ err_out:
 }
 
 static NTSTATUS WSKAPI
-WskStreamIo(
-    _In_ PWSK_SOCKET SocketParam,
-    _In_ PWSK_BUF Buffer,
-    _In_ ULONG Flags,
-     _Inout_ PIRP Irp,
-    _In_ enum direction Direction)
+WskSend(_In_ PWSK_SOCKET SocketParam, _In_ PWSK_BUF Buffer, _In_ ULONG Flags, _Inout_ PIRP Irp)
 {
     PIRP tdiIrp = NULL;
     PWSK_SOCKET_INTERNAL Socket = CONTAINING_RECORD(SocketParam, WSK_SOCKET_INTERNAL, Socket);
@@ -1546,17 +2444,9 @@ WskStreamIo(
     IoMarkIrpPending(Irp);
     ReferenceSocket(Socket);
 
-    if (Direction == DIR_SEND)
-    {
-        /* This will create a tdiIrp */
-        status = TdiSend(&tdiIrp, Socket->ConnectionFile, 0, ((char *)BufferData) + Buffer->Offset,
-                    Buffer->Length, NetioComplete, NetioContext);
-    }
-    else
-    {
-        status = TdiReceive(&tdiIrp, Socket->ConnectionFile, 0, ((char *)BufferData) + Buffer->Offset,
-                       Buffer->Length, NetioReceiveComplete, NetioContext);
-    }
+    /* This will create a tdiIrp */
+    status = TdiSend(&tdiIrp, Socket->ConnectionFile, 0, ((char *)BufferData) + Buffer->Offset,
+                     Buffer->Length, NetioComplete, NetioContext);
 
     /* If allocating tdiIrp fails we get here.
      * Call the IoCompletion of the application's Irp so this Irp
@@ -1564,6 +2454,7 @@ WskStreamIo(
      */
     if (!NT_SUCCESS(status))
     {
+        DereferenceSocket(Socket);
         goto err_out_free_nc;	/* caller has to clean up mdl mapping */
     }
     return STATUS_PENDING;
@@ -1578,36 +2469,103 @@ err_out:
     return status;
 }
 
-static NTSTATUS WSKAPI
-WskSend(_In_ PWSK_SOCKET SocketParam, _In_ PWSK_BUF Buffer, _In_ ULONG Flags, _Inout_ PIRP Irp)
-{
-    FUNCTION_TRACE;
-
-    return WskStreamIo(SocketParam, Buffer, Flags, Irp, DIR_SEND);
-}
-
+/* Completes once data arrived (any amount up to the buffer size), with no
+ * data once the peer closed its side, or with the error that broke the
+ * connection. */
 static NTSTATUS WSKAPI
 WskReceive(_In_ PWSK_SOCKET SocketParam, _In_ PWSK_BUF Buffer, _In_ ULONG Flags, _Inout_ PIRP Irp)
 {
+    PWSK_SOCKET_INTERNAL Socket = CONTAINING_RECORD(SocketParam, WSK_SOCKET_INTERNAL, Socket);
+    PNETIO_RECV_REQUEST Request;
+    NTSTATUS Status;
+
     FUNCTION_TRACE;
 
-    return WskStreamIo(SocketParam, Buffer, Flags, Irp, DIR_RECEIVE);
+    IoSetNextIrpStackLocation(Irp);
+
+    if (Buffer == NULL || Buffer->Mdl == NULL || Buffer->Length == 0)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto err_out;
+    }
+    if (!Socket->Connected)
+    {
+        Status = STATUS_INVALID_DEVICE_STATE;
+        goto err_out;
+    }
+
+    Request = CreateRecvRequest(Socket, Buffer, Irp);
+    if (Request == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto err_out;
+    }
+    QueueRecvRequest(Request);
+
+    /* Serve it from data received already, else start receiving */
+    StreamDeliver(Socket);
+    return STATUS_PENDING;
+
+err_out:
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+    return STATUS_PENDING;
 }
 
+/* Graceful: shuts down the sending side, the socket can still receive.
+ * WSK_FLAG_ABORTIVE resets the connection instead. */
 static NTSTATUS WSKAPI
 WskDisconnect(_In_ PWSK_SOCKET SocketParam, _In_opt_ PWSK_BUF Buffer, _In_ ULONG Flags, _Inout_ PIRP Irp)
 {
     PWSK_SOCKET_INTERNAL Socket = CONTAINING_RECORD(SocketParam, WSK_SOCKET_INTERNAL, Socket);
+    PNETIO_CONTEXT NetioContext;
+    PIRP tdiIrp = NULL;
+    NTSTATUS status;
 
     FUNCTION_TRACE;
 
-    SocketShutdown(Socket);
-
     IoSetNextIrpStackLocation(Irp);
 
-    Irp->IoStatus.Status = STATUS_SUCCESS;
-    IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+    if (Buffer != NULL && Buffer->Length != 0)
+    {
+        /* Sending final data along is not supported yet */
+        status = STATUS_NOT_SUPPORTED;
+        goto err_out;
+    }
+    if (!Socket->Connected || Socket->ConnectionFile == NULL)
+    {
+        status = STATUS_INVALID_DEVICE_STATE;
+        goto err_out;
+    }
 
+    NetioContext = ExAllocatePoolZero(NonPagedPool, sizeof(*NetioContext), TAG_NETIO);
+    if (NetioContext == NULL)
+    {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto err_out;
+    }
+    NetioContext->socket = Socket;
+    NetioContext->UserIrp = Irp;
+
+    IoMarkIrpPending(Irp);
+    ReferenceSocket(Socket);
+
+    status = TdiDisconnect(&tdiIrp, Socket->ConnectionFile, NULL,
+                           (Flags & WSK_FLAG_ABORTIVE) ? TDI_DISCONNECT_ABORT : TDI_DISCONNECT_RELEASE,
+                           NetioComplete, NetioContext, NULL, NULL);
+    if (!NT_SUCCESS(status))
+    {
+        DereferenceSocket(Socket);
+        ExFreePoolWithTag(NetioContext, TAG_NETIO);
+        goto err_out;
+    }
+    return STATUS_PENDING;
+
+err_out:
+    Irp->IoStatus.Status = status;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
     return STATUS_PENDING;
 }
 
@@ -1706,8 +2664,12 @@ WskSocket(
     Socket->proto = Protocol;
     Socket->WskFlags = Flags;
     Socket->user_context = SocketContext;
-    Socket->ListenDispatch = Dispatch;
+    Socket->ClientDispatch = Dispatch;
     Socket->RefCount = 1;            /* DereferenceSocket() is in WskCloseSocket */
+    KeInitializeSpinLock(&Socket->RecvLock);
+    InitializeListHead(&Socket->RecvRequests);
+    InitializeListHead(&Socket->DatagramBacklog);
+    ExInitializeRundownProtection(&Socket->EventRundown);
 
     switch (SocketType)
     {
@@ -1751,7 +2713,7 @@ WskSocket(
                 ZwClose(Socket->ListenThreadHandle);
             }
 
-            if (Flags == WSK_FLAG_LISTEN_SOCKET && Socket->ListenDispatch == NULL)
+            if (Flags == WSK_FLAG_LISTEN_SOCKET && Socket->ClientDispatch == NULL)
             {
                 DPRINT1("Warning: no callbacks given for listen socket\n");
             }
