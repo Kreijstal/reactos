@@ -1267,6 +1267,50 @@ TestDatagramHostEcho(
     ok_eq_hex(Record.Remote.sin_addr.s_addr, (ULONG)ECHO_HOST);
     ok_eq_uint(Record.Remote.sin_port, RtlUshortByteSwap(ECHO_PORT));
 
+    /* Sends from DISPATCH_LEVEL, the way ovpn-dco sends its keepalives
+     * from a timer DPC */
+    ResetRecord(EventAccept);
+    if (SyncCallBegin(&Call))
+    {
+        WSK_BUF WskBuf;
+        KIRQL OldIrql;
+
+        WskBuf.Mdl = Out.Mdl;
+        WskBuf.Offset = 0;
+        WskBuf.Length = 33;
+        KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+        Status = Dispatch->WskSendTo(Socket, &WskBuf, 0, (PSOCKADDR)&Remote, 0, NULL, Call.Irp);
+        KeLowerIrql(OldIrql);
+        Information = 0;
+        Status = SyncCallEnd(&Call, Status, &Information);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok_eq_ulongptr(Information, 33);
+        ok(WaitFor(&Record.DataEvent), "No echo of the DISPATCH_LEVEL WskSendTo\n");
+        ok_eq_ulong(Record.Length, 33UL);
+    }
+
+    ResetRecord(EventAccept);
+    if (SyncCallBegin(&Call))
+    {
+        WSK_BUF_LIST List;
+        KIRQL OldIrql;
+
+        List.Next = NULL;
+        List.Buffer.Mdl = Out.Mdl;
+        List.Buffer.Offset = 4;
+        List.Buffer.Length = 17;
+        KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+        Status = Dispatch->WskSendMessages(Socket, &List, 0, (PSOCKADDR)&Remote, 0, NULL, Call.Irp);
+        KeLowerIrql(OldIrql);
+        Information = 0;
+        Status = SyncCallEnd(&Call, Status, &Information);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok_eq_ulongptr(Information, 17);
+        ok(WaitFor(&Record.DataEvent), "No echo of the DISPATCH_LEVEL WskSendMessages\n");
+        ok_eq_ulong(Record.Length, 17UL);
+        ok(RtlCompareMemory(Record.Data, (PUCHAR)Out.Data + 4, 17) == 17, "Wrong echo\n");
+    }
+
     CloseSocket(Socket);
 Free:
     FreeBuffer(&Out);
