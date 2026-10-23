@@ -16,6 +16,8 @@
 #define IDS_HLP_IP_DELETE_ARPCACHE_EX       209
 #define IDS_HLP_IP_DELETE_DNS               210
 #define IDS_HLP_IP_DELETE_DNS_EX            211
+#define IDS_HLP_IP_DELETE_WINS              217
+#define IDS_HLP_IP_DELETE_WINS_EX           218
 
 #define IDS_HLP_IP_SET                      212
 #define IDS_HLP_IP_SET_ADDRESS              213

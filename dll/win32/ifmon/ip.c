@@ -41,6 +41,7 @@ static FN_HANDLE_CMD IpAddDns;
 static FN_HANDLE_CMD IpDeleteAddress;
 static FN_HANDLE_CMD IpDeleteArpCache;
 static FN_HANDLE_CMD IpDeleteDns;
+static FN_HANDLE_CMD IpDeleteWins;
 static FN_HANDLE_CMD IpSetAddress;
 static FN_HANDLE_CMD IpSetDns;
 static FN_HANDLE_CMD IpShowAddresses;
@@ -62,7 +63,8 @@ IpDeleteCommands[] =
 {
     {L"address", IpDeleteAddress, IDS_HLP_IP_DELETE_ADDRESS, IDS_HLP_IP_DELETE_ADDRESS_EX, 0},
     {L"arpcache", IpDeleteArpCache, IDS_HLP_IP_DELETE_ARPCACHE, IDS_HLP_IP_DELETE_ARPCACHE_EX, 0},
-    {L"dns", IpDeleteDns, IDS_HLP_IP_DELETE_DNS, IDS_HLP_IP_DELETE_DNS_EX, 0}
+    {L"dns", IpDeleteDns, IDS_HLP_IP_DELETE_DNS, IDS_HLP_IP_DELETE_DNS_EX, 0},
+    {L"wins", IpDeleteWins, IDS_HLP_IP_DELETE_WINS, IDS_HLP_IP_DELETE_WINS_EX, 0}
 };
 
 static
@@ -1553,6 +1555,182 @@ done:
     return dwError;
 }
 
+
+/*
+ * The WINS servers of an interface are the NameServerList of its
+ * NetBT interface. Without NetBT on the interface, there is nothing
+ * to delete.
+ */
+static
+DWORD
+WINAPI
+IpDeleteWins(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    TAG_TYPE pttTags[] = {{L"name", NS_REQ_ZERO, FALSE},
+                          {L"addr", NS_REQ_ZERO, FALSE}};
+    TOKEN_VALUE ptvAddress[] = {{L"all", ADDRESS_ALL}};
+    WCHAR szGuid[40];
+    GUID InterfaceGUID;
+    PDWORD pdwTagType = NULL;
+    DWORD i, dwAddress, dwType, dwSize;
+    BOOL bHaveName = FALSE, bHaveAddress = FALSE;
+    IN_ADDR Address;
+    PWSTR pszAddress = NULL, pszList = NULL, pszEntry, pszOut;
+    WCHAR szKeyName[128];
+    PCWSTR Term;
+    HKEY hKey = NULL;
+    NTSTATUS Status;
+    DWORD dwError = ERROR_SUCCESS;
+
+    DPRINT("IpDeleteWins()\n");
+
+    pdwTagType = HeapAlloc(GetProcessHeap(),
+                           0,
+                           (dwArgCount - dwCurrentIndex) * sizeof(DWORD));
+    if (pdwTagType == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    dwError = MatchTagsInCmdLine(hDllInstance,
+                                 argv,
+                                 dwCurrentIndex,
+                                 dwArgCount,
+                                 pttTags,
+                                 ARRAYSIZE(pttTags),
+                                 pdwTagType);
+    if (dwError != ERROR_SUCCESS)
+    {
+        HeapFree(GetProcessHeap(), 0, pdwTagType);
+        return dwError;
+    }
+
+    for (i = 0; i < (dwArgCount - dwCurrentIndex); i++)
+    {
+        switch (pdwTagType[i])
+        {
+            case 0: /* name */
+                dwError = GetInterfaceGuid(argv[i + dwCurrentIndex], &InterfaceGUID);
+                if (dwError != ERROR_SUCCESS)
+                {
+                    PrintMessageFromModule(hDllInstance,
+                                           IDS_ERROR_INVALID_INTERFACE,
+                                           argv[i + dwCurrentIndex]);
+                    dwError = ERROR_SUPPRESS_OUTPUT;
+                    break;
+                }
+                bHaveName = TRUE;
+                break;
+
+            case 1: /* addr */
+                dwError = MatchEnumTag(hDllInstance,
+                                       argv[i + dwCurrentIndex],
+                                       ARRAYSIZE(ptvAddress),
+                                       ptvAddress,
+                                       &dwAddress);
+                if (dwError == ERROR_SUCCESS)
+                {
+                    pszAddress = NULL;
+                }
+                else
+                {
+                    dwError = ERROR_SUCCESS;
+                    Status = RtlIpv4StringToAddressW(argv[i + dwCurrentIndex],
+                                                     TRUE,
+                                                     &Term,
+                                                     &Address);
+                    if (Status != 0 /*STATUS_SUCCESS*/)
+                    {
+                        PrintMessageFromModule(hDllInstance,
+                                               IDS_ERROR_BAD_VALUE,
+                                               argv[i + dwCurrentIndex],
+                                               pttTags[pdwTagType[i]].pwszTag);
+                        dwError = ERROR_SUPPRESS_OUTPUT;
+                        break;
+                    }
+                    pszAddress = argv[i + dwCurrentIndex];
+                }
+                bHaveAddress = TRUE;
+                break;
+
+            default:
+                DPRINT1("Unknown tag type %lu\n", pdwTagType[i]);
+                break;
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, pdwTagType);
+
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
+
+    if (!bHaveName || !bHaveAddress)
+        return ERROR_INVALID_SYNTAX;
+
+    StringFromGUID2(&InterfaceGUID, szGuid, ARRAYSIZE(szGuid));
+    StringCchPrintfW(szKeyName, ARRAYSIZE(szKeyName),
+                     L"SYSTEM\\CurrentControlSet\\Services\\NetBT\\Parameters\\Interfaces\\Tcpip_%s",
+                     szGuid);
+
+    dwError = RegOpenKeyExW(HKEY_LOCAL_MACHINE, szKeyName, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &hKey);
+    if (dwError == ERROR_FILE_NOT_FOUND)
+        return ERROR_SUCCESS;
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
+
+    if (pszAddress == NULL)
+    {
+        dwError = RegDeleteValueW(hKey, L"NameServerList");
+        if (dwError == ERROR_FILE_NOT_FOUND)
+            dwError = ERROR_SUCCESS;
+        goto done;
+    }
+
+    dwSize = 0;
+    dwError = RegQueryValueExW(hKey, L"NameServerList", NULL, &dwType, NULL, &dwSize);
+    if ((dwError == ERROR_FILE_NOT_FOUND) || (dwType != REG_MULTI_SZ))
+    {
+        dwError = ERROR_SUCCESS;
+        goto done;
+    }
+    if (dwError != ERROR_SUCCESS)
+        goto done;
+
+    pszList = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize + 2 * sizeof(WCHAR));
+    if (pszList == NULL)
+    {
+        dwError = ERROR_NOT_ENOUGH_MEMORY;
+        goto done;
+    }
+
+    dwError = RegQueryValueExW(hKey, L"NameServerList", NULL, &dwType, (PBYTE)pszList, &dwSize);
+    if (dwError != ERROR_SUCCESS)
+        goto done;
+
+    /* Remove the address from the list in place */
+    for (pszEntry = pszList, pszOut = pszList; *pszEntry; pszEntry += wcslen(pszEntry) + 1)
+    {
+        if (_wcsicmp(pszEntry, pszAddress) == 0)
+            continue;
+        MoveMemory(pszOut, pszEntry, (wcslen(pszEntry) + 1) * sizeof(WCHAR));
+        pszOut += wcslen(pszOut) + 1;
+    }
+    *pszOut++ = UNICODE_NULL;
+
+    dwError = RegSetValueExW(hKey, L"NameServerList", 0, REG_MULTI_SZ, (PBYTE)pszList,
+                             (DWORD)((pszOut - pszList) * sizeof(WCHAR)));
+
+done:
+    if (pszList)
+        HeapFree(GetProcessHeap(), 0, pszList);
+    RegCloseKey(hKey);
+    return dwError;
+}
 
 static
 DWORD
