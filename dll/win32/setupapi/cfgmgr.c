@@ -4300,7 +4300,7 @@ CM_Get_Device_Interface_Alias_ExA(
     if (ulFlags != 0)
         return CR_INVALID_FLAG;
 
-    if (!pSetupCaptureAndConvertAnsiArg(pszDeviceInterface, &pszDeviceInterfaceW))
+    if (pSetupCaptureAndConvertAnsiArg(pszDeviceInterface, &pszDeviceInterfaceW) != ERROR_SUCCESS)
         return CR_INVALID_POINTER;
 
     pszAliasDeviceInterfaceW = MyMalloc(*pulLength * sizeof(WCHAR));
@@ -4473,7 +4473,7 @@ CM_Get_Device_Interface_List_ExA(
 
     if (pDeviceID != NULL)
     {
-        if (!pSetupCaptureAndConvertAnsiArg(pDeviceID, &pDeviceIdW))
+        if (pSetupCaptureAndConvertAnsiArg(pDeviceID, &pDeviceIdW) != ERROR_SUCCESS)
             return CR_INVALID_DEVICE_ID;
     }
 
@@ -4634,7 +4634,7 @@ CM_Get_Device_Interface_List_Size_ExA(
 
     if (pDeviceID != NULL)
     {
-        if (!pSetupCaptureAndConvertAnsiArg(pDeviceID, &pDeviceIdW))
+        if (pSetupCaptureAndConvertAnsiArg(pDeviceID, &pDeviceIdW) != ERROR_SUCCESS)
             return CR_INVALID_DEVICE_ID;
     }
 
