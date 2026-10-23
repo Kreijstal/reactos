@@ -1514,11 +1514,16 @@ VOID UnbindAdapter(
  *     Adapter = Pointer to LAN_ADAPTER structure
  */
 {
+    PIP_INTERFACE IF = Adapter->Context;
+
     TI_DbgPrint(DEBUG_DATALINK, ("Called.\n"));
 
-    if (Adapter->State == LAN_STATE_STARTED) {
-        PIP_INTERFACE IF = Adapter->Context;
-
+    /*
+     * BindAdapter creates the IP interface whatever the media state is, so
+     * destroy it for an adapter whose link is down as well. A stale one
+     * stays in the interface list and refers to the freed adapter.
+     */
+    if (IF) {
         IPUnregisterInterface(IF);
 
         IPDestroyInterface(IF);
