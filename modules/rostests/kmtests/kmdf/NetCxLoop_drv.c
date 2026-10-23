@@ -11,6 +11,10 @@
  * managed receive buffers. Every packet the OS gives the transmit queue is
  * copied to a FIFO and handed back on the receive queue. Built once per
  * NetAdapterCx version (NETADAPTER_VERSION_MINOR 0 and 1).
+ *
+ * Built with NETCXLOOP_TUN it is a raw IP adapter for tcpip instead: what
+ * it is given to transmit is kept for the test to read, and the test
+ * injects what it receives.
  */
 
 #include <ntddk.h>
@@ -45,6 +49,11 @@ typedef struct _LOOP_DEVICE
     KSPIN_LOCK FifoLock;
     LIST_ENTRY Fifo;
     LONG FifoDepth;
+
+    /* Transmitted frames kept for IOCTL_NETCXLOOP_GET_TX_FRAME */
+    BOOLEAN Capture;
+    LIST_ENTRY Captured;
+    LONG CapturedDepth;
 } LOOP_DEVICE, *PLOOP_DEVICE;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(LOOP_DEVICE, LoopGetDevice)
@@ -70,25 +79,57 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(LOOP_QUEUE, LoopGetQueue)
 static NETCXLOOP_STATE LoopState;
 
 static
-VOID
-LoopFifoFlush(
-    _In_ PLOOP_DEVICE LoopDevice)
+PLOOP_FRAME
+LoopFramePop(
+    _In_ PLOOP_DEVICE LoopDevice,
+    _Inout_ PLIST_ENTRY List,
+    _Inout_ PLONG Depth)
 {
     PLIST_ENTRY Entry;
     KIRQL OldIrql;
 
-    for (;;)
-    {
-        KeAcquireSpinLock(&LoopDevice->FifoLock, &OldIrql);
-        Entry = IsListEmpty(&LoopDevice->Fifo) ? NULL : RemoveHeadList(&LoopDevice->Fifo);
-        if (Entry)
-            LoopDevice->FifoDepth--;
-        KeReleaseSpinLock(&LoopDevice->FifoLock, OldIrql);
+    KeAcquireSpinLock(&LoopDevice->FifoLock, &OldIrql);
+    Entry = IsListEmpty(List) ? NULL : RemoveHeadList(List);
+    if (Entry)
+        (*Depth)--;
+    KeReleaseSpinLock(&LoopDevice->FifoLock, OldIrql);
 
-        if (Entry == NULL)
-            break;
-        ExFreePoolWithTag(CONTAINING_RECORD(Entry, LOOP_FRAME, Link), TAG_LOOP);
+    return Entry ? CONTAINING_RECORD(Entry, LOOP_FRAME, Link) : NULL;
+}
+
+static
+VOID
+LoopFifoFlush(
+    _In_ PLOOP_DEVICE LoopDevice)
+{
+    PLOOP_FRAME Frame;
+
+    while ((Frame = LoopFramePop(LoopDevice, &LoopDevice->Fifo, &LoopDevice->FifoDepth)) != NULL)
+        ExFreePoolWithTag(Frame, TAG_LOOP);
+    while ((Frame = LoopFramePop(LoopDevice, &LoopDevice->Captured, &LoopDevice->CapturedDepth)) != NULL)
+        ExFreePoolWithTag(Frame, TAG_LOOP);
+}
+
+/* Queues a frame for the receive queue and wakes it if it is waiting */
+static
+BOOLEAN
+LoopQueueRxFrame(
+    _In_ PLOOP_DEVICE LoopDevice,
+    _In_ PLOOP_FRAME Frame)
+{
+    BOOLEAN Queued = FALSE;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&LoopDevice->FifoLock, &OldIrql);
+    if (LoopDevice->FifoDepth < LOOP_FIFO_MAX)
+    {
+        InsertTailList(&LoopDevice->Fifo, &Frame->Link);
+        LoopDevice->FifoDepth++;
+        Queued = TRUE;
     }
+    KeReleaseSpinLock(&LoopDevice->FifoLock, OldIrql);
+
+    return Queued;
 }
 
 /* Transmit queue */
@@ -148,15 +189,23 @@ LoopEvtTxAdvance(
         if (Packet->FragmentCount > 1)
             InterlockedIncrement64(&LoopState.TxMultiFragmentPackets);
 
-        KeAcquireSpinLock(&LoopDevice->FifoLock, &OldIrql);
-        if (Frame->Length != 0 && LoopDevice->FifoDepth < LOOP_FIFO_MAX)
+        if (Frame->Length != 0 && LoopDevice->Capture)
         {
-            InsertTailList(&LoopDevice->Fifo, &Frame->Link);
-            LoopDevice->FifoDepth++;
+            /* Kept for the test, not looped */
+            KeAcquireSpinLock(&LoopDevice->FifoLock, &OldIrql);
+            if (LoopDevice->CapturedDepth < LOOP_FIFO_MAX)
+            {
+                InsertTailList(&LoopDevice->Captured, &Frame->Link);
+                LoopDevice->CapturedDepth++;
+                Frame = NULL;
+            }
+            KeReleaseSpinLock(&LoopDevice->FifoLock, OldIrql);
+        }
+        else if (Frame->Length != 0 && LoopQueueRxFrame(LoopDevice, Frame))
+        {
             Frame = NULL;
             Looped = TRUE;
         }
-        KeReleaseSpinLock(&LoopDevice->FifoLock, OldIrql);
 
         if (Frame != NULL)
         {
@@ -568,6 +617,9 @@ LoopEvtIoDeviceControl(
 {
     PLOOP_DEVICE LoopDevice = LoopGetDevice(WdfIoQueueGetDevice(Queue));
     PNETCXLOOP_STATE State;
+    PLOOP_FRAME Frame;
+    PVOID Buffer;
+    size_t Length;
     NTSTATUS Status;
 
     UNREFERENCED_PARAMETER(OutputBufferLength);
@@ -577,6 +629,56 @@ LoopEvtIoDeviceControl(
     {
         case IOCTL_NETCXLOOP_GET_STATE:
             break;
+
+        case IOCTL_NETCXLOOP_GET_TX_FRAME:
+            Status = WdfRequestRetrieveOutputBuffer(Request, LOOP_FRAME_MAX, &Buffer, NULL);
+            if (!NT_SUCCESS(Status))
+            {
+                WdfRequestComplete(Request, Status);
+                return;
+            }
+            Frame = LoopFramePop(LoopDevice, &LoopDevice->Captured, &LoopDevice->CapturedDepth);
+            if (Frame == NULL)
+            {
+                WdfRequestComplete(Request, STATUS_NO_MORE_ENTRIES);
+                return;
+            }
+            Length = Frame->Length;
+            RtlCopyMemory(Buffer, Frame->Data, Length);
+            ExFreePoolWithTag(Frame, TAG_LOOP);
+            WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, Length);
+            return;
+
+        case IOCTL_NETCXLOOP_INJECT_RX_FRAME:
+            Status = WdfRequestRetrieveInputBuffer(Request, 1, &Buffer, &Length);
+            if (NT_SUCCESS(Status) && Length > LOOP_FRAME_MAX)
+                Status = STATUS_INVALID_BUFFER_SIZE;
+            if (!NT_SUCCESS(Status))
+            {
+                WdfRequestComplete(Request, Status);
+                return;
+            }
+            Frame = ExAllocatePoolZero(NonPagedPool, sizeof(*Frame), TAG_LOOP);
+            if (Frame == NULL)
+            {
+                WdfRequestComplete(Request, STATUS_INSUFFICIENT_RESOURCES);
+                return;
+            }
+            Frame->Length = (ULONG)Length;
+            RtlCopyMemory(Frame->Data, Buffer, Length);
+            if (!LoopQueueRxFrame(LoopDevice, Frame))
+            {
+                ExFreePoolWithTag(Frame, TAG_LOOP);
+                WdfRequestComplete(Request, STATUS_DEVICE_BUSY);
+                return;
+            }
+            if (LoopDevice->RxQueue != NULL &&
+                InterlockedExchange(&LoopDevice->RxNotificationEnabled, FALSE))
+            {
+                NetRxQueueNotifyMoreReceivedPacketsAvailable(LoopDevice->RxQueue);
+            }
+            WdfRequestComplete(Request, STATUS_SUCCESS);
+            return;
 
         case IOCTL_NETCXLOOP_STOP_ADAPTER:
             /* The class extension halts the NDIS adapter and deletes the queues */
@@ -654,9 +756,15 @@ LoopEvtDeviceAdd(
     LoopDevice->Device = Device;
     KeInitializeSpinLock(&LoopDevice->FifoLock);
     InitializeListHead(&LoopDevice->Fifo);
+    InitializeListHead(&LoopDevice->Captured);
 
     RtlInitEmptyUnicodeString(&SymbolicLink, LinkBuffer, sizeof(LinkBuffer));
+#ifdef NETCXLOOP_TUN
+    LoopDevice->Capture = TRUE;
+    RtlUnicodeStringPrintf(&SymbolicLink, L"\\DosDevices\\KmtNetCxTun");
+#else
     RtlUnicodeStringPrintf(&SymbolicLink, L"\\DosDevices\\KmtNetCxLoop2%u", NETADAPTER_VERSION_MINOR);
+#endif
     Status = WdfDeviceCreateSymbolicLink(Device, &SymbolicLink);
     if (!NT_SUCCESS(Status))
         goto Exit;

@@ -252,7 +252,7 @@ list(APPEND KMTEST_SOURCE
 add_executable(kmtest ${KMTEST_SOURCE})
 set_module_type(kmtest win32cui)
 target_link_libraries(kmtest ${PSEH_LIB})
-add_importlibs(kmtest fltlib advapi32 setupapi ws2_32 msvcrt kernel32 ntdll)
+add_importlibs(kmtest fltlib advapi32 setupapi ws2_32 iphlpapi msvcrt kernel32 ntdll)
 target_compile_definitions(kmtest PRIVATE KMT_USER_MODE NTDDI_VERSION=${REACTOS_TARGET_NTDDI})
 #add_pch(kmtest include/kmt_test.h)
 add_rostests_file(TARGET kmtest)
@@ -278,6 +278,7 @@ add_dependencies(kmtest_drivers
     kmdfucx_drv
     netcxloop20_drv
     netcxloop21_drv
+    netcxtun21_drv
     netcxproto_drv
     mmmaplockedpagesspecifycache_drv
     mmpageoutsysview_drv
