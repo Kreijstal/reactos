@@ -78,20 +78,20 @@ Ndis6DispatchHybridGeneric(
  * ============================================================================ */
 
 NDIS_STATUS
-NTAPI
-NdisMRegisterMiniportDriver(
+Ndis6RegisterMiniportDriverBlock(
     _In_     PDRIVER_OBJECT                          DriverObject,
-    _In_     PUNICODE_STRING                         RegistryPath,
+    _In_opt_ PUNICODE_STRING                         RegistryPath,
     _In_opt_ NDIS_HANDLE                             MiniportDriverContext,
     _In_     PNDIS_MINIPORT_DRIVER_CHARACTERISTICS   MiniportDriverCharacteristics,
-    _Out_    PNDIS_HANDLE                            NdisMiniportDriverHandle)
+    _In_     BOOLEAN                                 HijackDispatch,
+    _Out_    PNDIS6_DRIVER_BLOCK*                    BlockOut)
 {
     PNDIS6_DRIVER_BLOCK Block;
     KIRQL OldIrql;
     ULONG i;
 
     if (DriverObject == NULL || MiniportDriverCharacteristics == NULL ||
-        NdisMiniportDriverHandle == NULL)
+        BlockOut == NULL)
     {
         return NDIS_STATUS_INVALID_PARAMETER;
     }
@@ -120,6 +120,7 @@ NdisMRegisterMiniportDriver(
     RtlZeroMemory(Block, sizeof(*Block));
     Block->DriverObject          = DriverObject;
     Block->MiniportDriverContext = MiniportDriverContext;
+    Block->IsNetCx               = !HijackDispatch;
     /* Copy only the bytes the driver actually supplied (REV_1 is 16 bytes
      * shorter than REV_2). The block was zeroed above so the REV_2 direct-OID
      * handlers stay NULL for a REV_1 driver. */
@@ -147,44 +148,47 @@ NdisMRegisterMiniportDriver(
         }
     }
 
-    /* Hijack the driver object's PnP / power / AddDevice slots. We save
-     * the originals so we can chain them if the driver had its own. NDIS
-     * miniport drivers shouldn't have their own (they only register via
-     * NdisMRegisterMiniportDriver) but we save them for safety. */
-    Block->OriginalAddDevice = DriverObject->DriverExtension->AddDevice;
-    Block->OriginalPnpDispatch = DriverObject->MajorFunction[IRP_MJ_PNP];
-    for (i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
-        Block->OriginalMajorFunction[i] = DriverObject->MajorFunction[i];
-
-    /* Hybrid KMDF+NDIS driver: WdfDriverCreate already installed its own
-     * AddDevice. Only AddDevice is a reliable signal — the IO manager
-     * pre-fills every MajorFunction slot with IopInvalidDeviceRequest. */
-    Block->IsWdfHybrid = (Block->OriginalAddDevice != NULL && Block->OriginalAddDevice != Ndis6AddDevice);
-    if (Block->IsWdfHybrid)
+    if (HijackDispatch)
     {
-        DbgPrint("NDIS6: hybrid KMDF+NDIS miniport detected (AddDevice=%p Pnp=%p)\n", Block->OriginalAddDevice, Block->OriginalPnpDispatch);
-    }
+        /* Hijack the driver object's PnP / power / AddDevice slots. We save
+         * the originals so we can chain them if the driver had its own. NDIS
+         * miniport drivers shouldn't have their own (they only register via
+         * NdisMRegisterMiniportDriver) but we save them for safety. */
+        Block->OriginalAddDevice = DriverObject->DriverExtension->AddDevice;
+        Block->OriginalPnpDispatch = DriverObject->MajorFunction[IRP_MJ_PNP];
+        for (i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
+            Block->OriginalMajorFunction[i] = DriverObject->MajorFunction[i];
 
-    DriverObject->DriverExtension->AddDevice         = Ndis6AddDevice;
-    DriverObject->MajorFunction[IRP_MJ_PNP]          = Ndis6DispatchPnp;
-    DriverObject->MajorFunction[IRP_MJ_POWER]        = Ndis6DispatchPower;
-    DriverObject->MajorFunction[IRP_MJ_SYSTEM_CONTROL] = Ndis6DispatchSystemControl;
+        /* Hybrid KMDF+NDIS driver: WdfDriverCreate already installed its own
+         * AddDevice. Only AddDevice is a reliable signal — the IO manager
+         * pre-fills every MajorFunction slot with IopInvalidDeviceRequest. */
+        Block->IsWdfHybrid = (Block->OriginalAddDevice != NULL && Block->OriginalAddDevice != Ndis6AddDevice);
+        if (Block->IsWdfHybrid)
+        {
+            DbgPrint("NDIS6: hybrid KMDF+NDIS miniport detected (AddDevice=%p Pnp=%p)\n", Block->OriginalAddDevice, Block->OriginalPnpDispatch);
+        }
 
-    /* Default-handle every other major function so the IO manager doesn't
-     * return STATUS_INVALID_DEVICE_REQUEST: IoCreateDriver pre-fills every
-     * slot with IopInvalidDeviceRequest, so testing for NULL here never
-     * matched and IRP_MJ_CREATE / IRP_MJ_DEVICE_CONTROL on a miniport FDO
-     * was rejected before Ndis6TryDispatchAdapterFdoIrp ever saw it - which
-     * is what user mode needs for IOCTL_NDIS_QUERY_GLOBAL_STATS.
-     * Ndis6DispatchHybridGeneric is the right handler in both cases: it
-     * hands a hybrid driver's KMDF-owned device objects back to KMDF's own
-     * dispatch and only services our adapter FDOs itself.  A driver that
-     * later calls NdisRegisterDeviceEx overrides these slots with its own
-     * per-device demux, which handles the FDO case identically. */
-    for (i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
-    {
-        if (i != IRP_MJ_PNP && i != IRP_MJ_POWER && i != IRP_MJ_SYSTEM_CONTROL)
-            DriverObject->MajorFunction[i] = Ndis6DispatchHybridGeneric;
+        DriverObject->DriverExtension->AddDevice         = Ndis6AddDevice;
+        DriverObject->MajorFunction[IRP_MJ_PNP]          = Ndis6DispatchPnp;
+        DriverObject->MajorFunction[IRP_MJ_POWER]        = Ndis6DispatchPower;
+        DriverObject->MajorFunction[IRP_MJ_SYSTEM_CONTROL] = Ndis6DispatchSystemControl;
+
+        /* Default-handle every other major function so the IO manager doesn't
+         * return STATUS_INVALID_DEVICE_REQUEST: IoCreateDriver pre-fills every
+         * slot with IopInvalidDeviceRequest, so testing for NULL here never
+         * matched and IRP_MJ_CREATE / IRP_MJ_DEVICE_CONTROL on a miniport FDO
+         * was rejected before Ndis6TryDispatchAdapterFdoIrp ever saw it - which
+         * is what user mode needs for IOCTL_NDIS_QUERY_GLOBAL_STATS.
+         * Ndis6DispatchHybridGeneric is the right handler in both cases: it
+         * hands a hybrid driver's KMDF-owned device objects back to KMDF's own
+         * dispatch and only services our adapter FDOs itself.  A driver that
+         * later calls NdisRegisterDeviceEx overrides these slots with its own
+         * per-device demux, which handles the FDO case identically. */
+        for (i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
+        {
+            if (i != IRP_MJ_PNP && i != IRP_MJ_POWER && i != IRP_MJ_SYSTEM_CONTROL)
+                DriverObject->MajorFunction[i] = Ndis6DispatchHybridGeneric;
+        }
     }
 
     /* Insert into the global driver list. */
@@ -192,8 +196,34 @@ NdisMRegisterMiniportDriver(
     InsertTailList(&g_Ndis6DriverList, &Block->ListEntry);
     KeReleaseSpinLock(&g_Ndis6DriverListLock, OldIrql);
 
-    *NdisMiniportDriverHandle = (NDIS_HANDLE)Block;
+    *BlockOut = Block;
     return NDIS_STATUS_SUCCESS;
+}
+
+NDIS_STATUS
+NTAPI
+NdisMRegisterMiniportDriver(
+    _In_     PDRIVER_OBJECT                          DriverObject,
+    _In_     PUNICODE_STRING                         RegistryPath,
+    _In_opt_ NDIS_HANDLE                             MiniportDriverContext,
+    _In_     PNDIS_MINIPORT_DRIVER_CHARACTERISTICS   MiniportDriverCharacteristics,
+    _Out_    PNDIS_HANDLE                            NdisMiniportDriverHandle)
+{
+    PNDIS6_DRIVER_BLOCK Block;
+    NDIS_STATUS Status;
+
+    if (NdisMiniportDriverHandle == NULL)
+        return NDIS_STATUS_INVALID_PARAMETER;
+
+    Status = Ndis6RegisterMiniportDriverBlock(DriverObject,
+                                              RegistryPath,
+                                              MiniportDriverContext,
+                                              MiniportDriverCharacteristics,
+                                              TRUE,
+                                              &Block);
+    if (Status == NDIS_STATUS_SUCCESS)
+        *NdisMiniportDriverHandle = (NDIS_HANDLE)Block;
+    return Status;
 }
 
 VOID
