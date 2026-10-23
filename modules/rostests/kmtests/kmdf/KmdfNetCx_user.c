@@ -10,7 +10,7 @@
  * way its INF does, create a root-enumerated network device whose function
  * driver is the loopback client, let PnP start it, check the client's view
  * through its device, push packets through NDIS with the protocol driver,
- * then remove the device again.
+ * then remove and uninstall the device again.
  */
 
 #include <kmt_test.h>
@@ -277,12 +277,76 @@ RunTraffic(
 }
 
 /*
- * The device stays installed: our cfgmgr cannot remove a device yet (the
- * kernel does not implement query-remove), and a KMDF function device that
- * reports itself removed (WdfDeviceSetDeviceState) brings the system down
- * in KMDF's own cleanup after its driver's callbacks ran, with or without
- * NetAdapterCx on it. Stopping the adapter is as far as the test goes.
+ * Remove the device the way the device manager does, then uninstall it:
+ * NDIS halts the adapter, the device node, its registry keys and, with
+ * the last device of its driver gone, the driver go away.
  */
+static
+VOID
+RemoveDevice(
+    _Inout_ PNETCX_TEST_DEVICE Device)
+{
+    PNP_VETO_TYPE VetoType = PNP_VetoTypeUnknown;
+    WCHAR VetoName[MAX_PATH], Path[256];
+    SERVICE_STATUS ServiceStatus;
+    ULONG Status, Problem, i;
+    DEVINST DevInst;
+    CONFIGRET Cr;
+    HKEY Key;
+
+    VetoName[0] = UNICODE_NULL;
+    RtlZeroMemory(&ServiceStatus, sizeof(ServiceStatus));
+    Cr = CM_Query_And_Remove_SubTreeW(Device->DevInst, &VetoType, VetoName, RTL_NUMBER_OF(VetoName),
+                                      CM_REMOVE_NO_RESTART);
+    ok_eq_ulong(Cr, CR_SUCCESS);
+    if (Cr != CR_SUCCESS)
+    {
+        trace("Removal of %S vetoed: type %d, name %S\n", Device->InstanceId, VetoType, VetoName);
+        return;
+    }
+    ok(!NdisAdapterPresent(Device->ExportName), "NDIS adapter %S still there\n", Device->ExportName);
+
+    /* The device node goes once the last reference to it is gone */
+    for (i = 0; i < 50; i++)
+    {
+        if (CM_Get_DevNode_Status(&Status, &Problem, Device->DevInst, 0) != CR_SUCCESS)
+            break;
+        Sleep(100);
+    }
+
+    Cr = CM_Locate_DevNodeW(&DevInst, Device->InstanceId, CM_LOCATE_DEVNODE_PHANTOM);
+    ok_eq_ulong(Cr, CR_SUCCESS);
+    if (Cr == CR_SUCCESS)
+    {
+        Cr = CM_Uninstall_DevNode(DevInst, 0);
+        ok_eq_ulong(Cr, CR_SUCCESS);
+    }
+
+    /* Hardware and software key */
+    FORMAT(Path, L"SYSTEM\\CurrentControlSet\\Enum\\%s", Device->InstanceId);
+    ok(RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_READ, &Key) == ERROR_FILE_NOT_FOUND,
+       "%S still there\n", Path);
+    FORMAT(Path, L"%s\\%s", NET_CLASS_KEY, Device->ClassInstance);
+    ok(RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_READ, &Key) == ERROR_FILE_NOT_FOUND,
+       "%S still there\n", Path);
+    FORMAT(Path, L"SYSTEM\\CurrentControlSet\\Enum\\Root\\%s", Device->DeviceId);
+    RegDeleteKeyW(HKEY_LOCAL_MACHINE, Path);
+
+    if (!Device->Service)
+        return;
+
+    for (i = 0; i < 50; i++)
+    {
+        if (QueryServiceStatus(Device->Service, &ServiceStatus) &&
+            ServiceStatus.dwCurrentState == SERVICE_STOPPED)
+            break;
+        Sleep(100);
+    }
+    ok(ServiceStatus.dwCurrentState == SERVICE_STOPPED, "%S not unloaded, state %lu\n",
+       Device->ServiceName, ServiceStatus.dwCurrentState);
+    KmtDeleteService(Device->ServiceName, &Device->Service);
+}
+
 static
 VOID
 FinishDevice(
@@ -299,7 +363,14 @@ FinishDevice(
         ok_eq_long(State.QueueDestroys, 4L);
     }
 
-    if (Device->Service)
+    /*
+     * Remove the device with its adapter running: TCPIP only tears down the
+     * IP interface of an adapter whose media is connected when it unbinds
+     * from it, and a stale one makes it query the removed adapter later.
+     */
+    if (LoopIoctl(Device->Minor, IOCTL_NETCXLOOP_START_ADAPTER, NULL))
+        RemoveDevice(Device);
+    else if (Device->Service)
         KmtCloseService(&Device->Service);
 }
 
@@ -497,6 +568,13 @@ START_TEST(KmdfNetCxOvpnDco)
     ok(Handle != INVALID_HANDLE_VALUE, "Opening ovpn-dco failed with %lu\n", GetLastError());
     if (Handle != INVALID_HANDLE_VALUE)
         CloseHandle(Handle);
+
+    /*
+     * The device stays installed: without a peer its link is down, and TCPIP
+     * does not tear down the IP interface of an adapter whose media is
+     * disconnected when it unbinds from it, then queries the removed adapter
+     * through the stale interface (iphlpapi, explorer).
+     */
 
 Exit:
     if (Device.Service)
