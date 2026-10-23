@@ -1,0 +1,10 @@
+; Network Adapter Class Extension (netadaptercx.sys)
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\NetAdapterCx","DisplayName",0x00000000,"Network Adapter Class Extension"
+HKLM,"SYSTEM\CurrentControlSet\Services\NetAdapterCx","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\NetAdapterCx","ImagePath",0x00020000,"system32\drivers\netadaptercx.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\NetAdapterCx","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\NetAdapterCx","Type",0x00010001,0x00000001
+
+; WDFLDR finds the class extension for a NetAdapterCx 2.x client of KMDF 1.x here
+HKLM,"SYSTEM\CurrentControlSet\Control\Wdf\Kmdf\NetAdapterCx\Versions\2\1","Service",0x00000000,"NetAdapterCx"
