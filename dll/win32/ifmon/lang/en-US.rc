@@ -97,7 +97,7 @@ Examples:\n\n\
        [[gateway=]<IP address>|none [gwmetric=]integer]\n\n\
 Parameters:\n\n\
       Tag            Value\n\
-      name         - The name of the interface.\n\
+      name         - The name or the index of the interface.\n\
       source       - One of the following values:\n\
                      dhcp: Sets DHCP as the source for configuring IP\n\
                            addresses for the specific interface.\n\
