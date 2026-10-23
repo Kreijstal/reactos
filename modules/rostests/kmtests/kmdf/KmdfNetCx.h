@@ -31,6 +31,20 @@
 #define IOCTL_NETCXLOOP_START_ADAPTER \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 
+/*
+ * netcxtun21_drv: the same client built as a raw IP "tunnel" for tcpip.
+ * It keeps what it is given to transmit for the test to read, and
+ * receives what the test injects.
+ */
+#define NETCXTUN_DOS_NAME           L"\\\\.\\KmtNetCxTun"
+
+/* Out: the oldest frame transmitted and not read yet */
+#define IOCTL_NETCXLOOP_GET_TX_FRAME \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x903, METHOD_BUFFERED, FILE_READ_ACCESS)
+/* In: a frame to indicate as received */
+#define IOCTL_NETCXLOOP_INJECT_RX_FRAME \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x904, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
 typedef struct _NETCXLOOP_STATE
 {
     ULONG Size;
