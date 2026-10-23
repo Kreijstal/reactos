@@ -902,6 +902,10 @@ IoGetRelatedTargetDevice(
 );
 
 VOID
+IopCheckUnloadDriver(
+    _In_ PDRIVER_OBJECT DriverObject);
+
+VOID
 NTAPI
 IopUnloadDevice(
     IN PDEVICE_OBJECT DeviceObject
