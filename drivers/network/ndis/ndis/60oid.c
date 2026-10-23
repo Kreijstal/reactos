@@ -469,10 +469,12 @@ Ndis6LegacyDoRequest(
                 return NDIS_STATUS_BUFFER_TOO_SHORT;
             }
             /* MTU + Ethernet header (14) — legacy consumers add their
-             * own VLAN / LLC padding on top. */
+             * own VLAN / LLC padding on top. A raw IP frame has no
+             * header. */
             if (Ext->GeneralAttrsValid && gen->MtuSize)
             {
-                *(PULONG)Buffer = gen->MtuSize + NDIS6_ETH_HEADER_SIZE;
+                *(PULONG)Buffer = gen->MtuSize +
+                    (gen->MediaType == NdisMediumIP ? 0 : NDIS6_ETH_HEADER_SIZE);
             }
             else
             {
@@ -519,12 +521,16 @@ Ndis6LegacyDoRequest(
                 Request->DATA.QUERY_INFORMATION.BytesNeeded = sizeof(NDIS_MEDIUM);
                 return NDIS_STATUS_BUFFER_TOO_SHORT;
             }
-            *(NDIS_MEDIUM*)Buffer = NdisMedium802_3;
+            *(NDIS_MEDIUM*)Buffer = Ext->GeneralAttrsValid ? gen->MediaType
+                                                           : NdisMedium802_3;
             Request->DATA.QUERY_INFORMATION.BytesWritten = sizeof(NDIS_MEDIUM);
             return NDIS_STATUS_SUCCESS;
 
         case OID_802_3_CURRENT_ADDRESS:
         case OID_802_3_PERMANENT_ADDRESS:
+            /* A raw IP adapter has no MAC address */
+            if (Ext->GeneralAttrsValid && gen->MediaType != NdisMedium802_3)
+                return NDIS_STATUS_NOT_SUPPORTED;
             if (BufferLen < 6)
             {
                 Request->DATA.QUERY_INFORMATION.BytesNeeded = 6;
