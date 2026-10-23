@@ -2279,6 +2279,63 @@ IopRemoveDevice(PDEVICE_NODE DeviceNode)
     return Status;
 }
 
+/**
+ * @brief      Removes a started device on behalf of user mode (CM_Query_And_Remove_SubTree,
+ *             CM_Disable_DevNode)
+ *
+ * The removal is vetoed while there are open handles to the device stack or when
+ * a driver fails IRP_MN_QUERY_REMOVE_DEVICE.
+ *
+ * @return     STATUS_SUCCESS, STATUS_FILES_OPEN for open handles, STATUS_CANNOT_DELETE for a
+ *             device that is not disableable, STATUS_PLUGPLAY_QUERY_VETOED for a driver veto
+ */
+static
+NTSTATUS
+PiQueryRemoveDevice(
+    _In_ PDEVICE_NODE DeviceNode)
+{
+    PDEVICE_OBJECT DeviceObject = DeviceNode->PhysicalDeviceObject;
+    NTSTATUS Status;
+
+    if (DeviceNode->State == DeviceNodeRemoved)
+        return STATUS_SUCCESS;
+
+    if (DeviceNode->State != DeviceNodeStarted)
+    {
+        DPRINT1("Cannot remove %wZ in state %u\n", &DeviceNode->InstancePath, DeviceNode->State);
+        return STATUS_PLUGPLAY_QUERY_VETOED;
+    }
+
+    if (DeviceNode->UserFlags & DNUF_NOT_DISABLEABLE)
+        return STATUS_CANNOT_DELETE;
+
+    if (PiDeviceStackHasOpenHandles(DeviceObject))
+    {
+        DPRINT1("Removal of %wZ vetoed: the device is open\n", &DeviceNode->InstancePath);
+        return STATUS_FILES_OPEN;
+    }
+
+    PiSetDevNodeState(DeviceNode, DeviceNodeAwaitingQueuedRemoval);
+
+    Status = IopPrepareDeviceForRemoval(DeviceObject, FALSE);
+    if (NT_SUCCESS(Status) && PiDeviceStackHasOpenHandles(DeviceObject))
+    {
+        /* Opened between our check and the query-remove */
+        DPRINT1("Removal of %wZ vetoed: the device was opened\n", &DeviceNode->InstancePath);
+        IopCancelPrepareDeviceForRemoval(DeviceObject);
+        Status = STATUS_FILES_OPEN;
+    }
+
+    if (!NT_SUCCESS(Status))
+    {
+        PiSetDevNodeState(DeviceNode, DeviceNodeStarted);
+        return (Status == STATUS_FILES_OPEN) ? Status : STATUS_PLUGPLAY_QUERY_VETOED;
+    }
+
+    IopSendRemoveDevice(DeviceObject);
+    return STATUS_SUCCESS;
+}
+
 static
 NTSTATUS
 PiEnumerateDevice(
@@ -2726,6 +2783,8 @@ ActionToStr(
             return "PiActionStartDevice";
         case PiActionQueryState:
             return "PiActionQueryState";
+        case PiActionQueryRemoveDevice:
+            return "PiActionQueryRemoveDevice";
         case PiActionRemovePendingCloses:
             return "PiActionRemovePendingCloses";
         default:
@@ -2835,6 +2894,10 @@ PipDeviceActionWorker(
                 }
                 // TODO: Windows may return STATUS_DELETE_PENDING here
                 status = STATUS_SUCCESS;
+                break;
+
+            case PiActionQueryRemoveDevice:
+                status = PiQueryRemoveDevice(deviceNode);
                 break;
 
             case PiActionRemovePendingCloses:
