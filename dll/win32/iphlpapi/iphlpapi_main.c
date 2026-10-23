@@ -1058,10 +1058,30 @@ DWORD WINAPI FlushIpNetTable(DWORD dwIfIndex)
  */
 DWORD WINAPI GetAdapterIndex(LPWSTR AdapterName, PULONG IfIndex)
 {
-  TRACE("AdapterName %p, IfIndex %p\n", AdapterName, IfIndex);
-  FIXME(":stub\n");
-  /* marking Win2K+ functions not supported */
-  return ERROR_NOT_SUPPORTED;
+  UNICODE_STRING GuidString;
+  NET_LUID Luid;
+  GUID Guid;
+  PWSTR Brace;
+  DWORD ret;
+
+  TRACE("AdapterName %s, IfIndex %p\n", debugstr_w(AdapterName), IfIndex);
+
+  if (!AdapterName || !IfIndex)
+    return ERROR_INVALID_PARAMETER;
+
+  /* "\DEVICE\TCPIP_{GUID}", as in IP_ADAPTER_INDEX_MAP */
+  Brace = wcschr(AdapterName, L'{');
+  if (!Brace)
+    return ERROR_INVALID_PARAMETER;
+  RtlInitUnicodeString(&GuidString, Brace);
+  if (!NT_SUCCESS(RtlGUIDFromString(&GuidString, &Guid)))
+    return ERROR_INVALID_PARAMETER;
+
+  ret = ConvertInterfaceGuidToLuid(&Guid, &Luid);
+  if (ret != NO_ERROR)
+    return ERROR_DEV_NOT_EXIST;
+
+  return ConvertInterfaceLuidToIndex(&Luid, IfIndex);
 }
 
 
