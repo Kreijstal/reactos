@@ -65,6 +65,11 @@ Ndis6OidForward(
         return NDIS_STATUS_NOT_SUPPORTED;
     }
 
+    /* A halted adapter (a NetAdapterCx adapter can be halted and keep its
+     * NDIS adapter) has no context to call its miniport with */
+    if (!Ext->Initialized || Ext->MiniportAdapterContext == NULL)
+        return NDIS_STATUS_ADAPTER_NOT_READY;
+
     RtlZeroMemory(&OidReq, sizeof(OidReq));
     OidReq.Header.Type     = NDIS_OBJECT_TYPE_OID_REQUEST;
     OidReq.Header.Revision = NDIS_OID_REQUEST_REVISION_1;
