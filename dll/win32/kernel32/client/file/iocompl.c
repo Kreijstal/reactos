@@ -295,10 +295,11 @@ PostQueuedCompletionStatus(IN HANDLE CompletionHandle,
  */
 BOOL
 WINAPI
-GetOverlappedResult(IN HANDLE hFile,
-                    IN LPOVERLAPPED lpOverlapped,
-                    OUT LPDWORD lpNumberOfBytesTransferred,
-                    IN BOOL bWait)
+GetOverlappedResultEx(IN HANDLE hFile,
+                      IN LPOVERLAPPED lpOverlapped,
+                      OUT LPDWORD lpNumberOfBytesTransferred,
+                      IN DWORD dwMilliseconds,
+                      IN BOOL bAlertable)
 {
     DWORD WaitStatus;
     HANDLE hObject;
@@ -307,23 +308,21 @@ GetOverlappedResult(IN HANDLE hFile,
     if (lpOverlapped->Internal == STATUS_PENDING)
     {
         /* Check if the caller is okay with waiting */
-        if (!bWait)
-        {
-            /* Set timeout */
-            WaitStatus = WAIT_TIMEOUT;
-        }
-        else
-        {
-            /* Wait for the result */
-            hObject = lpOverlapped->hEvent ? lpOverlapped->hEvent : hFile;
-            WaitStatus = WaitForSingleObject(hObject, INFINITE);
-        }
-
-        /* Check for timeout */
-        if (WaitStatus == WAIT_TIMEOUT)
+        if (!dwMilliseconds)
         {
             /* We have to override the last error with INCOMPLETE instead */
             SetLastError(ERROR_IO_INCOMPLETE);
+            return FALSE;
+        }
+
+        /* Wait for the result */
+        hObject = lpOverlapped->hEvent ? lpOverlapped->hEvent : hFile;
+        WaitStatus = WaitForSingleObjectEx(hObject, dwMilliseconds, bAlertable);
+
+        /* A timeout or an APC ends the wait; tell the caller which one */
+        if (WaitStatus == WAIT_TIMEOUT || WaitStatus == WAIT_IO_COMPLETION)
+        {
+            SetLastError(WaitStatus);
             return FALSE;
         }
 
@@ -344,6 +343,23 @@ GetOverlappedResult(IN HANDLE hFile,
 
     /* All done */
     return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+GetOverlappedResult(IN HANDLE hFile,
+                    IN LPOVERLAPPED lpOverlapped,
+                    OUT LPDWORD lpNumberOfBytesTransferred,
+                    IN BOOL bWait)
+{
+    return GetOverlappedResultEx(hFile,
+                                 lpOverlapped,
+                                 lpNumberOfBytesTransferred,
+                                 bWait ? INFINITE : 0,
+                                 FALSE);
 }
 
 /*
