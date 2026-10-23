@@ -677,6 +677,10 @@ MiniAdapterHasAddress(
             /* Destination address is the first field */
             break;
 
+        case NdisMediumIP:
+            /* No link address to loop back on */
+            return FALSE;
+
         default:
             NDIS_DbgPrint(MIN_TRACE, ("Adapter has unsupported media type (0x%X).\n", Adapter->NdisMiniportBlock.MediaType));
             return FALSE;

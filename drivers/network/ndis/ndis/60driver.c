@@ -298,6 +298,10 @@ NdisMSetMiniportAttributes(
             Ext->GeneralAttrs       = *Gen;
             Ext->GeneralAttrsValid  = TRUE;
 
+            /* What NdisOpenAdapter matches a legacy protocol's media
+             * against: a raw IP adapter must not pass for 802.3 */
+            Adapter->NdisMiniportBlock.MediaType = Gen->MediaType;
+
             /* Mirror the MAC address into the legacy LOGICAL_ADAPTER
              * fields so existing 5.x consumers see it. */
             if (Gen->MacAddressLength <= sizeof(Adapter->Address))

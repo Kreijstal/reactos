@@ -234,11 +234,20 @@ Ndis6ImSeedTcpipRegistry(_In_ PCUNICODE_STRING DeviceName)
     if (Key != NULL)
     {
         UNICODE_STRING ValName;
+        ULONG Length;
+        NTSTATUS Status;
+
+        /* Keep a configuration the adapter already has: a static address
+         * written before the device started, or the one from the last boot */
         RtlInitUnicodeString(&ValName, L"EnableDHCP");
-        ZwSetValueKey(Key, &ValName, 0, REG_DWORD, &One, sizeof(One));
-        Ndis6ImSetSz(Key, L"IPAddress", REG_MULTI_SZ, L"0.0.0.0");
-        Ndis6ImSetSz(Key, L"SubnetMask", REG_MULTI_SZ, L"0.0.0.0");
-        Ndis6ImSetSz(Key, L"DefaultGateway", REG_MULTI_SZ, L"");
+        Status = ZwQueryValueKey(Key, &ValName, KeyValuePartialInformation, NULL, 0, &Length);
+        if (Status != STATUS_BUFFER_TOO_SMALL && Status != STATUS_BUFFER_OVERFLOW)
+        {
+            ZwSetValueKey(Key, &ValName, 0, REG_DWORD, &One, sizeof(One));
+            Ndis6ImSetSz(Key, L"IPAddress", REG_MULTI_SZ, L"0.0.0.0");
+            Ndis6ImSetSz(Key, L"SubnetMask", REG_MULTI_SZ, L"0.0.0.0");
+            Ndis6ImSetSz(Key, L"DefaultGateway", REG_MULTI_SZ, L"");
+        }
         ZwClose(Key);
     }
 

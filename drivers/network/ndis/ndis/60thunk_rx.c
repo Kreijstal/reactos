@@ -201,7 +201,9 @@ Ndis6RxBuildLegacyPacket(
 
     NDIS_SET_PACKET_STATUS(Packet,
         ResourcesFlag ? NDIS_STATUS_RESOURCES : NDIS_STATUS_SUCCESS);
-    NDIS_SET_PACKET_HEADER_SIZE(Packet, 14);  /* Ethernet II */
+    /* Ethernet II, or nothing in front of a raw IP packet */
+    NDIS_SET_PACKET_HEADER_SIZE(Packet,
+        (Ext->GeneralAttrsValid && Ext->GeneralAttrs.MediaType == NdisMediumIP) ? 0 : 14);
 
     return Packet;
 }
