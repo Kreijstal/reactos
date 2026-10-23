@@ -30,6 +30,8 @@
 typedef struct _NETCX_TEST_DEVICE
 {
     ULONG Minor;
+    WCHAR DeviceId[32];
+    WCHAR Description[64];
     WCHAR ServiceName[32];
     WCHAR ImageName[32];
     WCHAR ClassInstance[8];
@@ -96,7 +98,7 @@ WriteClassKey(
         return FALSE;
 
     FORMAT(Medium, L"%u", NETCX_TEST_MEDIUM);
-    SetString(Key, L"DriverDesc", L"ReactOS NetAdapterCx loopback test adapter");
+    SetString(Key, L"DriverDesc", Device->Description);
     SetString(Key, L"NetCfgInstanceId", Device->NetCfgInstanceId);
     SetString(Key, L"*MediaType", Medium);
     SetString(Key, L"*PhysicalMediaType", L"0");
@@ -141,16 +143,12 @@ BOOLEAN
 InstallDevice(
     _Inout_ PNETCX_TEST_DEVICE Device)
 {
-    WCHAR DeviceId[32], Driver[64];
+    WCHAR Driver[64];
     DEVINST Root;
     CONFIGRET Cr;
-    ULONG Status, Problem, i;
+    ULONG Status = 0, Problem = 0, i;
     DWORD Error;
 
-    FORMAT(Device->ServiceName, L"KmtNetCxLoop2%lu", Device->Minor);
-    FORMAT(Device->ImageName, L"netcxloop2%lu_drv.sys", Device->Minor);
-    FORMAT(Device->ClassInstance, L"092%lu", Device->Minor);
-    FORMAT(Device->NetCfgInstanceId, L"{6E4E4358-0000-4000-8000-0000000002%02lX}", Device->Minor);
     FORMAT(Device->ExportName, L"\\Device\\%s", Device->NetCfgInstanceId);
 
     Error = KmtCreateService(Device->ServiceName, Device->ImageName, NULL, &Device->Service);
@@ -167,8 +165,7 @@ InstallDevice(
         return FALSE;
 
     /* Registry first, as a phantom: nothing must try to install it */
-    FORMAT(DeviceId, L"KmtNetCxLoop2%lu", Device->Minor);
-    Cr = CM_Create_DevNodeW(&Device->DevInst, DeviceId, Root,
+    Cr = CM_Create_DevNodeW(&Device->DevInst, Device->DeviceId, Root,
                             CM_CREATE_DEVNODE_GENERATE_ID | CM_CREATE_DEVNODE_PHANTOM);
     ok_eq_ulong(Cr, CR_SUCCESS);
     if (Cr != CR_SUCCESS)
@@ -181,8 +178,8 @@ InstallDevice(
     FORMAT(Driver, L"%s\\%s", NET_CLASS_GUID, Device->ClassInstance);
     ok_eq_ulong(SetProperty(Device->DevInst, CM_DRP_CLASS, L"Net", FALSE), CR_SUCCESS);
     ok_eq_ulong(SetProperty(Device->DevInst, CM_DRP_CLASSGUID, NET_CLASS_GUID, FALSE), CR_SUCCESS);
-    ok_eq_ulong(SetProperty(Device->DevInst, CM_DRP_HARDWAREID, DeviceId, TRUE), CR_SUCCESS);
-    ok_eq_ulong(SetProperty(Device->DevInst, CM_DRP_DEVICEDESC, L"NetAdapterCx loopback", FALSE), CR_SUCCESS);
+    ok_eq_ulong(SetProperty(Device->DevInst, CM_DRP_HARDWAREID, Device->DeviceId, TRUE), CR_SUCCESS);
+    ok_eq_ulong(SetProperty(Device->DevInst, CM_DRP_DEVICEDESC, Device->Description, FALSE), CR_SUCCESS);
     ok_eq_ulong(SetProperty(Device->DevInst, CM_DRP_SERVICE, Device->ServiceName, FALSE), CR_SUCCESS);
     ok_eq_ulong(SetProperty(Device->DevInst, CM_DRP_DRIVER, Driver, FALSE), CR_SUCCESS);
 
@@ -205,6 +202,7 @@ InstallDevice(
 
     ok(Cr == CR_SUCCESS && (Status & DN_STARTED),
        "Device not started: cr %lu, status 0x%lx, problem %lu\n", Cr, Status, Problem);
+    trace("Device %S: status 0x%lx, problem %lu\n", Device->InstanceId, Status, Problem);
     return Cr == CR_SUCCESS && (Status & DN_STARTED);
 }
 
@@ -320,6 +318,12 @@ TestVersion(
 
     RtlZeroMemory(&Device, sizeof(Device));
     Device.Minor = Minor;
+    FORMAT(Device.DeviceId, L"KmtNetCxLoop2%lu", Minor);
+    FORMAT(Device.Description, L"NetAdapterCx 2.%lu loopback test adapter", Minor);
+    FORMAT(Device.ServiceName, L"KmtNetCxLoop2%lu", Minor);
+    FORMAT(Device.ImageName, L"netcxloop2%lu_drv.sys", Minor);
+    FORMAT(Device.ClassInstance, L"092%lu", Minor);
+    FORMAT(Device.NetCfgInstanceId, L"{6E4E4358-0000-4000-8000-0000000002%02lX}", Minor);
 
     FORMAT(Name, NETCXLOOP_DOS_NAME_FORMAT, Minor);
     Handle = CreateFileW(Name, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
@@ -419,6 +423,84 @@ START_TEST(KmdfNetCx)
     TestVersion(0);
 
     /* The class extension stays loaded, as on Windows */
+    if (CxService)
+        KmtCloseService(&CxService);
+}
+
+/*
+ * Bring-up probe for OpenVPN's ovpn-dco-win, a NetAdapterCx 2.0/2.1 client.
+ * Copy an ovpn-dco.sys (OpenVPN's signed build or a GCC build) next to
+ * kmtest.exe; without one the test is skipped. The device is set up the
+ * way ovpn-dco.inf sets it up (raw IP, IF_TYPE_PROP_VIRTUAL).
+ */
+#define OVPN_IOCTL_GET_VERSION CTL_CODE(FILE_DEVICE_UNKNOWN, 8, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+START_TEST(KmdfNetCxOvpnDco)
+{
+    NETCX_TEST_DEVICE Device;
+    SC_HANDLE CxService;
+    HANDLE Handle;
+    LONG Version[3] = { 0 };
+    DWORD Returned = 0;
+    WCHAR Path[MAX_PATH];
+    BOOL Ok;
+
+    /* Where KmtCreateService looks: the directory of kmtest.exe */
+    if (!GetModuleFileNameW(NULL, Path, RTL_NUMBER_OF(Path)) || !wcsrchr(Path, L'\\'))
+        return;
+    wcscpy(wcsrchr(Path, L'\\') + 1, L"ovpn-dco.sys");
+    if (GetFileAttributesW(Path) == INVALID_FILE_ATTRIBUTES)
+    {
+        skip(FALSE, "No ovpn-dco.sys next to kmtest.exe\n");
+        return;
+    }
+
+    Handle = CreateFileW(L"\\\\.\\ovpn-dco-ver", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         NULL, OPEN_EXISTING, 0, NULL);
+    if (Handle != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(Handle);
+        skip(FALSE, "ovpn-dco left from an earlier run\n");
+        return;
+    }
+
+    RegisterClassExtension(&CxService);
+
+    RtlZeroMemory(&Device, sizeof(Device));
+    wcscpy(Device.DeviceId, L"ovpn-dco");
+    wcscpy(Device.Description, L"OpenVPN Data Channel Offload");
+    wcscpy(Device.ServiceName, L"ovpn-dco");
+    wcscpy(Device.ImageName, L"ovpn-dco.sys");
+    wcscpy(Device.ClassInstance, L"0930");
+    wcscpy(Device.NetCfgInstanceId, L"{6E4E4358-0000-4000-8000-000000000300}");
+
+    if (!InstallDevice(&Device))
+        goto Exit;
+
+    ok(NdisAdapterPresent(Device.ExportName), "No NDIS adapter %S\n", Device.ExportName);
+
+    /* The control device the driver creates for its first device */
+    Handle = CreateFileW(L"\\\\.\\ovpn-dco-ver", GENERIC_READ | GENERIC_WRITE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(Handle != INVALID_HANDLE_VALUE, "Opening ovpn-dco-ver failed with %lu\n", GetLastError());
+    if (Handle != INVALID_HANDLE_VALUE)
+    {
+        Ok = DeviceIoControl(Handle, OVPN_IOCTL_GET_VERSION, NULL, 0, Version, sizeof(Version),
+                             &Returned, NULL);
+        ok(Ok, "OVPN_IOCTL_GET_VERSION failed with %lu\n", GetLastError());
+        trace("ovpn-dco %ld.%ld.%ld\n", Version[0], Version[1], Version[2]);
+        CloseHandle(Handle);
+    }
+
+    /* The adapter's own device: what openvpn.exe opens */
+    Handle = CreateFileW(L"\\\\.\\ovpn-dco", GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    ok(Handle != INVALID_HANDLE_VALUE, "Opening ovpn-dco failed with %lu\n", GetLastError());
+    if (Handle != INVALID_HANDLE_VALUE)
+        CloseHandle(Handle);
+
+Exit:
+    if (Device.Service)
+        KmtCloseService(&Device.Service);
     if (CxService)
         KmtCloseService(&CxService);
 }
