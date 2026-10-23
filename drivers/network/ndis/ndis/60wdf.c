@@ -317,6 +317,8 @@ NdisWdfPnpPowerEventHandler(
 
         case NdisWdfActionPnpRemove:
         case NdisWdfActionPnpSurpriseRemove:
+            /* Protocols unbind while the miniport still runs */
+            Ndis6UnbindProtocolsFromAdapter(Adapter);
             NdisWdfHaltAdapter(Adapter,
                                Event == NdisWdfActionPnpSurpriseRemove ?
                                    NdisHaltDeviceSurpriseRemoved :

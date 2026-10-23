@@ -755,6 +755,9 @@ Ndis6DispatchPnp(
              *    2. Forward REMOVE down so PCI can clean up its side
              *    3. Destroy our own state (detach + free ext + delete FDO)
              * --------------------------------------------------------- */
+            /* Protocols unbind while the miniport still runs */
+            Ndis6UnbindProtocolsFromAdapter(Adapter);
+
             if (Ext && Ext->Initialized)
             {
                 NDIS_HALT_ACTION action =

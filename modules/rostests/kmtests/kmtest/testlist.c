@@ -27,6 +27,7 @@ KMT_TESTFUNC Test_Kmdf133;
 KMT_TESTFUNC Test_KmdfNetCx;
 KMT_TESTFUNC Test_KmdfNetCxOvpnDco;
 KMT_TESTFUNC Test_KmdfNetCxRawIp;
+KMT_TESTFUNC Test_KmdfRemove;
 KMT_TESTFUNC Test_KmdfUcx;
 KMT_TESTFUNC Test_MmMapLockedPagesSpecifyCache;
 KMT_TESTFUNC Test_MmPageoutSysView;
@@ -93,6 +94,7 @@ const KMT_TEST TestList[] =
     { "KmdfNetCx",                    Test_KmdfNetCx },
     { "KmdfNetCxOvpnDco",             Test_KmdfNetCxOvpnDco },
     { "KmdfNetCxRawIp",               Test_KmdfNetCxRawIp },
+    { "KmdfRemove",                   Test_KmdfRemove },
     { "KmdfUcx",                      Test_KmdfUcx },
     { "MmMapLockedPagesSpecifyCache", Test_MmMapLockedPagesSpecifyCache },
     { "MmPageoutSysView",             Test_MmPageoutSysView },

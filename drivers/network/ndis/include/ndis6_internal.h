@@ -304,6 +304,10 @@ Ndis6CreateLogicalAdapter(
     _Out_ PLOGICAL_ADAPTER*     AdapterOut);
 
 VOID
+Ndis6UnbindProtocolsFromAdapter(
+    _In_ PLOGICAL_ADAPTER Adapter);
+
+VOID
 Ndis6DestroyLogicalAdapter(
     _In_ PLOGICAL_ADAPTER       Adapter);
 
