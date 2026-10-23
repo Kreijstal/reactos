@@ -33,6 +33,9 @@
 
 #define ADDRESS_ALL        1
 
+#define STORE_ACTIVE       1
+#define STORE_PERSISTENT   2
+
 static FN_HANDLE_CMD IpAddAddress;
 static FN_HANDLE_CMD IpAddDns;
 static FN_HANDLE_CMD IpDeleteAddress;
@@ -128,6 +131,41 @@ GetInterfaceGuid(
 
     return ERROR_SUCCESS;
 }
+
+/* Sets the address of the interface in the TCP/IP driver only */
+static
+DWORD
+SetActiveAddress(
+    _In_ GUID *pInterfaceGuid,
+    _In_ IN_ADDR *pAddress,
+    _In_ IN_ADDR *pMask)
+{
+    NET_LUID InterfaceLuid;
+    NET_IFINDEX InterfaceIndex;
+    ULONG NteContext = 0, NteInstance = 0;
+    DWORD dwError;
+
+    dwError = ConvertInterfaceGuidToLuid(pInterfaceGuid, &InterfaceLuid);
+    if (dwError == NO_ERROR)
+        dwError = ConvertInterfaceLuidToIndex(&InterfaceLuid, &InterfaceIndex);
+    if (dwError != NO_ERROR)
+    {
+        DPRINT1("Interface not found (Error %lu)\n", dwError);
+        return dwError;
+    }
+
+    /* The TCP/IP driver has one address per interface and replaces it */
+    dwError = AddIPAddress(pAddress->S_un.S_addr,
+                           pMask->S_un.S_addr,
+                           InterfaceIndex,
+                           &NteContext,
+                           &NteInstance);
+    if (dwError != NO_ERROR)
+        DPRINT1("AddIPAddress() failed (Error %lu)\n", dwError);
+
+    return dwError;
+}
+
 
 static
 HRESULT
@@ -1533,13 +1571,16 @@ IpSetAddress(
                           {L"addr", NS_REQ_ZERO, FALSE},
                           {L"mask", NS_REQ_ZERO, FALSE},
                           {L"gateway", NS_REQ_ZERO, FALSE},
-                          {L"gwmetric", NS_REQ_ZERO, FALSE}};
+                          {L"gwmetric", NS_REQ_ZERO, FALSE},
+                          {L"store", NS_REQ_ZERO, FALSE}};
     TOKEN_VALUE ptvSource[] = {{L"static", SOURCE_STATIC},
                                {L"dhcp", SOURCE_DHCP}};
     TOKEN_VALUE ptvGateway[] = {{L"none", GATEWAY_NONE}};
+    TOKEN_VALUE ptvStore[] = {{L"active", STORE_ACTIVE},
+                              {L"persistent", STORE_PERSISTENT}};
     GUID InterfaceGUID;
     PDWORD pdwTagType = NULL;
-    DWORD i, dwSource = SOURCE_UNCHANGED, dwGateway = 0;
+    DWORD i, dwSource = SOURCE_UNCHANGED, dwGateway = 0, dwStore = STORE_PERSISTENT;
     BOOL bHaveName = FALSE, bHaveSource = FALSE, bHaveAddress = FALSE,
          bHaveMask = FALSE, bHaveGateway = FALSE, bHaveMetric = FALSE;
     IN_ADDR Address, Mask, Gateway;
@@ -1720,6 +1761,24 @@ IpSetAddress(
                 bHaveMetric = TRUE;
                 break;
 
+            case 6: /* store */
+                DPRINT("Tag: store (%S)\n", argv[i + dwCurrentIndex]);
+                dwError = MatchEnumTag(hDllInstance,
+                                       argv[i + dwCurrentIndex],
+                                       ARRAYSIZE(ptvStore),
+                                       ptvStore,
+                                       &dwStore);
+                if (dwError != ERROR_SUCCESS)
+                {
+                    PrintMessageFromModule(hDllInstance,
+                                           IDS_ERROR_BAD_VALUE,
+                                           argv[i + dwCurrentIndex],
+                                           pttTags[pdwTagType[i]].pwszTag);
+                    dwError = ERROR_SUPPRESS_OUTPUT;
+                    break;
+                }
+                break;
+
             default:
                 DPRINT1("Unknown tag type %lu\n", pdwTagType[i]);
                 break;
@@ -1755,6 +1814,31 @@ IpSetAddress(
     /* If we have a static source, we need an address or a gateway */
     if ((dwSource == SOURCE_STATIC) && !bHaveAddress && !bHaveGateway)
         return ERROR_INVALID_SYNTAX;
+
+    /*
+     * An active-only static address goes to the TCP/IP driver and not to
+     * the registry, so it is gone with the next restart of the interface.
+     */
+    if (dwStore == STORE_ACTIVE)
+    {
+        if ((dwSource != SOURCE_STATIC) || !bHaveAddress || bHaveGateway)
+        {
+            DPRINT1("Only a static address can be set with store=active\n");
+            return ERROR_NOT_SUPPORTED;
+        }
+
+        dwError = SetActiveAddress(&InterfaceGUID, &Address, &Mask);
+        if (dwError != ERROR_SUCCESS)
+        {
+            PrintMessageFromModule(hDllInstance,
+                                   IDS_ERROR_SET_ADDRESS,
+                                   pszName,
+                                   dwError);
+            return ERROR_SUPPRESS_OUTPUT;
+        }
+
+        return ERROR_SUCCESS;
+    }
 
     hr = GetInterfaceProperties(&InterfaceGUID, &pProperties);
     if (FAILED(hr))

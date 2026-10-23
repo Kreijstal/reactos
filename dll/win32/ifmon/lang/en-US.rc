@@ -94,7 +94,8 @@ Examples:\n\n\
     IDS_HLP_IP_SET_ADDRESS_EX  "\nUsage: %1!s! [name=]<string> \n\
        [[source=]dhcp | \n\
         [source=] static [addr=]IP address [mask=]IP subnet mask]\n\
-       [[gateway=]<IP address>|none [gwmetric=]integer]\n\n\
+       [[gateway=]<IP address>|none [gwmetric=]integer]\n\
+       [[store=]active|persistent]\n\n\
 Parameters:\n\n\
       Tag            Value\n\
       name         - The name or the index of the interface.\n\
@@ -111,7 +112,11 @@ Parameters:\n\n\
                      not be set if gateway is set to 'none'.\n\
       The following options are used only if source is 'static':\n\
       addr         - An IP address for the specified interface.\n\
-      mask         - The subnet mask for the specified IP address.\n\n\
+      mask         - The subnet mask for the specified IP address.\n\
+      store        - One of the following values:\n\
+                     active: The static address is set until the interface\n\
+                             is restarted.\n\
+                     persistent: The setting is kept (default).\n\n\
 Remarks: Used to change the IP address configuration mode from either DHCP to\n\
          static mode or static mode to DHCP. Adds IP addresses on an\n\
          interface with static IP address or adds default gateways.\n\n\
@@ -221,4 +226,5 @@ Parameters:\n\n\
 
     IDS_ERROR_ADD_DHCP_ADDRESS "\nCannot add a static IP address to an interface configured for DHCP.\n"
     IDS_ERROR_DELETE_DHCP_ADDRESS "\nCannot delete Dhcp configured IP Address.\n"
+    IDS_ERROR_SET_ADDRESS "\nThe address of interface %1!s! could not be set (error %2!lu!).\n"
 END
