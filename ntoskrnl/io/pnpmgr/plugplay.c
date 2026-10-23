@@ -406,6 +406,12 @@ PiControlInitializeDevice(
     // Finish the root device registration
     PnpRootRegisterDevice(DeviceObject);
 
+    /*
+     * The device node keeps a reference on its PDO, as on the PDOs that bus
+     * drivers report; IopSendRemoveDevice releases it.
+     */
+    ObReferenceObject(DeviceObject);
+
     /* Insert as a root enumerated device node */
     PiInsertDevNode(DeviceNode, IopRootDeviceNode);
 
@@ -1319,6 +1325,7 @@ PiControlQueryRemoveDevice(
     PDEVICE_OBJECT DeviceObject;
     NTSTATUS Status;
     UNICODE_STRING DeviceInstance;
+    PNP_VETO_TYPE VetoType;
 
     Status = IopCaptureUnicodeString(&DeviceInstance, &ControlData->DeviceInstance);
     if (!NT_SUCCESS(Status))
@@ -1336,10 +1343,42 @@ PiControlQueryRemoveDevice(
         return STATUS_NO_SUCH_DEVICE;
     }
 
-    UNIMPLEMENTED;
-    Status = STATUS_NOT_IMPLEMENTED;
-
+    /* Query-remove and remove the device on the PnP worker */
+    Status = PiPerformSyncDeviceAction(DeviceObject, PiActionQueryRemoveDevice);
     ObDereferenceObject(DeviceObject);
+
+    switch (Status)
+    {
+        case STATUS_SUCCESS:
+            VetoType = PNP_VetoTypeUnknown;
+            break;
+        case STATUS_FILES_OPEN:
+            VetoType = PNP_VetoOutstandingOpen;
+            break;
+        case STATUS_CANNOT_DELETE:
+            VetoType = PNP_VetoNonDisableable;
+            break;
+        default:
+            VetoType = PNP_VetoDevice;
+            break;
+    }
+
+    if (Status != STATUS_SUCCESS)
+    {
+        DPRINT1("Removal of %wZ vetoed (status 0x%lx, veto type %d)\n",
+                &ControlData->DeviceInstance, Status, VetoType);
+        Status = STATUS_PLUGPLAY_QUERY_VETOED;
+    }
+
+    _SEH2_TRY
+    {
+        ControlData->VetoType = VetoType;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
 
     return Status;
 }
