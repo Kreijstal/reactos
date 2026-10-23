@@ -1726,6 +1726,84 @@ PiIrpSendRemoveCheckVpb(
     return IopSynchronousCall(targetDevice, &stack, &info);
 }
 
+/**
+ * @brief      Checks whether any device object of a device stack is open
+ *
+ * Every file object opened on a device holds a reference on the device object
+ * it was opened through (DEVICE_OBJECT::ReferenceCount), see IopCheckDeviceAndDriver.
+ */
+static
+BOOLEAN
+PiDeviceStackHasOpenHandles(
+    _In_ PDEVICE_OBJECT DeviceObject)
+{
+    PDEVICE_OBJECT Current;
+    BOOLEAN Open = FALSE;
+    KIRQL OldIrql;
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueIoDatabaseLock);
+    for (Current = DeviceObject; Current != NULL; Current = Current->AttachedDevice)
+    {
+        if (Current->ReferenceCount != 0)
+        {
+            Open = TRUE;
+            break;
+        }
+    }
+    KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
+
+    return Open;
+}
+
+/**
+ * @brief      Sets or clears DOE_REMOVE_PENDING on every device object of a device stack
+ *
+ * Once a device stack is query-removed or surprise-removed, the I/O manager fails
+ * new opens of it (IopCheckDeviceAndDriver), so that no handle is opened between
+ * the decision to remove the device and IRP_MN_REMOVE_DEVICE.
+ */
+static
+VOID
+PiSetDeviceStackRemovePending(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ BOOLEAN RemovePending)
+{
+    PDEVICE_OBJECT Current;
+    KIRQL OldIrql;
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueIoDatabaseLock);
+    for (Current = DeviceObject; Current != NULL; Current = Current->AttachedDevice)
+    {
+        if (RemovePending)
+            IoGetDevObjExtension(Current)->ExtensionFlags |= DOE_REMOVE_PENDING;
+        else
+            IoGetDevObjExtension(Current)->ExtensionFlags &= ~DOE_REMOVE_PENDING;
+    }
+    KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
+}
+
+/**
+ * @brief      Called by the I/O manager when the last open of a device object is gone
+ *
+ * A surprise-removed device gets its IRP_MN_REMOVE_DEVICE only once all handles
+ * to its stack are closed. Queue the device so that the removal is finished.
+ */
+VOID
+PiNotifyDeviceObjectClosed(
+    _In_ PDEVICE_OBJECT DeviceObject)
+{
+    PDEVICE_OBJECT BaseDevice;
+    PDEVICE_NODE DeviceNode;
+
+    BaseDevice = IoGetDeviceAttachmentBaseRef(DeviceObject);
+    DeviceNode = IopGetDeviceNode(BaseDevice);
+    if (DeviceNode && DeviceNode->State == DeviceNodeRemovePendingCloses)
+    {
+        PiQueueDeviceAction(BaseDevice, PiActionRemovePendingCloses, NULL, NULL);
+    }
+    ObDereferenceObject(BaseDevice);
+}
+
 NTSTATUS
 IopUpdateResourceMapForPnPDevice(
     IN PDEVICE_NODE DeviceNode);
@@ -1740,7 +1818,8 @@ IopSendRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
     ULONG StackCount = 0, i;
     KIRQL OldIrql;
 
-    ASSERT(DeviceNode->State == DeviceNodeAwaitingQueuedRemoval);
+    ASSERT(DeviceNode->State == DeviceNodeAwaitingQueuedRemoval ||
+           DeviceNode->State == DeviceNodeRemovePendingCloses);
 
     /*
      * Keep the device objects of the stack while their drivers process the
@@ -1850,6 +1929,7 @@ IopCancelRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
 {
     /* Drivers should never fail a IRP_MN_CANCEL_REMOVE_DEVICE request */
     PiIrpSendRemoveCheckVpb(DeviceObject, IRP_MN_CANCEL_REMOVE_DEVICE);
+    PiSetDeviceStackRemovePending(DeviceObject, FALSE);
 
     PiNotifyTargetDeviceChange(&GUID_TARGET_DEVICE_REMOVE_CANCELLED, DeviceObject, NULL);
 }
@@ -1940,6 +2020,11 @@ IopQueryRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
                               &DeviceNode->InstancePath);
 
     Status = PiIrpSendRemoveCheckVpb(DeviceObject, IRP_MN_QUERY_REMOVE_DEVICE);
+    if (NT_SUCCESS(Status))
+    {
+        /* No new opens from now on */
+        PiSetDeviceStackRemovePending(DeviceObject, TRUE);
+    }
 
     PiNotifyTargetDeviceChange(&GUID_TARGET_DEVICE_QUERY_REMOVE, DeviceObject, NULL);
 
@@ -2124,7 +2209,18 @@ IopRemoveDevice(PDEVICE_NODE DeviceNode)
 
     DPRINT("Removing device: %wZ\n", &DeviceNode->InstancePath);
 
-    BOOLEAN surpriseRemoval = (_Bool)(DeviceNode->Flags & DNF_DEVICE_GONE);
+    /*
+     * A device that its driver reports removed, disabled or failed
+     * (IoInvalidateDeviceState) is surprise-removed, like one its bus
+     * driver no longer reports. Its IRP_MN_REMOVE_DEVICE waits for the
+     * handles to its stack to be closed.
+     */
+    BOOLEAN reportedRemoval = !(DeviceNode->Flags & DNF_DEVICE_GONE) &&
+                              (DeviceNode->Flags & DNF_HAS_PROBLEM) &&
+                              (DeviceNode->Problem == CM_PROB_DEVICE_NOT_THERE ||
+                               DeviceNode->Problem == CM_PROB_HARDWARE_DISABLED ||
+                               DeviceNode->Problem == CM_PROB_FAILED_POST_START);
+    BOOLEAN surpriseRemoval = (DeviceNode->Flags & DNF_DEVICE_GONE) || reportedRemoval;
 
     /*
      * Remove children bottom-up before removing the parent.  Otherwise
@@ -2146,12 +2242,28 @@ IopRemoveDevice(PDEVICE_NODE DeviceNode)
         }
     }
 
+    if (reportedRemoval)
+        PiSetDeviceStackRemovePending(DeviceNode->PhysicalDeviceObject, TRUE);
+
     Status = IopPrepareDeviceForRemoval(DeviceNode->PhysicalDeviceObject, surpriseRemoval);
 
     if (surpriseRemoval)
     {
         IopSendSurpriseRemoval(DeviceNode->PhysicalDeviceObject);
         IopQueueTargetDeviceEvent(&GUID_DEVICE_SURPRISE_REMOVAL, &DeviceNode->InstancePath);
+    }
+
+    if (NT_SUCCESS(Status) && reportedRemoval && DeviceNode->Child == NULL &&
+        PiDeviceStackHasOpenHandles(DeviceNode->PhysicalDeviceObject))
+    {
+        /* PiNotifyDeviceObjectClosed brings us back once the handles are closed */
+        PiSetDevNodeState(DeviceNode, DeviceNodeRemovePendingCloses);
+        if (PiDeviceStackHasOpenHandles(DeviceNode->PhysicalDeviceObject))
+        {
+            DPRINT("Removal of %wZ waits for open handles\n", &DeviceNode->InstancePath);
+            return STATUS_SUCCESS;
+        }
+        /* The last one was closed in the meantime */
     }
 
     if (NT_SUCCESS(Status))
@@ -2404,7 +2516,8 @@ PiDevNodeStateMachine(
 
         // Devices with problems are skipped (unless they are not being removed)
         if (currentNode->Flags & DNF_HAS_PROBLEM &&
-            currentNode->State != DeviceNodeAwaitingQueuedRemoval)
+            currentNode->State != DeviceNodeAwaitingQueuedRemoval &&
+            currentNode->State != DeviceNodeRemovePendingCloses)
         {
             goto skipEnum;
         }
@@ -2538,6 +2651,13 @@ PiDevNodeStateMachine(
             case DeviceNodeQueryRemoved:
                 break;
             case DeviceNodeRemovePendingCloses:
+                // a surprise-removed device, see IopRemoveDevice
+                if (!PiDeviceStackHasOpenHandles(currentNode->PhysicalDeviceObject))
+                {
+                    DPRINT("DeviceNodeRemovePendingCloses %wZ\n", &currentNode->InstancePath);
+                    IopSendRemoveDevice(currentNode->PhysicalDeviceObject);
+                    IopQueueTargetDeviceEvent(&GUID_DEVICE_SAFE_REMOVAL, &currentNode->InstancePath);
+                }
                 break;
             case DeviceNodeRemoved:
                 break;
@@ -2606,6 +2726,8 @@ ActionToStr(
             return "PiActionStartDevice";
         case PiActionQueryState:
             return "PiActionQueryState";
+        case PiActionRemovePendingCloses:
+            return "PiActionRemovePendingCloses";
         default:
             return "(request unknown)";
     }
@@ -2712,6 +2834,15 @@ PipDeviceActionWorker(
                     }
                 }
                 // TODO: Windows may return STATUS_DELETE_PENDING here
+                status = STATUS_SUCCESS;
+                break;
+
+            case PiActionRemovePendingCloses:
+                // The last handle to a surprise-removed device has been closed
+                if (deviceNode->State == DeviceNodeRemovePendingCloses)
+                {
+                    PiDevNodeStateMachine(deviceNode);
+                }
                 status = STATUS_SUCCESS;
                 break;
 
