@@ -163,6 +163,9 @@ NtStatusToCrError(NTSTATUS Status)
         case STATUS_OBJECT_NAME_NOT_FOUND:
             return CR_NO_SUCH_VALUE;
 
+        case STATUS_PLUGPLAY_QUERY_VETOED:
+            return CR_REMOVE_VETOED;
+
         default:
             return CR_FAILURE;
     }
@@ -3811,8 +3814,62 @@ PNP_UninstallDevInst(
     LPWSTR pDeviceID,
     DWORD ulFlags)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    WCHAR szDriver[MAX_PATH];
+    DWORD dwType, dwSize;
+    HKEY hDeviceKey;
+    CONFIGRET ret = CR_SUCCESS;
+
+    UNREFERENCED_PARAMETER(hBinding);
+
+    DPRINT("PNP_UninstallDevInst(%p %S 0x%08lx)\n",
+           hBinding, pDeviceID, ulFlags);
+
+    if (ulFlags != 0)
+        return CR_INVALID_FLAG;
+
+    if (!IsValidDeviceInstanceID(pDeviceID) ||
+        IsRootDeviceInstanceID(pDeviceID))
+        return CR_INVALID_DEVINST;
+
+    /* Only a device that is not present (a phantom) can be uninstalled */
+    if (IsPresentDeviceInstanceID(pDeviceID))
+        return CR_INVALID_DEVINST;
+
+    LockPnpMutation();
+
+    if (RegOpenKeyExW(hEnumKey, pDeviceID, 0, KEY_QUERY_VALUE, &hDeviceKey) != ERROR_SUCCESS)
+    {
+        ret = CR_NO_SUCH_DEVINST;
+        goto done;
+    }
+
+    /* The software key of the device, Control\Class\{guid}\nnnn */
+    dwSize = sizeof(szDriver) - sizeof(WCHAR);
+    if (RegQueryValueExW(hDeviceKey, L"Driver", NULL, &dwType,
+                         (LPBYTE)szDriver, &dwSize) != ERROR_SUCCESS ||
+        dwType != REG_SZ)
+    {
+        szDriver[0] = UNICODE_NULL;
+    }
+    szDriver[dwSize / sizeof(WCHAR)] = UNICODE_NULL;
+    RegCloseKey(hDeviceKey);
+
+    /* The hardware key of the device */
+    if (SHDeleteKeyW(hEnumKey, pDeviceID) != ERROR_SUCCESS)
+    {
+        ret = CR_REGISTRY_ERROR;
+        goto done;
+    }
+
+    if (szDriver[0] != UNICODE_NULL)
+        SHDeleteKeyW(hClassKey, szDriver);
+
+done:
+    UnlockPnpMutation();
+
+    DPRINT("PNP_UninstallDevInst() done (returns %lx)\n", ret);
+
+    return ret;
 }
 
 
@@ -4040,6 +4097,9 @@ PNP_QueryRemove(
     if (!NT_SUCCESS(Status))
         ret = NtStatusToCrError(Status);
 
+    if (ret == CR_REMOVE_VETOED && pVetoType != NULL)
+        *pVetoType = PlugPlayData.VetoType;
+
     return ret;
 }
 
@@ -4089,6 +4149,9 @@ PNP_RequestDeviceEject(
     UnlockPnpMutation();
     if (!NT_SUCCESS(Status))
         ret = NtStatusToCrError(Status);
+
+    if (ret == CR_REMOVE_VETOED && pVetoType != NULL)
+        *pVetoType = PlugPlayData.VetoType;
 
     return ret;
 }
