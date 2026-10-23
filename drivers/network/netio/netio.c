@@ -1794,6 +1794,117 @@ err_out:
     return STATUS_PENDING;
 }
 
+/*
+ * WSK clients send at IRQL <= DISPATCH_LEVEL, from DPCs and timers too
+ * (ovpn-dco sends its keepalives from one). The TDI IRPs below are built
+ * with IoBuildDeviceIoControlRequest, which queues them to the current
+ * thread and needs IRQL <= APC_LEVEL, and the transport expects
+ * PASSIVE_LEVEL callers, so a send made above PASSIVE_LEVEL is issued from
+ * a worker thread. The client's IRP completes as usual.
+ */
+typedef enum _NETIO_SEND_KIND
+{
+    NetioSendStream,
+    NetioSendDatagram,
+    NetioSendMessages
+} NETIO_SEND_KIND;
+
+typedef struct _NETIO_DEFERRED_SEND
+{
+    WORK_QUEUE_ITEM WorkItem;
+    NETIO_SEND_KIND Kind;
+    PWSK_SOCKET Socket;
+    WSK_BUF Buffer;
+    PWSK_BUF_LIST BufferList;
+    ULONG Flags;
+    PSOCKADDR RemoteAddress;
+    PIRP Irp;
+} NETIO_DEFERRED_SEND, *PNETIO_DEFERRED_SEND;
+
+static NTSTATUS WSKAPI
+WskSend(_In_ PWSK_SOCKET SocketParam, _In_ PWSK_BUF Buffer, _In_ ULONG Flags, _Inout_ PIRP Irp);
+
+static NTSTATUS WSKAPI
+WskSendTo(
+    _In_ PWSK_SOCKET SocketParam,
+    _In_ PWSK_BUF Buffer,
+    _Reserved_ ULONG Flags,
+    _In_opt_ PSOCKADDR RemoteAddress,
+    _In_ ULONG ControlInfoLength,
+    _In_reads_bytes_opt_(ControlInfoLength) PCMSGHDR ControlInfo,
+    _Inout_ PIRP Irp);
+
+static NTSTATUS WSKAPI
+WskSendMessages(
+    _In_ PWSK_SOCKET SocketParam,
+    _In_ PWSK_BUF_LIST BufferList,
+    _Reserved_ ULONG Flags,
+    _In_opt_ PSOCKADDR RemoteAddress,
+    _In_ ULONG ControlInfoLength,
+    _In_reads_bytes_opt_(ControlInfoLength) PVOID ControlInfo,
+    _Inout_ PIRP Irp);
+
+static VOID NTAPI
+DeferredSendWorker(_In_ PVOID Parameter)
+{
+    PNETIO_DEFERRED_SEND Send = Parameter;
+    PWSK_SOCKET_INTERNAL Socket = CONTAINING_RECORD(Send->Socket, WSK_SOCKET_INTERNAL, Socket);
+
+    switch (Send->Kind)
+    {
+        case NetioSendStream:
+            WskSend(Send->Socket, &Send->Buffer, Send->Flags, Send->Irp);
+            break;
+        case NetioSendDatagram:
+            WskSendTo(Send->Socket, &Send->Buffer, Send->Flags, Send->RemoteAddress, 0, NULL, Send->Irp);
+            break;
+        case NetioSendMessages:
+            WskSendMessages(Send->Socket, Send->BufferList, Send->Flags, Send->RemoteAddress, 0, NULL, Send->Irp);
+            break;
+    }
+
+    DereferenceSocket(Socket);
+    ExFreePoolWithTag(Send, TAG_NETIO);
+}
+
+static NTSTATUS
+DeferSend(
+    _In_ NETIO_SEND_KIND Kind,
+    _In_ PWSK_SOCKET SocketParam,
+    _In_opt_ PWSK_BUF Buffer,
+    _In_opt_ PWSK_BUF_LIST BufferList,
+    _In_ ULONG Flags,
+    _In_opt_ PSOCKADDR RemoteAddress,
+    _Inout_ PIRP Irp)
+{
+    PWSK_SOCKET_INTERNAL Socket = CONTAINING_RECORD(SocketParam, WSK_SOCKET_INTERNAL, Socket);
+    PNETIO_DEFERRED_SEND Send;
+
+    Send = ExAllocatePoolZero(NonPagedPool, sizeof(*Send), TAG_NETIO);
+    if (Send == NULL)
+    {
+        IoSetNextIrpStackLocation(Irp);
+        Irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Send->Kind = Kind;
+    Send->Socket = SocketParam;
+    if (Buffer != NULL)
+        Send->Buffer = *Buffer;
+    Send->BufferList = BufferList;
+    Send->Flags = Flags;
+    Send->RemoteAddress = RemoteAddress;
+    Send->Irp = Irp;
+
+    ReferenceSocket(Socket);
+    ExInitializeWorkItem(&Send->WorkItem, DeferredSendWorker, Send);
+    ExQueueWorkItem(&Send->WorkItem, CriticalWorkQueue);
+    return STATUS_PENDING;
+}
+
 static NTSTATUS WSKAPI
 WskSendTo(
     _In_ PWSK_SOCKET SocketParam,
@@ -1812,6 +1923,9 @@ WskSendTo(
     PNETIO_CONTEXT NetioContext;
 
     FUNCTION_TRACE;
+
+    if (KeGetCurrentIrql() > PASSIVE_LEVEL)
+        return DeferSend(NetioSendDatagram, SocketParam, Buffer, NULL, Flags, RemoteAddress, Irp);
 
     IoSetNextIrpStackLocation(Irp);
 
@@ -2135,6 +2249,9 @@ WskSendMessages(
 
     FUNCTION_TRACE;
 
+    if (KeGetCurrentIrql() > PASSIVE_LEVEL)
+        return DeferSend(NetioSendMessages, SocketParam, NULL, BufferList, Flags, RemoteAddress, Irp);
+
     IoSetNextIrpStackLocation(Irp);
 
     if (RemoteAddress == NULL && Socket->FixedRemoteAddress)
@@ -2419,6 +2536,9 @@ WskSend(_In_ PWSK_SOCKET SocketParam, _In_ PWSK_BUF Buffer, _In_ ULONG Flags, _I
     PNETIO_CONTEXT NetioContext;
 
     FUNCTION_TRACE;
+
+    if (KeGetCurrentIrql() > PASSIVE_LEVEL)
+        return DeferSend(NetioSendStream, SocketParam, Buffer, NULL, Flags, NULL, Irp);
 
     IoSetNextIrpStackLocation(Irp);
     status = STATUS_INSUFFICIENT_RESOURCES;
