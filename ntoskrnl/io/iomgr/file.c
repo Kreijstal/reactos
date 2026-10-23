@@ -135,31 +135,44 @@ NTAPI
 IopCheckDeviceAndDriver(IN POPEN_PACKET OpenPacket,
                         IN PDEVICE_OBJECT DeviceObject)
 {
+    NTSTATUS Status;
+    KIRQL OldIrql;
+
+    /* Checked and referenced under the database lock: PnP marks stacks for removal under it */
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueIoDatabaseLock);
+
     /* Make sure the object is valid */
-    if ((DeviceObject->Flags & DO_DEVICE_INITIALIZING) ||
-        (IoGetDevObjExtension(DeviceObject)->ExtensionFlags &
-         (DOE_UNLOAD_PENDING | DOE_DELETE_PENDING |
-          DOE_REMOVE_PENDING | DOE_REMOVE_PROCESSED)))
+    if (DeviceObject->Flags & DO_DEVICE_INITIALIZING)
     {
-        /* It's initializing or unloading, so fail */
+        /* It's initializing, so fail */
         DPRINT1("\nYou are seeing this because the following ROS driver: %wZ\n"
                 "sucks. Please fix its AddDevice routine.\n",
                 &DeviceObject->DriverObject->DriverName);
-        return STATUS_NO_SUCH_DEVICE;
+        Status = STATUS_NO_SUCH_DEVICE;
+    }
+    else if (IoGetDevObjExtension(DeviceObject)->ExtensionFlags &
+             (DOE_UNLOAD_PENDING | DOE_DELETE_PENDING |
+              DOE_REMOVE_PENDING | DOE_REMOVE_PROCESSED))
+    {
+        /* It's unloading or being removed, so fail */
+        Status = STATUS_NO_SUCH_DEVICE;
     }
     else if ((DeviceObject->Flags & DO_EXCLUSIVE) &&
              (DeviceObject->ReferenceCount) &&
              !(OpenPacket->RelatedFileObject) &&
              !(OpenPacket->Options & IO_ATTACH_DEVICE))
     {
-        return STATUS_ACCESS_DENIED;
+        Status = STATUS_ACCESS_DENIED;
     }
     else
     {
         /* Increase reference count */
         InterlockedIncrement(&DeviceObject->ReferenceCount);
-        return STATUS_SUCCESS;
+        Status = STATUS_SUCCESS;
     }
+
+    KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
+    return Status;
 }
 
 VOID
