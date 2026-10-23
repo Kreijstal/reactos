@@ -775,15 +775,17 @@ ClassReleaseClientReference(
     __DBGPRINT(("Dereference module %wZ\n", &ClassModule->Service));
     refs = InterlockedDecrement(&ClassModule->ClientRefCount);
 
-    if (refs <= 0)
-    {
-        ClassUnload(ClassModule, TRUE);
-    }
-    else
-    {
-        __DBGPRINT(("Dereference module %wZ still has %d references\n",
-                   &ClassModule->Service, refs));
-    }
+    /*
+     * A class extension stays loaded and registered without clients, like
+     * the in-box ones (UCX, NetAdapterCx) on Windows. Unloading it here
+     * deinitialized it and dropped its registration, while ZwUnloadDriver
+     * may well leave the driver loaded (the I/O manager does not unload a
+     * driver that it counts as a PnP one): the next client then bound to
+     * a class module that was gone, and the extension never registered
+     * again, as its DriverEntry does not run twice.
+     */
+    __DBGPRINT(("Dereference module %wZ still has %d references\n",
+               &ClassModule->Service, refs));
 }
 
 VOID
