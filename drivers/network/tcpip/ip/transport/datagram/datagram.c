@@ -190,13 +190,25 @@ DGDeliverData(
         PVOID HandlerContext = AddrFile->ReceiveDatagramHandlerContext;
         PVOID OptionsData = NULL;
         INT32 OptionsSize = 0;
+        union
+        {
+            TA_IP_ADDRESS Ip4;
+            TA_IP6_ADDRESS Ip6;
+        } Source;
 
         TI_DbgPrint(MAX_TRACE, ("Calling receive event handler.\n"));
 
+        /* TDI passes the source as a TRANSPORT_ADDRESS, port included */
+        RtlZeroMemory(&Source, sizeof(Source));
+        SourceAddress = &Source;
         if (SrcAddress->Type == IP_ADDRESS_V4)
         {
-            AddressLength = sizeof(IPv4_RAW_ADDRESS);
-            SourceAddress = &SrcAddress->Address.IPv4Address;
+            Source.Ip4.TAAddressCount = 1;
+            Source.Ip4.Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
+            Source.Ip4.Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
+            Source.Ip4.Address[0].Address[0].sin_port = SrcPort;
+            Source.Ip4.Address[0].Address[0].in_addr = SrcAddress->Address.IPv4Address;
+            AddressLength = sizeof(Source.Ip4);
             OptionsSize = IPPacket->HeaderSize - sizeof(IPv4_HEADER);
             if (OptionsSize > 0)
             {
@@ -205,8 +217,14 @@ DGDeliverData(
         }
         else /* (Address->Type == IP_ADDRESS_V6) */
         {
-            AddressLength = sizeof(IPv6_RAW_ADDRESS);
-            SourceAddress = SrcAddress->Address.IPv6Address;
+            Source.Ip6.TAAddressCount = 1;
+            Source.Ip6.Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP6;
+            Source.Ip6.Address[0].AddressType = TDI_ADDRESS_TYPE_IP6;
+            Source.Ip6.Address[0].Address[0].sin6_port = SrcPort;
+            RtlCopyMemory(Source.Ip6.Address[0].Address[0].sin6_addr,
+                          SrcAddress->Address.IPv6Address,
+                          sizeof(Source.Ip6.Address[0].Address[0].sin6_addr));
+            AddressLength = sizeof(Source.Ip6);
         }
 
         ReferenceObject(AddrFile);
