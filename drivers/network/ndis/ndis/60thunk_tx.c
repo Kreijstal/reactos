@@ -241,6 +241,15 @@ Ndis6FilterTerminalSend(
         return;
     }
 
+    /* A halted miniport (NetAdapterCx can halt one and keep the NDIS
+     * adapter) has no context to send with: complete as paused */
+    if (!Ext->Initialized || Ext->MiniportAdapterContext == NULL)
+    {
+        NET_BUFFER_LIST_STATUS(NetBufferList) = NDIS_STATUS_PAUSED;
+        NdisMSendNetBufferListsComplete((NDIS_HANDLE)Adapter, NetBufferList, 0);
+        return;
+    }
+
     Ext->DriverBlock->Characteristics.SendNetBufferListsHandler(
         Ext->MiniportAdapterContext,
         NetBufferList,
