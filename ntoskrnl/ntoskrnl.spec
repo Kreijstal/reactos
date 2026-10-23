@@ -671,7 +671,7 @@
 @ stdcall KeInitializeMutex(ptr long)
 @ stdcall KeInitializeQueue(ptr long)
 @ stdcall KeInitializeSemaphore(ptr long long)
-@ stdcall -arch=i386,arm,arm64 KeInitializeSpinLock(ptr) _KeInitializeSpinLock
+@ stdcall KeInitializeSpinLock(ptr) _KeInitializeSpinLock
 @ stdcall KeInitializeThreadedDpc(ptr ptr ptr)
 @ stdcall KeInitializeTimer(ptr)
 @ stdcall KeInitializeTimerEx(ptr long)
