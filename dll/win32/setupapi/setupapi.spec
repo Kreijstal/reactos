@@ -152,6 +152,7 @@
 @ stdcall CM_Locate_DevNodeW(ptr wstr long)
 @ stdcall CM_Locate_DevNode_ExA(ptr str long ptr)
 @ stdcall CM_Locate_DevNode_ExW(ptr wstr long ptr)
+@ stdcall -version=0x602+ CM_MapCrToWin32Err(long long)
 @ stdcall CM_Merge_Range_List(ptr ptr ptr long)
 @ stdcall CM_Modify_Res_Des(ptr ptr long ptr long long)
 @ stdcall CM_Modify_Res_Des_Ex(ptr ptr long ptr long long ptr)
