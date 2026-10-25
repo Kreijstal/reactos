@@ -317,6 +317,23 @@ SETUP_CreateDevicesList(
     IN PCWSTR Enumerator OPTIONAL,
     IN BOOL OnlyPresentDevices);
 
+/* driverstore.c */
+
+BOOL
+SETUP_GetDriverPackageDirectory(
+    _In_ PCWSTR OemInf,
+    _Out_writes_(Chars) PWSTR Directory,
+    _In_ DWORD Chars);
+
+BOOL
+SETUP_StageDriverPackage(
+    _In_ PCWSTR SourceInf,
+    _In_ PCWSTR OemInf);
+
+VOID
+SETUP_DeleteDriverPackage(
+    _In_ PCWSTR OemInf);
+
 HKEY SETUPDI_CreateDevKey(HKEY RootKey, struct DeviceInfo *devInfo, REGSAM samDesired);
 HKEY SETUPDI_CreateDrvKey(HKEY RootKey, struct DeviceInfo *devInfo, UUID *ClassGuid, REGSAM samDesired);
 HKEY SETUPDI_OpenDevKey(HKEY RootKey, struct DeviceInfo *devInfo, REGSAM samDesired);
