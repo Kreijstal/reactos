@@ -574,6 +574,32 @@ ExAllocatePoolWithTagPriority(
   _In_ ULONG Tag,
   _In_ __drv_strictTypeMatch(__drv_typeExpr) EX_POOL_PRIORITY Priority);
 
+/* Opt in to no-execute nonpaged pool: NonPagedPool then means
+ * NonPagedPoolNx on systems that have it, after ExInitializeDriverRuntime */
+#if defined(POOL_NX_OPTIN) && POOL_NX_OPTIN && !(defined(POOL_NX_OPTOUT) && POOL_NX_OPTOUT) && \
+    !defined(_NTOSKRNL_) && !defined(_NTHAL_)
+
+DECLSPEC_SELECTANY POOL_TYPE ExDefaultNonPagedPoolType = NonPagedPoolExecute;
+DECLSPEC_SELECTANY ULONG ExDefaultMdlProtection = 0;
+
+#define NonPagedPool ExDefaultNonPagedPoolType
+
+#define DrvRtPoolNxOptIn 0x00000001
+
+FORCEINLINE
+VOID
+ExInitializeDriverRuntime(
+  _In_ ULONG RuntimeFlags)
+{
+  if ((RuntimeFlags & DrvRtPoolNxOptIn) != 0 &&
+      RtlIsNtDdiVersionAvailable(NTDDI_WIN8)) {
+    ExDefaultMdlProtection = MdlMappingNoExecute;
+    ExDefaultNonPagedPoolType = NonPagedPoolNx;
+  }
+}
+
+#endif /* POOL_NX_OPTIN */
+
 FORCEINLINE
 __drv_allocatesMem(Mem)
 _When_((PoolType & PagedPool) != 0, _IRQL_requires_max_(APC_LEVEL))
