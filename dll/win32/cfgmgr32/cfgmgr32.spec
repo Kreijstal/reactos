@@ -209,3 +209,7 @@
 @ stdcall -version=0x602+ SwDeviceClose(ptr) setupapi.SwDeviceClose
 @ stdcall -version=0x602+ SwDeviceSetLifetime(ptr long) setupapi.SwDeviceSetLifetime
 @ stdcall -version=0x602+ SwDeviceGetLifetime(ptr ptr) setupapi.SwDeviceGetLifetime
+@ stdcall -version=0xA00+ DevCreateObjectQuery(long long long ptr long ptr ptr ptr ptr) setupapi.DevCreateObjectQuery
+@ stdcall -version=0xA00+ DevCloseObjectQuery(ptr) setupapi.DevCloseObjectQuery
+@ stdcall -version=0xA00+ DevGetObjects(long long long ptr long ptr ptr ptr) setupapi.DevGetObjects
+@ stdcall -version=0xA00+ DevFreeObjects(long ptr) setupapi.DevFreeObjects

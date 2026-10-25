@@ -694,3 +694,7 @@
 @ stdcall -version=0x602+ SwDeviceClose(ptr)
 @ stdcall -version=0x602+ SwDeviceSetLifetime(ptr long)
 @ stdcall -version=0x602+ SwDeviceGetLifetime(ptr ptr)
+@ stdcall -version=0xA00+ DevCreateObjectQuery(long long long ptr long ptr ptr ptr ptr)
+@ stdcall -version=0xA00+ DevCloseObjectQuery(ptr)
+@ stdcall -version=0xA00+ DevGetObjects(long long long ptr long ptr ptr ptr)
+@ stdcall -version=0xA00+ DevFreeObjects(long ptr)
