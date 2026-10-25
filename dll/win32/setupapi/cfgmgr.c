@@ -232,7 +232,8 @@ GetDeviceInstanceKeyPath(
     _Out_ PWSTR pszKeyPath,
     _Out_ PWSTR pszInstancePath,
     _In_ ULONG ulHardwareProfile,
-    _In_ ULONG ulFlags)
+    _In_ ULONG ulFlags,
+    _In_ BOOL bCreate)
 {
     PWSTR pszBuffer = NULL;
     ULONG ulType = 0;
@@ -272,6 +273,13 @@ GetDeviceInstanceKeyPath(
             ret = RpcStatusToCmStatus(RpcExceptionCode());
         }
         RpcEndExcept;
+
+        /* Without a software key yet, only make one if asked to */
+        if (ret != CR_SUCCESS && !bCreate)
+        {
+            ret = CR_NO_SUCH_REGISTRY_KEY;
+            goto done;
+        }
 
         if (ret != CR_SUCCESS)
         {
@@ -1685,7 +1693,8 @@ CM_Delete_DevNode_Key_Ex(
                                    pszKeyPath,
                                    pszInstancePath,
                                    ulHardwareProfile,
-                                   ulFlags);
+                                   ulFlags,
+                                   FALSE);
     if (ret != CR_SUCCESS)
         goto done;
 
@@ -6720,7 +6729,8 @@ CM_Open_DevNode_Key_Ex(
                                    pszKeyPath,
                                    pszInstancePath,
                                    ulHardwareProfile,
-                                   ulFlags);
+                                   ulFlags,
+                                   Disposition == RegDisposition_OpenAlways);
     if (ret != CR_SUCCESS)
         goto done;
 
