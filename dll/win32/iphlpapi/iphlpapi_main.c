@@ -84,38 +84,127 @@ DWORD getInterfaceGatewayByIndex(DWORD index)
     return retVal;
 }
 
-static DWORD
-getInterfaceInfoForLuid(const NET_LUID *InterfaceLuid, IFInfo *IfInfo)
+static BOOL
+guidFromInterfaceName(const BYTE *Name, ULONG NameLength, GUID *InterfaceGuid);
+
+/*
+ * The LUID of an interface. A network adapter has the one the network
+ * class installer gave it, as on Windows: its *IfType and NetLuidIndex,
+ * kept in its software key. Other interfaces, and adapters installed
+ * without one, are known by their type and interface index.
+ */
+VOID
+luidFromInterface(DWORD Index, DWORD Type, const BYTE *Name, ULONG NameLength, PNET_LUID InterfaceLuid)
 {
-    HANDLE tcpFile;
-    NTSTATUS status;
+    WCHAR GuidString[MAX_ADAPTER_NAME_LENGTH], KeyName[32], Value[64];
+    DWORD KeyIndex, Length, ValueType, Size, LuidIndex, IfType;
+    HKEY ClassKey, Key;
+    GUID Guid;
 
-    if (!InterfaceLuid || !IfInfo || InterfaceLuid->Value == 0)
-        return ERROR_INVALID_PARAMETER;
+    InterfaceLuid->Value = 0;
+    InterfaceLuid->Info.NetLuidIndex = Index;
+    InterfaceLuid->Info.IfType = Type;
 
-    status = openTcpFile(&tcpFile, FILE_READ_DATA);
-    if (!NT_SUCCESS(status))
-        return RtlNtStatusToDosError(status);
+    if (!guidFromInterfaceName(Name, NameLength, &Guid))
+        return;
+    StringCchPrintfW(GuidString, ARRAYSIZE(GuidString),
+                     L"{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+                     Guid.Data1, Guid.Data2, Guid.Data3, Guid.Data4[0], Guid.Data4[1],
+                     Guid.Data4[2], Guid.Data4[3], Guid.Data4[4], Guid.Data4[5],
+                     Guid.Data4[6], Guid.Data4[7]);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SYSTEM\\CurrentControlSet\\Control\\Class\\{4D36E972-E325-11CE-BFC1-08002BE10318}",
+                      0, KEY_ENUMERATE_SUB_KEYS, &ClassKey) != ERROR_SUCCESS)
+        return;
 
-    status = getInterfaceInfoByIndex(tcpFile,
-                                     (DWORD)InterfaceLuid->Info.NetLuidIndex,
-                                     IfInfo);
-    closeTcpFile(tcpFile);
-    if (!NT_SUCCESS(status))
-        return ERROR_NOT_FOUND;
+    for (KeyIndex = 0; ; KeyIndex++)
+    {
+        Length = ARRAYSIZE(KeyName);
+        if (RegEnumKeyExW(ClassKey, KeyIndex, KeyName, &Length, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        if (RegOpenKeyExW(ClassKey, KeyName, 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
+            continue;
 
-    if ((USHORT)IfInfo->if_info.ent.if_type != InterfaceLuid->Info.IfType)
-        return ERROR_NOT_FOUND;
+        ZeroMemory(Value, sizeof(Value));
+        Size = sizeof(Value) - sizeof(WCHAR);
+        if (RegQueryValueExW(Key, L"NetCfgInstanceId", NULL, &ValueType, (PBYTE)Value, &Size) != ERROR_SUCCESS ||
+            ValueType != REG_SZ || _wcsicmp(Value, GuidString))
+        {
+            RegCloseKey(Key);
+            continue;
+        }
 
-    return NO_ERROR;
+        Size = sizeof(LuidIndex);
+        if (RegQueryValueExW(Key, L"NetLuidIndex", NULL, &ValueType, (PBYTE)&LuidIndex, &Size) == ERROR_SUCCESS &&
+            ValueType == REG_DWORD && LuidIndex != 0)
+        {
+            Size = sizeof(IfType);
+            if (RegQueryValueExW(Key, L"*IfType", NULL, &ValueType, (PBYTE)&IfType, &Size) != ERROR_SUCCESS ||
+                ValueType != REG_DWORD)
+            {
+                IfType = IF_TYPE_ETHERNET_CSMACD;
+            }
+            InterfaceLuid->Info.NetLuidIndex = LuidIndex;
+            InterfaceLuid->Info.IfType = IfType;
+        }
+        RegCloseKey(Key);
+        break;
+    }
+    RegCloseKey(ClassKey);
 }
 
 static VOID
 luidFromMibIfRow(const MIB_IFROW *Row, PNET_LUID InterfaceLuid)
 {
-    InterfaceLuid->Value = 0;
-    InterfaceLuid->Info.NetLuidIndex = Row->dwIndex;
-    InterfaceLuid->Info.IfType = Row->dwType;
+    luidFromInterface(Row->dwIndex, Row->dwType, Row->bDescr, Row->dwDescrLen, InterfaceLuid);
+}
+
+static DWORD
+getInterfaceInfoForLuid(const NET_LUID *InterfaceLuid, IFInfo *IfInfo)
+{
+    PMIB_IFTABLE table;
+    HANDLE tcpFile;
+    NTSTATUS status;
+    NET_LUID luid;
+    ULONG size = 0;
+    DWORD i, index = 0;
+    BOOL found = FALSE;
+
+    if (!InterfaceLuid || !IfInfo || InterfaceLuid->Value == 0)
+        return ERROR_INVALID_PARAMETER;
+
+    /* Find the interface with that LUID */
+    if (GetIfTable(NULL, &size, FALSE) != ERROR_INSUFFICIENT_BUFFER)
+        return ERROR_NOT_FOUND;
+    table = HeapAlloc(GetProcessHeap(), 0, size);
+    if (!table)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    if (GetIfTable(table, &size, FALSE) == NO_ERROR)
+    {
+        for (i = 0; i < table->dwNumEntries && !found; i++)
+        {
+            luidFromMibIfRow(&table->table[i], &luid);
+            if (luid.Value == InterfaceLuid->Value)
+            {
+                index = table->table[i].dwIndex;
+                found = TRUE;
+            }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, table);
+    if (!found)
+        return ERROR_NOT_FOUND;
+
+    status = openTcpFile(&tcpFile, FILE_READ_DATA);
+    if (!NT_SUCCESS(status))
+        return RtlNtStatusToDosError(status);
+
+    status = getInterfaceInfoByIndex(tcpFile, index, IfInfo);
+    closeTcpFile(tcpFile);
+    if (!NT_SUCCESS(status))
+        return ERROR_NOT_FOUND;
+
+    return NO_ERROR;
 }
 
 static DWORD
@@ -184,8 +273,9 @@ DWORD WINAPI ConvertInterfaceIndexToLuid(NET_IFINDEX InterfaceIndex,
     if (!NT_SUCCESS(status))
         return ERROR_NOT_FOUND;
 
-    InterfaceLuid->Info.NetLuidIndex = ifInfo.if_info.ent.if_index;
-    InterfaceLuid->Info.IfType = ifInfo.if_info.ent.if_type;
+    luidFromInterface(ifInfo.if_info.ent.if_index, ifInfo.if_info.ent.if_type,
+                      ifInfo.if_info.ent.if_descr, ifInfo.if_info.ent.if_descrlen,
+                      InterfaceLuid);
     return NO_ERROR;
 }
 
@@ -523,8 +613,7 @@ DWORD WINAPI ConvertInterfaceGuidToLuid(const GUID *InterfaceGuid,
                                   &guid) &&
             IsEqualGUID(&guid, InterfaceGuid))
         {
-            InterfaceLuid->Info.NetLuidIndex = table->table[i].dwIndex;
-            InterfaceLuid->Info.IfType = table->table[i].dwType;
+            luidFromMibIfRow(&table->table[i], InterfaceLuid);
             HeapFree(GetProcessHeap(), 0, table);
             return NO_ERROR;
         }

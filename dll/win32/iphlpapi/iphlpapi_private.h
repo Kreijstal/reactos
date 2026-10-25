@@ -169,6 +169,7 @@ NTSTATUS getIPAddrEntryForIf(HANDLE tcpFile,
 NTSTATUS getInterfaceInfoByIndex(HANDLE tcpFile,
                                  DWORD index,
                                  IFInfo *ifInfo);
+VOID luidFromInterface(DWORD Index, DWORD Type, const BYTE *Name, ULONG NameLength, PNET_LUID InterfaceLuid);
 DWORD TCPSendIoctl(HANDLE hDevice, DWORD dwIoControlCode, LPVOID lpInBuffer, PULONG pInBufferSize, LPVOID lpOutBuffer, PULONG pOutBufferSize);
 
 #include <w32api.h>
