@@ -141,10 +141,9 @@ typedef enum _MM_PAGE_PRIORITY {
   HighPagePriority = 32
 } MM_PAGE_PRIORITY;
 
-#if (NTDDI_VERSION >= NTDDI_WIN8)
+/* MM_PAGE_PRIORITY flags, honored since Windows 8 (older systems ignore them) */
 #define MdlMappingNoWrite     0x80000000
 #define MdlMappingNoExecute   0x40000000
-#endif
 
 typedef enum _MM_SYSTEM_SIZE {
   MmSmallSystem,
