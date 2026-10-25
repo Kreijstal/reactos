@@ -397,9 +397,32 @@ CreateInfFileDetails(
     struct InfFileDetails *details;
     PWCHAR last;
     DWORD Needed;
+    WCHAR PackageDirectory[MAX_PATH];
+    BOOL InPackage = FALSE;
+
+    /* A published OEM INF gets its files from its driver store package */
+    last = strrchrW(FullInfFileName, '\\');
+    if (last && !strncmpiW(last + 1, L"oem", 3))
+    {
+        WCHAR InfDir[MAX_PATH];
+        UINT Length = GetSystemWindowsDirectoryW(InfDir, ARRAYSIZE(InfDir) - 5);
+
+        if (Length && Length < ARRAYSIZE(InfDir) - 5)
+        {
+            if (InfDir[Length - 1] != '\\')
+                strcatW(InfDir, BackSlash);
+            strcatW(InfDir, L"inf");
+            InPackage = (DWORD)(last - FullInfFileName) == strlenW(InfDir) &&
+                        !strncmpiW(FullInfFileName, InfDir, last - FullInfFileName) &&
+                        SETUP_GetDriverPackageDirectory(last + 1, PackageDirectory,
+                                                        ARRAYSIZE(PackageDirectory));
+        }
+    }
 
     Needed = FIELD_OFFSET(struct InfFileDetails, szData)
         + strlenW(FullInfFileName) * sizeof(WCHAR) + sizeof(UNICODE_NULL);
+    if (InPackage)
+        Needed += (strlenW(PackageDirectory) + 1) * sizeof(WCHAR);
 
     details = HeapAlloc(GetProcessHeap(), 0, Needed);
     if (!details)
@@ -419,6 +442,14 @@ CreateInfFileDetails(
     }
     else
         details->FileName = details->szData;
+    if (InPackage)
+    {
+        PWCHAR Directory = details->szData + strlenW(FullInfFileName) + 1;
+
+        strcpyW(Directory, PackageDirectory);
+        details->DirectoryName = Directory;
+        TRACE("Files of %s come from %s\n", debugstr_w(FullInfFileName), debugstr_w(Directory));
+    }
     ReferenceInfFile(details);
     details->hInf = SetupOpenInfFileW(FullInfFileName, NULL, INF_STYLE_WIN4, NULL);
     if (details->hInf == INVALID_HANDLE_VALUE)
