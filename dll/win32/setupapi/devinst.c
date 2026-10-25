@@ -5055,6 +5055,95 @@ SetupDiDeleteDeviceInfo(
 
 
 /***********************************************************************
+ *		SetupDiRemoveDevice (SETUPAPI.@)
+ *
+ * The default handler of DIF_REMOVE: remove the device if it is present,
+ * then delete its hardware and software keys.
+ */
+BOOL WINAPI
+SetupDiRemoveDevice(
+    _In_ HDEVINFO DeviceInfoSet,
+    _Inout_ PSP_DEVINFO_DATA DeviceInfoData)
+{
+    struct DeviceInfoSet *deviceInfoSet;
+    struct DeviceInfo *deviceInfo;
+    PNP_VETO_TYPE VetoType;
+    WCHAR VetoName[MAX_PATH];
+    ULONG Status, Problem, i;
+    DEVINST DevInst;
+    CONFIGRET cr;
+
+    TRACE("%s(%p %p)\n", __FUNCTION__, DeviceInfoSet, DeviceInfoData);
+
+    if (!DeviceInfoSet || DeviceInfoSet == INVALID_HANDLE_VALUE)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    deviceInfoSet = (struct DeviceInfoSet *)DeviceInfoSet;
+    if (deviceInfoSet->magic != SETUP_DEVICE_INFO_SET_MAGIC)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    if (!DeviceInfoData || DeviceInfoData->cbSize != sizeof(*DeviceInfoData) || !DeviceInfoData->Reserved)
+    {
+        SetLastError(ERROR_INVALID_USER_BUFFER);
+        return FALSE;
+    }
+    deviceInfo = (struct DeviceInfo *)DeviceInfoData->Reserved;
+    if (!IsDeviceInfoInDeviceInfoSet(deviceInfoSet, deviceInfo))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* Take a present device out of the device tree first */
+    if (CM_Get_DevNode_Status_Ex(&Status, &Problem, deviceInfo->dnDevInst, 0, deviceInfoSet->hMachine) == CR_SUCCESS)
+    {
+        VetoType = PNP_VetoTypeUnknown;
+        VetoName[0] = UNICODE_NULL;
+        cr = CM_Query_And_Remove_SubTree_ExW(deviceInfo->dnDevInst, &VetoType, VetoName, ARRAYSIZE(VetoName),
+                                             CM_REMOVE_NO_RESTART, deviceInfoSet->hMachine);
+        if (cr != CR_SUCCESS)
+        {
+            /* Something holds on to it: the removal takes a reboot */
+            WARN("Removal of %s vetoed (%lu): type %d, %s\n", debugstr_w(deviceInfo->instanceId),
+                 cr, VetoType, debugstr_w(VetoName));
+            deviceInfo->InstallParams.Flags |= DI_NEEDREBOOT;
+            return TRUE;
+        }
+
+        /* The device node goes away with its last reference */
+        for (i = 0; i < 100; i++)
+        {
+            if (CM_Get_DevNode_Status_Ex(&Status, &Problem, deviceInfo->dnDevInst, 0,
+                                         deviceInfoSet->hMachine) != CR_SUCCESS)
+                break;
+            Sleep(50);
+        }
+    }
+
+    cr = CM_Locate_DevNode_ExW(&DevInst, (DEVINSTID_W)deviceInfo->instanceId, CM_LOCATE_DEVNODE_PHANTOM,
+                               deviceInfoSet->hMachine);
+    if (cr == CR_SUCCESS)
+        cr = CM_Uninstall_DevNode_Ex(DevInst, 0, deviceInfoSet->hMachine);
+    if (cr == CR_INVALID_DEVINST)
+    {
+        /* Still in the device tree */
+        deviceInfo->InstallParams.Flags |= DI_NEEDREBOOT;
+        return TRUE;
+    }
+    if (cr != CR_SUCCESS)
+    {
+        SetLastError(GetErrorCodeFromCrCode(cr));
+        return FALSE;
+    }
+    return TRUE;
+}
+
+
+/***********************************************************************
  *		SetupDiOpenDeviceInfoA (SETUPAPI.@)
  */
 BOOL WINAPI
