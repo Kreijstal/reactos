@@ -29,6 +29,7 @@ list(APPEND SOURCE
     setupcab.c
     stringtable.c
     stubs.c
+    swdevice.c
     rpc.c)
 
 list(APPEND PCH_SKIP_SOURCE

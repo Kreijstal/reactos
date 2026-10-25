@@ -204,3 +204,7 @@
 @ stub CM_Remove_Unmarked_Children_Ex # setupapi.CM_Remove_Unmarked_Children_Ex
 @ stub CM_Reset_Children_Marks # setupapi.CM_Reset_Children_Marks
 @ stub CM_Reset_Children_Marks_Ex # setupapi.CM_Reset_Children_Marks_Ex
+@ stdcall -version=0x602+ SwDeviceCreate(wstr wstr ptr long ptr ptr ptr ptr) setupapi.SwDeviceCreate
+@ stdcall -version=0x602+ SwDeviceClose(ptr) setupapi.SwDeviceClose
+@ stdcall -version=0x602+ SwDeviceSetLifetime(ptr long) setupapi.SwDeviceSetLifetime
+@ stdcall -version=0x602+ SwDeviceGetLifetime(ptr ptr) setupapi.SwDeviceGetLifetime
