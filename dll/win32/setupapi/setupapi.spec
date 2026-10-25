@@ -689,3 +689,7 @@
 @ stub pSetupWriteLogError
 @ stub -version=0x600 pSpAddInboxDriverPackage # Vista only
 @ stub -version=0x600 pSpDeleteInboxDriverPackage # Vista only
+@ stdcall -version=0x602+ SwDeviceCreate(wstr wstr ptr long ptr ptr ptr ptr)
+@ stdcall -version=0x602+ SwDeviceClose(ptr)
+@ stdcall -version=0x602+ SwDeviceSetLifetime(ptr long)
+@ stdcall -version=0x602+ SwDeviceGetLifetime(ptr ptr)
