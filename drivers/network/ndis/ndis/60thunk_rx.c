@@ -46,7 +46,7 @@ MiniIndicateReceivePacket(
  *  The wrapper is allocated from Ext->RxLegacyPacketPool, with a single
  *  NDIS_BUFFER chained on that re-uses the NB's CurrentMdl directly (no
  *  copy). The original NBL pointer is stashed in Reserved[0] so the
- *  return path can find it; the Ext is stashed in Reserved[1]. The legacy
+ *  return path can find it; the indicating adapter is in Reserved[1]. The legacy
  *  WrapperReserved[0] starts at zero and is incremented by the existing
  *  protocol-bind logic in MiniIndicateReceivePacket.
  *
@@ -182,9 +182,11 @@ Ndis6RxBuildLegacyPacket(
 
     NdisChainBufferAtFront(Packet, FirstBuffer);
 
-    /* Stash NBL backptr + Ext so Ndis6RxReturnLegacyPacket can find them. */
+    /* Stash the NBL for Ndis6RxReturnLegacyPacket, and the indicating
+     * adapter where the legacy path keeps it: MiniIndicateReceivePacket
+     * stores it in Reserved[1] too, and NdisReturnPackets reads it there. */
     Packet->Reserved[0] = (ULONG_PTR)Nbl;
-    Packet->Reserved[1] = (ULONG_PTR)Ext;
+    Packet->Reserved[1] = (ULONG_PTR)Ext->Adapter;
 
     /* B2: translate RX offload result from NBL info to legacy packet info.
      * NDIS_TCP_IP_CHECKSUM_PACKET_INFO.Receive and
@@ -261,18 +263,18 @@ Ndis6RxReturnLegacyPacket(
     _In_ PNDIS_PACKET Packet)
 {
     PNET_BUFFER_LIST    Nbl;
-    PNDIS6_ADAPTER_EXT  Ext;
+    PLOGICAL_ADAPTER    Adapter;
     ULONG_PTR           RemainingRefs;
 
     if (Packet == NULL)
         return;
 
     Nbl = (PNET_BUFFER_LIST)Packet->Reserved[0];
-    Ext = (PNDIS6_ADAPTER_EXT)Packet->Reserved[1];
+    Adapter = (PLOGICAL_ADAPTER)Packet->Reserved[1];
 
     Ndis6RxFreeLegacyPacket(Packet);
 
-    if (Nbl == NULL || Ext == NULL || Ext->Adapter == NULL)
+    if (Nbl == NULL || Adapter == NULL || !Adapter->IsNdis6)
         return;
 
     /* Atomic decrement of the per-NBL refcount stashed in MiniportReserved[2]. */
@@ -284,7 +286,7 @@ Ndis6RxReturnLegacyPacket(
         /* All wrappers released. Hand the NBL back to the miniport via
          * the filter chain so any attached filter's ReturnNBL handler
          * runs in TX (top→bottom) order before the miniport sees it. */
-        Ndis6FilterDispatchReturn(Ext->Adapter, Nbl, 0);
+        Ndis6FilterDispatchReturn(Adapter, Nbl, 0);
     }
 }
 
