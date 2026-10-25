@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     CM_Get_Device_Interface_List.c
     devclass.c
+    SetupDiDeviceProperty.c
     SetupDiInstallClassExA.c
     SetupDiGetActualModelsSection.c
     SetupInstallServicesFromInfSectionEx.c
