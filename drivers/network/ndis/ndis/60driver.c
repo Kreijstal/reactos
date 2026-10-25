@@ -784,7 +784,11 @@ Ndis6DispatchPnp(
         case IRP_MN_CANCEL_REMOVE_DEVICE:
         case IRP_MN_CANCEL_STOP_DEVICE:
         case IRP_MN_STOP_DEVICE:
-            /* Forward down; no local handling needed at Phase 1. */
+            /* As the function driver, agree before passing the IRP down:
+             * a bus driver that does not handle it (the root enumerator
+             * of a software device) leaves the status alone, and the
+             * initial STATUS_NOT_SUPPORTED would veto the removal. */
+            Irp->IoStatus.Status = STATUS_SUCCESS;
             return Ndis6PassThroughIrp(LowerDevice, Irp);
 
         default:
