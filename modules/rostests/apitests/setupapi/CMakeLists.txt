@@ -9,6 +9,7 @@ list(APPEND SOURCE
     SetupDiInstallClassExA.c
     SetupDiGetActualModelsSection.c
     SetupInstallServicesFromInfSectionEx.c
+    SwDevice.c
     testlist.c)
 
 add_executable(setupapi_apitest ${SOURCE})
