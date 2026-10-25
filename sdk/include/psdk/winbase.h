@@ -1480,6 +1480,17 @@ HANDLE WINAPI CreateMemoryResourceNotification(MEMORY_RESOURCE_NOTIFICATION_TYPE
 HANDLE WINAPI CreateMutexA(LPSECURITY_ATTRIBUTES,BOOL,LPCSTR);
 HANDLE WINAPI CreateMutexW(LPSECURITY_ATTRIBUTES,BOOL,LPCWSTR);
 #if (_WIN32_WINNT >= 0x0600)
+#define PRIVATE_NAMESPACE_FLAG_DESTROY 0x00000001
+HANDLE WINAPI CreatePrivateNamespaceA(LPSECURITY_ATTRIBUTES,LPVOID,LPCSTR);
+HANDLE WINAPI CreatePrivateNamespaceW(LPSECURITY_ATTRIBUTES,LPVOID,LPCWSTR);
+BOOLEAN WINAPI ClosePrivateNamespace(HANDLE,ULONG);
+HANDLE WINAPI CreateBoundaryDescriptorA(LPCSTR,ULONG);
+HANDLE WINAPI CreateBoundaryDescriptorW(LPCWSTR,ULONG);
+BOOL WINAPI AddSIDToBoundaryDescriptor(HANDLE*,PSID);
+BOOL WINAPI AddIntegrityLabelToBoundaryDescriptor(HANDLE*,PSID);
+VOID WINAPI DeleteBoundaryDescriptor(HANDLE);
+#endif
+#if (_WIN32_WINNT >= 0x0600)
 HANDLE WINAPI CreateMutexExA(LPSECURITY_ATTRIBUTES,LPCSTR,DWORD,DWORD);
 HANDLE WINAPI CreateMutexExW(LPSECURITY_ATTRIBUTES,LPCWSTR,DWORD,DWORD);
 #endif
@@ -2625,6 +2636,10 @@ HANDLE WINAPI OpenFileMappingA(_In_ DWORD, _In_ BOOL, _In_ LPCSTR);
 HANDLE WINAPI OpenFileMappingW(DWORD,BOOL,LPCWSTR);
 _Ret_maybenull_ HANDLE WINAPI OpenMutexA(_In_ DWORD, _In_ BOOL, _In_ LPCSTR);
 HANDLE WINAPI OpenMutexW(DWORD,BOOL,LPCWSTR);
+#if (_WIN32_WINNT >= 0x0600)
+HANDLE WINAPI OpenPrivateNamespaceA(LPVOID,LPCSTR);
+HANDLE WINAPI OpenPrivateNamespaceW(LPVOID,LPCWSTR);
+#endif
 HANDLE WINAPI OpenProcess(DWORD,BOOL,DWORD);
 BOOL WINAPI OpenProcessToken(HANDLE,DWORD,PHANDLE);
 _Ret_maybenull_ HANDLE WINAPI OpenSemaphoreA(_In_ DWORD, _In_ BOOL, _In_ LPCSTR);
@@ -3408,6 +3423,11 @@ typedef PCACTCTXW PCACTCTX;
 #define OpenEventLog OpenEventLogW
 #define OpenFileMapping OpenFileMappingW
 #define OpenMutex OpenMutexW
+#if (_WIN32_WINNT >= 0x0600)
+#define CreateBoundaryDescriptor CreateBoundaryDescriptorW
+#define CreatePrivateNamespace CreatePrivateNamespaceW
+#define OpenPrivateNamespace OpenPrivateNamespaceW
+#endif
 #define OpenSemaphore OpenSemaphoreW
 #define OutputDebugString OutputDebugStringW
 #define PrivilegedServiceAuditAlarm PrivilegedServiceAuditAlarmW
@@ -3615,6 +3635,11 @@ typedef ENUMRESTYPEPROCA ENUMRESTYPEPROC;
 #define OpenEventLog OpenEventLogA
 #define OpenFileMapping OpenFileMappingA
 #define OpenMutex OpenMutexA
+#if (_WIN32_WINNT >= 0x0600)
+#define CreateBoundaryDescriptor CreateBoundaryDescriptorA
+#define CreatePrivateNamespace CreatePrivateNamespaceA
+#define OpenPrivateNamespace OpenPrivateNamespaceA
+#endif
 #define OpenSemaphore OpenSemaphoreA
 #define OutputDebugString OutputDebugStringA
 #define PrivilegedServiceAuditAlarm PrivilegedServiceAuditAlarmA
