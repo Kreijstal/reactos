@@ -599,8 +599,10 @@ GetAdaptersAddresses(
                 CurrentAA->IfType = Entry->if_type;
 #if (NTDDI_VERSION >= NTDDI_VISTA)
                 /* The LUID the other IP Helper functions take for this interface */
-                CurrentAA->Luid.Info.NetLuidIndex = Entry->if_index;
-                CurrentAA->Luid.Info.IfType = Entry->if_type;
+                luidFromInterface(Entry->if_index, Entry->if_type, Entry->if_descr, Entry->if_descrlen,
+                                  &CurrentAA->Luid);
+                /* An adapter has the interface type its LUID tells */
+                CurrentAA->IfType = CurrentAA->Luid.Info.IfType;
 #endif
                 if(Entry->if_operstatus >= IF_OPER_STATUS_CONNECTING)
                     CurrentAA->OperStatus = IfOperStatusUp;
