@@ -705,6 +705,9 @@ Ndis6DispatchPnp(
                     Ext->Initialized = TRUE;
                 Status = STATUS_SUCCESS;
 
+                if (Adapter->NdisMiniportBlock.SymbolicLinkName.Buffer != NULL)
+                    IoSetDeviceInterfaceState(&Adapter->NdisMiniportBlock.SymbolicLinkName, TRUE);
+
                 /* Phase 7A: now that the adapter is up and GeneralAttrs
                  * is populated, fan out a bind notification to every
                  * native NDIS 6 protocol driver that has registered. */
@@ -755,6 +758,9 @@ Ndis6DispatchPnp(
              *    2. Forward REMOVE down so PCI can clean up its side
              *    3. Destroy our own state (detach + free ext + delete FDO)
              * --------------------------------------------------------- */
+            if (Adapter->NdisMiniportBlock.SymbolicLinkName.Buffer != NULL)
+                IoSetDeviceInterfaceState(&Adapter->NdisMiniportBlock.SymbolicLinkName, FALSE);
+
             /* Protocols unbind while the miniport still runs */
             Ndis6UnbindProtocolsFromAdapter(Adapter);
 
