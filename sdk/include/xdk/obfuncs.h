@@ -43,6 +43,15 @@ ObReferenceObjectByHandle(
   _Out_ PVOID *Object,
   _Out_opt_ POBJECT_HANDLE_INFORMATION HandleInformation);
 
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+NTKERNELAPI
+NTSTATUS
+NTAPI
+ObCloseHandle(
+  _In_ _Post_ptr_invalid_ HANDLE Handle,
+  _In_ KPROCESSOR_MODE PreviousMode);
+#endif
+
 _IRQL_requires_max_(DISPATCH_LEVEL)
 NTKERNELAPI
 NTSTATUS
