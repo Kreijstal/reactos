@@ -378,6 +378,21 @@ ObpDeleteObjectType(
     IN PVOID Object
 );
 
+//
+// Private namespace functions
+//
+VOID
+NTAPI
+ObpInitPrivateNamespaces(
+    VOID
+);
+
+VOID
+NTAPI
+ObpDeleteDirectory(
+    _In_ PVOID ObjectBody
+);
+
 NTSTATUS
 NTAPI
 ObReferenceFileObjectForWrite(
