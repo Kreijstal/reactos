@@ -36,6 +36,7 @@ list(APPEND SOURCE
     lstrlen.c
     Mailslot.c
     MultiByteToWideChar.c
+    ObjectLabel.c
     Pipes.c
     PrivateNamespace.c
     PrivMoveFileIdentityW.c
