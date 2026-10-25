@@ -8874,3 +8874,184 @@ CM_Unregister_Device_Interface_ExW(
 
     return ret;
 }
+
+
+/***********************************************************************
+ * CM_Get_DevNode_PropertyW [SETUPAPI.@]
+ */
+CONFIGRET
+WINAPI
+CM_Get_DevNode_PropertyW(
+    _In_ DEVINST dnDevInst,
+    _In_ const DEVPROPKEY *PropertyKey,
+    _Out_ DEVPROPTYPE *PropertyType,
+    _Out_writes_bytes_opt_(*PropertyBufferSize) PBYTE PropertyBuffer,
+    _Inout_ PULONG PropertyBufferSize,
+    _In_ ULONG ulFlags)
+{
+    return CM_Get_DevNode_Property_ExW(dnDevInst, PropertyKey, PropertyType,
+                                       PropertyBuffer, PropertyBufferSize, ulFlags, NULL);
+}
+
+
+/***********************************************************************
+ * CM_Get_DevNode_Property_ExW [SETUPAPI.@]
+ */
+CONFIGRET
+WINAPI
+CM_Get_DevNode_Property_ExW(
+    _In_ DEVINST dnDevInst,
+    _In_ const DEVPROPKEY *PropertyKey,
+    _Out_ DEVPROPTYPE *PropertyType,
+    _Out_writes_bytes_opt_(*PropertyBufferSize) PBYTE PropertyBuffer,
+    _Inout_ PULONG PropertyBufferSize,
+    _In_ ULONG ulFlags,
+    _In_opt_ HMACHINE hMachine)
+{
+    RPC_BINDING_HANDLE BindingHandle = NULL;
+    HSTRING_TABLE StringTable = NULL;
+    LPWSTR lpDevInst;
+    ULONG ulTransferLength, ulLength;
+    CONFIGRET ret;
+
+    TRACE("CM_Get_DevNode_Property_ExW(%lx %p %p %p %p %lx %p)\n",
+          dnDevInst, PropertyKey, PropertyType, PropertyBuffer,
+          PropertyBufferSize, ulFlags, hMachine);
+
+    if (dnDevInst == 0)
+        return CR_INVALID_DEVNODE;
+    if (PropertyKey == NULL || PropertyType == NULL || PropertyBufferSize == NULL)
+        return CR_INVALID_POINTER;
+    if (ulFlags != 0)
+        return CR_INVALID_FLAG;
+
+    if (hMachine != NULL)
+    {
+        BindingHandle = ((PMACHINE_INFO)hMachine)->BindingHandle;
+        if (BindingHandle == NULL)
+            return CR_FAILURE;
+        StringTable = ((PMACHINE_INFO)hMachine)->StringTable;
+        if (StringTable == 0)
+            return CR_FAILURE;
+    }
+    else if (!PnpGetLocalHandles(&BindingHandle, &StringTable))
+        return CR_FAILURE;
+
+    lpDevInst = pSetupStringTableStringFromId(StringTable, dnDevInst);
+    if (lpDevInst == NULL)
+        return CR_INVALID_DEVNODE;
+
+    ulTransferLength = ulLength = (PropertyBuffer != NULL) ? *PropertyBufferSize : 0;
+
+    RpcTryExcept
+    {
+        ret = PNP_GetObjectProp(BindingHandle,
+                                lpDevInst,
+                                PNP_OBJECT_TYPE_DEVICE,
+                                NULL,
+                                PropertyKey,
+                                PropertyType,
+                                &ulLength,
+                                &ulTransferLength,
+                                PropertyBuffer,
+                                ulFlags);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ret = RpcStatusToCmStatus(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+    if (ret == CR_SUCCESS || ret == CR_BUFFER_SMALL)
+        *PropertyBufferSize = ulLength;
+
+    return ret;
+}
+
+
+/***********************************************************************
+ * CM_Set_DevNode_PropertyW [SETUPAPI.@]
+ */
+CONFIGRET
+WINAPI
+CM_Set_DevNode_PropertyW(
+    _In_ DEVINST dnDevInst,
+    _In_ const DEVPROPKEY *PropertyKey,
+    _In_ DEVPROPTYPE PropertyType,
+    _In_reads_bytes_opt_(PropertyBufferSize) const BYTE *PropertyBuffer,
+    _In_ ULONG PropertyBufferSize,
+    _In_ ULONG ulFlags)
+{
+    return CM_Set_DevNode_Property_ExW(dnDevInst, PropertyKey, PropertyType,
+                                       PropertyBuffer, PropertyBufferSize, ulFlags, NULL);
+}
+
+
+/***********************************************************************
+ * CM_Set_DevNode_Property_ExW [SETUPAPI.@]
+ */
+CONFIGRET
+WINAPI
+CM_Set_DevNode_Property_ExW(
+    _In_ DEVINST dnDevInst,
+    _In_ const DEVPROPKEY *PropertyKey,
+    _In_ DEVPROPTYPE PropertyType,
+    _In_reads_bytes_opt_(PropertyBufferSize) const BYTE *PropertyBuffer,
+    _In_ ULONG PropertyBufferSize,
+    _In_ ULONG ulFlags,
+    _In_opt_ HMACHINE hMachine)
+{
+    RPC_BINDING_HANDLE BindingHandle = NULL;
+    HSTRING_TABLE StringTable = NULL;
+    LPWSTR lpDevInst;
+    CONFIGRET ret;
+
+    TRACE("CM_Set_DevNode_Property_ExW(%lx %p %lx %p %lu %lx %p)\n",
+          dnDevInst, PropertyKey, PropertyType, PropertyBuffer,
+          PropertyBufferSize, ulFlags, hMachine);
+
+    if (dnDevInst == 0)
+        return CR_INVALID_DEVNODE;
+    if (PropertyKey == NULL)
+        return CR_INVALID_POINTER;
+    if (PropertyBuffer == NULL && PropertyBufferSize != 0)
+        return CR_INVALID_POINTER;
+    if (ulFlags != 0)
+        return CR_INVALID_FLAG;
+
+    if (hMachine != NULL)
+    {
+        BindingHandle = ((PMACHINE_INFO)hMachine)->BindingHandle;
+        if (BindingHandle == NULL)
+            return CR_FAILURE;
+        StringTable = ((PMACHINE_INFO)hMachine)->StringTable;
+        if (StringTable == 0)
+            return CR_FAILURE;
+    }
+    else if (!PnpGetLocalHandles(&BindingHandle, &StringTable))
+        return CR_FAILURE;
+
+    lpDevInst = pSetupStringTableStringFromId(StringTable, dnDevInst);
+    if (lpDevInst == NULL)
+        return CR_INVALID_DEVNODE;
+
+    RpcTryExcept
+    {
+        ret = PNP_SetObjectProp(BindingHandle,
+                                lpDevInst,
+                                PNP_OBJECT_TYPE_DEVICE,
+                                NULL,
+                                PropertyKey,
+                                PropertyType,
+                                PropertyBufferSize,
+                                (BYTE *)PropertyBuffer,
+                                ulFlags);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ret = RpcStatusToCmStatus(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+    return ret;
+}

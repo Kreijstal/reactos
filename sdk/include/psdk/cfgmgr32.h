@@ -26,6 +26,9 @@
 #define _CFGMGR32_H_
 
 #include <cfg.h>
+#if (WINVER >= _WIN32_WINNT_VISTA)
+#include <devpropdef.h>
+#endif
 
 #ifndef GUID_DEFINED
 #include <guiddef.h>
@@ -1716,6 +1719,63 @@ CM_Get_DevNode_Registry_Property_ExW(
   _Inout_ PULONG pulLength,
   _In_ ULONG ulFlags,
   _In_opt_ HMACHINE hMachine);
+
+#if (WINVER >= _WIN32_WINNT_VISTA)
+
+CMAPI
+CONFIGRET
+WINAPI
+CM_Get_DevNode_PropertyW(
+  _In_ DEVINST dnDevInst,
+  _In_ CONST DEVPROPKEY *PropertyKey,
+  _Out_ DEVPROPTYPE *PropertyType,
+  _Out_writes_bytes_opt_(*PropertyBufferSize) PBYTE PropertyBuffer,
+  _Inout_ PULONG PropertyBufferSize,
+  _In_ ULONG ulFlags);
+
+CMAPI
+CONFIGRET
+WINAPI
+CM_Get_DevNode_Property_ExW(
+  _In_ DEVINST dnDevInst,
+  _In_ CONST DEVPROPKEY *PropertyKey,
+  _Out_ DEVPROPTYPE *PropertyType,
+  _Out_writes_bytes_opt_(*PropertyBufferSize) PBYTE PropertyBuffer,
+  _Inout_ PULONG PropertyBufferSize,
+  _In_ ULONG ulFlags,
+  _In_opt_ HMACHINE hMachine);
+
+CMAPI
+CONFIGRET
+WINAPI
+CM_Set_DevNode_PropertyW(
+  _In_ DEVINST dnDevInst,
+  _In_ CONST DEVPROPKEY *PropertyKey,
+  _In_ DEVPROPTYPE PropertyType,
+  _In_reads_bytes_opt_(PropertyBufferSize) CONST BYTE *PropertyBuffer,
+  _In_ ULONG PropertyBufferSize,
+  _In_ ULONG ulFlags);
+
+CMAPI
+CONFIGRET
+WINAPI
+CM_Set_DevNode_Property_ExW(
+  _In_ DEVINST dnDevInst,
+  _In_ CONST DEVPROPKEY *PropertyKey,
+  _In_ DEVPROPTYPE PropertyType,
+  _In_reads_bytes_opt_(PropertyBufferSize) CONST BYTE *PropertyBuffer,
+  _In_ ULONG PropertyBufferSize,
+  _In_ ULONG ulFlags,
+  _In_opt_ HMACHINE hMachine);
+
+#ifdef UNICODE
+#define CM_Get_DevNode_Property CM_Get_DevNode_PropertyW
+#define CM_Get_DevNode_Property_Ex CM_Get_DevNode_Property_ExW
+#define CM_Set_DevNode_Property CM_Set_DevNode_PropertyW
+#define CM_Set_DevNode_Property_Ex CM_Set_DevNode_Property_ExW
+#endif
+
+#endif /* (WINVER >= _WIN32_WINNT_VISTA) */
 
 #define CM_Get_DevInst_Registry_PropertyW CM_Get_DevNode_Registry_PropertyW
 #define CM_Get_DevInst_Registry_PropertyA CM_Get_DevNode_Registry_PropertyA
