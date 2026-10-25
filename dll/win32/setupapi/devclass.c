@@ -59,6 +59,13 @@ SETUP_PropertyAddPropertyAdvancedHandler(
     IN PSP_CLASSINSTALL_HEADER ClassInstallParams OPTIONAL,
     IN DWORD ClassInstallParamsSize);
 
+static BOOL
+SETUP_RemoveDeviceHandler(
+    IN HDEVINFO DeviceInfoSet,
+    IN PSP_DEVINFO_DATA DeviceInfoData OPTIONAL,
+    IN PSP_CLASSINSTALL_HEADER ClassInstallParams OPTIONAL,
+    IN DWORD ClassInstallParamsSize);
+
 typedef struct _INSTALL_PARAMS_DATA
 {
     DI_FUNCTION Function;
@@ -73,6 +80,7 @@ typedef struct _INSTALL_PARAMS_DATA
 static const INSTALL_PARAMS_DATA InstallParamsData[] = {
     ADD_PARAM_HANDLER(DIF_PROPERTYCHANGE, SETUP_PropertyChangeHandler, SP_PROPCHANGE_PARAMS, PropChangeParams)
     ADD_PARAM_HANDLER(DIF_ADDPROPERTYPAGE_ADVANCED, SETUP_PropertyAddPropertyAdvancedHandler, SP_ADDPROPERTYPAGE_DATA, AddPropertyPageData)
+    ADD_PARAM_HANDLER(DIF_REMOVE, SETUP_RemoveDeviceHandler, SP_REMOVEDEVICE_PARAMS, RemoveDeviceParams)
 };
 #undef ADD_PARAM_HANDLER
 
@@ -964,6 +972,51 @@ SETUP_PropertyAddPropertyAdvancedHandler(
 
 done:
     return ret;
+}
+
+static BOOL
+SETUP_RemoveDeviceHandler(
+    IN HDEVINFO DeviceInfoSet,
+    IN PSP_DEVINFO_DATA DeviceInfoData OPTIONAL,
+    IN PSP_CLASSINSTALL_HEADER ClassInstallParams OPTIONAL,
+    IN DWORD ClassInstallParamsSize)
+{
+    PSP_REMOVEDEVICE_PARAMS RemoveDeviceParams = (PSP_REMOVEDEVICE_PARAMS)ClassInstallParams;
+    PSP_REMOVEDEVICE_PARAMS *CurrentRemoveDeviceParams;
+    struct DeviceInfo *deviceInfo;
+
+    if (!DeviceInfoData)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (ClassInstallParamsSize != sizeof(SP_REMOVEDEVICE_PARAMS))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (RemoveDeviceParams && RemoveDeviceParams->Scope != DI_REMOVEDEVICE_GLOBAL &&
+        RemoveDeviceParams->Scope != DI_REMOVEDEVICE_CONFIGSPECIFIC)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return FALSE;
+    }
+
+    deviceInfo = (struct DeviceInfo *)DeviceInfoData->Reserved;
+    CurrentRemoveDeviceParams = &deviceInfo->ClassInstallParams.RemoveDeviceParams;
+    MyFree(*CurrentRemoveDeviceParams);
+    *CurrentRemoveDeviceParams = NULL;
+    if (RemoveDeviceParams)
+    {
+        *CurrentRemoveDeviceParams = MyMalloc(ClassInstallParamsSize);
+        if (!*CurrentRemoveDeviceParams)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+        memcpy(*CurrentRemoveDeviceParams, RemoveDeviceParams, ClassInstallParamsSize);
+    }
+    return TRUE;
 }
 
 /***********************************************************************

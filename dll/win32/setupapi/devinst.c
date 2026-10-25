@@ -825,6 +825,7 @@ DestroyClassInstallParams(struct ClassInstallParams* installParams)
 {
     HeapFree(GetProcessHeap(), 0, installParams->PropChangeParams);
     HeapFree(GetProcessHeap(), 0, installParams->AddPropertyPageData);
+    HeapFree(GetProcessHeap(), 0, installParams->RemoveDeviceParams);
     return TRUE;
 }
 
@@ -5096,6 +5097,13 @@ SetupDiRemoveDevice(
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
+    }
+
+    if (deviceInfo->ClassInstallParams.RemoveDeviceParams &&
+        deviceInfo->ClassInstallParams.RemoveDeviceParams->Scope == DI_REMOVEDEVICE_CONFIGSPECIFIC)
+    {
+        FIXME("Removal from hardware profile %lu only is not supported, removing the device\n",
+              deviceInfo->ClassInstallParams.RemoveDeviceParams->HwProfile);
     }
 
     /* Take a present device out of the device tree first */

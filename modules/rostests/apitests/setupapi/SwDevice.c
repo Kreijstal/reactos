@@ -123,6 +123,7 @@ START_TEST(SwDevice)
 {
     HMODULE Cfgmgr32 = LoadLibraryW(L"cfgmgr32.dll");
     SP_DEVINFO_DATA DevInfoData = { sizeof(DevInfoData) };
+    SP_REMOVEDEVICE_PARAMS RemoveParams;
     WCHAR InstanceId[MAX_DEVICE_ID_LEN];
     CREATE_CTX Ctx;
     HSWDEVICE SwDevice;
@@ -203,6 +204,13 @@ START_TEST(SwDevice)
         return;
     ok(SetupDiOpenDeviceInfoW(DevInfo, InstanceId, NULL, 0, &DevInfoData),
        "SetupDiOpenDeviceInfoW failed: %lu\n", GetLastError());
+    /* As Wintun does it */
+    RemoveParams.ClassInstallHeader.cbSize = sizeof(RemoveParams.ClassInstallHeader);
+    RemoveParams.ClassInstallHeader.InstallFunction = DIF_REMOVE;
+    RemoveParams.Scope = DI_REMOVEDEVICE_GLOBAL;
+    RemoveParams.HwProfile = 0;
+    ok(SetupDiSetClassInstallParamsW(DevInfo, &DevInfoData, &RemoveParams.ClassInstallHeader, sizeof(RemoveParams)),
+       "SetupDiSetClassInstallParamsW failed: %lu\n", GetLastError());
     ok(SetupDiCallClassInstaller(DIF_REMOVE, DevInfo, &DevInfoData), "DIF_REMOVE failed: %lu\n", GetLastError());
     SetupDiDestroyDeviceInfoList(DevInfo);
     Cr = CM_Locate_DevNodeW(&DevInst, InstanceId, CM_LOCATE_DEVNODE_PHANTOM);
