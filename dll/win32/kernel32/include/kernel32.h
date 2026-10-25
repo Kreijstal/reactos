@@ -342,6 +342,13 @@ HANDLE
 WINAPI
 BasepGetNamedObjectDirectory(VOID);
 
+HANDLE
+WINAPI
+BasepGetObjectRootDirectory(
+    _Inout_ PUNICODE_STRING Name);
+
+extern RTL_CRITICAL_SECTION BasepPrivateNamespaceLock;
+
 NTSTATUS
 WINAPI
 BasepMapFile(IN LPCWSTR lpApplicationName,

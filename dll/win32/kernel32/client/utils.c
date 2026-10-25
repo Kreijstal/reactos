@@ -382,7 +382,7 @@ BaseFormatObjectAttributes(OUT POBJECT_ATTRIBUTES ObjectAttributes,
     if (ObjectName)
     {
         Attributes |= OBJ_OPENIF;
-        RootDirectory = BasepGetNamedObjectDirectory();
+        RootDirectory = BasepGetObjectRootDirectory(ObjectName);
     }
     else
     {
