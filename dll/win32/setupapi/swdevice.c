@@ -10,7 +10,8 @@
  * the PnP manager to create, found under SWD\<enumerator>\<instance>. Wintun,
  * for one, creates its network adapter this way. We make the device node
  * through the ordinary SetupAPI install path and, with the default
- * SWDeviceLifetimeHandle, remove it when the handle is closed.
+ * SWDeviceLifetimeHandle, take it out of the device tree when the handle is
+ * closed. Its keys stay, and creating it again brings it back with them.
  */
 
 #include "setupapi_private.h"
@@ -31,6 +32,45 @@ typedef struct _SW_DEVICE
     SW_DEVICE_LIFETIME Lifetime;
     WCHAR InstanceId[MAX_DEVICE_ID_LEN];
 } SW_DEVICE, *PSW_DEVICE;
+
+static
+BOOL
+SwpIsPresent(
+    _In_ PCWSTR InstanceId)
+{
+    DEVINST DevInst;
+
+    return CM_Locate_DevNodeW(&DevInst, (DEVINSTID_W)InstanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS;
+}
+
+/* Take a device out of the device tree, keeping its keys */
+static
+VOID
+SwpRemoveFromTree(
+    _In_ PCWSTR InstanceId)
+{
+    PNP_VETO_TYPE VetoType = PNP_VetoTypeUnknown;
+    WCHAR VetoName[MAX_PATH];
+    DEVINST DevInst;
+    CONFIGRET Cr;
+    ULONG i;
+
+    if (CM_Locate_DevNodeW(&DevInst, (DEVINSTID_W)InstanceId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS)
+        return;
+
+    VetoName[0] = UNICODE_NULL;
+    Cr = CM_Query_And_Remove_SubTreeW(DevInst, &VetoType, VetoName, ARRAYSIZE(VetoName), CM_REMOVE_NO_RESTART);
+    if (Cr != CR_SUCCESS)
+    {
+        WARN("Removal of %s vetoed (%lu): type %d, %s\n",
+             debugstr_w(InstanceId), Cr, VetoType, debugstr_w(VetoName));
+        return;
+    }
+
+    /* The device node goes away with its last reference */
+    for (i = 0; i < 100 && SwpIsPresent(InstanceId); i++)
+        Sleep(50);
+}
 
 /* Install the best matching driver already in the store onto a new device */
 static DWORD
@@ -158,7 +198,26 @@ SwDeviceCreate(
                                   pCreateInfo->pszDeviceDescription, NULL, 0, &DevInfoData))
     {
         Error = GetLastError();
-        goto cleanup;
+        if (Error != ERROR_DEVINST_ALREADY_EXISTS)
+            goto cleanup;
+
+        /*
+         * A software device made before and closed since comes back with
+         * the instance and the keys it had, as on Windows. One that is
+         * still there cannot be made twice.
+         */
+        if (SwpIsPresent(FullInstanceId) ||
+            !SetupDiOpenDeviceInfoW(DevInfo, FullInstanceId, NULL, 0, &DevInfoData))
+        {
+            goto cleanup;
+        }
+        Error = ERROR_SUCCESS;
+        if (pCreateInfo->pszDeviceDescription)
+        {
+            SetupDiSetDeviceRegistryPropertyW(DevInfo, &DevInfoData, SPDRP_DEVICEDESC,
+                                              (const BYTE *)pCreateInfo->pszDeviceDescription,
+                                              (DWORD)((wcslen(pCreateInfo->pszDeviceDescription) + 1) * sizeof(WCHAR)));
+        }
     }
 
     /* Hardware IDs (a double-null-terminated multi-string) */
@@ -239,25 +298,18 @@ SwDeviceClose(
     _In_ HSWDEVICE hSwDevice)
 {
     PSW_DEVICE SwDevice = (PSW_DEVICE)hSwDevice;
-    HDEVINFO DevInfo;
-    SP_DEVINFO_DATA DevInfoData = { .cbSize = sizeof(DevInfoData) };
 
     TRACE("SwDeviceClose(%p)\n", hSwDevice);
 
     if (!SwDevice || SwDevice->Magic != SW_DEVICE_MAGIC)
         return;
 
-    /* The default lifetime ends the device with its handle */
+    /*
+     * The default lifetime ends the device with its handle: it leaves the
+     * device tree, but keeps its keys until it is uninstalled (DIF_REMOVE).
+     */
     if (SwDevice->Lifetime == SWDeviceLifetimeHandle)
-    {
-        DevInfo = SetupDiCreateDeviceInfoList(NULL, NULL);
-        if (DevInfo != INVALID_HANDLE_VALUE)
-        {
-            if (SetupDiOpenDeviceInfoW(DevInfo, SwDevice->InstanceId, NULL, 0, &DevInfoData))
-                SetupDiCallClassInstaller(DIF_REMOVE, DevInfo, &DevInfoData);
-            SetupDiDestroyDeviceInfoList(DevInfo);
-        }
-    }
+        SwpRemoveFromTree(SwDevice->InstanceId);
 
     SwDevice->Magic = 0;
     HeapFree(GetProcessHeap(), 0, SwDevice);
