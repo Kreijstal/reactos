@@ -1268,10 +1268,13 @@ TestDatagramHostEcho(
     ok_eq_uint(Record.Remote.sin_port, RtlUshortByteSwap(ECHO_PORT));
 
     /* Sends from DISPATCH_LEVEL, the way ovpn-dco sends its keepalives
-     * from a timer DPC */
+     * from a timer DPC. The remote address only has to be valid during the
+     * call (ovpn-dco passes one from its stack), so clear it right after,
+     * before a send deferred to a worker thread can run */
     ResetRecord(EventAccept);
     if (SyncCallBegin(&Call))
     {
+        SOCKADDR_IN Target = Remote;
         WSK_BUF WskBuf;
         KIRQL OldIrql;
 
@@ -1279,7 +1282,8 @@ TestDatagramHostEcho(
         WskBuf.Offset = 0;
         WskBuf.Length = 33;
         KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
-        Status = Dispatch->WskSendTo(Socket, &WskBuf, 0, (PSOCKADDR)&Remote, 0, NULL, Call.Irp);
+        Status = Dispatch->WskSendTo(Socket, &WskBuf, 0, (PSOCKADDR)&Target, 0, NULL, Call.Irp);
+        RtlZeroMemory(&Target, sizeof(Target));
         KeLowerIrql(OldIrql);
         Information = 0;
         Status = SyncCallEnd(&Call, Status, &Information);
@@ -1292,6 +1296,7 @@ TestDatagramHostEcho(
     ResetRecord(EventAccept);
     if (SyncCallBegin(&Call))
     {
+        SOCKADDR_IN Target = Remote;
         WSK_BUF_LIST List;
         KIRQL OldIrql;
 
@@ -1300,7 +1305,8 @@ TestDatagramHostEcho(
         List.Buffer.Offset = 4;
         List.Buffer.Length = 17;
         KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
-        Status = Dispatch->WskSendMessages(Socket, &List, 0, (PSOCKADDR)&Remote, 0, NULL, Call.Irp);
+        Status = Dispatch->WskSendMessages(Socket, &List, 0, (PSOCKADDR)&Target, 0, NULL, Call.Irp);
+        RtlZeroMemory(&Target, sizeof(Target));
         KeLowerIrql(OldIrql);
         Information = 0;
         Status = SyncCallEnd(&Call, Status, &Information);
