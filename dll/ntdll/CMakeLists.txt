@@ -22,6 +22,7 @@ include_directories(
     ${REACTOS_SOURCE_DIR}/sdk/include/reactos/subsys)
 
 add_library(rtl_um OBJECT
+    rtl/boundary.c
     rtl/license.c
     rtl/libsupp.c
     rtl/uilist.c
