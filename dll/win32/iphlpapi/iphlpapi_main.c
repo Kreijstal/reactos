@@ -426,6 +426,64 @@ DWORD WINAPI ConvertInterfaceLuidToGuid(const NET_LUID *InterfaceLuid,
     return NO_ERROR;
 }
 
+/******************************************************************
+ *    ConvertInterfaceAliasToLuid (IPHLPAPI.@)
+ *
+ * The alias of an interface is the name of its network connection, the
+ * Name value of Control\Network\{4D36E972-...}\{guid}\Connection.
+ */
+DWORD WINAPI ConvertInterfaceAliasToLuid(const WCHAR *InterfaceAlias,
+                                         NET_LUID *InterfaceLuid)
+{
+    WCHAR SubKeyName[64], Name[MAX_INTERFACE_NAME_LEN];
+    HKEY NetworkKey, ConnectionKey;
+    DWORD Index, Size, Type, ret = ERROR_INVALID_PARAMETER;
+    UNICODE_STRING GuidString;
+    GUID Guid;
+
+    if (!InterfaceLuid)
+        return ERROR_INVALID_PARAMETER;
+    InterfaceLuid->Value = 0;
+    if (!InterfaceAlias || !*InterfaceAlias)
+        return ERROR_INVALID_PARAMETER;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}",
+                      0, KEY_ENUMERATE_SUB_KEYS, &NetworkKey) != ERROR_SUCCESS)
+        return ERROR_INVALID_PARAMETER;
+
+    for (Index = 0; ret != ERROR_SUCCESS; Index++)
+    {
+        Size = ARRAYSIZE(SubKeyName);
+        if (RegEnumKeyExW(NetworkKey, Index, SubKeyName, &Size, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        RtlInitUnicodeString(&GuidString, SubKeyName);
+        if (!NT_SUCCESS(RtlGUIDFromString(&GuidString, &Guid)))
+            continue;
+
+        StringCchCatW(SubKeyName, ARRAYSIZE(SubKeyName), L"\\Connection");
+        if (RegOpenKeyExW(NetworkKey, SubKeyName, 0, KEY_QUERY_VALUE, &ConnectionKey) != ERROR_SUCCESS)
+            continue;
+        Size = sizeof(Name) - sizeof(WCHAR);
+        if (RegQueryValueExW(ConnectionKey, L"Name", NULL, &Type, (LPBYTE)Name, &Size) == ERROR_SUCCESS &&
+            Type == REG_SZ)
+        {
+            Name[Size / sizeof(WCHAR)] = UNICODE_NULL;
+            if (!_wcsicmp(Name, InterfaceAlias) &&
+                ConvertInterfaceGuidToLuid(&Guid, InterfaceLuid) == NO_ERROR)
+            {
+                ret = ERROR_SUCCESS;
+            }
+        }
+        RegCloseKey(ConnectionKey);
+    }
+
+    RegCloseKey(NetworkKey);
+    if (ret != ERROR_SUCCESS)
+        InterfaceLuid->Value = 0;
+    return ret;
+}
+
 DWORD WINAPI ConvertInterfaceGuidToLuid(const GUID *InterfaceGuid,
                                         PNET_LUID InterfaceLuid)
 {

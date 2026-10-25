@@ -14,7 +14,7 @@
 @ stub CancelSecurityHealthChangeNotify
 @ stdcall -stub -version=0x600+ ConvertGuidToStringA(ptr ptr long)
 @ stdcall -stub -version=0x600+ ConvertGuidToStringW(ptr ptr long)
-@ stdcall -stub -version=0x600+ ConvertInterfaceAliasToLuid(wstr ptr)
+@ stdcall -version=0x600+ ConvertInterfaceAliasToLuid(wstr ptr)
 @ stdcall -version=0x600+ ConvertInterfaceGuidToLuid(ptr ptr)
 @ stdcall -version=0x600+ ConvertInterfaceIndexToLuid(long ptr)
 @ stdcall -stub -version=0x600+ ConvertInterfaceLuidToAlias(ptr ptr long)
