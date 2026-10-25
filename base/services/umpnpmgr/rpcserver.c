@@ -867,7 +867,6 @@ PNP_ValidateDeviceInstance(
     HKEY hDeviceKey = NULL;
 
     UNREFERENCED_PARAMETER(hBinding);
-    UNREFERENCED_PARAMETER(ulFlags);
 
     DPRINT("PNP_ValidateDeviceInstance(%p %S 0x%08lx)\n",
            hBinding, pDeviceID, ulFlags);
@@ -886,7 +885,15 @@ PNP_ValidateDeviceInstance(
         goto Done;
     }
 
-    /* FIXME: add more tests */
+    /* Only CM_LOCATE_DEVNODE_PHANTOM finds a device that is not present */
+    if (!(ulFlags & CM_LOCATE_DEVNODE_PHANTOM) &&
+        !IsRootDeviceInstanceID(pDeviceID) &&
+        !IsPresentDeviceInstanceID(pDeviceID))
+    {
+        DPRINT("Device %S is not present\n", pDeviceID);
+        ret = CR_NO_SUCH_DEVNODE;
+        goto Done;
+    }
 
 Done:
     if (hDeviceKey != NULL)
