@@ -65,6 +65,10 @@
 @ stdcall CM_Get_Depth_Ex(ptr long long long) setupapi.CM_Get_Depth_Ex
 @ stdcall CM_Get_DevNode_Registry_PropertyA(long long ptr ptr ptr long) setupapi.CM_Get_DevNode_Registry_PropertyA
 @ stdcall CM_Get_DevNode_Registry_PropertyW(long long ptr ptr ptr long) setupapi.CM_Get_DevNode_Registry_PropertyW
+@ stdcall -version=0x600+ CM_Get_DevNode_PropertyW(long ptr ptr ptr ptr long) setupapi.CM_Get_DevNode_PropertyW
+@ stdcall -version=0x600+ CM_Get_DevNode_Property_ExW(long ptr ptr ptr ptr long ptr) setupapi.CM_Get_DevNode_Property_ExW
+@ stdcall -version=0x600+ CM_Set_DevNode_PropertyW(long ptr long ptr long long) setupapi.CM_Set_DevNode_PropertyW
+@ stdcall -version=0x600+ CM_Set_DevNode_Property_ExW(long ptr long ptr long long ptr) setupapi.CM_Set_DevNode_Property_ExW
 @ stdcall CM_Get_DevNode_Registry_Property_ExA(long long ptr ptr ptr long long) setupapi.CM_Get_DevNode_Registry_Property_ExA
 @ stdcall CM_Get_DevNode_Registry_Property_ExW(long long ptr ptr ptr long long) setupapi.CM_Get_DevNode_Registry_Property_ExW
 @ stdcall CM_Get_DevNode_Status(ptr ptr long long) setupapi.CM_Get_DevNode_Status
