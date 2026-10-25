@@ -138,6 +138,7 @@
 @ stdcall CM_Locate_DevNodeW(ptr wstr long) setupapi.CM_Locate_DevNodeW
 @ stdcall CM_Locate_DevNode_ExA(ptr str long long) setupapi.CM_Locate_DevNode_ExA
 @ stdcall CM_Locate_DevNode_ExW(ptr wstr long long) setupapi.CM_Locate_DevNode_ExW
+@ stdcall -version=0x602+ CM_MapCrToWin32Err(long long) setupapi.CM_MapCrToWin32Err
 @ stub CM_Merge_Range_List # setupapi.CM_Merge_Range_List
 @ stdcall CM_Modify_Res_Des(ptr ptr long ptr long long) setupapi.CM_Modify_Res_Des
 @ stdcall CM_Modify_Res_Des_Ex(ptr ptr long ptr long long long) setupapi.CM_Modify_Res_Des_Ex
