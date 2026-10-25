@@ -627,6 +627,41 @@ ObpChargeQuotaForObject(IN POBJECT_HEADER ObjectHeader,
     return STATUS_SUCCESS;
 }
 
+/*
+ * Whether a SACL needs ACCESS_SYSTEM_SECURITY (and so SeSecurityPrivilege)
+ * to be set. Since Vista, mandatory label ACEs are not audit settings: any
+ * caller may label the object it creates, so a SACL holding nothing else
+ * does not need the privilege.
+ */
+static
+BOOLEAN
+ObpSaclNeedsSystemSecurity(
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor)
+{
+    BOOLEAN Present, Defaulted;
+    PACL Sacl;
+    PACE_HEADER Ace;
+    ULONG i;
+
+    if (!NT_SUCCESS(RtlGetSaclSecurityDescriptor(SecurityDescriptor, &Present, &Sacl, &Defaulted)) ||
+        !Present || !Sacl)
+    {
+        /* A present but NULL SACL still clears the auditing settings */
+        return Present;
+    }
+
+    for (i = 0; i < Sacl->AceCount; i++)
+    {
+        if (!NT_SUCCESS(RtlGetAce(Sacl, i, (PVOID *)&Ace)) ||
+            Ace->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+        {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
 NTSTATUS
 NTAPI
 ObpValidateAccessMask(IN PACCESS_STATE AccessState)
@@ -637,9 +672,10 @@ ObpValidateAccessMask(IN PACCESS_STATE AccessState)
     SecurityDescriptor = AccessState->SecurityDescriptor;
     if (SecurityDescriptor)
     {
-        /* Check if the SD has a system ACL but hasn't been granted access to get/set it */
+        /* Check if the SD has auditing settings but hasn't been granted access to get/set them */
         if ((SecurityDescriptor->Control & SE_SACL_PRESENT) &&
-            !(AccessState->PreviouslyGrantedAccess & ACCESS_SYSTEM_SECURITY))
+            !(AccessState->PreviouslyGrantedAccess & ACCESS_SYSTEM_SECURITY) &&
+            ObpSaclNeedsSystemSecurity(SecurityDescriptor))
         {
             /* We're gonna need access */
             AccessState->RemainingDesiredAccess |= ACCESS_SYSTEM_SECURITY;
