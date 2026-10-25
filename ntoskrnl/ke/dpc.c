@@ -902,15 +902,16 @@ KeInsertQueueDpc(IN PKDPC Dpc,
                 if (Prcb != CurrentPrcb)
                 {
                     /*
-                     * Check if the DPC is of high importance or above the
-                     * maximum depth. If it is, then make sure that the CPU
-                     * isn't idle, or that it's sleeping.
+                     * Check if the DPC is of high or medium-high importance,
+                     * or above the maximum depth. If it is, interrupt the
+                     * other CPU, even an idle one: our idle loop halts instead
+                     * of polling the DPC queue, and would otherwise only see
+                     * the DPC on its next clock tick.
                      */
-                    if (((Dpc->Importance == HighImportance) ||
+                    if ((Dpc->Importance == HighImportance) ||
+                        (Dpc->Importance == MediumHighImportance) ||
                         (DpcData->DpcQueueDepth >=
-                         Prcb->MaximumDpcQueueDepth)) &&
-                        (!(AFFINITY_MASK(Cpu) & KiIdleSummary) ||
-                         (Prcb->Sleeping)))
+                         Prcb->MaximumDpcQueueDepth))
                     {
                         /* Set interrupt requested */
                         Prcb->DpcInterruptRequested = TRUE;
