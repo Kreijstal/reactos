@@ -122,7 +122,8 @@ SETUP_CreateDevicesList(
     IN OUT struct DeviceInfoSet *list,
     IN PCWSTR MachineName OPTIONAL,
     IN CONST GUID *Class OPTIONAL,
-    IN PCWSTR Enumerator OPTIONAL)
+    IN PCWSTR Enumerator OPTIONAL,
+    IN BOOL OnlyPresentDevices)
 {
     PWCHAR Buffer = NULL;
     DWORD BufferLength = 4096;
@@ -166,15 +167,15 @@ SETUP_CreateDevicesList(
 
     for (InstancePath = Buffer; *InstancePath != UNICODE_NULL; InstancePath += wcslen(InstancePath) + 1)
     {
-        /* Check that device really exists */
+        /* Check that device really exists, and is present if asked to */
         TRACE("Checking %S\n", InstancePath);
         cr = CM_Locate_DevNode_Ex(&dnDevInst,
                                   (DEVINSTID_W)InstancePath,
-                                  CM_LOCATE_DEVNODE_NORMAL,
+                                  OnlyPresentDevices ? CM_LOCATE_DEVNODE_NORMAL : CM_LOCATE_DEVNODE_PHANTOM,
                                   list->hMachine);
         if (cr != CR_SUCCESS)
         {
-            ERR("CM_Locate_DevNode_ExW('%S') failed with status 0x%x\n", InstancePath, cr);
+            TRACE("CM_Locate_DevNode_ExW('%S') failed with status 0x%x\n", InstancePath, cr);
             continue;
         }
 
