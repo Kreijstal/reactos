@@ -213,6 +213,39 @@ NtCreateDirectoryObject(
     _In_ POBJECT_ATTRIBUTES ObjectAttributes
 );
 
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCreatePrivateNamespace(
+    _Out_ PHANDLE NamespaceHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ POBJECT_BOUNDARY_DESCRIPTOR BoundaryDescriptor
+);
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtOpenPrivateNamespace(
+    _Out_ PHANDLE NamespaceHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ POBJECT_BOUNDARY_DESCRIPTOR BoundaryDescriptor
+);
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtDeletePrivateNamespace(
+    _In_ HANDLE NamespaceHandle
+);
+#endif
+
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
@@ -418,6 +451,39 @@ ZwCreateDirectoryObject(
     _In_ ACCESS_MASK DesiredAccess,
     _In_ POBJECT_ATTRIBUTES ObjectAttributes
 );
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwCreatePrivateNamespace(
+    _Out_ PHANDLE NamespaceHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ POBJECT_BOUNDARY_DESCRIPTOR BoundaryDescriptor
+);
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwOpenPrivateNamespace(
+    _Out_ PHANDLE NamespaceHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ POBJECT_BOUNDARY_DESCRIPTOR BoundaryDescriptor
+);
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwDeletePrivateNamespace(
+    _In_ HANDLE NamespaceHandle
+);
+#endif
 
 NTSYSAPI
 NTSTATUS

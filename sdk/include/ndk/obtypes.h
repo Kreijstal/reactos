@@ -263,6 +263,44 @@ typedef struct _OBJECT_DIRECTORY_INFORMATION
     UNICODE_STRING TypeName;
 } OBJECT_DIRECTORY_INFORMATION, *POBJECT_DIRECTORY_INFORMATION;
 
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+//
+// Private namespace boundary descriptors: the header is followed by Items
+// entries, each one an OBJECT_BOUNDARY_ENTRY and its data padded to a ULONG
+//
+#define OBJECT_BOUNDARY_DESCRIPTOR_VERSION 1
+
+typedef enum _BOUNDARY_ENTRY_TYPE
+{
+    OBNS_Invalid,
+    OBNS_Name,
+    OBNS_SID,
+    OBNS_IL
+} BOUNDARY_ENTRY_TYPE;
+
+typedef struct _OBJECT_BOUNDARY_ENTRY
+{
+    BOUNDARY_ENTRY_TYPE EntryType;
+    ULONG EntryDataSize;
+} OBJECT_BOUNDARY_ENTRY, *POBJECT_BOUNDARY_ENTRY;
+
+typedef struct _OBJECT_BOUNDARY_DESCRIPTOR
+{
+    ULONG Version;
+    ULONG Items;
+    ULONG TotalSize;
+    union
+    {
+        ULONG Flags;
+        struct
+        {
+            ULONG AddAppContainerSid : 1;
+            ULONG Reserved : 31;
+        };
+    };
+} OBJECT_BOUNDARY_DESCRIPTOR, *POBJECT_BOUNDARY_DESCRIPTOR;
+#endif
+
 //
 // Object Information Classes for NtQueryInformationObject
 //
