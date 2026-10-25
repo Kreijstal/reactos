@@ -99,6 +99,7 @@ Ndis6RxBuildLegacyPacket(
     {
         ULONG MdlSize = MmGetMdlByteCount(CurrentMdl);
         PNDIS_BUFFER NdisBuffer = NULL;
+        PUCHAR SystemVa;
 
         /* Clamp the MDL segment to what's available in this MDL AND
          * what's remaining in the total payload. */
@@ -115,11 +116,21 @@ Ndis6RxBuildLegacyPacket(
         if (MdlSegmentSize > Remaining)
             MdlSegmentSize = Remaining;
 
-        NdisAllocateBuffer(&Status,
-                           &NdisBuffer,
-                           Ext->RxLegacyBufferPool,
-                           (PUCHAR)MmGetMdlVirtualAddress(CurrentMdl) + MdlSegmentOffset,
-                           MdlSegmentSize);
+        /*
+         * The legacy buffer describes the data by its system address: the
+         * MDL may describe locked user pages (Wintun indicates packets
+         * straight from the ring it shares with its client), whose virtual
+         * address means nothing in the thread that consumes the packet.
+         */
+        SystemVa = (PUCHAR)MmGetSystemAddressForMdlSafe(CurrentMdl, NormalPagePriority);
+        if (SystemVa == NULL)
+            Status = NDIS_STATUS_RESOURCES;
+        else
+            NdisAllocateBuffer(&Status,
+                               &NdisBuffer,
+                               Ext->RxLegacyBufferPool,
+                               SystemVa + MdlSegmentOffset,
+                               MdlSegmentSize);
         if (Status != NDIS_STATUS_SUCCESS || NdisBuffer == NULL)
         {
             /* Tear down the partial chain we built before this failure,
