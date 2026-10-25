@@ -313,7 +313,8 @@ SETUP_CreateDevicesList(
     IN OUT struct DeviceInfoSet *list,
     IN PCWSTR MachineName OPTIONAL,
     IN CONST GUID *Class OPTIONAL,
-    IN PCWSTR Enumerator OPTIONAL);
+    IN PCWSTR Enumerator OPTIONAL,
+    IN BOOL OnlyPresentDevices);
 
 HKEY SETUPDI_CreateDevKey(HKEY RootKey, struct DeviceInfo *devInfo, REGSAM samDesired);
 HKEY SETUPDI_CreateDrvKey(HKEY RootKey, struct DeviceInfo *devInfo, UUID *ClassGuid, REGSAM samDesired);

@@ -92,6 +92,33 @@ CreateDevice(
     return SwDevice;
 }
 
+/* Whether SetupDiGetClassDevs lists the device, with the enumerator filter Wintun uses */
+static
+BOOL
+ClassDevsHas(
+    _In_ PCWSTR InstanceId,
+    _In_ DWORD Flags)
+{
+    SP_DEVINFO_DATA DevInfoData = { sizeof(DevInfoData) };
+    WCHAR Id[MAX_DEVICE_ID_LEN];
+    HDEVINFO DevInfo;
+    BOOL Found = FALSE;
+    DWORD Index;
+
+    DevInfo = SetupDiGetClassDevsExW(&GUID_DEVCLASS_SAMPLE, L"SWD\\ApitestSwd", NULL, Flags, NULL, NULL, NULL);
+    ok(DevInfo != INVALID_HANDLE_VALUE, "SetupDiGetClassDevsExW failed: %lu\n", GetLastError());
+    if (DevInfo == INVALID_HANDLE_VALUE)
+        return FALSE;
+    for (Index = 0; SetupDiEnumDeviceInfo(DevInfo, Index, &DevInfoData); Index++)
+    {
+        if (SetupDiGetDeviceInstanceIdW(DevInfo, &DevInfoData, Id, ARRAYSIZE(Id), NULL) &&
+            !_wcsicmp(Id, InstanceId))
+            Found = TRUE;
+    }
+    SetupDiDestroyDeviceInfoList(DevInfo);
+    return Found;
+}
+
 START_TEST(SwDevice)
 {
     HMODULE Cfgmgr32 = LoadLibraryW(L"cfgmgr32.dll");
@@ -120,6 +147,8 @@ START_TEST(SwDevice)
 
     Cr = CM_Locate_DevNodeW(&DevInst, InstanceId, CM_LOCATE_DEVNODE_NORMAL);
     ok(Cr == CR_SUCCESS, "The device is not there: %lu\n", Cr);
+    ok(ClassDevsHas(InstanceId, 0), "The device is not listed\n");
+    ok(ClassDevsHas(InstanceId, DIGCF_PRESENT), "The device is not listed as present\n");
 
     /* Something to find again in the software key */
     Cr = CM_Open_DevNode_Key(DevInst, KEY_SET_VALUE, 0, RegDisposition_OpenAlways, &Key, CM_REGISTRY_SOFTWARE);
@@ -143,6 +172,8 @@ START_TEST(SwDevice)
     ok(Cr == CR_NO_SUCH_DEVNODE, "The device is still there: %lu\n", Cr);
     Cr = CM_Locate_DevNodeW(&DevInst, InstanceId, CM_LOCATE_DEVNODE_PHANTOM);
     ok(Cr == CR_SUCCESS, "The device is gone: %lu\n", Cr);
+    ok(ClassDevsHas(InstanceId, 0), "The device is not listed\n");
+    ok(!ClassDevsHas(InstanceId, DIGCF_PRESENT), "The device is listed as present\n");
 
     /* Making it again brings it back, with its software key */
     SwDevice = CreateDevice(&Ctx);
