@@ -1918,6 +1918,25 @@ BOOL WINAPI SetupDiCreateDeviceInfoW(
         TRACE("Using generated instance ID: %s\n", debugstr_w(DeviceName));
     }
 
+    /* Like Windows, record the class and the description of the new device */
+    if (!IsEqualGUID(ClassGuid, &GUID_NULL))
+    {
+        WCHAR ClassGuidString[MAX_GUID_STRING_LEN];
+
+        if (pSetupStringFromGuid((LPGUID)ClassGuid, ClassGuidString, ARRAYSIZE(ClassGuidString)) == ERROR_SUCCESS)
+        {
+            CM_Set_DevNode_Registry_Property_ExW(DevInst, CM_DRP_CLASSGUID, ClassGuidString,
+                                                 (wcslen(ClassGuidString) + 1) * sizeof(WCHAR),
+                                                 0, set->hMachine);
+        }
+    }
+    if (DeviceDescription)
+    {
+        CM_Set_DevNode_Registry_Property_ExW(DevInst, CM_DRP_DEVICEDESC, (PVOID)DeviceDescription,
+                                             (wcslen(DeviceDescription) + 1) * sizeof(WCHAR),
+                                             0, set->hMachine);
+    }
+
     if (CreateDeviceInfo(set, DeviceName, ClassGuid, &deviceInfo))
     {
         InsertTailList(&set->ListHead, &deviceInfo->ListEntry);
