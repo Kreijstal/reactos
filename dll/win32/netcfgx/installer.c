@@ -274,6 +274,90 @@ GetOwnKeyName(
     return TRUE;
 }
 
+/* Whether another adapter has this NetCfgInstanceId already */
+static
+BOOL
+IsNetCfgInstanceIdTaken(
+    IN PCWSTR OwnKeyName OPTIONAL,
+    IN PCWSTR InstanceId)
+{
+    WCHAR Value[64];
+    DWORD Index = 0, Type, Size;
+    HKEY ClassKey, Key;
+    BOOL Taken = FALSE;
+
+    ClassKey = OpenNetClassKey();
+    if (!ClassKey)
+        return FALSE;
+    while (!Taken && (Key = OpenNextNetAdapterKey(ClassKey, OwnKeyName, &Index)) != NULL)
+    {
+        Size = sizeof(Value) - sizeof(WCHAR);
+        ZeroMemory(Value, sizeof(Value));
+        if (RegQueryValueExW(Key, L"NetCfgInstanceId", NULL, &Type, (PBYTE)Value, &Size) == ERROR_SUCCESS &&
+            Type == REG_SZ && !_wcsicmp(Value, InstanceId))
+        {
+            Taken = TRUE;
+        }
+        RegCloseKey(Key);
+    }
+    RegCloseKey(ClassKey);
+    return Taken;
+}
+
+/*
+ * The NetCfgInstanceId of a network adapter, as Windows picks it: the one
+ * it has from an earlier installation, else the SuggestedInstanceId that
+ * its installer stored in its software key (Wintun does), else a new one.
+ * Returns FALSE to make a new one.
+ */
+static
+BOOL
+GetExistingNetCfgInstanceId(
+    IN HDEVINFO DeviceInfoSet,
+    IN PSP_DEVINFO_DATA DeviceInfoData,
+    OUT PWSTR InstanceId,
+    IN DWORD Chars)
+{
+    WCHAR OwnKeyName[32];
+    PCWSTR OwnName = NULL;
+    DWORD Type, Size;
+    GUID Suggested;
+    HKEY Key;
+    BOOL Found = FALSE;
+
+    Key = SetupDiOpenDevRegKey(DeviceInfoSet, DeviceInfoData, DICS_FLAG_GLOBAL, 0, DIREG_DRV, KEY_QUERY_VALUE);
+    if (Key == INVALID_HANDLE_VALUE)
+        return FALSE;
+    if (GetOwnKeyName(DeviceInfoSet, DeviceInfoData, OwnKeyName, ARRAYSIZE(OwnKeyName)))
+        OwnName = OwnKeyName;
+
+    Size = (Chars - 1) * sizeof(WCHAR);
+    ZeroMemory(InstanceId, Chars * sizeof(WCHAR));
+    if (RegQueryValueExW(Key, L"NetCfgInstanceId", NULL, &Type, (PBYTE)InstanceId, &Size) == ERROR_SUCCESS &&
+        Type == REG_SZ && InstanceId[0] == L'{')
+    {
+        Found = TRUE;
+    }
+    else
+    {
+        Size = sizeof(Suggested);
+        if (RegQueryValueExW(Key, L"SuggestedInstanceId", NULL, &Type, (PBYTE)&Suggested, &Size) == ERROR_SUCCESS &&
+            Type == REG_BINARY && Size == sizeof(Suggested) &&
+            StringFromGUID2(&Suggested, InstanceId, Chars))
+        {
+            Found = TRUE;
+        }
+    }
+    RegCloseKey(Key);
+
+    if (Found && IsNetCfgInstanceIdTaken(OwnName, InstanceId))
+    {
+        WARN("NetCfgInstanceId %S is taken\n", InstanceId);
+        Found = FALSE;
+    }
+    return Found;
+}
+
 /*
  * Give the adapter the NetLuidIndex of its interface LUID, unless it has
  * one: the lowest that no other adapter of the same *IfType has.
@@ -865,6 +949,25 @@ NetClassInstaller(
         }
     }
 
+    /* An adapter keeps the instance id it has or was suggested */
+    if (IsEqualIID(&DeviceInfoData->ClassGuid, &GUID_DEVCLASS_NET))
+    {
+        UuidString = HeapAlloc(GetProcessHeap(), 0, MAX_GUID_STRING_LEN * sizeof(WCHAR));
+        if (!UuidString)
+        {
+            ERR("HeapAlloc() failed\n");
+            rc = ERROR_NOT_ENOUGH_MEMORY;
+            goto cleanup;
+        }
+        if (GetExistingNetCfgInstanceId(DeviceInfoSet, DeviceInfoData, UuidString, MAX_GUID_STRING_LEN))
+        {
+            TRACE("Using NetCfgInstanceId %S\n", UuidString);
+            goto install;
+        }
+        HeapFree(GetProcessHeap(), 0, UuidString);
+        UuidString = NULL;
+    }
+
     /* Create a new UUID */
     RpcStatus = UuidCreate(&Uuid);
     if (RpcStatus != RPC_S_OK && RpcStatus != RPC_S_UUID_LOCAL_ONLY)
@@ -895,6 +998,7 @@ NetClassInstaller(
     wcscat(UuidString, UuidRpcString);
     wcscat(UuidString, L"}");
 
+install:
     if (IsEqualIID(&DeviceInfoData->ClassGuid, &GUID_DEVCLASS_NET))
         rc = InstallNetDevice(DeviceInfoSet, DeviceInfoData, UuidString, Characteristics, BusType, &Keywords);
     else if (IsEqualIID(&DeviceInfoData->ClassGuid, &GUID_DEVCLASS_NETCLIENT))
