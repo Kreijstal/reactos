@@ -37,6 +37,7 @@ list(APPEND SOURCE
     Mailslot.c
     MultiByteToWideChar.c
     Pipes.c
+    PrivateNamespace.c
     PrivMoveFileIdentityW.c
     QueueUserAPC.c
     ReadFile.c
