@@ -76,20 +76,6 @@ BOOL WINAPI SetupSetSourceListW(DWORD flags, PCWSTR *list, UINT count)
 
 
 /***********************************************************************
- *      SetupDiRemoveDevice(SETUPAPI.@)
- */
-BOOL WINAPI
-SetupDiRemoveDevice(
-    IN HDEVINFO DeviceInfoSet,
-    IN PSP_DEVINFO_DATA DeviceInfoData)
-{
-    FIXME ("Stub %p %p\n", DeviceInfoSet, DeviceInfoData);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
-}
-
-
-/***********************************************************************
  *      SetupDiUnremoveDevice(SETUPAPI.@)
  */
 BOOL WINAPI

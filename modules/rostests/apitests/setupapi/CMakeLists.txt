@@ -4,6 +4,7 @@ list(APPEND SOURCE
     CM_MapCrToWin32Err.c
     devclass.c
     DevQuery.c
+    SetupDiCreateDeviceInfo.c
     SetupDiDeviceProperty.c
     SetupDiInstallClassExA.c
     SetupDiGetActualModelsSection.c
