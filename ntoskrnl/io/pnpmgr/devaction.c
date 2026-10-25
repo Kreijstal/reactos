@@ -2300,6 +2300,28 @@ PiQueryRemoveDevice(
     if (DeviceNode->State == DeviceNodeRemoved)
         return STATUS_SUCCESS;
 
+    /*
+     * A device that a user-mode installer made on the root bus, but that
+     * never got a driver (a software device without one, for instance), has
+     * nothing that could veto its removal: the root enumerator deletes its
+     * PDO, and the device node goes with it.
+     */
+    if ((DeviceNode->State == DeviceNodeUninitialized ||
+         DeviceNode->State == DeviceNodeInitialized) &&
+        DeviceNode->Parent == IopRootDeviceNode &&
+        DeviceNode->Child == NULL &&
+        DeviceObject->AttachedDevice == NULL)
+    {
+        if (DeviceNode->UserFlags & DNUF_NOT_DISABLEABLE)
+            return STATUS_CANNOT_DELETE;
+        if (PiDeviceStackHasOpenHandles(DeviceObject))
+            return STATUS_FILES_OPEN;
+
+        PiSetDevNodeState(DeviceNode, DeviceNodeAwaitingQueuedRemoval);
+        IopSendRemoveDevice(DeviceObject);
+        return STATUS_SUCCESS;
+    }
+
     if (DeviceNode->State != DeviceNodeStarted)
     {
         DPRINT1("Cannot remove %wZ in state %u\n", &DeviceNode->InstancePath, DeviceNode->State);
