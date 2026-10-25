@@ -75,6 +75,46 @@ Done:
     HeapFree(GetProcessHeap(), 0, ListA);
 }
 
+/* Without a device, the list has the interfaces of all devices */
+static
+VOID
+CheckAllDevices(
+    _In_ HDEVINFO Set)
+{
+    SP_DEVICE_INTERFACE_DATA Interface = { sizeof(Interface) };
+    ULONG Length = 0, Count = 0;
+    DWORD Index, Expected = 0;
+    PWSTR List, p;
+    CONFIGRET Cr;
+
+    for (Index = 0; SetupDiEnumDeviceInterfaces(Set, NULL, &GUID_DEVINTERFACE_DISK, Index, &Interface); Index++)
+        Expected++;
+
+    Cr = CM_Get_Device_Interface_List_SizeW(&Length, (LPGUID)&GUID_DEVINTERFACE_DISK, NULL,
+                                            CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+    ok(Cr == CR_SUCCESS, "CM_Get_Device_Interface_List_SizeW(NULL) returned %lu\n", Cr);
+    if (Cr != CR_SUCCESS)
+        return;
+    ok(Length > 1, "Length %lu\n", Length);
+
+    List = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (Length + 1) * sizeof(WCHAR));
+    if (!List)
+    {
+        skip("Out of memory\n");
+        return;
+    }
+    Cr = CM_Get_Device_Interface_ListW((LPGUID)&GUID_DEVINTERFACE_DISK, NULL, List, Length + 1,
+                                       CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+    ok(Cr == CR_SUCCESS, "CM_Get_Device_Interface_ListW(NULL) returned %lu\n", Cr);
+    if (Cr == CR_SUCCESS)
+    {
+        for (p = List; *p; p += wcslen(p) + 1)
+            Count++;
+        ok(Count == Expected, "%lu interfaces, expected %lu\n", Count, Expected);
+    }
+    HeapFree(GetProcessHeap(), 0, List);
+}
+
 START_TEST(CM_Get_Device_Interface_List)
 {
     SP_DEVINFO_DATA DevInfo;
@@ -100,6 +140,8 @@ START_TEST(CM_Get_Device_Interface_List)
         CheckDevice(IdA, IdW);
     }
     ok(Index > 0, "No disk found\n");
+
+    CheckAllDevices(Set);
 
     SetupDiDestroyDeviceInfoList(Set);
 }
