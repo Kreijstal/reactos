@@ -193,6 +193,134 @@ ReadNetDDInstallKeywords(
     }
 }
 
+#define NET_LUID_INDEX_FIRST 0x8000 /* the first one Windows gives, too */
+#define NET_LUID_INDEX_LAST  0xFFFFFF
+
+/*
+ * Open the software key of every other network adapter in turn:
+ * Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}\nnnn, except
+ * OwnKeyName (the nnnn of the adapter being installed).
+ */
+static
+HKEY
+OpenNextNetAdapterKey(
+    IN HKEY ClassKey,
+    IN PCWSTR OwnKeyName OPTIONAL,
+    IN OUT PDWORD Index)
+{
+    WCHAR Name[32];
+    DWORD Length;
+    HKEY Key;
+
+    for (;;)
+    {
+        Length = ARRAYSIZE(Name);
+        if (RegEnumKeyExW(ClassKey, (*Index)++, Name, &Length, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            return NULL;
+        if (OwnKeyName && !_wcsicmp(Name, OwnKeyName))
+            continue;
+        if (RegOpenKeyExW(ClassKey, Name, 0, KEY_QUERY_VALUE, &Key) == ERROR_SUCCESS)
+            return Key;
+    }
+}
+
+static
+HKEY
+OpenNetClassKey(VOID)
+{
+    HKEY ClassKey;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SYSTEM\\CurrentControlSet\\Control\\Class\\{4D36E972-E325-11CE-BFC1-08002BE10318}",
+                      0, KEY_ENUMERATE_SUB_KEYS, &ClassKey) != ERROR_SUCCESS)
+        return NULL;
+    return ClassKey;
+}
+
+static
+DWORD
+QueryDword(
+    IN HKEY Key,
+    IN PCWSTR Name,
+    IN DWORD Default)
+{
+    DWORD Type, Value, Size = sizeof(Value);
+
+    if (RegQueryValueExW(Key, Name, NULL, &Type, (PBYTE)&Value, &Size) != ERROR_SUCCESS ||
+        Type != REG_DWORD || Size != sizeof(Value))
+        return Default;
+    return Value;
+}
+
+/* The nnnn of the software key of the device */
+static
+BOOL
+GetOwnKeyName(
+    IN HDEVINFO DeviceInfoSet,
+    IN PSP_DEVINFO_DATA DeviceInfoData,
+    OUT PWSTR Name,
+    IN DWORD Chars)
+{
+    WCHAR Driver[MAX_PATH];
+    PWSTR Slash;
+
+    if (!SetupDiGetDeviceRegistryPropertyW(DeviceInfoSet, DeviceInfoData, SPDRP_DRIVER, NULL,
+                                           (PBYTE)Driver, sizeof(Driver), NULL))
+        return FALSE;
+    Slash = wcsrchr(Driver, L'\\');
+    if (!Slash || wcslen(Slash + 1) >= Chars)
+        return FALSE;
+    wcscpy(Name, Slash + 1);
+    return TRUE;
+}
+
+/*
+ * Give the adapter the NetLuidIndex of its interface LUID, unless it has
+ * one: the lowest that no other adapter of the same *IfType has.
+ */
+static
+DWORD
+AssignNetLuidIndex(
+    IN HDEVINFO DeviceInfoSet,
+    IN PSP_DEVINFO_DATA DeviceInfoData,
+    IN HKEY hKey)
+{
+    WCHAR OwnKeyName[32];
+    PCWSTR OwnName = NULL;
+    DWORD IfType, Candidate, Index;
+    HKEY ClassKey, Key;
+    BOOL Taken;
+
+    if (QueryDword(hKey, L"NetLuidIndex", 0) != 0)
+        return ERROR_SUCCESS;
+
+    IfType = QueryDword(hKey, L"*IfType", 6 /* IF_TYPE_ETHERNET_CSMACD */);
+    if (GetOwnKeyName(DeviceInfoSet, DeviceInfoData, OwnKeyName, ARRAYSIZE(OwnKeyName)))
+        OwnName = OwnKeyName;
+
+    ClassKey = OpenNetClassKey();
+    for (Candidate = NET_LUID_INDEX_FIRST; Candidate <= NET_LUID_INDEX_LAST; Candidate++)
+    {
+        Taken = FALSE;
+        Index = 0;
+        while (ClassKey && !Taken && (Key = OpenNextNetAdapterKey(ClassKey, OwnName, &Index)) != NULL)
+        {
+            Taken = QueryDword(Key, L"*IfType", 6 /* IF_TYPE_ETHERNET_CSMACD */) == IfType &&
+                    QueryDword(Key, L"NetLuidIndex", 0) == Candidate;
+            RegCloseKey(Key);
+        }
+        if (!Taken)
+            break;
+    }
+    if (ClassKey)
+        RegCloseKey(ClassKey);
+    if (Candidate > NET_LUID_INDEX_LAST)
+        return ERROR_NO_MORE_ITEMS;
+
+    TRACE("NetLuidIndex 0x%lx for interface type %lu\n", Candidate, IfType);
+    return RegSetValueExW(hKey, L"NetLuidIndex", 0, REG_DWORD, (const BYTE *)&Candidate, sizeof(Candidate));
+}
+
 static
 DWORD
 InstallNetDevice(
@@ -380,6 +508,14 @@ InstallNetDevice(
             ERR("RegSetValueExW(%S) failed with error 0x%lx\n", NetDDInstallKeywords[i], rc);
             goto cleanup;
         }
+    }
+
+    /* The interface LUID of the adapter is its *IfType and NetLuidIndex */
+    rc = AssignNetLuidIndex(DeviceInfoSet, DeviceInfoData, hKey);
+    if (rc != ERROR_SUCCESS)
+    {
+        ERR("AssignNetLuidIndex() failed with error 0x%lx\n", rc);
+        goto cleanup;
     }
 
     /* Get ComponentId (from MatchingDeviceId value) */
