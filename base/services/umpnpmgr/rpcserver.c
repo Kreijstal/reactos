@@ -5770,6 +5770,59 @@ PNP_GetObjectPropKeys(
 }
 
 
+/*
+ * The unified device properties of a device instance are stored under
+ * Enum\<id>\Properties\{fmtid}\<pid>, mirroring Windows. The value type is
+ * the DEVPROPTYPE and the data is the property value.
+ */
+static
+CONFIGRET
+OpenDevicePropertyKey(
+    _In_ LPWSTR pDeviceID,
+    _In_ const DEVPROPKEY *PropertyKey,
+    _In_ BOOL Create,
+    _Out_ PHKEY phKey)
+{
+    WCHAR szSubKey[MAX_PATH];
+    HKEY hDeviceKey, hPropertiesKey;
+    LONG lError;
+
+    lError = RegOpenKeyExW(hEnumKey, pDeviceID, 0,
+                           Create ? KEY_READ | KEY_WRITE : KEY_READ, &hDeviceKey);
+    if (lError != ERROR_SUCCESS)
+        return CR_NO_SUCH_DEVINST;
+
+    if (Create)
+        lError = RegCreateKeyExW(hDeviceKey, L"Properties", 0, NULL, REG_OPTION_NON_VOLATILE,
+                                 KEY_READ | KEY_WRITE, NULL, &hPropertiesKey, NULL);
+    else
+        lError = RegOpenKeyExW(hDeviceKey, L"Properties", 0, KEY_READ, &hPropertiesKey);
+    RegCloseKey(hDeviceKey);
+    if (lError != ERROR_SUCCESS)
+        return CR_NO_SUCH_VALUE;
+
+    _snwprintf(szSubKey, _countof(szSubKey),
+             L"{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}\\%04lX",
+             PropertyKey->fmtid.Data1, PropertyKey->fmtid.Data2, PropertyKey->fmtid.Data3,
+             PropertyKey->fmtid.Data4[0], PropertyKey->fmtid.Data4[1],
+             PropertyKey->fmtid.Data4[2], PropertyKey->fmtid.Data4[3],
+             PropertyKey->fmtid.Data4[4], PropertyKey->fmtid.Data4[5],
+             PropertyKey->fmtid.Data4[6], PropertyKey->fmtid.Data4[7],
+             PropertyKey->pid);
+
+    if (Create)
+        lError = RegCreateKeyExW(hPropertiesKey, szSubKey, 0, NULL, REG_OPTION_NON_VOLATILE,
+                                 KEY_READ | KEY_WRITE, NULL, phKey, NULL);
+    else
+        lError = RegOpenKeyExW(hPropertiesKey, szSubKey, 0, KEY_READ, phKey);
+    RegCloseKey(hPropertiesKey);
+    if (lError != ERROR_SUCCESS)
+        return Create ? CR_REGISTRY_ERROR : CR_NO_SUCH_VALUE;
+
+    return CR_SUCCESS;
+}
+
+
 /* Function 66 */
 DWORD
 WINAPI
@@ -5785,10 +5838,73 @@ PNP_GetObjectProp(
     BYTE *PropertyBuffer,
     DWORD Flags)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
-}
+    HKEY hKey;
+    CONFIGRET ret;
+    LONG lError;
+    DWORD dwType = 0, dwSize;
 
+    UNREFERENCED_PARAMETER(hBinding);
+    UNREFERENCED_PARAMETER(PropertyCultureName);
+
+    DPRINT("PNP_GetObjectProp(%p %S %lu %p %p %p %p %p 0x%lx)\n",
+           hBinding, ObjectName, ObjectType, PropertyKey, PropertyType,
+           PropertySize, TransferLen, PropertyBuffer, Flags);
+
+    if (ObjectType != PNP_OBJECT_TYPE_DEVICE)
+        return CR_CALL_NOT_IMPLEMENTED;
+    if (ObjectName == NULL || PropertyKey == NULL || PropertyType == NULL ||
+        PropertySize == NULL || TransferLen == NULL)
+        return CR_INVALID_POINTER;
+    if (Flags != 0)
+        return CR_INVALID_FLAG;
+    if (!IsValidDeviceInstanceID(ObjectName))
+        return CR_INVALID_DEVINST;
+
+    ret = OpenDevicePropertyKey(ObjectName, PropertyKey, FALSE, &hKey);
+    if (ret != CR_SUCCESS)
+    {
+        *PropertySize = 0;
+        *TransferLen = 0;
+        return ret;
+    }
+
+    /* The value's type is the DEVPROPTYPE, stored in the "Type" value */
+    dwSize = sizeof(DEVPROPTYPE);
+    lError = RegQueryValueExW(hKey, L"Type", NULL, NULL, (LPBYTE)PropertyType, &dwSize);
+    if (lError != ERROR_SUCCESS)
+    {
+        RegCloseKey(hKey);
+        *PropertySize = 0;
+        *TransferLen = 0;
+        return CR_NO_SUCH_VALUE;
+    }
+
+    dwSize = *PropertySize;
+    lError = RegQueryValueExW(hKey, L"Data", NULL, &dwType,
+                              (dwSize != 0) ? PropertyBuffer : NULL, &dwSize);
+    RegCloseKey(hKey);
+
+    if (lError == ERROR_MORE_DATA)
+    {
+        *PropertySize = dwSize;
+        *TransferLen = 0;
+        ret = CR_BUFFER_SMALL;
+    }
+    else if (lError != ERROR_SUCCESS)
+    {
+        *PropertySize = 0;
+        *TransferLen = 0;
+        ret = CR_NO_SUCH_VALUE;
+    }
+    else
+    {
+        *PropertySize = dwSize;
+        *TransferLen = dwSize;
+        ret = CR_SUCCESS;
+    }
+
+    return ret;
+}
 
 /* Function 67 */
 DWORD
@@ -5804,9 +5920,57 @@ PNP_SetObjectProp(
     BYTE *PropertyBuffer,
     DWORD Flags)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    HKEY hKey;
+    CONFIGRET ret;
+    LONG lError;
+
+    UNREFERENCED_PARAMETER(hBinding);
+    UNREFERENCED_PARAMETER(PropertyCultureName);
+
+    DPRINT("PNP_SetObjectProp(%p %S %lu %p 0x%lx %lu %p 0x%lx)\n",
+           hBinding, ObjectName, ObjectType, PropertyKey, PropertyType,
+           PropertySize, PropertyBuffer, Flags);
+
+    if (ObjectType != PNP_OBJECT_TYPE_DEVICE)
+        return CR_CALL_NOT_IMPLEMENTED;
+    if (ObjectName == NULL || PropertyKey == NULL)
+        return CR_INVALID_POINTER;
+    if (Flags != 0)
+        return CR_INVALID_FLAG;
+    if (!IsValidDeviceInstanceID(ObjectName))
+        return CR_INVALID_DEVINST;
+
+    /* A zero size (and NULL data) deletes the property */
+    if (PropertySize == 0)
+    {
+        ret = OpenDevicePropertyKey(ObjectName, PropertyKey, FALSE, &hKey);
+        if (ret != CR_SUCCESS)
+            return ret;
+        RegDeleteValueW(hKey, L"Type");
+        RegDeleteValueW(hKey, L"Data");
+        RegCloseKey(hKey);
+        return CR_SUCCESS;
+    }
+
+    if (PropertyBuffer == NULL)
+        return CR_INVALID_POINTER;
+
+    ret = OpenDevicePropertyKey(ObjectName, PropertyKey, TRUE, &hKey);
+    if (ret != CR_SUCCESS)
+        return ret;
+
+    lError = RegSetValueExW(hKey, L"Type", 0, REG_BINARY,
+                            (const BYTE *)&PropertyType, sizeof(DEVPROPTYPE));
+    if (lError == ERROR_SUCCESS)
+        lError = RegSetValueExW(hKey, L"Data", 0, REG_BINARY, PropertyBuffer, PropertySize);
+    RegCloseKey(hKey);
+
+    if (lError != ERROR_SUCCESS)
+        return CR_REGISTRY_ERROR;
+
+    return CR_SUCCESS;
 }
+
 
 
 /* Function 68 */
