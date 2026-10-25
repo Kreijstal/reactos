@@ -1390,6 +1390,39 @@ RtlCopySid(
     _In_ PSID SourceSid
 );
 
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+NTSYSAPI
+POBJECT_BOUNDARY_DESCRIPTOR
+NTAPI
+RtlCreateBoundaryDescriptor(
+    _In_ PCUNICODE_STRING Name,
+    _In_ ULONG Flags
+);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlDeleteBoundaryDescriptor(
+    _In_ _Post_invalid_ POBJECT_BOUNDARY_DESCRIPTOR BoundaryDescriptor
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlAddSIDToBoundaryDescriptor(
+    _Inout_ POBJECT_BOUNDARY_DESCRIPTOR *BoundaryDescriptor,
+    _In_ PSID RequiredSid
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlAddIntegrityLabelToBoundaryDescriptor(
+    _Inout_ POBJECT_BOUNDARY_DESCRIPTOR *BoundaryDescriptor,
+    _In_ PSID IntegrityLabel
+);
+#endif
+
 NTSYSAPI
 NTSTATUS
 NTAPI
