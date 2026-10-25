@@ -2834,6 +2834,14 @@ PipDeviceActionWorker(
         KeReleaseSpinLock(&IopDeviceActionLock, OldIrql);
         Request = CONTAINING_RECORD(ListEntry, DEVICE_ACTION_REQUEST, RequestListEntry);
 
+        /*
+         * Windows sends PnP IRPs with the PnP engine lock held, so with
+         * normal kernel APCs disabled. Drivers rely on it: Wintun, for one,
+         * acquires an ERESOURCE in its IRP_MJ_PNP dispatch routine without
+         * entering a critical region of its own.
+         */
+        KeEnterCriticalRegion();
+
         ASSERT(Request->DeviceObject);
 
         deviceNode = IopGetDeviceNode(Request->DeviceObject);
@@ -2950,6 +2958,7 @@ PipDeviceActionWorker(
         DPRINT("Finished processing PnP request %p\n", Request);
         ObDereferenceObject(Request->DeviceObject);
         ExFreePoolWithTag(Request, TAG_IO);
+        KeLeaveCriticalRegion();
         KeAcquireSpinLock(&IopDeviceActionLock, &OldIrql);
     }
     IopDeviceActionInProgress = FALSE;
