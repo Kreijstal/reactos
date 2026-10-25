@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     CM_Get_Device_Interface_List.c
+    CM_MapCrToWin32Err.c
     devclass.c
     SetupDiDeviceProperty.c
     SetupDiInstallClassExA.c

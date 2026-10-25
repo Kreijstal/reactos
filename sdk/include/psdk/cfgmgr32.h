@@ -2467,6 +2467,13 @@ CM_Locate_DevNodeW(
 #endif /* UNICODE */
 
 CMAPI
+DWORD
+WINAPI
+CM_MapCrToWin32Err(
+  _In_ CONFIGRET CmReturnCode,
+  _In_ DWORD DefaultErr);
+
+CMAPI
 CONFIGRET
 WINAPI
 CM_Merge_Range_List(
