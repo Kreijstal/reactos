@@ -597,6 +597,11 @@ GetAdaptersAddresses(
                 QueryFlags(&Entry->if_descr[0], Entry->if_descrlen, &CurrentAA->Flags);
                 CurrentAA->Mtu = Entry->if_mtu;
                 CurrentAA->IfType = Entry->if_type;
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+                /* The LUID the other IP Helper functions take for this interface */
+                CurrentAA->Luid.Info.NetLuidIndex = Entry->if_index;
+                CurrentAA->Luid.Info.IfType = Entry->if_type;
+#endif
                 if(Entry->if_operstatus >= IF_OPER_STATUS_CONNECTING)
                     CurrentAA->OperStatus = IfOperStatusUp;
                 else
