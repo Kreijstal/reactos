@@ -21,6 +21,7 @@ list(APPEND SOURCE
     dirid.c
     diskspace.c
     driver.c
+    driverstore.c
     install.c
     interface.c
     misc.c
