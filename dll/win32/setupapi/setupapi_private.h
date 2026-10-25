@@ -123,6 +123,7 @@ struct ClassInstallParams
 {
     PSP_PROPCHANGE_PARAMS PropChangeParams;
     PSP_ADDPROPERTYPAGE_DATA AddPropertyPageData;
+    PSP_REMOVEDEVICE_PARAMS RemoveDeviceParams;
 };
 
 struct DeviceInfo /* Element of DeviceInfoSet.ListHead */
