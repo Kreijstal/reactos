@@ -1801,7 +1801,9 @@ err_out:
  * thread and needs IRQL <= APC_LEVEL, and the transport expects
  * PASSIVE_LEVEL callers, so a send made above PASSIVE_LEVEL is issued from
  * a worker thread, in the order of the calls. The client's IRP completes as
- * usual.
+ * usual. The remote address is captured here: like on Windows, the caller
+ * only has to keep it valid for the duration of the call (ovpn-dco passes
+ * one from its stack).
  */
 typedef enum _NETIO_SEND_KIND
 {
@@ -1818,7 +1820,8 @@ typedef struct _NETIO_DEFERRED_SEND
     WSK_BUF Buffer;
     PWSK_BUF_LIST BufferList;
     ULONG Flags;
-    PSOCKADDR RemoteAddress;
+    PSOCKADDR RemoteAddress;    /* NULL, or &RemoteAddressCopy */
+    SOCKADDR RemoteAddressCopy;
     PIRP Irp;
 } NETIO_DEFERRED_SEND, *PNETIO_DEFERRED_SEND;
 
@@ -1925,7 +1928,11 @@ DeferSend(
         Send->Buffer = *Buffer;
     Send->BufferList = BufferList;
     Send->Flags = Flags;
-    Send->RemoteAddress = RemoteAddress;
+    if (RemoteAddress != NULL)
+    {
+        Send->RemoteAddressCopy = *RemoteAddress;
+        Send->RemoteAddress = &Send->RemoteAddressCopy;
+    }
     Send->Irp = Irp;
 
     ReferenceSocket(Socket);
