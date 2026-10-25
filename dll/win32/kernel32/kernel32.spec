@@ -9,7 +9,8 @@
 @ stdcall AddLocalAlternateComputerNameW(wstr ptr)
 @ stdcall AddRefActCtx(ptr)
 @ stdcall -version=0x602+ AddDllDirectory(wstr)
-@ stdcall -stub -version=0x600+ AddSIDToBoundaryDescriptor(ptr ptr)
+@ stdcall -version=0x600+ AddIntegrityLabelToBoundaryDescriptor(ptr ptr)
+@ stdcall -version=0x600+ AddSIDToBoundaryDescriptor(ptr ptr)
 @ stdcall -stub -version=0x600+ AddSecureMemoryCacheCallback(ptr)
 @ stdcall AddVectoredContinueHandler(long ptr) ntdll.RtlAddVectoredContinueHandler
 @ stdcall AddVectoredExceptionHandler(long ptr) ntdll.RtlAddVectoredExceptionHandler
@@ -74,7 +75,7 @@
 @ stdcall ClearCommError(long ptr ptr)
 @ stdcall CloseConsoleHandle(long)
 @ stdcall CloseHandle(long)
-@ stdcall -stub -version=0x600+ ClosePrivateNamespace(ptr long)
+@ stdcall -version=0x600+ ClosePrivateNamespace(ptr long)
 @ stdcall CloseProfileUserMapping()
 @ stdcall -version=0x600+ CloseThreadpool(ptr) ntdll.TpReleasePool
 @ stdcall -version=0x600+ CloseThreadpoolCleanupGroup(ptr) ntdll.TpReleaseCleanupGroup
@@ -113,8 +114,8 @@
 @ stdcall CopyLZFile(long long) LZCopy
 @ stdcall CreateActCtxA(ptr)
 @ stdcall CreateActCtxW(ptr)
-@ stdcall -stub -version=0x600+ CreateBoundaryDescriptorA(str long)
-@ stdcall -stub -version=0x600+ CreateBoundaryDescriptorW(wstr long)
+@ stdcall -version=0x600+ CreateBoundaryDescriptorA(str long)
+@ stdcall -version=0x600+ CreateBoundaryDescriptorW(wstr long)
 @ stdcall CreateConsoleScreenBuffer(long long ptr long ptr)
 @ stdcall CreateDirectoryA(str ptr)
 @ stdcall CreateDirectoryExA(str str ptr)
@@ -155,8 +156,8 @@
 @ stdcall CreateNamedPipeW(wstr long long long long long long ptr)
 @ stdcall -version=0x501-0x502 CreateNlsSecurityDescriptor(ptr long long)
 @ stdcall CreatePipe(ptr ptr ptr long)
-@ stdcall -stub -version=0x600+ CreatePrivateNamespaceA(ptr ptr str)
-@ stdcall -stub -version=0x600+ CreatePrivateNamespaceW(ptr ptr wstr)
+@ stdcall -version=0x600+ CreatePrivateNamespaceA(ptr ptr str)
+@ stdcall -version=0x600+ CreatePrivateNamespaceW(ptr ptr wstr)
 @ stdcall CreateProcessA(str str ptr ptr long long ptr str ptr ptr)
 @ stdcall -version=0x602+ CreateProcessAsUserW(long wstr wstr ptr ptr long long ptr wstr ptr ptr)
 @ stdcall CreateProcessInternalA(ptr str str ptr ptr long long ptr str ptr ptr long)
@@ -200,7 +201,7 @@
 @ stdcall DefineDosDeviceW(long wstr wstr)
 @ stdcall DelayLoadFailureHook(str str)
 @ stdcall DeleteAtom(long)
-@ stub -version=0x600+ DeleteBoundaryDescriptor
+@ stdcall -version=0x600+ DeleteBoundaryDescriptor(ptr)
 @ stdcall DeleteCriticalSection(ptr) ntdll.RtlDeleteCriticalSection
 @ stdcall DeleteFiber(ptr)
 @ stdcall DeleteFileA(str)
@@ -888,8 +889,8 @@
 @ stdcall OpenJobObjectW(long long wstr)
 @ stdcall OpenMutexA(long long str)
 @ stdcall OpenMutexW(long long wstr)
-@ stub -version=0x600+ OpenPrivateNamespaceA
-@ stub -version=0x600+ OpenPrivateNamespaceW
+@ stdcall -version=0x600+ OpenPrivateNamespaceA(ptr str)
+@ stdcall -version=0x600+ OpenPrivateNamespaceW(ptr wstr)
 @ stdcall OpenProcess(long long long)
 @ stdcall OpenProfileUserMapping()
 @ stdcall OpenSemaphoreA(long long str)
