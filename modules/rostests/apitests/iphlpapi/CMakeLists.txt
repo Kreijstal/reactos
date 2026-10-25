@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    GetAdaptersAddresses.c
     GetExtendedTcpTable.c
     GetExtendedUdpTable.c
     GetInterfaceName.c
