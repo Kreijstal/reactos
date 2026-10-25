@@ -16,6 +16,7 @@ list(APPEND SOURCE
     cfgmgr.c
     devclass.c
     devinst.c
+    devquery.c
     dialog.c
     dirid.c
     diskspace.c
