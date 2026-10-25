@@ -322,4 +322,9 @@
     SVC_(AlertThreadByThreadId, 1)
     SVC_(WaitForAlertByThreadId, 2)
 #endif
+#if (NTDDI_VERSION >= 0x06000000)
+    SVC_(CreatePrivateNamespace, 4)
+    SVC_(OpenPrivateNamespace, 4)
+    SVC_(DeletePrivateNamespace, 1)
+#endif
 #endif
