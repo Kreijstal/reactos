@@ -2111,6 +2111,12 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
     ExpCheckPoolIrqlLevel(PoolType, NumberOfBytes, NULL);
 
     //
+    // ReactOS pool is executable: the no-execute types (NonPagedPoolNx and
+    // friends) are plain nonpaged pool here
+    //
+    PoolType &= ~POOL_NX_ALLOCATION;
+
+    //
     // Not supported in ReactOS
     //
     ASSERT(!(PoolType & SESSION_POOL_MASK));
