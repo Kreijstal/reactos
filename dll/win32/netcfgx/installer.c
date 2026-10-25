@@ -561,8 +561,14 @@ InstallNetDevice(
      * PnP stop/start cycle. */
     {
         DEVINST dnDevInst = DeviceInfoData->DevInst;
+        ULONG ulStatus, ulProblem;
 
-        CM_Disable_DevNode(dnDevInst, 0);
+        /* A device that has not started yet reads the linkage when it starts */
+        if (CM_Get_DevNode_Status(&ulStatus, &ulProblem, dnDevInst, 0) == CR_SUCCESS &&
+            (ulStatus & DN_STARTED))
+        {
+            CM_Disable_DevNode(dnDevInst, 0);
+        }
         CM_Enable_DevNode(dnDevInst, 0);
     }
 
