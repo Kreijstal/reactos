@@ -53,6 +53,7 @@ list(APPEND KMTEST_DRV_SOURCE
 
     example/Example.c
     example/KernelType.c
+    hal/HalPerformanceCounter.c
     hal/HalSystemInfo.c
     npfs/NpfsConnect.c
     npfs/NpfsCreate.c
