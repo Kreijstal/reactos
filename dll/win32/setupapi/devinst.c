@@ -6611,3 +6611,108 @@ SetupDiGetCustomDevicePropertyW(
 
     return TRUE;
 }
+
+/***********************************************************************
+ *		SetupDiGetDevicePropertyW (SETUPAPI.@)
+ */
+BOOL WINAPI
+SetupDiGetDevicePropertyW(
+    _In_ HDEVINFO DeviceInfoSet,
+    _In_ PSP_DEVINFO_DATA DeviceInfoData,
+    _In_ const DEVPROPKEY *PropertyKey,
+    _Out_ DEVPROPTYPE *PropertyType,
+    _Out_writes_bytes_to_opt_(PropertyBufferSize, *RequiredSize) PBYTE PropertyBuffer,
+    _In_ DWORD PropertyBufferSize,
+    _Out_opt_ PDWORD RequiredSize,
+    _In_ DWORD Flags)
+{
+    struct DeviceInfoSet *set = (struct DeviceInfoSet *)DeviceInfoSet;
+    struct DeviceInfo *devInfo;
+    ULONG Length = PropertyBufferSize;
+    CONFIGRET cr;
+
+    TRACE("%s(%p %p %p %p %p %lu %p 0x%lx)\n", __FUNCTION__, DeviceInfoSet, DeviceInfoData,
+          PropertyKey, PropertyType, PropertyBuffer, PropertyBufferSize, RequiredSize, Flags);
+
+    if (!DeviceInfoSet || DeviceInfoSet == INVALID_HANDLE_VALUE ||
+        set->magic != SETUP_DEVICE_INFO_SET_MAGIC)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    if (!DeviceInfoData || DeviceInfoData->cbSize != sizeof(SP_DEVINFO_DATA) ||
+        !DeviceInfoData->Reserved || !PropertyKey || !PropertyType ||
+        (!PropertyBuffer && PropertyBufferSize != 0))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (Flags != 0)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return FALSE;
+    }
+
+    devInfo = (struct DeviceInfo *)DeviceInfoData->Reserved;
+    cr = CM_Get_DevNode_Property_ExW(devInfo->dnDevInst, PropertyKey, PropertyType,
+                                     PropertyBuffer, &Length, 0, set->hMachine);
+    if (RequiredSize)
+        *RequiredSize = Length;
+    if (cr != CR_SUCCESS)
+    {
+        /* A property that was never set is ERROR_NOT_FOUND, as on Windows */
+        SetLastError(cr == CR_NO_SUCH_VALUE ? ERROR_NOT_FOUND : GetErrorCodeFromCrCode(cr));
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/***********************************************************************
+ *		SetupDiSetDevicePropertyW (SETUPAPI.@)
+ */
+BOOL WINAPI
+SetupDiSetDevicePropertyW(
+    _In_ HDEVINFO DeviceInfoSet,
+    _In_ PSP_DEVINFO_DATA DeviceInfoData,
+    _In_ const DEVPROPKEY *PropertyKey,
+    _In_ DEVPROPTYPE PropertyType,
+    _In_reads_bytes_opt_(PropertyBufferSize) const BYTE *PropertyBuffer,
+    _In_ DWORD PropertyBufferSize,
+    _In_ DWORD Flags)
+{
+    struct DeviceInfoSet *set = (struct DeviceInfoSet *)DeviceInfoSet;
+    struct DeviceInfo *devInfo;
+    CONFIGRET cr;
+
+    TRACE("%s(%p %p %p 0x%lx %p %lu 0x%lx)\n", __FUNCTION__, DeviceInfoSet, DeviceInfoData,
+          PropertyKey, PropertyType, PropertyBuffer, PropertyBufferSize, Flags);
+
+    if (!DeviceInfoSet || DeviceInfoSet == INVALID_HANDLE_VALUE ||
+        set->magic != SETUP_DEVICE_INFO_SET_MAGIC)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    if (!DeviceInfoData || DeviceInfoData->cbSize != sizeof(SP_DEVINFO_DATA) ||
+        !DeviceInfoData->Reserved || !PropertyKey ||
+        (!PropertyBuffer && PropertyBufferSize != 0))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (Flags != 0)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return FALSE;
+    }
+
+    devInfo = (struct DeviceInfo *)DeviceInfoData->Reserved;
+    cr = CM_Set_DevNode_Property_ExW(devInfo->dnDevInst, PropertyKey, PropertyType,
+                                     PropertyBuffer, PropertyBufferSize, 0, set->hMachine);
+    if (cr != CR_SUCCESS)
+    {
+        SetLastError(GetErrorCodeFromCrCode(cr));
+        return FALSE;
+    }
+    return TRUE;
+}

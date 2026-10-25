@@ -1671,6 +1671,18 @@ SetupDiGetDevicePropertyW(
     _Out_opt_ PDWORD RequiredSize,
     _In_ DWORD Flags);
 
+WINSETUPAPI
+BOOL
+WINAPI
+SetupDiSetDevicePropertyW(
+    _In_ HDEVINFO DeviceInfoSet,
+    _In_ PSP_DEVINFO_DATA DeviceInfoData,
+    _In_ const DEVPROPKEY *PropertyKey,
+    _In_ DEVPROPTYPE PropertyType,
+    _In_reads_bytes_opt_(PropertyBufferSize) const BYTE *PropertyBuffer,
+    _In_ DWORD PropertyBufferSize,
+    _In_ DWORD Flags);
+
 _Success_(return != FALSE)
 _When_((*PropertyRegDataType == REG_SZ), _At_((PSTR) PropertyBuffer, _Post_valid_))
 _When_((*PropertyRegDataType == REG_MULTI_SZ), _At_((PZZSTR) PropertyBuffer, _Post_valid_))
@@ -2525,6 +2537,7 @@ WINSETUPAPI PSTR WINAPI UnicodeToMultiByte(PCWSTR lpUnicodeStr, UINT uCodePage);
 #define SetupDiGetDeviceInterfaceDetail	SetupDiGetDeviceInterfaceDetailW
 #define SetupDiGetInterfaceDeviceDetail	SetupDiGetDeviceInterfaceDetailW
 #define SetupDiGetDeviceProperty	SetupDiGetDevicePropertyW
+#define SetupDiSetDeviceProperty	SetupDiSetDevicePropertyW
 #define SetupDiGetDeviceRegistryProperty	SetupDiGetDeviceRegistryPropertyW
 #define SetupDiGetDriverInfoDetail	SetupDiGetDriverInfoDetailW
 #define SetupDiGetDriverInstallParams	SetupDiGetDriverInstallParamsW
