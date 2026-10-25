@@ -2653,6 +2653,10 @@ BOOL WINAPI SetupCopyOEMInfW(
             goto cleanup;
         }
 
+        /* Devices get the files of the package from the driver store */
+        if (!SETUP_StageDriverPackage(SourceInfFileName, pFileName))
+            WARN("Cannot stage the driver package of %s\n", debugstr_w(SourceInfFileName));
+
         len = strlenW(pFullFileName) + 1;
         if (RequiredSize)
             *RequiredSize = len;

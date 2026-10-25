@@ -1230,7 +1230,12 @@ BOOL WINAPI SetupUninstallOEMInfW( PCWSTR inf_file, DWORD flags, PVOID reserved 
     strcatW( target, inf_file );
 
     if (flags & SUOI_FORCEDELETE)
-        return DeleteFileW(target);
+    {
+        if (!DeleteFileW(target))
+            return FALSE;
+        SETUP_DeleteDriverPackage(inf_file);
+        return TRUE;
+    }
 
     FIXME("not deleting %s\n", debugstr_w(target));
 

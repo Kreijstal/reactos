@@ -2005,6 +2005,20 @@ SetupGetInfFileListW(
   _In_ DWORD ReturnBufferSize,
   _Out_opt_ PDWORD RequiredSize);
 
+#if (_WIN32_WINNT >= 0x0600)
+_Success_(return != FALSE)
+WINSETUPAPI
+BOOL
+WINAPI
+SetupGetInfDriverStoreLocationW(
+  _In_ PCWSTR FileName,
+  _In_opt_ PSP_ALTPLATFORM_INFO AlternatePlatformInfo,
+  _In_opt_ PCWSTR LocaleName,
+  _Out_writes_opt_(ReturnBufferSize) PWSTR ReturnBuffer,
+  _In_ DWORD ReturnBufferSize,
+  _Out_opt_ PDWORD RequiredSize);
+#endif
+
 _Success_(return != FALSE)
 WINSETUPAPI
 BOOL
