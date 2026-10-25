@@ -67,6 +67,9 @@ PspRunCreateProcessNotifyRoutines(IN PEPROCESS CurrentProcess,
     /* Check if we have registered routines */
     if (PspProcessNotifyRoutineCount)
     {
+        /* As on Windows, the routines run with normal kernel APCs disabled */
+        KeEnterCriticalRegion();
+
         /* Loop callbacks */
         for (i = 0; i < PSP_MAX_CREATE_PROCESS_NOTIFY; i++)
         {
@@ -76,6 +79,8 @@ PspRunCreateProcessNotifyRoutines(IN PEPROCESS CurrentProcess,
                          CurrentProcess->UniqueProcessId,
                          (PVOID)(ULONG_PTR)Create);
         }
+
+        KeLeaveCriticalRegion();
     }
 }
 
