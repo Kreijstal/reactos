@@ -22,6 +22,7 @@
 
 #include "ndis6_internal.h"
 #include <ntstrsafe.h>
+#include <ndisguid.h>
 
 #define NDIS6_ADAPTER_TAG  'aDNn'  /* "nNDa" */
 
@@ -447,6 +448,16 @@ Ndis6CreateLogicalAdapter(
         IoDeleteDevice(Fdo);
         Ndis6FreeAdapterName(&AdapterName);
         return NDIS_STATUS_RESOURCES;
+    }
+
+    /* The network adapter interface, enabled while the miniport runs, as
+     * for the miniports of the legacy path (NdisIAddDevice). */
+    Status = IoRegisterDeviceInterface(Pdo, &GUID_DEVINTERFACE_NET, NULL,
+                                       &Adapter->NdisMiniportBlock.SymbolicLinkName);
+    if (!NT_SUCCESS(Status))
+    {
+        DbgPrint("NDIS6: no network interface for %wZ (0x%08lx)\n", &AdapterName, Status);
+        RtlInitEmptyUnicodeString(&Adapter->NdisMiniportBlock.SymbolicLinkName, NULL, 0);
     }
 
     Fdo->Flags |= DO_DIRECT_IO | DO_POWER_PAGABLE;
@@ -995,6 +1006,11 @@ Ndis6DestroyLogicalAdapter(
     }
 
     Ndis6FreeAdapterName(&Adapter->NdisMiniportBlock.MiniportName);
+    if (Adapter->NdisMiniportBlock.SymbolicLinkName.Buffer != NULL)
+    {
+        IoSetDeviceInterfaceState(&Adapter->NdisMiniportBlock.SymbolicLinkName, FALSE);
+        RtlFreeUnicodeString(&Adapter->NdisMiniportBlock.SymbolicLinkName);
+    }
 
     /* Sever the LOGICAL_ADAPTER → Ext link before freeing Ext, so any
      * stale reference goes through a NULL check rather than touching
