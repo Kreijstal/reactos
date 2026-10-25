@@ -67,6 +67,85 @@ DpcHandler(
     }
 }
 
+#define REMOTE_DPC_TRIALS 15
+
+static LARGE_INTEGER RemoteDpcTime;
+static volatile ULONG RemoteDpcProcessor;
+static KEVENT RemoteDpcEvent;
+
+static KDEFERRED_ROUTINE RemoteDpcHandler;
+
+static
+VOID
+NTAPI
+RemoteDpcHandler(
+    IN PRKDPC Dpc,
+    IN PVOID DeferredContext,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2)
+{
+    RemoteDpcTime = KeQueryPerformanceCounter(NULL);
+    RemoteDpcProcessor = KeGetCurrentProcessorNumber();
+    KeSetEvent(&RemoteDpcEvent, IO_NO_INCREMENT, FALSE);
+}
+
+/*
+ * A DPC of high (or, since Vista, medium-high) importance queued to another
+ * processor runs right away, even when that processor is idle, and not only
+ * on its next clock tick
+ */
+static
+VOID
+TestRemoteDpcLatency(
+    IN KDPC_IMPORTANCE Importance)
+{
+    KDPC Dpc;
+    LARGE_INTEGER Frequency, Start, Interval, Timeout;
+    LONGLONG Latency[REMOTE_DPC_TRIALS], Swap;
+    NTSTATUS Status;
+    ULONG i, j;
+
+    KeQueryPerformanceCounter(&Frequency);
+    KeInitializeEvent(&RemoteDpcEvent, SynchronizationEvent, FALSE);
+    KeInitializeDpc(&Dpc, RemoteDpcHandler, NULL);
+    KeSetImportanceDpc(&Dpc, Importance);
+    KeSetTargetProcessorDpc(&Dpc, 1);
+
+    /* Queue it from processor 0 */
+    KeSetSystemAffinityThread(AFFINITY_MASK(0));
+    for (i = 0; i < REMOTE_DPC_TRIALS; i++)
+    {
+        /* Give processor 1 time to go idle */
+        Interval.QuadPart = -20 * 10000;
+        KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+
+        RemoteDpcProcessor = MAXULONG;
+        Start = KeQueryPerformanceCounter(NULL);
+        KeInsertQueueDpc(&Dpc, NULL, NULL);
+        Timeout.QuadPart = -1000 * 10000;
+        Status = KeWaitForSingleObject(&RemoteDpcEvent, Executive, KernelMode, FALSE, &Timeout);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok_eq_ulong(RemoteDpcProcessor, 1UL);
+        Latency[i] = RemoteDpcTime.QuadPart - Start.QuadPart;
+    }
+    KeRevertToUserAffinityThread();
+
+    for (i = 0; i < REMOTE_DPC_TRIALS; i++)
+        for (j = i + 1; j < REMOTE_DPC_TRIALS; j++)
+            if (Latency[j] < Latency[i])
+            {
+                Swap = Latency[i];
+                Latency[i] = Latency[j];
+                Latency[j] = Swap;
+            }
+
+    /* Much less than a clock tick */
+    ok(Latency[REMOTE_DPC_TRIALS / 2] * 1000000 / Frequency.QuadPart < 2000,
+       "Importance %d: median latency %I64d us, maximum %I64d us\n", Importance,
+       Latency[REMOTE_DPC_TRIALS / 2] * 1000000 / Frequency.QuadPart,
+       Latency[REMOTE_DPC_TRIALS - 1] * 1000000 / Frequency.QuadPart);
+}
+
 START_TEST(KeDpc)
 {
     NTSTATUS Status = STATUS_SUCCESS;
@@ -193,4 +272,11 @@ START_TEST(KeDpc)
     ok_dpccount();
     ok_irql(PASSIVE_LEVEL);
     trace("Final Dpc count: %ld, expected %ld\n", DpcCount, ExpectedDpcCount);
+
+    if (!skip(KeNumberProcessors > 1, "Only one processor\n"))
+    {
+        TestRemoteDpcLatency(HighImportance);
+        if (GetNTVersion() >= _WIN32_WINNT_VISTA)
+            TestRemoteDpcLatency(MediumHighImportance);
+    }
 }
