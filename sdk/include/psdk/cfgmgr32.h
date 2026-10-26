@@ -26,7 +26,7 @@
 #define _CFGMGR32_H_
 
 #include <cfg.h>
-#if (WINVER >= _WIN32_WINNT_VISTA)
+#if (WINVER >= _WIN32_WINNT_VISTA) || defined(_CFGMGR32_)
 #include <devpropdef.h>
 #endif
 
@@ -1720,7 +1720,7 @@ CM_Get_DevNode_Registry_Property_ExW(
   _In_ ULONG ulFlags,
   _In_opt_ HMACHINE hMachine);
 
-#if (WINVER >= _WIN32_WINNT_VISTA)
+#if (WINVER >= _WIN32_WINNT_VISTA) || defined(_CFGMGR32_)
 
 CMAPI
 CONFIGRET
@@ -1775,7 +1775,7 @@ CM_Set_DevNode_Property_ExW(
 #define CM_Set_DevNode_Property_Ex CM_Set_DevNode_Property_ExW
 #endif
 
-#endif /* (WINVER >= _WIN32_WINNT_VISTA) */
+#endif /* (WINVER >= _WIN32_WINNT_VISTA) || defined(_CFGMGR32_) */
 
 #define CM_Get_DevInst_Registry_PropertyW CM_Get_DevNode_Registry_PropertyW
 #define CM_Get_DevInst_Registry_PropertyA CM_Get_DevNode_Registry_PropertyA

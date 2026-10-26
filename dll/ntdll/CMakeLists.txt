@@ -22,11 +22,13 @@ include_directories(
     ${REACTOS_SOURCE_DIR}/sdk/include/reactos/subsys)
 
 add_library(rtl_um OBJECT
-    rtl/boundary.c
     rtl/license.c
     rtl/libsupp.c
     rtl/uilist.c
     rtl/version.c)
+if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
+    target_sources(rtl_um PRIVATE rtl/boundary.c)
+endif()
 target_link_libraries(rtl_um apisets ${PSEH_LIB})
 add_dependencies(rtl_um psdk)
 
