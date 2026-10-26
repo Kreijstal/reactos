@@ -6,6 +6,8 @@
  */
 
 #include <apitest.h>
+
+#if (DLL_EXPORT_VERSION >= 0x602)
 #include <windows.h>
 #include <setupapi.h>
 #include <cfgmgr32.h>
@@ -216,3 +218,12 @@ START_TEST(SwDevice)
     Cr = CM_Locate_DevNodeW(&DevInst, InstanceId, CM_LOCATE_DEVNODE_PHANTOM);
     ok(Cr == CR_NO_SUCH_DEVNODE, "The device is still installed: %lu\n", Cr);
 }
+
+#else
+
+START_TEST(SwDevice)
+{
+    skip("SwDevice requires NT 6.2 or later\n");
+}
+
+#endif

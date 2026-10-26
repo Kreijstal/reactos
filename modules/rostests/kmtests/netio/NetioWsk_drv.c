@@ -6,6 +6,7 @@
  */
 
 #include <kmt_test.h>
+#include <windef.h>
 #include <ws2def.h>
 #include <wsk.h>
 

@@ -7,6 +7,8 @@
 
 #include <apitest.h>
 
+#if (DLL_EXPORT_VERSION >= 0x600)
+
 #include <winsock2.h>
 #include <ws2ipdef.h>
 #include <iphlpapi.h>
@@ -59,3 +61,12 @@ START_TEST(GetAdaptersAddresses)
     ok(Count > 0, "No adapter\n");
     HeapFree(GetProcessHeap(), 0, Addresses);
 }
+
+#else
+
+START_TEST(GetAdaptersAddresses)
+{
+    skip("GetAdaptersAddresses requires NT 6.0 or later\n");
+}
+
+#endif
