@@ -7,6 +7,8 @@
 
 #include <kmt_test.h>
 
+#if (NTDDI_VERSION >= NTDDI_VISTASP1)
+
 #define EX_SPIN_LOCK_EXCLUSIVE 0x80000000UL
 
 #define CONTENTION_THREADS      4
@@ -391,3 +393,12 @@ START_TEST(ExSpinLockRw)
     TestContention();
     TestExclusiveWaiter();
 }
+
+#else
+
+START_TEST(ExSpinLockRw)
+{
+    skip(FALSE, "ExSpinLockRw requires Vista SP1 or later\n");
+}
+
+#endif

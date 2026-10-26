@@ -263,7 +263,7 @@ typedef struct _OBJECT_DIRECTORY_INFORMATION
     UNICODE_STRING TypeName;
 } OBJECT_DIRECTORY_INFORMATION, *POBJECT_DIRECTORY_INFORMATION;
 
-#if (NTDDI_VERSION >= NTDDI_VISTA)
+#if (NTDDI_VERSION >= NTDDI_VISTA) || defined(_NTOSKRNL_)
 //
 // Private namespace boundary descriptors: the header is followed by Items
 // entries, each one an OBJECT_BOUNDARY_ENTRY and its data padded to a ULONG

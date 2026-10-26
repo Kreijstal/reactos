@@ -973,7 +973,13 @@ FX_DRIVER_TRACKER_CACHE_AWARE::Register(
     //
     // Capture maximum number of processors.
     //
+#if (DLL_EXPORT_VERSION >= 0x601)
     m_Number = KeQueryMaximumProcessorCountEx(ALL_PROCESSOR_GROUPS);
+#elif (DLL_EXPORT_VERSION >= 0x600)
+    m_Number = KeQueryMaximumProcessorCount();
+#else
+    m_Number = MAXIMUM_PROCESSORS;
+#endif
 
     //
     // Validate upper bound.

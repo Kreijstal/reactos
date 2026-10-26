@@ -7,6 +7,8 @@
 
 #include <kmt_test.h>
 
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+
 #define TAG_POOL2 '2lPK'
 
 static
@@ -123,3 +125,12 @@ START_TEST(ExAllocatePool2)
     TestInvalid(POOL_FLAG_NON_PAGED | 0x40000000ULL, TAG_POOL2);        /* unknown required flag */
     TestInvalid(POOL_FLAG_NON_PAGED, 0);                                /* zero tag */
 }
+
+#else
+
+START_TEST(ExAllocatePool2)
+{
+    skip(FALSE, "ExAllocatePool2 requires NT 10 or later\n");
+}
+
+#endif

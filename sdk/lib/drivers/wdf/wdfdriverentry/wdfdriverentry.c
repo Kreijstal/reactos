@@ -81,14 +81,14 @@ typedef struct _KMDF_CLASS_BIND_MARKER
 #pragma section(".kmdfclassbind$a", read, write)
 #pragma section(".kmdfclassbind$c", read, write)
 #pragma section(".kmdfclassbind$d", read, write)
-#define KMDF_CLASS_BIND_SECTION(_Group) __declspec(allocate(".kmdfclassbind$" _Group))
+#define KMDF_CLASS_BIND_SECTION(_Section) __declspec(allocate(_Section))
 #else
-#define KMDF_CLASS_BIND_SECTION(_Group) __attribute__((section(".kmdfclassbind$" _Group), used))
+#define KMDF_CLASS_BIND_SECTION(_Section) __attribute__((section(_Section), used))
 #endif
 
-KMDF_CLASS_BIND_SECTION("a") KMDF_CLASS_BIND_MARKER __KMDF_CLASS_BIND_START = { { NULL, NULL } };
-KMDF_CLASS_BIND_SECTION("c") PVOID __KMDF_CLASS_BIND_END = NULL;
-KMDF_CLASS_BIND_SECTION("d") PWDF_CLASS_BIND_INFO __KMDF_CLASS_BIND_LAST_BOUND =
+KMDF_CLASS_BIND_SECTION(".kmdfclassbind$a") KMDF_CLASS_BIND_MARKER __KMDF_CLASS_BIND_START = { { NULL, NULL } };
+KMDF_CLASS_BIND_SECTION(".kmdfclassbind$c") PVOID __KMDF_CLASS_BIND_END = NULL;
+KMDF_CLASS_BIND_SECTION(".kmdfclassbind$d") PWDF_CLASS_BIND_INFO __KMDF_CLASS_BIND_LAST_BOUND =
     (PWDF_CLASS_BIND_INFO)&__KMDF_CLASS_BIND_START;
 
 #define KMDF_CLASS_BIND_FIRST ((const BYTE *)(&__KMDF_CLASS_BIND_START + 1))
