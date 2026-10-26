@@ -1,6 +1,10 @@
 
 include_directories(../include)
 
+# KMDF clients inherit their header version from wdfdriverentry, like the
+# production KMDF drivers. Do not also pass the global NT target to GCC.
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT})
+
 #
 # Test class extension, loaded by WDFLDR when kmdf133_drv binds to it
 #
@@ -86,7 +90,7 @@ add_library(netcxproto_drv MODULE ${NETCXPROTO_DRV_SOURCE})
 set_module_type(netcxproto_drv kernelmodedriver)
 target_link_libraries(netcxproto_drv kmtest_printf memcmp ${PSEH_LIB})
 add_importlibs(netcxproto_drv ndis ntoskrnl hal)
-target_compile_definitions(netcxproto_drv PRIVATE KMT_STANDALONE_DRIVER NDIS60 NDIS_LEGACY_DRIVER=1 NDIS_LEGACY_PROTOCOL=1)
+target_compile_definitions(netcxproto_drv PRIVATE KMT_STANDALONE_DRIVER NDIS60 NDIS_LEGACY_DRIVER=1 NDIS_LEGACY_PROTOCOL=1 _WIN32_WINNT=${REACTOS_TARGET_NT})
 if(REACTOS_TARGET_NTDDI LESS 0x06000000)
     target_compile_definitions(netcxproto_drv PRIVATE NTDDI_VERSION=0x06000000)
 endif()
