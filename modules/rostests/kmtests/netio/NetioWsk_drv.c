@@ -5,6 +5,11 @@
  * COPYRIGHT:   Copyright 2026 Kreijstal <rainb@tfwno.gf>
  */
 
+/* Select the matching socket declarations before any SDK header is read.
+ * MSBuild separates /D and /U options, so command-line ordering cannot do this. */
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0602
+
 #include <kmt_test.h>
 #include <windef.h>
 #include <ws2def.h>
