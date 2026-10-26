@@ -9,6 +9,8 @@ extern "C" {
 #include <ipexport.h>
 #include <iptypes.h>
 
+struct sockaddr;
+
 DWORD WINAPI AddIPAddress(IPAddr,IPMask,DWORD,PULONG,PULONG);
 DWORD WINAPI CreateIpForwardEntry(PMIB_IPFORWARDROW);
 DWORD WINAPI CreateIpNetEntry(PMIB_IPNETROW);

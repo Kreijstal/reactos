@@ -16,7 +16,6 @@ list(APPEND SOURCE
     cfgmgr.c
     devclass.c
     devinst.c
-    devquery.c
     dialog.c
     dirid.c
     diskspace.c
@@ -31,8 +30,14 @@ list(APPEND SOURCE
     setupcab.c
     stringtable.c
     stubs.c
-    swdevice.c
     rpc.c)
+
+if(DLL_EXPORT_VERSION GREATER_EQUAL 0x602)
+    list(APPEND SOURCE swdevice.c)
+endif()
+if(DLL_EXPORT_VERSION GREATER_EQUAL 0xA00)
+    list(APPEND SOURCE devquery.c)
+endif()
 
 list(APPEND PCH_SKIP_SOURCE
     ${CMAKE_CURRENT_BINARY_DIR}/setupapi_stubs.c)

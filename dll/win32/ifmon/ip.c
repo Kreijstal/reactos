@@ -101,6 +101,44 @@ IpTopCommands[] =
     {L"reset", IpReset, IDS_HLP_IP_RESET, IDS_HLP_IP_RESET_EX, 0}
 };
 
+#if (NTDDI_VERSION < NTDDI_VISTA)
+/* Older IP Helper versions expose the index/GUID mapping through this table. */
+static
+DWORD
+FindLegacyInterface(
+    _Inout_ NET_IFINDEX *pInterfaceIndex,
+    _Inout_ GUID *pInterfaceGuid,
+    _In_ BOOL ByIndex)
+{
+    IP_INTERFACE_NAME_INFO *pTable = NULL;
+    DWORD dwCount = 0, i;
+    DWORD dwError;
+
+    dwError = NhpAllocateAndGetInterfaceInfoFromStack(&pTable, &dwCount,
+                                                    FALSE, GetProcessHeap(), 0);
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
+
+    dwError = ERROR_NOT_FOUND;
+    for (i = 0; i < dwCount; i++)
+    {
+        if (ByIndex ? pTable[i].Index == *pInterfaceIndex :
+                      IsEqualGUID(&pTable[i].DeviceGuid, pInterfaceGuid))
+        {
+            if (ByIndex)
+                *pInterfaceGuid = pTable[i].DeviceGuid;
+            else
+                *pInterfaceIndex = pTable[i].Index;
+            dwError = ERROR_SUCCESS;
+            break;
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, pTable);
+    return dwError;
+}
+#endif
+
 
 /*
  * Like Windows, take an interface index wherever an interface name is
@@ -112,7 +150,9 @@ GetInterfaceGuid(
     _In_ PWSTR pszName,
     _Out_ GUID *pInterfaceGuid)
 {
+#if (NTDDI_VERSION >= NTDDI_VISTA)
     NET_LUID InterfaceLuid;
+#endif
     PWSTR pszEnd;
     ULONG ulIndex;
     DWORD dwError;
@@ -125,8 +165,12 @@ GetInterfaceGuid(
     if ((pszEnd == pszName) || (*pszEnd != UNICODE_NULL))
         return dwError;
 
+#if (NTDDI_VERSION >= NTDDI_VISTA)
     if ((ConvertInterfaceIndexToLuid(ulIndex, &InterfaceLuid) != NO_ERROR) ||
         (ConvertInterfaceLuidToGuid(&InterfaceLuid, pInterfaceGuid) != NO_ERROR))
+#else
+    if (FindLegacyInterface(&ulIndex, pInterfaceGuid, TRUE) != ERROR_SUCCESS)
+#endif
     {
         return dwError;
     }
@@ -142,14 +186,20 @@ SetActiveAddress(
     _In_ IN_ADDR *pAddress,
     _In_ IN_ADDR *pMask)
 {
+#if (NTDDI_VERSION >= NTDDI_VISTA)
     NET_LUID InterfaceLuid;
+#endif
     NET_IFINDEX InterfaceIndex;
     ULONG NteContext = 0, NteInstance = 0;
     DWORD dwError;
 
+#if (NTDDI_VERSION >= NTDDI_VISTA)
     dwError = ConvertInterfaceGuidToLuid(pInterfaceGuid, &InterfaceLuid);
     if (dwError == NO_ERROR)
         dwError = ConvertInterfaceLuidToIndex(&InterfaceLuid, &InterfaceIndex);
+#else
+    dwError = FindLegacyInterface(&InterfaceIndex, pInterfaceGuid, FALSE);
+#endif
     if (dwError != NO_ERROR)
     {
         DPRINT1("Interface not found (Error %lu)\n", dwError);

@@ -33,6 +33,7 @@
 #include <ndk/obfuncs.h>
 #include <ndk/rtlfuncs.h>
 #include <iphlpapi.h>
+#include <netioapi.h>
 #include <iphlpapi_undoc.h>
 #include "resinfo.h"
 #include <wine/debug.h>

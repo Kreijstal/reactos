@@ -93,6 +93,8 @@ BasepGetObjectRootDirectory(
     return Directory ? Directory : BasepGetNamedObjectDirectory();
 }
 
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+
 static
 HANDLE
 BasepAddPrivateNamespace(
@@ -387,5 +389,7 @@ ClosePrivateNamespace(
     }
     return TRUE;
 }
+
+#endif /* DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA */
 
 /* EOF */
