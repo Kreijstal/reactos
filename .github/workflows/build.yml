@@ -32,7 +32,7 @@ jobs:
         sed -i '/mingw-w64-v6.0.0.tar.bz2\/download/c\wget -O mingw-w64-v6.0.0.tar.bz2 https://sourceforge.net/projects/mingw-w64/files/mingw-w64/mingw-w64-release/mingw-w64-v6.0.0.tar.bz2/download && bzip2 -t mingw-w64-v6.0.0.tar.bz2 || (wget -O - https://github.com/mingw-w64/mingw-w64/archive/refs/tags/v6.0.0.tar.gz | tar -xz && mv mingw-w64-6.0.0 mingw-w64-v6.0.0 && tar -cjf mingw-w64-v6.0.0.tar.bz2 mingw-w64-v6.0.0 && rm -rf mingw-w64-v6.0.0)' ./build_rosbe_ci.sh
     - name: Get RosBE
       id: get_rosbe
-      uses: actions/cache@v5
+      uses: actions/cache/restore@v5
       with:
         path: RosBE-CI
         key: RosBE-CI-${{runner.os}}-${{steps.get_rosbe_spec.outputs.march-sha}}-${{steps.get_rosbe_spec.outputs.git-sha}}-${{hashfiles('./build_rosbe_ci.sh')}}
@@ -42,6 +42,12 @@ jobs:
         chmod +x build_rosbe_ci.sh
         ./build_rosbe_ci.sh ${{github.workspace}}/RosBE-CI
         test -x ${{github.workspace}}/RosBE-CI/RosBE.sh || { echo "::error::RosBE build failed. see download/build output a bit up"; exit 1; }
+    - name: Save RosBE
+      if: ${{ steps.get_rosbe.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v5
+      with:
+        path: RosBE-CI
+        key: ${{steps.get_rosbe.outputs.cache-primary-key}}
     - name: Install ccache
       run: sudo apt install ccache
     - name: Install LLVM
