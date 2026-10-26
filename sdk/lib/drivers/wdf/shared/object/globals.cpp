@@ -1250,7 +1250,7 @@ Return Value:
     DECLARE_CONST_UNICODE_STRING(valueName, L"ObjectLeakDetectionLimit");
     ULONG Limit;
     if (!NT_SUCCESS(FxRegKey::_QueryULong(Key, &valueName, &Limit))
-        || Limit == FX_OBJECT_LEAK_DETECTION_DISABLED) {
+        || Limit == (ULONG)FX_OBJECT_LEAK_DETECTION_DISABLED) {
 
         return pInfo;
     }

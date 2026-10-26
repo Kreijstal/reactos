@@ -6,6 +6,8 @@
  */
 
 #include <apitest.h>
+
+#if (DLL_EXPORT_VERSION >= 0x600)
 #include <windows.h>
 #include <setupapi.h>
 #include <cfgmgr32.h>
@@ -115,3 +117,12 @@ START_TEST(SetupDiDeviceProperty)
     SetupDiRemoveDevice(DevInfo, &DevInfoData);
     SetupDiDestroyDeviceInfoList(DevInfo);
 }
+
+#else
+
+START_TEST(SetupDiDeviceProperty)
+{
+    skip("SetupDiDeviceProperty requires NT 6.0 or later\n");
+}
+
+#endif

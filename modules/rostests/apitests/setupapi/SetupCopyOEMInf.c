@@ -6,6 +6,8 @@
  */
 
 #include <apitest.h>
+
+#if (DLL_EXPORT_VERSION >= 0x600)
 #include <windows.h>
 #include <setupapi.h>
 #include <versionhelpers.h>
@@ -147,3 +149,12 @@ START_TEST(SetupCopyOEMInf)
     if (Slash)
         ok(GetFileAttributesW(Store) == INVALID_FILE_ATTRIBUTES, "%ls is still there\n", Store);
 }
+
+#else
+
+START_TEST(SetupCopyOEMInf)
+{
+    skip("SetupCopyOEMInf requires NT 6.0 or later\n");
+}
+
+#endif

@@ -683,7 +683,6 @@ __drv_maxIRQL(DISPATCH_LEVEL+1)
 WDFAPI
 PVOID
 FASTCALL
-NTAPI
 WDFEXPORT(WdfObjectGetTypedContextWorker)(
     __in
     PWDF_DRIVER_GLOBALS DriverGlobals,
@@ -745,7 +744,6 @@ __drv_maxIRQL(DISPATCH_LEVEL+1)
 WDFAPI
 WDFOBJECT
 FASTCALL
-NTAPI
 WDFEXPORT(WdfObjectContextGetObject)(
     __in
     PWDF_DRIVER_GLOBALS,

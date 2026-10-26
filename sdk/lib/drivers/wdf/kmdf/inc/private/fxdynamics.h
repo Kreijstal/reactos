@@ -4462,7 +4462,6 @@ _IRQL_requires_max_(DISPATCH_LEVEL+1)
 WDFAPI
 PVOID
 FASTCALL
-NTAPI
 WDFEXPORT(WdfObjectGetTypedContextWorker)(
     _In_
     PWDF_DRIVER_GLOBALS DriverGlobals,
@@ -4492,7 +4491,6 @@ _IRQL_requires_max_(DISPATCH_LEVEL+1)
 WDFAPI
 WDFOBJECT
 FASTCALL
-NTAPI
 WDFEXPORT(WdfObjectContextGetObject)(
     _In_
     PWDF_DRIVER_GLOBALS DriverGlobals,

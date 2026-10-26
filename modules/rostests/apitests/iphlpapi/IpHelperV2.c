@@ -7,6 +7,8 @@
 
 #include <apitest.h>
 
+#if (DLL_EXPORT_VERSION >= 0x600)
+
 #include <winsock2.h>
 #include <ws2ipdef.h>
 #include <iphlpapi.h>
@@ -215,3 +217,12 @@ START_TEST(IpHelperV2)
     TestGetAdapterIndex();
     TestRoutes();
 }
+
+#else
+
+START_TEST(IpHelperV2)
+{
+    skip("IpHelperV2 requires NT 6.0 or later\n");
+}
+
+#endif

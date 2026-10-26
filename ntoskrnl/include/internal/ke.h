@@ -1,5 +1,10 @@
 #pragma once
 
+/* Also used internally when the public DDK targets pre-Vista drivers. */
+ULONG
+NTAPI
+KeQueryMaximumProcessorCount(VOID);
+
 /* INCLUDES *****************************************************************/
 
 #include "arch/ke.h"

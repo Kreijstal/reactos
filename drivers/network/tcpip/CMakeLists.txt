@@ -38,6 +38,11 @@ add_library(tcpip MODULE
     tcpip.rc
     ${CMAKE_CURRENT_BINARY_DIR}/tcpip.def)
 
+# The NDIS bridge handles the Windows 7 IP medium on every target.
+if(REACTOS_TARGET_NTDDI LESS 0x06010000)
+    target_compile_definitions(tcpip PRIVATE NTDDI_VERSION=0x06010000)
+endif()
+
 target_include_directories(tcpip BEFORE
     PRIVATE ${LWIP_INCLUDE_DIRS}
     PRIVATE include)

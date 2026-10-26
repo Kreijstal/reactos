@@ -26,6 +26,17 @@ Revision History:
 #pragma once
 
 #include <ntddk.h>
+
+#if (DLL_EXPORT_VERSION < 0xA00)
+/* KMDF 1.33 uses the zeroing allocator even on pre-Windows 10 kernels. */
+PVOID
+NTAPI
+FxAllocatePool2(
+    _In_ POOL_FLAGS Flags,
+    _In_ SIZE_T NumberOfBytes,
+    _In_ ULONG Tag);
+#define ExAllocatePool2 FxAllocatePool2
+#endif
 // #include <procgrp.h>
 // #include <wdmsec.h>
 

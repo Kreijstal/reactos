@@ -39,7 +39,7 @@ START_TEST(HalPerformanceCounter)
         for (Processor = 0; Processor < Processors; Processor++)
         {
             KeSetSystemAffinityThread(AFFINITY_MASK(Processor));
-            ok_eq_ulong(KeGetCurrentProcessorNumberEx(NULL), Processor);
+            ok_eq_ulong(KeGetCurrentProcessorNumber(), Processor);
             Counter = KeQueryPerformanceCounter(NULL);
 
             Delta = Counter.QuadPart - Previous.QuadPart;

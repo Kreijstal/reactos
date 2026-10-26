@@ -6,6 +6,8 @@
  */
 
 #include <apitest.h>
+
+#if (DLL_EXPORT_VERSION >= 0xA00)
 #include <windows.h>
 #include <cfgmgr32.h>
 #include <devquery.h>
@@ -468,3 +470,12 @@ START_TEST(DevQuery)
     /* Only an asynchronous close may come from the callback */
     TestQuery(InstanceId, DevQueryFlagUpdateResults | DevQueryFlagAsyncClose, TRUE);
 }
+
+#else
+
+START_TEST(DevQuery)
+{
+    skip("DevQuery requires NT 10 or later\n");
+}
+
+#endif
