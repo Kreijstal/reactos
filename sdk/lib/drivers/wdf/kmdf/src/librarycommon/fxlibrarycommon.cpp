@@ -419,9 +419,9 @@ FxLibraryCommonRegisterClient(
         // Make sure table count matches exactly with previously
         // released framework version table sizes.
         //
-        ASSERT(WdfFunctionTableNumEntries_V1_27 == WdfFunctionTableNumEntries_V1_25);
-        ASSERT(WdfFunctionTableNumEntries_V1_17 == WdfFunctionTableNumEntries_V1_15);
-        ASSERT(WdfFunctionTableNumEntries_V1_7  == WdfFunctionTableNumEntries_V1_5);
+        ASSERT((ULONG)WdfFunctionTableNumEntries_V1_27 == (ULONG)WdfFunctionTableNumEntries_V1_25);
+        ASSERT((ULONG)WdfFunctionTableNumEntries_V1_17 == (ULONG)WdfFunctionTableNumEntries_V1_15);
+        ASSERT((ULONG)WdfFunctionTableNumEntries_V1_7 == (ULONG)WdfFunctionTableNumEntries_V1_5);
 
         switch (Info->FuncCount) {
 

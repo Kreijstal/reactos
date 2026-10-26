@@ -67,6 +67,11 @@ add_library(ndis MODULE
     ndis.rc
     ${CMAKE_CURRENT_BINARY_DIR}/ndis.def)
 
+# The wrapper implements NDIS 6.20 even for an older export target.
+if(REACTOS_TARGET_NTDDI LESS 0x06010000)
+    target_compile_definitions(ndis PRIVATE NTDDI_VERSION=0x06010000)
+endif()
+
 set_module_type(ndis kernelmodedriver)
 add_importlibs(ndis ntoskrnl hal)
 add_pch(ndis include/ndissys.h SOURCE)

@@ -7,6 +7,8 @@
 
 #include <kmt_test.h>
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+
 /* {6C1A8C3E-5D4B-4F2A-9E77-0B3A1D2C4E5F}, not registered with any session */
 static const GUID TestProviderId =
     { 0x6c1a8c3e, 0x5d4b, 0x4f2a, { 0x9e, 0x77, 0x0b, 0x3a, 0x1d, 0x2c, 0x4e, 0x5f } };
@@ -169,3 +171,12 @@ START_TEST(EtwProvider)
     TestKernelExports();
     ok_eq_long(EnableCallbackCount, 0L);
 }
+
+#else
+
+START_TEST(EtwProvider)
+{
+    skip(FALSE, "EtwProvider requires NT 6.2 or later\n");
+}
+
+#endif

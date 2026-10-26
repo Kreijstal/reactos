@@ -7,6 +7,8 @@
  */
 
 #include <apitest.h>
+
+#if (DLL_EXPORT_VERSION >= 0x600)
 #include <winsock2.h>
 #include <windows.h>
 #include <iphlpapi.h>
@@ -149,3 +151,12 @@ START_TEST(NciConnectionName)
     /* Renaming is not tested here: it would rename a real adapter of the
        machine the test runs on. */
 }
+
+#else
+
+START_TEST(NciConnectionName)
+{
+    skip("NciConnectionName requires NT 6.0 or later\n");
+}
+
+#endif

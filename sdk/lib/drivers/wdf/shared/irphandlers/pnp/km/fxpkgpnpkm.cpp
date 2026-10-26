@@ -694,7 +694,6 @@ Return Value:
 --*/
 {
     NTSTATUS status;
-    POWER_PLATFORM_INFORMATION platformInfo = {0};
     WNF_STATE_NAME wnfStateName = WNF_PO_DRIPS_DEVICE_CONSTRAINTS_REGISTERED;
     PSLEEP_STUDY_INTERFACE sleepStudy = NULL;
 

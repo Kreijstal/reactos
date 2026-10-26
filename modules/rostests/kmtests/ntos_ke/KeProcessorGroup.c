@@ -7,6 +7,8 @@
 
 #include <kmt_test.h>
 
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+
 static volatile LONG DpcProcessor;
 static KEVENT DpcEvent;
 
@@ -237,3 +239,12 @@ START_TEST(KeProcessorGroup)
     TestRelationship();
     TestAffinity();
 }
+
+#else
+
+START_TEST(KeProcessorGroup)
+{
+    skip(FALSE, "KeProcessorGroup requires NT 6.1 or later\n");
+}
+
+#endif

@@ -294,11 +294,8 @@ public:
         VOID
         )
     {
-
-
-
-
-
+        /* Persistent state storage is not implemented yet. */
+        return NULL;
     }
 
     __inline
