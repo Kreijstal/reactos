@@ -2022,6 +2022,7 @@ LockServiceDatabase(SC_HANDLE hSCManager)
 
     TRACE("hLock = %p\n", hLock);
 
+    SetLastError(ERROR_SUCCESS);
     return hLock;
 }
 
@@ -3081,6 +3082,7 @@ UnlockServiceDatabase(SC_LOCK ScLock)
         return FALSE;
     }
 
+    SetLastError(ERROR_SUCCESS);
     return TRUE;
 }
 
