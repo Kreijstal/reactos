@@ -493,6 +493,7 @@ CcCopyRead (
     OUT PVOID Buffer,
     OUT PIO_STATUS_BLOCK IoStatus)
 {
+    BOOLEAN Success;
     PROS_VACB Vacb;
     PROS_SHARED_CACHE_MAP SharedCacheMap = FileObject->SectionObjectPointer->SharedCacheMap;
     NTSTATUS Status;
@@ -524,6 +525,7 @@ CcCopyRead (
             return FALSE;
         }
 
+        Success = FALSE;
         _SEH2_TRY
         {
             ULONG VacbOffset = CurrentOffset % VACB_MAPPING_GRANULARITY;
@@ -531,7 +533,10 @@ CcCopyRead (
             SIZE_T CopyLength = VacbLength;
 
             if (!CcRosEnsureVacbResident(Vacb, Wait, FALSE, VacbOffset, VacbLength))
-                return FALSE;
+            {
+                /* The amd64 PSEH YIELD macro does not run finally blocks. */
+                _SEH2_LEAVE;
+            }
 
             _SEH2_TRY
             {
@@ -548,12 +553,15 @@ CcCopyRead (
             Buffer = (PVOID)((ULONG_PTR)Buffer + VacbLength);
             CurrentOffset += VacbLength;
             Length -= VacbLength;
+            Success = TRUE;
         }
         _SEH2_FINALLY
         {
             CcRosReleaseVacb(SharedCacheMap, Vacb, FALSE, FALSE);
         }
         _SEH2_END;
+        if (!Success)
+            return FALSE;
     }
 
     IoStatus->Status = STATUS_SUCCESS;
@@ -597,6 +605,7 @@ CcCopyWrite (
     IN BOOLEAN Wait,
     IN PVOID Buffer)
 {
+    BOOLEAN Success;
     PROS_VACB Vacb;
     PROS_SHARED_CACHE_MAP SharedCacheMap = FileObject->SectionObjectPointer->SharedCacheMap;
     NTSTATUS Status;
@@ -632,11 +641,12 @@ CcCopyWrite (
             return FALSE;
         }
 
+        Success = FALSE;
         _SEH2_TRY
         {
             if (!CcRosEnsureVacbResident(Vacb, Wait, FALSE, VacbOffset, VacbLength))
             {
-                return FALSE;
+                _SEH2_LEAVE;
             }
 
             _SEH2_TRY
@@ -658,13 +668,16 @@ CcCopyWrite (
                                         VacbLength);
             if (!NT_SUCCESS(Status))
                 ExRaiseStatus(Status);
+            Success = TRUE;
         }
         _SEH2_FINALLY
         {
             /* Do not mark the VACB as dirty if an exception was raised */
-            CcRosReleaseVacb(SharedCacheMap, Vacb, !_SEH2_AbnormalTermination(), FALSE);
+            CcRosReleaseVacb(SharedCacheMap, Vacb, Success && !_SEH2_AbnormalTermination(), FALSE);
         }
         _SEH2_END;
+        if (!Success)
+            return FALSE;
     }
 
     /* Flush if needed */
@@ -812,6 +825,7 @@ CcZeroData (
     IN PLARGE_INTEGER EndOffset,
     IN BOOLEAN Wait)
 {
+    BOOLEAN Success;
     NTSTATUS Status;
     LARGE_INTEGER WriteOffset;
     LONGLONG Length;
@@ -902,11 +916,12 @@ CcZeroData (
             return FALSE;
         }
 
+        Success = FALSE;
         _SEH2_TRY
         {
             if (!CcRosEnsureVacbResident(Vacb, Wait, FALSE, VacbOffset, VacbLength))
             {
-                return FALSE;
+                _SEH2_LEAVE;
             }
 
             RtlZeroMemory((PVOID)((ULONG_PTR)Vacb->BaseAddress + VacbOffset), VacbLength);
@@ -920,13 +935,16 @@ CcZeroData (
                                         VacbLength);
             if (!NT_SUCCESS(Status))
                 ExRaiseStatus(Status);
+            Success = TRUE;
         }
         _SEH2_FINALLY
         {
             /* Do not mark the VACB as dirty if an exception was raised */
-            CcRosReleaseVacb(SharedCacheMap, Vacb, !_SEH2_AbnormalTermination(), FALSE);
+            CcRosReleaseVacb(SharedCacheMap, Vacb, Success && !_SEH2_AbnormalTermination(), FALSE);
         }
         _SEH2_END;
+        if (!Success)
+            return FALSE;
     }
 
     /* Flush if needed */

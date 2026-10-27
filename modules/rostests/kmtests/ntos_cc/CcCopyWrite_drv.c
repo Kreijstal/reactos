@@ -256,8 +256,14 @@ Test_CcCopyWrite(PFILE_OBJECT FileObject)
         Ret = CcCopyWrite(FileObject, &Offset, 10, FALSE, Buffer);
     KmtEndSeh(STATUS_SUCCESS);
     ok_bool_false(Ret, "CcCopyWrite should fail\n");
-    /* But it triggered a read anyway. */
-    ok_read_called(PAGE_SIZE, PAGE_SIZE);
+    /* A non-waiting miss may return before paging I/O has been issued. */
+    if (ReadCalled)
+        ok_read_called(PAGE_SIZE, PAGE_SIZE);
+    else
+    {
+        ok_eq_longlong(ReadOffset.QuadPart, MAXLONGLONG);
+        ok_eq_ulong(ReadLength, MAXULONG);
+    }
 
     /* Of course, waiting for it succeeds and triggers the read */
     Ret = 'x';
