@@ -228,6 +228,7 @@ NtfsInitializeFcbLock(PNTFS_FCB Fcb)
         return STATUS_INSUFFICIENT_RESOURCES;
     RtlZeroMemory(NewLock, sizeof(*NewLock));
     NewLock->Vcb = Vcb;
+    InitializeListHead(&NewLock->FcbList);
     NewLock->FileReference = NtfsFileReference(Fcb);
     wcscpy(NewLock->Stream, Fcb->Stream);
     ExInitializeResourceLite(&NewLock->Resource);
@@ -243,6 +244,7 @@ NtfsInitializeFcbLock(PNTFS_FCB Fcb)
             FileLock->References++;
             FileLock->MultipleFcbs = TRUE;
             Fcb->FileLock = FileLock;
+            InsertTailList(&FileLock->FcbList, &Fcb->FileLockListEntry);
             KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
             FsRtlUninitializeFileLock(&NewLock->Lock);
             ExDeleteResourceLite(&NewLock->Resource);
@@ -253,8 +255,44 @@ NtfsInitializeFcbLock(PNTFS_FCB Fcb)
     NewLock->References = 1;
     InsertTailList(&Vcb->FileLockList, &NewLock->ListEntry);
     Fcb->FileLock = NewLock;
+    InsertTailList(&NewLock->FcbList, &Fcb->FileLockListEntry);
     KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
     return STATUS_SUCCESS;
+}
+
+BOOLEAN
+NtfsDeferFileDeletion(PNTFS_VCB Vcb, ULONGLONG FileReference)
+{
+    PLIST_ENTRY Entry, FcbEntry;
+    KIRQL OldIrql;
+    BOOLEAN Referenced = FALSE;
+
+    KeAcquireSpinLock(&Vcb->FcbListLock, &OldIrql);
+    for (Entry = Vcb->FileLockList.Flink; Entry != &Vcb->FileLockList; Entry = Entry->Flink)
+    {
+        PNTFS_FILE_LOCK Lock = CONTAINING_RECORD(Entry, NTFS_FILE_LOCK, ListEntry);
+        if (Lock->FileReference == FileReference)
+        {
+            Lock->DeletePending = TRUE;
+            Referenced = TRUE;
+            /* Keep every live FCB, including a previously unlinked alias,
+             * while removing its path binding from future lookups. */
+            for (FcbEntry = Lock->FcbList.Flink; FcbEntry != &Lock->FcbList; FcbEntry = FcbEntry->Flink)
+            {
+                PNTFS_FCB Fcb = CONTAINING_RECORD(FcbEntry, NTFS_FCB, FileLockListEntry);
+                Fcb->LinkCount = 0;
+                if (!(Fcb->Flags & FCB_DELETED))
+                {
+                    RemoveEntryList(&Fcb->FcbListEntry);
+                    InitializeListHead(&Fcb->FcbListEntry);
+                    NtfsRemoveFCBFromHash(Fcb);
+                    Fcb->Flags |= FCB_DELETED;
+                }
+            }
+        }
+    }
+    KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
+    return Referenced;
 }
 
 VOID
@@ -272,17 +310,45 @@ VOID
 NtfsReleaseFileLock(PNTFS_FILE_LOCK FileLock)
 {
     KIRQL OldIrql;
-    BOOLEAN Last;
+    BOOLEAN Last, DeleteRecord = FALSE;
+    PNTFS_VCB Vcb = FileLock->Vcb;
+    PLIST_ENTRY Entry;
 
     KeAcquireSpinLock(&FileLock->Vcb->FcbListLock, &OldIrql);
     ASSERT(FileLock->References > 0);
     Last = (--FileLock->References == 0);
     if (Last)
+    {
         RemoveEntryList(&FileLock->ListEntry);
+        DeleteRecord = FileLock->DeletePending;
+        for (Entry = Vcb->FileLockList.Flink; DeleteRecord && Entry != &Vcb->FileLockList; Entry = Entry->Flink)
+        {
+            PNTFS_FILE_LOCK Other = CONTAINING_RECORD(Entry, NTFS_FILE_LOCK, ListEntry);
+            if (Other->FileReference == FileLock->FileReference)
+                DeleteRecord = FALSE;
+        }
+    }
     KeReleaseSpinLock(&FileLock->Vcb->FcbListLock, OldIrql);
     if (Last)
     {
         FsRtlUninitializeFileLock(&FileLock->Lock);
+        /* The final stream state outlives every file object, mapping and
+         * pending lock operation. Only now may an unlinked record be freed. */
+        if (DeleteRecord && !(Vcb->Flags & (VCB_VOLUME_DISMOUNTED | VCB_DEVICE_REMOVED | VCB_VOLUME_READ_ONLY)))
+        {
+            ExAcquireResourceExclusiveLite(&Vcb->DirResource, TRUE);
+            if (!(Vcb->Flags & (VCB_VOLUME_DISMOUNTED | VCB_DEVICE_REMOVED | VCB_VOLUME_READ_ONLY)))
+            {
+                if (!NT_SUCCESS(NtfsDeleteFileRecord(Vcb, FileLock->FileReference & NTFS_MFT_MASK, FALSE)))
+                    NtfsMarkVolumeCorrupt(Vcb);
+                /* Final close does not own QuotaResource. Persist a rebuild
+                 * instead of taking it after DirResource and reversing the
+                 * normal quota/namespace resource order. */
+                if (Vcb->QuotaTracking)
+                    NtfsInvalidateQuota(Vcb);
+            }
+            ExReleaseResourceLite(&Vcb->DirResource);
+        }
         ExDeleteResourceLite(&FileLock->Resource);
         ExFreePoolWithTag(FileLock, TAG_NTFS);
     }
@@ -311,6 +377,7 @@ NtfsCreateFCB(PCWSTR FileName,
 
     Fcb->Vcb = Vcb;
     InitializeListHead(&Fcb->FcbHashEntry);
+    InitializeListHead(&Fcb->FileLockListEntry);
 
     /* An FCB without a name (the volume's stream) still has a path, an empty one */
     if (!NT_SUCCESS(NtfsSetFCBPath(Fcb, FileName ? FileName : L"")))
@@ -354,7 +421,13 @@ NtfsDestroyFCB(PNTFS_FCB Fcb)
     ASSERT(Fcb->SectionObjectPointers.SharedCacheMap == NULL);
 
     if (Fcb->FileLock != NULL)
+    {
+        KIRQL OldIrql;
+        KeAcquireSpinLock(&Fcb->Vcb->FcbListLock, &OldIrql);
+        RemoveEntryList(&Fcb->FileLockListEntry);
+        KeReleaseSpinLock(&Fcb->Vcb->FcbListLock, OldIrql);
         NtfsReleaseFileLock(Fcb->FileLock);
+    }
     ExDeleteResourceLite(&Fcb->PagingIoResource);
     ExDeleteResourceLite(&Fcb->MainResource);
 
@@ -749,10 +822,11 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
 {
     NTSTATUS Status;
     PWCHAR pathName;
-    PFILENAME_ATTRIBUTE FileName;
+    PFILENAME_ATTRIBUTE FileName, LongName, DosName;
     PSTANDARD_INFORMATION StdInfo;
     PNTFS_FCB rcFCB;
-    ULONGLONG Size, AllocatedSize;
+    PNTFS_ATTR_CONTEXT DataContext;
+    ULONGLONG Size, AllocatedSize, ValidDataLength;
 
     DPRINT("NtfsMakeFCBFromDirEntry(%p, %p, %wZ, %p, %p, %p)\n", Vcb, DirectoryFCB, Name, Stream, Record, fileFCB);
 
@@ -766,7 +840,31 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
      * stream part, if any, which is part of the FCB's path */
     if (DirectoryFCB && Name)
     {
-        pathName = NtfsBuildChildPath(DirectoryFCB->PathName, Name->Buffer);
+        UNICODE_STRING BaseName = *Name;
+        PWSTR Colon = wcschr(Name->Buffer, L':');
+        if (Colon != NULL)
+            BaseName.Length = (Colon - Name->Buffer) * sizeof(WCHAR);
+        LongName = GetFileNameFromRecord(Vcb, Record, NTFS_FILE_NAME_WIN32);
+        DosName = LongName ? NtfsGetDosNameFromRecord(Vcb, Record, LongName) : NULL;
+        if (DosName && (DosName->DirectoryFileReferenceNumber & NTFS_MFT_MASK) == DirectoryFCB->MFTIndex &&
+            BaseName.Length == DosName->NameLength * sizeof(WCHAR) &&
+            NtfsAttributeNamesEqual(Vcb, BaseName.Buffer, DosName->Name, DosName->NameLength))
+        {
+            SIZE_T SuffixLength = wcslen(Name->Buffer + BaseName.Length / sizeof(WCHAR));
+            PWSTR Component = ExAllocatePoolWithTag(NonPagedPool,
+                (LongName->NameLength + SuffixLength + 1) * sizeof(WCHAR), TAG_NTFS);
+            if (Component == NULL)
+                return STATUS_INSUFFICIENT_RESOURCES;
+            RtlCopyMemory(Component, LongName->Name, LongName->NameLength * sizeof(WCHAR));
+            RtlCopyMemory(Component + LongName->NameLength, Name->Buffer + BaseName.Length / sizeof(WCHAR),
+                          (SuffixLength + 1) * sizeof(WCHAR));
+            pathName = NtfsBuildChildPath(DirectoryFCB->PathName, Component);
+            ExFreePoolWithTag(Component, TAG_NTFS);
+        }
+        else
+        {
+            pathName = NtfsBuildChildPath(DirectoryFCB->PathName, Name->Buffer);
+        }
     }
     else
     {
@@ -781,7 +879,31 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
     if (pathName == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
 
+    /* DOS and long names open the same FCB, preserving share access and the
+     * canonical link name used by rename and delete-on-close. */
+    rcFCB = NtfsGrabFCBFromTable(Vcb, pathName);
+    if (rcFCB != NULL)
+    {
+        ExFreePoolWithTag(pathName, TAG_NTFS);
+        *fileFCB = rcFCB;
+        return STATUS_SUCCESS;
+    }
+
     Size = NtfsGetFileSize(Vcb, Record, (Stream ? Stream : L""), (Stream ? wcslen(Stream) : 0), &AllocatedSize);
+    ValidDataLength = Size;
+    if (!(Record->Flags & FRH_DIRECTORY) || (Stream != NULL && Stream[0] != UNICODE_NULL))
+    {
+        Status = FindAttribute(Vcb, Record, AttributeData, Stream ? Stream : L"",
+                                Stream ? wcslen(Stream) : 0, &DataContext, NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            ExFreePoolWithTag(pathName, TAG_NTFS);
+            return Status;
+        }
+        if (DataContext->pRecord->IsNonResident)
+            ValidDataLength = min(Size, DataContext->pRecord->NonResident.InitializedSize);
+        ReleaseAttributeContext(DataContext);
+    }
 
     rcFCB = NtfsCreateFCB(pathName, Stream, Vcb);
     ExFreePoolWithTag(pathName, TAG_NTFS);
@@ -793,7 +915,7 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
     memcpy(&rcFCB->Entry, FileName, FIELD_OFFSET(FILENAME_ATTRIBUTE, NameLength));
     rcFCB->Entry.NameType = FileName->NameType;
     rcFCB->RFCB.FileSize.QuadPart = Size;
-    rcFCB->RFCB.ValidDataLength.QuadPart = Size;
+    rcFCB->RFCB.ValidDataLength.QuadPart = ValidDataLength;
     rcFCB->RFCB.AllocationSize.QuadPart = AllocatedSize;
 
     StdInfo = GetStandardInformationFromRecord(Vcb, Record);
@@ -883,7 +1005,7 @@ NtfsMakeStreamFCB(
     WCHAR Stream[NTFS_MAX_NAME_LENGTH + 1];
     PFILE_RECORD_HEADER Record;
     PNTFS_ATTR_CONTEXT DataContext;
-    ULONGLONG AllocatedSize;
+    ULONGLONG AllocatedSize, ValidDataLength = 0;
     SIZE_T BaseLength;
     PWCHAR Path;
     PNTFS_FCB Fcb;
@@ -907,6 +1029,9 @@ NtfsMakeStreamFCB(
         Status = FindAttribute(Vcb, Record, AttributeData, Stream, StreamName->Length / sizeof(WCHAR), &DataContext, NULL);
         if (NT_SUCCESS(Status))
         {
+            ValidDataLength = DataContext->pRecord->IsNonResident ?
+                              DataContext->pRecord->NonResident.InitializedSize :
+                              DataContext->pRecord->Resident.ValueLength;
             /* Keep the stream's name as the disk has it */
             RtlCopyMemory(Stream,
                           (PUCHAR)DataContext->pRecord + DataContext->pRecord->NameOffset,
@@ -962,7 +1087,7 @@ NtfsMakeStreamFCB(
     Fcb->Entry.NameType = BaseFcb->Entry.NameType;
 
     Fcb->RFCB.FileSize.QuadPart = NtfsGetFileSize(Vcb, Record, Stream, wcslen(Stream), &AllocatedSize);
-    Fcb->RFCB.ValidDataLength = Fcb->RFCB.FileSize;
+    Fcb->RFCB.ValidDataLength.QuadPart = min(ValidDataLength, Fcb->RFCB.FileSize.QuadPart);
     Fcb->RFCB.AllocationSize.QuadPart = AllocatedSize;
 
     Fcb->RefCount = 1;

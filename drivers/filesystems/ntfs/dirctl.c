@@ -133,7 +133,7 @@ NtfsFillDirEntryFixedPart(
     }
 
     /* A short name is only reported for a real entry, not for "." or "..". */
-    ShortName = ReportShortName ? GetFileNameFromRecord(DeviceExt, FileRecord, NTFS_FILE_NAME_DOS) : NULL;
+    ShortName = ReportShortName ? NtfsGetDosNameFromRecord(DeviceExt, FileRecord, FileName) : NULL;
     if (ShortName != NULL && ShortName->NameType == NTFS_FILE_NAME_DOS)
     {
         PFILE_BOTH_DIR_INFORMATION Both = Buffer;
@@ -259,7 +259,8 @@ NtfsDotNameMatches(PUNICODE_STRING Pattern,
                    PUNICODE_STRING Name,
                    BOOLEAN CaseSensitive)
 {
-    UNICODE_STRING Upcased;
+    UNICODE_STRING Expression;
+    UNICODE_STRING DosName = RTL_CONSTANT_STRING(L".");
     BOOLEAN Ret;
 
     if (!FsRtlDoesNameContainWildCards(Pattern))
@@ -267,20 +268,25 @@ NtfsDotNameMatches(PUNICODE_STRING Pattern,
         return (RtlCompareUnicodeString(Pattern, Name, !CaseSensitive) == 0);
     }
 
-    /* FsRtlIsNameInExpression() wants the expression upcased when matching
-     * case-insensitively. "." and ".." need no upcasing themselves. */
-    if (CaseSensitive)
-    {
-        return FsRtlIsNameInExpression(Pattern, Name, FALSE, NULL);
-    }
-
-    if (!NT_SUCCESS(RtlUpcaseUnicodeString(&Upcased, Pattern, TRUE)))
-    {
+    if (Pattern->Length > MAXUSHORT - sizeof(WCHAR))
         return FALSE;
-    }
+    Expression.Length = Pattern->Length;
+    Expression.MaximumLength = Pattern->Length + sizeof(WCHAR);
+    Expression.Buffer = ExAllocatePoolWithTag(PagedPool, Expression.MaximumLength, TAG_NTFS);
+    if (Expression.Buffer == NULL)
+        return FALSE;
 
-    Ret = FsRtlIsNameInExpression(&Upcased, Name, TRUE, NULL);
-    RtlFreeUnicodeString(&Upcased);
+    if (CaseSensitive)
+        RtlCopyMemory(Expression.Buffer, Pattern->Buffer, Pattern->Length);
+    else
+        RtlUpcaseUnicodeString(&Expression, Pattern, FALSE);
+
+    /* Both pseudoentries have an empty DOS base and extension. Match a
+     * single separator with an optional final dot, including DOS_QM masks. */
+    Expression.Buffer[Expression.Length / sizeof(WCHAR)] = L'"';
+    Expression.Length += sizeof(WCHAR);
+    Ret = FsRtlIsNameInExpression(&Expression, &DosName, !CaseSensitive, NULL);
+    ExFreePoolWithTag(Expression.Buffer, TAG_NTFS);
 
     return Ret;
 }
@@ -453,6 +459,10 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
         Ccb->Entry = 0;
         ClearFlag(Ccb->Flags, CCB_RETURNED_DOT | CCB_RETURNED_DOTDOT);
     }
+
+    /* The volume root has no parent and does not enumerate pseudoentries. */
+    if (NtfsFCBIsRoot(Fcb))
+        SetFlag(Ccb->Flags, CCB_RETURNED_DOT | CCB_RETURNED_DOTDOT);
 
     /* Get Buffer for result */
     Buffer = NtfsGetUserBuffer(Irp, FALSE);
