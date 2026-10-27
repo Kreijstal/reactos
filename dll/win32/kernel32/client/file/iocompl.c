@@ -341,6 +341,11 @@ GetOverlappedResultEx(IN HANDLE hFile,
         return FALSE;
     }
 
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_WIN10)
+    /* Windows 10 clears the last error on success */
+    SetLastError(ERROR_SUCCESS);
+#endif
+
     /* All done */
     return TRUE;
 }
