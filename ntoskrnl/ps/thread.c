@@ -1057,6 +1057,15 @@ NtCreateThread(OUT PHANDLE ThreadHandle,
         SafeInitialTeb = *InitialTeb;
     }
 
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    /* Fixed-size stacks described by the previous stack fields are gone */
+    if ((SafeInitialTeb.PreviousStackBase != NULL) ||
+        (SafeInitialTeb.PreviousStackLimit != NULL))
+    {
+        return STATUS_NOT_SUPPORTED;
+    }
+#endif
+
     /* Call the shared function */
     return PspCreateThread(ThreadHandle,
                            DesiredAccess,
