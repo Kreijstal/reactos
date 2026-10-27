@@ -721,13 +721,6 @@ CleanupTest(
             KeWaitForSingleObject(&CacheUninitEvent.Event, Executive, KernelMode, FALSE, NULL);
         }
 
-        if (TestFileObject->FsContext != NULL)
-        {
-            ExFreePool(TestFileObject->FsContext);
-            TestFileObject->FsContext = NULL;
-            TestFileObject->SectionObjectPointer = NULL;
-        }
-
         if (TestTestId == 6)
         {
             ok_bool_true(TestWriteCalled, "Write was not called!\n");
@@ -735,6 +728,23 @@ CleanupTest(
         else
         {
             ok_bool_false(TestWriteCalled, "Write was unexpectedly called\n");
+        }
+
+        /* The flush event does not promise that no data section remains.
+         * Release it before freeing the FCB that owns its section pointers.
+         * Check the write above so this teardown cannot mask a missed flush. */
+        if (MmForceSectionClosed(TestFileObject->SectionObjectPointer, FALSE))
+        {
+            if (TestFileObject->FsContext != NULL)
+            {
+                ExFreePool(TestFileObject->FsContext);
+                TestFileObject->FsContext = NULL;
+                TestFileObject->SectionObjectPointer = NULL;
+            }
+        }
+        else
+        {
+            ok(FALSE, "Test %lu left a section in use\n", TestId);
         }
 
         ObDereferenceObject(TestFileObject);
