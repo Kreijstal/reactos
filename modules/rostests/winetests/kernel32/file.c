@@ -3429,16 +3429,10 @@ static void CALLBACK FileIOComplete(DWORD dwError, DWORD dwBytes, LPOVERLAPPED o
 static void test_async_file_errors(void)
 {
     char szFile[MAX_PATH];
-    HANDLE hSem = CreateSemaphoreW(NULL, 1, 1, NULL);
+    HANDLE hSem = CreateSemaphoreW(NULL, 0, 1, NULL);
     HANDLE hFile;
     LPVOID lpBuffer = HeapAlloc(GetProcessHeap(), 0, 4096);
     OVERLAPPED ovl;
-#ifdef __REACTOS__
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: test_async_file_errors() crashes on ReactOS!\n");
-        return;
-    }
-#endif
     ovl.Offset = 0;
     ovl.OffsetHigh = 0;
     ovl.hEvent = hSem;
@@ -3456,22 +3450,24 @@ static void test_async_file_errors(void)
     {
         BOOL res;
         DWORD count;
-        while (WaitForSingleObjectEx(hSem, INFINITE, TRUE) == WAIT_IO_COMPLETION)
-            ;
         res = ReadFileEx(hFile, lpBuffer, 4096, &ovl, FileIOComplete);
         /*printf("Offset = %ld, result = %s\n", ovl.Offset, res ? "TRUE" : "FALSE");*/
         if (!res)
+        {
+            SleepEx(0, TRUE); /* A failed call must not queue a completion APC. */
             break;
+        }
+        completion_count--;
+        while (WaitForSingleObjectEx(hSem, INFINITE, TRUE) == WAIT_IO_COMPLETION)
+            ;
         if (!GetOverlappedResult(hFile, &ovl, &count, FALSE))
             break;
         ovl.Offset += count;
-        /* i/o completion routine only called if ReadFileEx returned success.
-         * we only care about violations of this rule so undo what should have
-         * been done */
-        completion_count--;
     }
     ok(completion_count == 0, "completion routine should only be called when ReadFileEx succeeds (this rule was violated %d times)\n", completion_count);
     /*printf("Error = %ld\n", GetLastError());*/
+    CloseHandle(hFile);
+    CloseHandle(hSem);
     HeapFree(GetProcessHeap(), 0, lpBuffer);
 }
 
@@ -4211,10 +4207,127 @@ static void test_ReplaceFileA(void)
     ok(ret, "got error %lu\n", GetLastError());
 }
 
-/*
- * ReplaceFileW is a simpler case of ReplaceFileA, there is no
- * need to be as thorough.
- */
+static void test_ReplaceFile_open(void)
+{
+    char path[MAX_PATH], original[MAX_PATH], replacement[MAX_PATH];
+    char old_data[8192], new_data[8192], buffer[8192];
+    HANDLE file, reader, mapping = NULL;
+    BY_HANDLE_FILE_INFORMATION replacement_info, result_info;
+    const char *view = NULL;
+    DWORD count;
+    BOOL ret;
+
+    GetTempPathA(sizeof(path), path);
+    GetTempFileNameA(path, "old", 0, original);
+    GetTempFileNameA(path, "new", 0, replacement);
+    memset(old_data, 'o', sizeof(old_data));
+    memset(new_data, 'n', sizeof(new_data));
+    file = CreateFileA(original, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    ok(file != INVALID_HANDLE_VALUE, "Open original failed %lu\n", GetLastError());
+    ret = WriteFile(file, old_data, sizeof(old_data), &count, NULL);
+    ok(ret && count == sizeof(old_data), "Write original failed %lu\n", GetLastError());
+    CloseHandle(file);
+    file = CreateFileA(replacement, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    ok(file != INVALID_HANDLE_VALUE, "Open replacement failed %lu\n", GetLastError());
+    ret = WriteFile(file, new_data, sizeof(new_data), &count, NULL);
+    ok(ret && count == sizeof(new_data), "Write replacement failed %lu\n", GetLastError());
+    ret = GetFileInformationByHandle(file, &replacement_info);
+    ok(ret, "GetFileInformationByHandle failed %lu\n", GetLastError());
+    CloseHandle(file);
+
+    reader = CreateFileA(original, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         NULL, OPEN_EXISTING, 0, NULL);
+    ok(reader != INVALID_HANDLE_VALUE, "Open reader failed %lu\n", GetLastError());
+    mapping = CreateFileMappingA(reader, NULL, PAGE_READONLY, 0, 0, NULL);
+    ok(mapping != NULL, "CreateFileMapping failed %lu\n", GetLastError());
+    if (mapping)
+        view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    ok(view != NULL, "MapViewOfFile failed %lu\n", GetLastError());
+
+    ret = ReplaceFileA(original, replacement, NULL, 0, NULL, NULL);
+    ok(ret, "ReplaceFile with an open reader failed %lu\n", GetLastError());
+    if (ret)
+    {
+        ret = ReadFile(reader, buffer, sizeof(buffer), &count, NULL);
+        ok(ret && count == sizeof(buffer) && !memcmp(buffer, old_data, sizeof(buffer)),
+           "The old handle lost its data, ret %d count %lu error %lu\n", ret, count, GetLastError());
+        file = CreateFileA(original, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        ok(file != INVALID_HANDLE_VALUE, "Open result failed %lu\n", GetLastError());
+        ret = ReadFile(file, buffer, sizeof(buffer), &count, NULL);
+        ok(ret && count == sizeof(buffer) && !memcmp(buffer, new_data, sizeof(buffer)),
+           "The new name has incorrect data, ret %d count %lu error %lu\n", ret, count, GetLastError());
+        ret = GetFileInformationByHandle(file, &result_info);
+        ok(ret && result_info.nFileIndexHigh == replacement_info.nFileIndexHigh &&
+           result_info.nFileIndexLow == replacement_info.nFileIndexLow,
+           "Replacement file identity was not preserved\n");
+        CloseHandle(file);
+    }
+    CloseHandle(reader);
+    if (view)
+    {
+        ok(!memcmp(view, old_data, sizeof(old_data)), "The old mapping lost its data after close\n");
+        UnmapViewOfFile(view);
+    }
+    if (mapping) CloseHandle(mapping);
+    DeleteFileA(original);
+    DeleteFileA(replacement);
+}
+
+static void test_DosAlias(void)
+{
+    char path[MAX_PATH], filename[MAX_PATH], shortname[MAX_PATH], linkname[MAX_PATH];
+    HANDLE file, alias;
+    DWORD length, attributes;
+    BOOL ret;
+
+    GetTempPathA(sizeof(path), path);
+    GetTempFileNameA(path, "dos", 0, filename);
+    DeleteFileA(filename);
+    strcat(filename, ".long name");
+    file = CreateFileA(filename, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
+                       NULL, CREATE_NEW, 0, NULL);
+    ok(file != INVALID_HANDLE_VALUE, "CreateFile failed %lu\n", GetLastError());
+    if (file == INVALID_HANDLE_VALUE) return;
+    length = GetShortPathNameA(filename, shortname, sizeof(shortname));
+    ok(length && length < sizeof(shortname), "GetShortPathName failed %lu\n", GetLastError());
+    if (length && length < sizeof(shortname) && lstrcmpiA(shortname, filename))
+    {
+        alias = CreateFileA(shortname, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            NULL, OPEN_EXISTING, 0, NULL);
+        ok(alias == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION,
+           "Alias bypassed share access, handle %p error %lu\n", alias, GetLastError());
+        if (alias != INVALID_HANDLE_VALUE) CloseHandle(alias);
+        CloseHandle(file);
+
+        /* Removing a different link must preserve this link's DOS alias. */
+        strcpy(linkname, filename);
+        strcat(linkname, ".link");
+        if (CreateHardLinkA(linkname, filename, NULL))
+        {
+            ret = DeleteFileA(linkname);
+            ok(ret, "Deleting another link failed %lu\n", GetLastError());
+            alias = CreateFileA(shortname, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                NULL, OPEN_EXISTING, 0, NULL);
+            ok(alias != INVALID_HANDLE_VALUE, "Another link's deletion removed the DOS alias, error %lu\n",
+               GetLastError());
+            if (alias != INVALID_HANDLE_VALUE) CloseHandle(alias);
+        }
+        ret = DeleteFileA(shortname);
+        ok(ret, "DeleteFile through alias failed %lu\n", GetLastError());
+        SetLastError(0xdeadbeef);
+        attributes = GetFileAttributesA(filename);
+        ok(attributes == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND,
+           "Long name survived alias deletion, attributes %#lx error %lu\n", attributes, GetLastError());
+    }
+    else
+    {
+        win_skip("Short file names are disabled on this volume\n");
+        CloseHandle(file);
+    }
+    DeleteFileA(filename);
+}
+
+/* ReplaceFileW shares its implementation with ReplaceFileA. */
 static void test_ReplaceFileW(void)
 {
     WCHAR replaced[MAX_PATH], replacement[MAX_PATH], backup[MAX_PATH];
@@ -4832,6 +4945,25 @@ static void test_SetFileValidData(void)
     ok(!ret, "SetFileValidData succeeded\n");
     ok(error == ERROR_INVALID_PARAMETER, "got %lu\n", error);
 
+    /* Valid data length must survive reopening, including a subsequent
+     * cached write inside the file's existing allocation. */
+    CloseHandle(handle);
+    handle = CreateFileA(filename, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    ok(handle != INVALID_HANDLE_VALUE, "Reopen failed %lu\n", GetLastError());
+    ret = pSetFileValidData(handle, 1024);
+    ok(ret, "Valid data length was not preserved, error %lu\n", GetLastError());
+    count = SetFilePointer(handle, 1024, NULL, FILE_BEGIN);
+    ok(count == 1024, "SetFilePointer returned %lu\n", count);
+    ret = WriteFile(handle, "more", 4, &count, NULL);
+    ok(ret && count == 4, "WriteFile failed %lu, count %lu\n", GetLastError(), count);
+    CloseHandle(handle);
+    handle = CreateFileA(filename, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    ok(handle != INVALID_HANDLE_VALUE, "Reopen failed %lu\n", GetLastError());
+    ret = pSetFileValidData(handle, 1024);
+    error = GetLastError();
+    ok(!ret && error == ERROR_INVALID_PARAMETER,
+       "Write did not preserve valid data length, ret %d error %lu\n", ret, error);
+
     privs.Privileges[0].Attributes = 0;
     AdjustTokenPrivileges(token, FALSE, &privs, sizeof(privs), NULL, NULL);
 
@@ -4987,18 +5119,10 @@ static void test_WriteFileGather(void)
     ok( ret, "GetQueuedCompletionStatus failed err %lu\n", GetLastError());
     ok( povl == &ovl, "wrong ovl %p\n", povl );
 
-#ifdef __REACTOS__
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: Calls to GetOverlappedResult hang on ReactOS!\n");
-    } else {
-#endif
     tx = 0;
     br = GetOverlappedResult( hfile, &ovl, &tx, TRUE );
     ok( br == TRUE, "GetOverlappedResult failed: %lu\n", GetLastError() );
     ok( tx == si.dwPageSize, "got unexpected bytes transferred: %lu\n", tx );
-#ifdef __REACTOS__
-    }
-#endif
 
     ResetEvent( evt );
 
@@ -5017,18 +5141,10 @@ static void test_WriteFileGather(void)
     ok( ret, "GetQueuedCompletionStatus failed err %lu\n", GetLastError());
     ok( povl == &ovl, "wrong ovl %p\n", povl );
 
-#ifdef __REACTOS__
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: Calls to GetOverlappedResult hang on ReactOS!\n");
-    } else {
-#endif
     tx = 0;
     br = GetOverlappedResult( hfile, &ovl, &tx, TRUE );
     ok( br == TRUE, "GetOverlappedResult failed: %lu\n", GetLastError() );
     ok( tx == si.dwPageSize, "got unexpected bytes transferred: %lu\n", tx );
-#ifdef __REACTOS__
-    }
-#endif
 
     ok( memcmp( rbuf1, wbuf, si.dwPageSize ) == 0,
             "data was not read into buffer\n" );
@@ -5079,6 +5195,17 @@ static void test_WriteFileGather(void)
     fse[1].Buffer = rbuf2;
     memset( rbuf1, 0, si.dwPageSize );
     memset( rbuf2, 0x17, si.dwPageSize );
+
+    /* A fault after pinning the first segment must unwind that pin without
+     * submitting an IRP or leaving a completion packet behind. */
+    fse[1].Buffer = NULL;
+    br = ReadFileScatter(hfile, fse, si.dwPageSize * 2, NULL, &ovl);
+    ok(!br && GetLastError() == ERROR_NOACCESS,
+       "Invalid second segment returned %d, error %lu\n", br, GetLastError());
+    ret = GetQueuedCompletionStatus(hiocp2, &size, &key, &povl, 100);
+    ok(!ret && GetLastError() == WAIT_TIMEOUT && povl == NULL,
+       "Faulted read left a completion, ret %lu error %lu ovl %p\n", ret, GetLastError(), povl);
+    fse[1].Buffer = rbuf2;
     SetLastError( 0xdeadbeef );
     br = ReadFileScatter( hfile, fse, si.dwPageSize * 2, NULL, &ovl );
     ok( br == FALSE, "ReadFileScatter should be asynchronous\n" );
@@ -5088,18 +5215,10 @@ static void test_WriteFileGather(void)
     ok( ret, "GetQueuedCompletionStatus failed err %lu\n", GetLastError() );
     ok( povl == &ovl, "wrong ovl %p\n", povl );
 
-#ifdef __REACTOS__
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: Calls to GetOverlappedResult hang on ReactOS!\n");
-    } else {
-#endif
     tx = 0;
     br = GetOverlappedResult( hfile, &ovl, &tx, TRUE );
     ok( br == TRUE, "GetOverlappedResult failed: %lu\n", GetLastError() );
     ok( tx == si.dwPageSize, "got unexpected bytes transferred: %lu\n", tx );
-#ifdef __REACTOS__
-    }
-#endif
 
     ok( memcmp( rbuf1, wbuf, si.dwPageSize ) == 0,
             "data was not read into buffer\n" );
@@ -5124,18 +5243,10 @@ static void test_WriteFileGather(void)
     ok( ret, "GetQueuedCompletionStatus failed err %lu\n", GetLastError() );
     ok( povl == &ovl, "wrong ovl %p\n", povl );
 
-#ifdef __REACTOS__
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: Calls to GetOverlappedResult hang on ReactOS!\n");
-    } else {
-#endif
     tx = 0;
     br = GetOverlappedResult( hfile, &ovl, &tx, TRUE );
     ok( br == TRUE, "GetOverlappedResult failed: %lu\n", GetLastError() );
     ok( tx == si.dwPageSize / 2, "got unexpected bytes transferred: %lu\n", tx );
-#ifdef __REACTOS__
-    }
-#endif
 
     ok( memcmp( rbuf1, wbuf, si.dwPageSize / 2 ) == 0,
             "invalid data was read into buffer\n" );
@@ -5156,17 +5267,9 @@ static void test_WriteFileGather(void)
         ok(br, "GetQueuedCompletionStatus failed, err %lu.\n", GetLastError());
         ok(povl == &ovl, "Wrong ovl %p.\n", povl);
 
-#ifdef __REACTOS__
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: Calls to GetOverlappedResult hang on ReactOS!\n");
-    } else {
-#endif
         br = GetOverlappedResult(hfile, &ovl, &tx, TRUE);
         ok(br, "GetOverlappedResult failed, err %lu.\n", GetLastError());
         ok(tx == si.dwPageSize, "Got unexpected size %lu.\n", tx);
-#ifdef __REACTOS__
-    }
-#endif
 
         ResetEvent(evt);
     }
@@ -6510,6 +6613,8 @@ START_TEST(file)
     test_RemoveDirectory();
     test_ReplaceFileA();
     test_ReplaceFileW();
+    test_ReplaceFile_open();
+    test_DosAlias();
     test_GetFileInformationByHandleEx();
     test_OpenFileById();
     test_SetFileValidData();

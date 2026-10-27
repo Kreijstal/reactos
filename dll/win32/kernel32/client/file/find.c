@@ -1024,13 +1024,13 @@ FindFirstStreamW(IN LPCWSTR lpFileName,
                                NULL);
 
     Status = NtCreateFile(&FileHandle,
-                          0,
+                          FILE_READ_ATTRIBUTES | SYNCHRONIZE,
                           &ObjectAttributes,
                           &IoStatusBlock,
                           NULL, 0,
                           FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
                           FILE_OPEN,
-                          0, NULL, 0);
+                          FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
     if (!NT_SUCCESS(Status)) goto Cleanup;
 
     /*
@@ -1100,6 +1100,9 @@ FindFirstStreamW(IN LPCWSTR lpFileName,
                                         FindStreamData->FileStreamInfo,
                                         BufferSize,
                                         FileStreamInformation);
+
+        if (NT_SUCCESS(Status) && IoStatusBlock.Information == 0)
+            Status = STATUS_END_OF_FILE;
 
     } while (Status == STATUS_BUFFER_TOO_SMALL);
 

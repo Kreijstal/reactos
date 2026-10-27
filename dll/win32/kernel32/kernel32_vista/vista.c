@@ -459,66 +459,70 @@ GetFinalPathNameByHandleA(IN HANDLE hFile,
                           IN DWORD cchFilePath,
                           IN DWORD dwFlags)
 {
-    WCHAR FilePathW[MAX_PATH];
+    WCHAR FilePathW[MAX_PATH], *Buffer = FilePathW;
     UNICODE_STRING FilePathU;
-    DWORD PrevLastError;
-    DWORD Ret = 0;
+    ANSI_STRING FilePathA;
+    DWORD Capacity = RTL_NUMBER_OF(FilePathW);
+    DWORD PreviousError = GetLastError();
+    DWORD Ret, Required;
+    NTSTATUS Status;
 
-    if (cchFilePath != 0 &&
-        cchFilePath > sizeof(FilePathW) / sizeof(FilePathW[0]))
+    /* Query into our own buffer: the ANSI byte count need not equal the
+     * caller's capacity in WCHARs, including for a size-only query. */
+    for (;;)
     {
-        FilePathU.Length = 0;
-        FilePathU.MaximumLength = (USHORT)cchFilePath * sizeof(WCHAR);
-        FilePathU.Buffer = RtlAllocateHeap(RtlGetProcessHeap(),
-                                           0,
-                                           FilePathU.MaximumLength);
-        if (FilePathU.Buffer == NULL)
+        Ret = GetFinalPathNameByHandleW(hFile, Buffer, Capacity, dwFlags);
+        if (Ret == 0)
+            goto Cleanup;
+        if (Ret < Capacity)
+            break;
+        if (Buffer != FilePathW)
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+        Buffer = NULL;
+        if (Ret >= MAXUSHORT / sizeof(WCHAR))
+        {
+            SetLastError(ERROR_FILENAME_EXCED_RANGE);
+            Ret = 0;
+            goto Cleanup;
+        }
+        Capacity = Ret + 1;
+        Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Capacity * sizeof(WCHAR));
+        if (!Buffer)
         {
             SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-            return 0;
+            Ret = 0;
+            goto Cleanup;
         }
     }
-    else
+    FilePathU.Buffer = Buffer;
+    FilePathU.Length = (USHORT)(Ret * sizeof(WCHAR));
+    FilePathU.MaximumLength = (USHORT)(FilePathU.Length + sizeof(WCHAR));
+    Required = AreFileApisANSI() ? RtlUnicodeStringToAnsiSize(&FilePathU) :
+                                   RtlUnicodeStringToOemSize(&FilePathU);
+    Ret = Required - 1;
+    /* Windows' ANSI size probes also exclude the terminator, unlike W. */
+    if (lpszFilePath && cchFilePath >= Required)
     {
-        FilePathU.Length = 0;
-        FilePathU.MaximumLength = sizeof(FilePathW);
-        FilePathU.Buffer = FilePathW;
+        FilePathA.Buffer = lpszFilePath;
+        FilePathA.Length = 0;
+        FilePathA.MaximumLength = (USHORT)min(cchFilePath, MAXUSHORT);
+        Status = AreFileApisANSI() ? RtlUnicodeStringToAnsiString(&FilePathA, &FilePathU, FALSE) :
+                                     RtlUnicodeStringToOemString(&FilePathA, &FilePathU, FALSE);
+        if (!NT_SUCCESS(Status))
+        {
+            BaseSetLastNTError(Status);
+            Ret = 0;
+            goto Cleanup;
+        }
+        Ret = FilePathA.Length;
     }
-
-    /* save the last error code */
-    PrevLastError = GetLastError();
-    SetLastError(ERROR_SUCCESS);
-
-    /* call the unicode version that does all the work */
-    Ret = GetFinalPathNameByHandleW(hFile,
-                                    FilePathU.Buffer,
-                                    cchFilePath,
-                                    dwFlags);
-
-    if (GetLastError() == ERROR_SUCCESS)
-    {
-        /* no error, restore the last error code and convert the string */
-        SetLastError(PrevLastError);
-
-        /* On success Ret is the number of characters written, without the
-           terminating null. FilenameU2A_FitOrFail converts Length bytes. */
-        FilePathU.Length = (USHORT)(Ret * sizeof(WCHAR));
-
-        Ret = FilenameU2A_FitOrFail(lpszFilePath,
-                                    cchFilePath,
-                                    &FilePathU);
-    }
-
-    /* free allocated memory if necessary */
-    if (FilePathU.Buffer != FilePathW)
-    {
-        RtlFreeHeap(RtlGetProcessHeap(),
-                    0,
-                    FilePathU.Buffer);
-    }
-
+    SetLastError(PreviousError);
+Cleanup:
+    if (Buffer && Buffer != FilePathW)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
     return Ret;
 }
+
 
 /*
  * @unimplemented
@@ -555,7 +559,7 @@ GetFileBandwidthReservation(IN HANDLE hFile,
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 HANDLE
 WINAPI
@@ -566,8 +570,64 @@ OpenFileById(IN HANDLE hFile,
              IN LPSECURITY_ATTRIBUTES lpSecurityAttributes  OPTIONAL,
              IN DWORD dwFlags)
 {
-    UNIMPLEMENTED;
-    return INVALID_HANDLE_VALUE;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    UNICODE_STRING Name;
+    HANDLE File;
+    ULONG Options = FILE_OPEN_BY_FILE_ID;
+    NTSTATUS Status;
+
+    if (!lpFileID || lpFileID->dwSize != sizeof(*lpFileID) ||
+        (unsigned)lpFileID->Type >= MaximumFileIdType)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    Name.Buffer = (PWSTR)&lpFileID->FileId;
+    Name.Length = Name.MaximumLength = (lpFileID->Type == FileIdType) ?
+                                      sizeof(lpFileID->FileId) : sizeof(lpFileID->ObjectId);
+    if (!(dwFlags & FILE_FLAG_OVERLAPPED))
+        Options |= FILE_SYNCHRONOUS_IO_NONALERT;
+    if (dwFlags & FILE_FLAG_WRITE_THROUGH)
+        Options |= FILE_WRITE_THROUGH;
+    if (dwFlags & FILE_FLAG_NO_BUFFERING)
+        Options |= FILE_NO_INTERMEDIATE_BUFFERING;
+    if (dwFlags & FILE_FLAG_RANDOM_ACCESS)
+        Options |= FILE_RANDOM_ACCESS;
+    if (dwFlags & FILE_FLAG_SEQUENTIAL_SCAN)
+        Options |= FILE_SEQUENTIAL_ONLY;
+    if (dwFlags & FILE_FLAG_BACKUP_SEMANTICS)
+        Options |= FILE_OPEN_FOR_BACKUP_INTENT;
+    if (dwFlags & FILE_FLAG_OPEN_REPARSE_POINT)
+        Options |= FILE_OPEN_REPARSE_POINT;
+    if (dwFlags & FILE_FLAG_OPEN_NO_RECALL)
+        Options |= FILE_OPEN_NO_RECALL;
+    if (dwFlags & FILE_FLAG_DELETE_ON_CLOSE)
+    {
+        Options |= FILE_DELETE_ON_CLOSE;
+        dwDesiredAccess |= DELETE;
+    }
+
+    InitializeObjectAttributes(&ObjectAttributes, &Name,
+                               OBJ_CASE_INSENSITIVE, hFile, NULL);
+    if (lpSecurityAttributes)
+    {
+        if (lpSecurityAttributes->bInheritHandle)
+            ObjectAttributes.Attributes |= OBJ_INHERIT;
+        ObjectAttributes.SecurityDescriptor = lpSecurityAttributes->lpSecurityDescriptor;
+    }
+
+    Status = NtCreateFile(&File,
+                          dwDesiredAccess | SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+                          &ObjectAttributes, &IoStatusBlock, NULL, 0,
+                          dwShareMode, FILE_OPEN, Options, NULL, 0);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return INVALID_HANDLE_VALUE;
+    }
+    return File;
 }
 
 

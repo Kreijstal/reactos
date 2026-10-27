@@ -1082,8 +1082,86 @@ MoveFileExW(IN LPCWSTR lpExistingFileName,
                                  dwFlags);
 }
 
+static BOOL
+BasepMergeReplacementStreams(LPCWSTR Original, LPCWSTR Replacement, DWORD Flags)
+{
+    WIN32_FIND_STREAM_DATA Data;
+    HANDLE Search;
+    DWORD Error = ERROR_SUCCESS;
+    SIZE_T OriginalLength = wcslen(Original), ReplacementLength = wcslen(Replacement);
+
+    Search = FindFirstStreamW(Original, FindStreamInfoStandard, &Data, 0);
+    if (Search == INVALID_HANDLE_VALUE)
+    {
+        Error = GetLastError();
+        if (Error == ERROR_HANDLE_EOF || Error == ERROR_INVALID_FUNCTION ||
+            Error == ERROR_NOT_SUPPORTED || Error == ERROR_INVALID_PARAMETER)
+            return TRUE; /* A filesystem without named streams. */
+        return !!(Flags & REPLACEFILE_IGNORE_MERGE_ERRORS);
+    }
+    do
+    {
+        SIZE_T Length;
+        PWSTR Paths, Destination;
+        if (wcscmp(Data.cStreamName, L"::$DATA") == 0)
+            continue;
+        Length = wcslen(Data.cStreamName);
+        Paths = RtlAllocateHeap(RtlGetProcessHeap(), 0,
+                                (OriginalLength + ReplacementLength + 2 * Length + 2) * sizeof(WCHAR));
+        if (!Paths)
+        {
+            Error = ERROR_NOT_ENOUGH_MEMORY;
+            break;
+        }
+        Destination = Paths + OriginalLength + Length + 1;
+        wcscpy(Paths, Original);
+        wcscat(Paths, Data.cStreamName);
+        wcscpy(Destination, Replacement);
+        wcscat(Destination, Data.cStreamName);
+        if (!CopyFileW(Paths, Destination, TRUE))
+        {
+            DWORD CopyError = GetLastError();
+            /* A replacement's own stream wins over the old stream. */
+            if (CopyError != ERROR_FILE_EXISTS && CopyError != ERROR_ALREADY_EXISTS &&
+                !(Flags & REPLACEFILE_IGNORE_MERGE_ERRORS))
+                Error = CopyError;
+        }
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Paths);
+        if (Error != ERROR_SUCCESS)
+            break;
+    } while (FindNextStreamW(Search, &Data));
+    if (Error == ERROR_SUCCESS && GetLastError() != ERROR_HANDLE_EOF)
+        Error = GetLastError();
+    FindClose(Search);
+    if (Error != ERROR_SUCCESS)
+        SetLastError(Error);
+    return Error == ERROR_SUCCESS;
+}
+
+static NTSTATUS
+BasepMergeReplacementDacl(HANDLE Original, HANDLE Replacement)
+{
+    PSECURITY_DESCRIPTOR Descriptor;
+    ULONG Length = 0;
+    NTSTATUS Status;
+
+    Status = NtQuerySecurityObject(Original, DACL_SECURITY_INFORMATION, NULL, 0, &Length);
+    if (Status == STATUS_NOT_SUPPORTED || Status == STATUS_INVALID_DEVICE_REQUEST)
+        return STATUS_SUCCESS;
+    if (Status != STATUS_BUFFER_TOO_SMALL && Status != STATUS_BUFFER_OVERFLOW)
+        return Status;
+    Descriptor = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+    if (!Descriptor)
+        return STATUS_NO_MEMORY;
+    Status = NtQuerySecurityObject(Original, DACL_SECURITY_INFORMATION, Descriptor, Length, &Length);
+    if (NT_SUCCESS(Status))
+        Status = NtSetSecurityObject(Replacement, DACL_SECURITY_INFORMATION, Descriptor);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Descriptor);
+    return Status;
+}
+
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -1091,143 +1169,123 @@ ReplaceFileW(
     LPCWSTR lpReplacedFileName,
     LPCWSTR lpReplacementFileName,
     LPCWSTR lpBackupFileName,
-    DWORD   dwReplaceFlags,
-    LPVOID  lpExclude,
-    LPVOID  lpReserved
-    )
+    DWORD dwReplaceFlags,
+    LPVOID lpExclude,
+    LPVOID lpReserved)
 {
-    HANDLE hReplaced = NULL, hReplacement = NULL;
-    UNICODE_STRING NtReplacedName = { 0, 0, NULL };
-    UNICODE_STRING NtReplacementName = { 0, 0, NULL };
+    HANDLE Original = NULL, Replacement = NULL;
+    UNICODE_STRING OriginalName = {0}, ReplacementName = {0};
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK IoStatus;
+    FILE_BASIC_INFORMATION OriginalBasic, NewBasic = {0};
+    BY_HANDLE_FILE_INFORMATION OriginalInfo, ReplacementInfo;
+    PFILE_RENAME_INFORMATION Rename = NULL;
     DWORD Error = ERROR_SUCCESS;
+    ULONG RenameLength;
     NTSTATUS Status;
     BOOL Ret = FALSE;
-    IO_STATUS_BLOCK IoStatusBlock;
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    PVOID Buffer = NULL ;
 
-    if (dwReplaceFlags)
-        FIXME("Ignoring flags %x\n", dwReplaceFlags);
-
-    /* First two arguments are mandatory */
     if (!lpReplacedFileName || !lpReplacementFileName)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-
-    /* Back it up */
-    if(lpBackupFileName)
-    {
-        if(!CopyFileW(lpReplacedFileName, lpBackupFileName, FALSE))
-        {
-            Error = GetLastError();
-            goto Cleanup ;
-        }
-    }
-
-    /* Open the "replaced" file for reading and writing */
-    if (!(RtlDosPathNameToNtPathName_U(lpReplacedFileName, &NtReplacedName, NULL, NULL)))
+    if (!RtlDosPathNameToNtPathName_U(lpReplacedFileName, &OriginalName, NULL, NULL) ||
+        !RtlDosPathNameToNtPathName_U(lpReplacementFileName, &ReplacementName, NULL, NULL))
     {
         Error = ERROR_PATH_NOT_FOUND;
         goto Cleanup;
     }
-
-    InitializeObjectAttributes(&ObjectAttributes,
-                               &NtReplacedName,
-                               OBJ_CASE_INSENSITIVE,
-                               NULL,
-                               NULL);
-
-    Status = NtOpenFile(&hReplaced,
-                        GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE | WRITE_DAC,
-                        &ObjectAttributes,
-                        &IoStatusBlock,
-                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    InitializeObjectAttributes(&Attributes, &OriginalName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    /* Delete sharing permits namespace replacement of an open executable.
+     * Replacing its name does not require writing its mapped data stream. */
+    Status = NtOpenFile(&Original, GENERIC_READ | DELETE | SYNCHRONIZE,
+                        &Attributes, &IoStatus, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                         FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
-
     if (!NT_SUCCESS(Status))
     {
-        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
-            Error = ERROR_FILE_NOT_FOUND;
-        else
-            Error = ERROR_UNABLE_TO_REMOVE_REPLACED;
+        Error = (Status == STATUS_OBJECT_NAME_NOT_FOUND) ? ERROR_FILE_NOT_FOUND :
+                (Status == STATUS_ACCESS_DENIED) ? ERROR_ACCESS_DENIED : ERROR_UNABLE_TO_REMOVE_REPLACED;
         goto Cleanup;
     }
-
-    /* Blank it */
-    SetEndOfFile(hReplaced) ;
-
-    /*
-     * Open the replacement file for reading, writing, and deleting
-     * (deleting is needed when finished)
-     */
-    if (!(RtlDosPathNameToNtPathName_U(lpReplacementFileName, &NtReplacementName, NULL, NULL)))
-    {
-        Error = ERROR_PATH_NOT_FOUND;
-        goto Cleanup;
-    }
-
-    InitializeObjectAttributes(&ObjectAttributes,
-                               &NtReplacementName,
-                               OBJ_CASE_INSENSITIVE,
-                               NULL,
-                               NULL);
-
-    Status = NtOpenFile(&hReplacement,
-                        GENERIC_READ | DELETE | SYNCHRONIZE,
-                        &ObjectAttributes,
-                        &IoStatusBlock,
-                        0,
-                        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE);
-
+    Status = NtQueryInformationFile(Original, &IoStatus, &OriginalBasic,
+                                    sizeof(OriginalBasic), FileBasicInformation);
     if (!NT_SUCCESS(Status))
+        goto NtError;
+    if (OriginalBasic.FileAttributes & FILE_ATTRIBUTE_READONLY)
     {
-        Error = RtlNtStatusToDosError(Status);
+        Error = ERROR_ACCESS_DENIED;
         goto Cleanup;
     }
 
-    Buffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, 0x10000) ;
-    if (!Buffer)
+    InitializeObjectAttributes(&Attributes, &ReplacementName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&Replacement, GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE | WRITE_DAC,
+                        &Attributes, &IoStatus, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+    if (Status == STATUS_ACCESS_DENIED &&
+        (dwReplaceFlags & (REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS)))
+        Status = NtOpenFile(&Replacement, GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE,
+                            &Attributes, &IoStatus, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+    if (!NT_SUCCESS(Status))
+        goto NtError;
+    if (!GetFileInformationByHandle(Original, &OriginalInfo) ||
+        !GetFileInformationByHandle(Replacement, &ReplacementInfo))
+    {
+        Error = GetLastError();
+        goto Cleanup;
+    }
+    if (OriginalInfo.dwVolumeSerialNumber == ReplacementInfo.dwVolumeSerialNumber &&
+        OriginalInfo.nFileIndexHigh == ReplacementInfo.nFileIndexHigh &&
+        OriginalInfo.nFileIndexLow == ReplacementInfo.nFileIndexLow)
+    {
+        Error = ERROR_INVALID_PARAMETER;
+        goto Cleanup;
+    }
+    if (lpBackupFileName && !CopyFileW(lpReplacedFileName, lpBackupFileName, FALSE))
+    {
+        Error = GetLastError();
+        goto Cleanup;
+    }
+    if (!BasepMergeReplacementStreams(lpReplacedFileName, lpReplacementFileName, dwReplaceFlags))
+    {
+        Error = GetLastError();
+        goto Cleanup;
+    }
+    NewBasic.CreationTime = OriginalBasic.CreationTime;
+    Status = NtSetInformationFile(Replacement, &IoStatus, &NewBasic, sizeof(NewBasic), FileBasicInformation);
+    if (!NT_SUCCESS(Status) && !(dwReplaceFlags & REPLACEFILE_IGNORE_MERGE_ERRORS))
+        goto NtError;
+    Status = BasepMergeReplacementDacl(Original, Replacement);
+    if (!NT_SUCCESS(Status) && !(dwReplaceFlags & (REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS)))
+        goto NtError;
+
+    RenameLength = FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) + OriginalName.Length;
+    Rename = RtlAllocateHeap(RtlGetProcessHeap(), 0, RenameLength);
+    if (!Rename)
     {
         Error = ERROR_NOT_ENOUGH_MEMORY;
-        goto Cleanup ;
+        goto Cleanup;
     }
-    while (Status != STATUS_END_OF_FILE)
-    {
-        Status = NtReadFile(hReplacement, NULL, NULL, NULL, &IoStatusBlock, Buffer, 0x10000, NULL, NULL) ;
-        if (NT_SUCCESS(Status))
-        {
-            Status = NtWriteFile(hReplaced, NULL, NULL, NULL, &IoStatusBlock, Buffer,
-                    IoStatusBlock.Information, NULL, NULL) ;
-            if (!NT_SUCCESS(Status))
-            {
-                Error = RtlNtStatusToDosError(Status);
-                goto Cleanup;
-            }
-        }
-        else if (Status != STATUS_END_OF_FILE)
-        {
-            Error = RtlNtStatusToDosError(Status);
-            goto Cleanup;
-        }
-    }
-
+    Rename->ReplaceIfExists = TRUE;
+    Rename->RootDirectory = NULL;
+    Rename->FileNameLength = OriginalName.Length;
+    RtlCopyMemory(Rename->FileName, OriginalName.Buffer, OriginalName.Length);
+    Status = NtSetInformationFile(Replacement, &IoStatus, Rename, RenameLength, FileRenameInformation);
+    if (!NT_SUCCESS(Status))
+        goto NtError;
     Ret = TRUE;
+    goto Cleanup;
 
-    /* Perform resource cleanup */
+NtError:
+    Error = RtlNtStatusToDosError(Status);
 Cleanup:
-    if (hReplaced) NtClose(hReplaced);
-    if (hReplacement) NtClose(hReplacement);
-    if (Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
-
-    if (NtReplacementName.Buffer)
-        RtlFreeHeap(GetProcessHeap(), 0, NtReplacementName.Buffer);
-    if (NtReplacedName.Buffer)
-        RtlFreeHeap(GetProcessHeap(), 0, NtReplacedName.Buffer);
-
-    /* If there was an error, set the error code */
-    if(!Ret)
+    if (Original) NtClose(Original);
+    if (Replacement) NtClose(Replacement);
+    if (Rename) RtlFreeHeap(RtlGetProcessHeap(), 0, Rename);
+    RtlFreeUnicodeString(&OriginalName);
+    RtlFreeUnicodeString(&ReplacementName);
+    if (!Ret)
     {
         TRACE("ReplaceFileW failed (error=%lu)\n", Error);
         SetLastError(Error);
