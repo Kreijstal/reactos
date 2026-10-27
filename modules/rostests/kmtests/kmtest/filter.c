@@ -122,11 +122,16 @@ KmtFltConnect(
 {
     HRESULT hResult;
     DWORD Error;
+    WCHAR PortName[128] = L"\\Device\\";
 
     assert(ServiceName);
     assert(hPort);
 
-    hResult = FilterConnectCommunicationPort(ServiceName,
+    if (wcslen(PortName) + wcslen(ServiceName) >= sizeof(PortName) / sizeof(PortName[0]))
+        return ERROR_FILENAME_EXCED_RANGE;
+    wcscat(PortName, ServiceName);
+
+    hResult = FilterConnectCommunicationPort(PortName,
                                              0,
                                              NULL,
                                              0,

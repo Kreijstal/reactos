@@ -42,6 +42,8 @@ TestMessageHandler(
 
 /* Globals */
 static PDRIVER_OBJECT TestDriverObject;
+static PFLT_FILTER TestFilter;
+static PFLT_PORT TestClientPort;
 
 
 
@@ -209,7 +211,13 @@ TestClientConnect(
     _In_ ULONG SizeOfContext,
     _Outptr_result_maybenull_ PVOID *ConnectionPortCookie)
 {
-    return 0;
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"Kmtest-FltMgrLoad");
+    NTSTATUS Status;
+
+    Status = FltGetFilterFromName(&Name, &TestFilter);
+    if (NT_SUCCESS(Status))
+        TestClientPort = ClientPort;
+    return Status;
 }
 
 VOID
@@ -217,7 +225,9 @@ FLTAPI
 TestClientDisconnect(
     _In_opt_ PVOID ConnectionCookie)
 {
-
+    FltCloseClientPort(TestFilter, &TestClientPort);
+    FltObjectDereference(TestFilter);
+    TestFilter = NULL;
 }
 
 NTSTATUS

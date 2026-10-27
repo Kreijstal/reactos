@@ -22,6 +22,8 @@ typedef struct _FILTER_NAME
 
 
 
+#define FILTER_PORT_EA_NAME "FLTPORT"
+
 typedef struct _FILTER_PORT_DATA
 {
     ULONG Size;

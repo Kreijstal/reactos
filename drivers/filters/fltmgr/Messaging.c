@@ -263,7 +263,17 @@ FltpMsgDispatch(_In_ PDEVICE_OBJECT DeviceObject,
     StackPtr = IoGetCurrentIrpStackLocation(Irp);
 
     /* Check if this is a caller wanting to connect */
-    if (StackPtr->MajorFunction == IRP_MJ_CLOSE)
+    if (StackPtr->MajorFunction == IRP_MJ_CLEANUP)
+    {
+        PPORT_CCB Ccb = StackPtr->FileObject->FsContext2;
+        if (Ccb && FltpDisconnectPort(Ccb->Port))
+        {
+            InterlockedDecrement(&Ccb->Port->ServerPort->NumberOfConnections);
+            Ccb->Port->ServerPort->DisconnectNotify(Ccb->Port->Cookie);
+        }
+        Status = STATUS_SUCCESS;
+    }
+    else if (StackPtr->MajorFunction == IRP_MJ_CLOSE)
     {
         /* Create the client port for this connection and exit */
         Status = CloseClientPort(StackPtr->FileObject, Irp);
@@ -297,6 +307,9 @@ FltpServerPortClose(_In_opt_ PEPROCESS Process,
 
     /* Cast the object to a server port object */
     PortObject = (PFLT_SERVER_PORT_OBJECT)Object;
+
+    if (SystemHandleCount > 1)
+        return;
 
     /* Lock the connection list */
     Lock = &PortObject->Filter->ConnectionList.mLock;
@@ -383,9 +396,9 @@ FltpSetupCommunicationObjects(_In_ PDRIVER_OBJECT DriverObject)
 
     GENERIC_MAPPING Mapping =
     {
-        STANDARD_RIGHTS_READ,
-        STANDARD_RIGHTS_WRITE,
-        STANDARD_RIGHTS_EXECUTE | SYNCHRONIZE,
+        STANDARD_RIGHTS_READ | FLT_PORT_CONNECT,
+        DELETE | FLT_PORT_CONNECT,
+        0,
         FLT_PORT_ALL_ACCESS
     };
 
@@ -397,7 +410,8 @@ FltpSetupCommunicationObjects(_In_ PDRIVER_OBJECT DriverObject)
     ObjectTypeInitializer.GenericMapping = Mapping;
     ObjectTypeInitializer.PoolType = NonPagedPool;
     ObjectTypeInitializer.DefaultNonPagedPoolCharge = sizeof(FLT_SERVER_PORT_OBJECT);
-    ObjectTypeInitializer.ValidAccessMask = GENERIC_ALL;
+    ObjectTypeInitializer.ValidAccessMask = FLT_PORT_ALL_ACCESS;
+    ObjectTypeInitializer.SecurityRequired = TRUE;
     ObjectTypeInitializer.CloseProcedure = FltpServerPortClose;
     ObjectTypeInitializer.DeleteProcedure = FltpServerPortDelete;
     Status = ObCreateObjectType(&Name, &ObjectTypeInitializer, NULL, &ServerPortObjectType);
@@ -411,7 +425,7 @@ FltpSetupCommunicationObjects(_In_ PDRIVER_OBJECT DriverObject)
     ObjectTypeInitializer.GenericMapping = Mapping;
     ObjectTypeInitializer.PoolType = NonPagedPool;
     ObjectTypeInitializer.DefaultNonPagedPoolCharge = sizeof(FLT_PORT_OBJECT);
-    ObjectTypeInitializer.ValidAccessMask = GENERIC_ALL;
+    ObjectTypeInitializer.ValidAccessMask = FLT_PORT_ALL_ACCESS;
     ObjectTypeInitializer.CloseProcedure = FltpClientPortClose;
     ObjectTypeInitializer.DeleteProcedure = FltpClientPortDelete;
     Status = ObCreateObjectType(&Name, &ObjectTypeInitializer, NULL, &ClientPortObjectType);
@@ -623,26 +637,68 @@ CreateClientPort(_In_ PFILE_OBJECT FileObject,
     PFLT_PORT_OBJECT ClientPortObject = NULL;
     PFLT_PORT PortHandle = NULL;
     PPORT_CCB PortCCB = NULL;
+    UNICODE_STRING PortName;
+    HANDLE AccessHandle;
     //ULONG BufferLength;
     LONG NumConns;
     NTSTATUS Status;
 
     /* We received the buffer via FilterConnectCommunicationPort, cast it back to its original form */
-    FilterPortData = Irp->AssociatedIrp.SystemBuffer;
+    {
+        PFILE_FULL_EA_INFORMATION Ea = Irp->AssociatedIrp.SystemBuffer;
+        ULONG EaLength = IoGetCurrentIrpStackLocation(Irp)->Parameters.Create.EaLength;
+        ULONG ValueOffset = FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName) + sizeof(FILTER_PORT_EA_NAME);
 
-    /* Get a reference to the server port the filter created */
-    Status = ObReferenceObjectByName(&FilterPortData->PortName,
+        if (EaLength < ValueOffset || !Ea ||
+            Ea->EaNameLength != sizeof(FILTER_PORT_EA_NAME) - 1 ||
+            RtlCompareMemory(Ea->EaName, FILTER_PORT_EA_NAME, sizeof(FILTER_PORT_EA_NAME)) != sizeof(FILTER_PORT_EA_NAME) ||
+            Ea->EaValueLength < sizeof(FILTER_PORT_DATA) ||
+            Ea->EaValueLength > EaLength - ValueOffset)
+            return STATUS_INVALID_PARAMETER;
+        FilterPortData = (PFILTER_PORT_DATA)((PUCHAR)Ea + ValueOffset);
+        if (FilterPortData->Size < sizeof(FILTER_PORT_DATA) ||
+            FilterPortData->Size > Ea->EaValueLength)
+            return STATUS_INVALID_PARAMETER;
+    }
+
+    /* The name follows the fixed header in the captured EA. Do not follow
+     * the pointer copied from the caller's address space. */
+    PortName = FilterPortData->PortName;
+    if ((PortName.Length & (sizeof(WCHAR) - 1)) ||
+        PortName.Length > FilterPortData->Size - sizeof(FILTER_PORT_DATA))
+        return STATUS_INVALID_PARAMETER;
+    PortName.MaximumLength = PortName.Length;
+    PortName.Buffer = (PWCH)(FilterPortData + 1);
+
+    /* The captured name is kernel memory. Check the original caller's
+     * connection access separately when opening a temporary kernel handle. */
+    Status = ObReferenceObjectByName(&PortName,
                                      0,
                                      0,
-                                     FLT_PORT_ALL_ACCESS,
+                                     0,
                                      ServerPortObjectType,
-                                     ExGetPreviousMode(),
+                                     KernelMode,
                                      0,
                                      (PVOID *)&ServerPortObject);
     if (!NT_SUCCESS(Status))
     {
         return Status;
     }
+
+    Status = ObOpenObjectByPointer(ServerPortObject,
+                                   OBJ_KERNEL_HANDLE |
+                                       (Irp->RequestorMode == UserMode ? OBJ_FORCE_ACCESS_CHECK : 0),
+                                   NULL,
+                                   FLT_PORT_CONNECT,
+                                   ServerPortObjectType,
+                                   KernelMode,
+                                   &AccessHandle);
+    if (!NT_SUCCESS(Status))
+    {
+        ObDereferenceObject(ServerPortObject);
+        return Status;
+    }
+    ZwClose(AccessHandle);
 
     /* Increment the number of connections on the server port */
     NumConns = InterlockedIncrement(&ServerPortObject->NumberOfConnections);
@@ -680,6 +736,7 @@ CreateClientPort(_In_ PFILE_OBJECT FileObject,
     /* Initialize the locks */
     ExInitializeRundownProtection(&ClientPortObject->MsgNotifRundownRef);
     ExInitializeFastMutex(&ClientPortObject->Lock);
+    KeInitializeEvent(&ClientPortObject->DisconnectEvent, NotificationEvent, FALSE);
 
     /* Set the server port object this belongs to */
     ClientPortObject->ServerPort = ServerPortObject;
@@ -766,14 +823,16 @@ NTSTATUS
 CloseClientPort(_In_ PFILE_OBJECT FileObject,
                 _Inout_ PIRP Irp)
 {
-    PFLT_CCB Ccb;
+    PPORT_CCB Ccb;
 
-    Ccb = (PFLT_CCB)FileObject->FsContext2;
+    Ccb = FileObject->FsContext2;
+    if (!Ccb)
+        return STATUS_SUCCESS;
+    FileObject->FsContext2 = NULL;
 
     /* Remove the reference on the filter we added when we opened the port */
-    ObDereferenceObject(Ccb->Data.Port.Port);
-
-    // FIXME: Free the CCB
+    ObDereferenceObject(Ccb->Port);
+    ExFreePoolWithTag(Ccb, FM_TAG_CCB);
 
     return STATUS_SUCCESS;
 }

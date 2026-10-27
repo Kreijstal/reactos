@@ -30,8 +30,8 @@ FltpStartingToDrainObject(
 );
 
 VOID
-FltpMiniFilterDriverUnload(
-);
+NTAPI
+FltpMiniFilterDriverUnload(_In_ PDRIVER_OBJECT DriverObject);
 
 NTSTATUS
 FltpAttachFrame(
@@ -121,6 +121,7 @@ FltRegisterFilter(_In_ PDRIVER_OBJECT DriverObject,
     ULONG Count = 0;
     PCHAR Ptr;
     NTSTATUS Status;
+    PLIST_ENTRY Entry;
 
     *RetFilter = NULL;
 
@@ -173,6 +174,7 @@ FltRegisterFilter(_In_ PDRIVER_OBJECT DriverObject,
     /* Initialize the base object data */
     Filter->Base.Flags = FLT_OBFL_TYPE_FILTER;
     Filter->Base.PointerCount = 1;
+    InitializeListHead(&Filter->Base.PrimaryLink);
     FltpExInitializeRundownProtection(&Filter->Base.RundownRef);
     FltObjectReference(&Filter->Base);
 
@@ -212,7 +214,7 @@ FltRegisterFilter(_In_ PDRIVER_OBJECT DriverObject,
     {
         /* Register the contexts for this filter */
         Status = FltpRegisterContexts(Filter, Registration->ContextRegistration);
-        if (NT_SUCCESS(Status))
+        if (!NT_SUCCESS(Status))
         {
             goto Quit;
         }
@@ -274,25 +276,47 @@ FltRegisterFilter(_In_ PDRIVER_OBJECT DriverObject,
     {
         goto Quit;
     }
+    Filter->Frame = Frame;
+
+    /* Publish a fully initialized filter and reject duplicate registrations
+     * while the list is locked. Name lookups must never see partial state. */
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&FilterListLock, TRUE);
+    for (Entry = FilterList.Flink; Entry != &FilterList; Entry = Entry->Flink)
+    {
+        PFLT_FILTER Existing = CONTAINING_RECORD(Entry, FLT_FILTER, Base.PrimaryLink);
+        if (Existing->DriverObject == DriverObject ||
+            RtlEqualUnicodeString(&Existing->Name, &Filter->Name, TRUE) ||
+            RtlEqualUnicodeString(&Existing->DefaultAltitude, &Filter->DefaultAltitude, TRUE))
+        {
+            Status = STATUS_FLT_INSTANCE_ALTITUDE_COLLISION;
+            break;
+        }
+    }
+    if (NT_SUCCESS(Status))
+    {
+        Filter->OldDriverUnload = (PFLT_FILTER_UNLOAD_CALLBACK)DriverObject->DriverUnload;
+        if (Registration->FilterUnloadCallback &&
+            !FlagOn(Registration->Flags, FLTFL_REGISTRATION_DO_NOT_SUPPORT_SERVICE_STOP))
+        {
+            DriverObject->DriverUnload = FltpMiniFilterDriverUnload;
+        }
+        else
+        {
+            DriverObject->DriverUnload = NULL;
+        }
+        ObReferenceObject(DriverObject);
+        InsertTailList(&FilterList, &Filter->Base.PrimaryLink);
+    }
+    ExReleaseResourceLite(&FilterListLock);
+    KeLeaveCriticalRegion();
+    if (!NT_SUCCESS(Status))
+        goto Quit;
 
     //
     // - Slot the filter into the correct altitude location
     // - More stuff??
     //
-
-    /* Store any existing driver unload routine before we make any changes */
-    Filter->OldDriverUnload = (PFLT_FILTER_UNLOAD_CALLBACK)DriverObject->DriverUnload;
-
-    /* Check we opted not to have an unload routine, or if we want to stop the driver from being unloaded */
-    if (Registration->FilterUnloadCallback && !FlagOn(Filter->Flags, FLTFL_REGISTRATION_DO_NOT_SUPPORT_SERVICE_STOP))
-    {
-        DriverObject->DriverUnload = (PDRIVER_UNLOAD)FltpMiniFilterDriverUnload;
-    }
-    else
-    {
-        DriverObject->DriverUnload = (PDRIVER_UNLOAD)NULL;
-    }
-
 
 Quit:
 
@@ -307,6 +331,8 @@ Quit:
 
         // Add cleanup for context resources
 
+        if (Filter->DefaultAltitude.Buffer)
+            ExFreePoolWithTag(Filter->DefaultAltitude.Buffer, FM_TAG_UNICODE_STRING);
         ExDeleteResourceLite(&Filter->InstanceList.rLock);
         ExFreePoolWithTag(Filter, FM_TAG_FILTER);
     }
@@ -330,6 +356,13 @@ FltUnregisterFilter(_In_ PFLT_FILTER Filter)
         FltObjectDereference(&Filter->Base);
         return;
     }
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&FilterListLock, TRUE);
+    RemoveEntryList(&Filter->Base.PrimaryLink);
+    InitializeListHead(&Filter->Base.PrimaryLink);
+    ExReleaseResourceLite(&FilterListLock);
+    KeLeaveCriticalRegion();
 
     /* Lock the instance list */
     KeEnterCriticalRegion();
@@ -368,6 +401,10 @@ FltUnregisterFilter(_In_ PFLT_FILTER Filter)
     /* We're finished cleaning up now */
     FltpExRundownCompleted(&Filter->Base.RundownRef);
 
+    if (Filter->DefaultAltitude.Buffer)
+        ExFreePoolWithTag(Filter->DefaultAltitude.Buffer, FM_TAG_UNICODE_STRING);
+    ObDereferenceObject(Filter->DriverObject);
+
     /* Hand the memory back */
     ExFreePoolWithTag(Filter, FM_TAG_FILTER);
 }
@@ -403,10 +440,26 @@ NTAPI
 FltGetFilterFromName(_In_ PCUNICODE_STRING FilterName,
                      _Out_ PFLT_FILTER *RetFilter)
 {
-   UNIMPLEMENTED;
-    UNREFERENCED_PARAMETER(FilterName);
+    PLIST_ENTRY Entry;
+    NTSTATUS Status = STATUS_FLT_FILTER_NOT_FOUND;
     *RetFilter = NULL;
-    return STATUS_NOT_IMPLEMENTED;
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceSharedLite(&FilterListLock, TRUE);
+    for (Entry = FilterList.Flink; Entry != &FilterList; Entry = Entry->Flink)
+    {
+        PFLT_FILTER Filter = CONTAINING_RECORD(Entry, FLT_FILTER, Base.PrimaryLink);
+        if (RtlEqualUnicodeString(&Filter->Name, FilterName, TRUE))
+        {
+            Status = FltObjectReference(Filter);
+            if (NT_SUCCESS(Status))
+                *RetFilter = Filter;
+            break;
+        }
+    }
+    ExReleaseResourceLite(&FilterListLock);
+    KeLeaveCriticalRegion();
+    return Status;
 }
 
 
@@ -429,9 +482,34 @@ FltpStartingToDrainObject(_Inout_ PFLT_OBJECT Object)
 }
 
 VOID
-FltpMiniFilterDriverUnload()
+NTAPI
+FltpMiniFilterDriverUnload(_In_ PDRIVER_OBJECT DriverObject)
 {
-    __debugbreak();
+    PLIST_ENTRY Entry;
+    PFLT_FILTER_UNLOAD_CALLBACK Unload = NULL;
+    PDRIVER_UNLOAD OldUnload = NULL;
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceSharedLite(&FilterListLock, TRUE);
+    for (Entry = FilterList.Flink; Entry != &FilterList; Entry = Entry->Flink)
+    {
+        PFLT_FILTER Filter = CONTAINING_RECORD(Entry, FLT_FILTER, Base.PrimaryLink);
+        if (Filter->DriverObject == DriverObject)
+        {
+            Unload = Filter->FilterUnload;
+            OldUnload = (PDRIVER_UNLOAD)Filter->OldDriverUnload;
+            break;
+        }
+    }
+    ExReleaseResourceLite(&FilterListLock);
+    KeLeaveCriticalRegion();
+
+    /* The unload callback unregisters its filter and waits for rundown.
+     * Do not retain a filter reference across that callback. */
+    if (Unload)
+        Unload(FLTFL_FILTER_UNLOAD_MANDATORY);
+    if (OldUnload && OldUnload != FltpMiniFilterDriverUnload)
+        OldUnload(DriverObject);
 }
 
 
@@ -548,10 +626,17 @@ GetFilterAltitude(_In_ PFLT_FILTER Filter,
                                            &BytesRequired);
             if (NT_SUCCESS(Status))
             {
+                if (BytesRequired > MAXUSHORT || BytesRequired % sizeof(WCHAR))
+                {
+                    Status = STATUS_INVALID_PARAMETER;
+                    goto Quit;
+                }
                 /* We made it, setup the return buffer */
                 AltitudeString->Length = BytesRequired;
                 AltitudeString->MaximumLength = BytesRequired;
                 AltitudeString->Buffer = AltBuffer;
+                if (BytesRequired && AltBuffer[BytesRequired / sizeof(WCHAR) - 1] == UNICODE_NULL)
+                    AltitudeString->Length -= sizeof(WCHAR);
             }
         }
     }

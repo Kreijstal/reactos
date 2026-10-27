@@ -8,6 +8,7 @@ list(APPEND FLTMGR_TEST_DRV_SOURCE
 
 add_library(fltmgrreg_drv MODULE ${FLTMGR_TEST_DRV_SOURCE})
 set_module_type(fltmgrreg_drv kernelmodedriver)
+set_target_properties(fltmgrreg_drv PROPERTIES OUTPUT_NAME FltMgrReg_drv)
 target_link_libraries(fltmgrreg_drv kmtest_printf ${PSEH_LIB})
 add_importlibs(fltmgrreg_drv fltmgr ntoskrnl hal)
 target_compile_definitions(fltmgrreg_drv PRIVATE KMT_STANDALONE_DRIVER KMT_FILTER_DRIVER NTDDI_VERSION=NTDDI_WS03SP1)

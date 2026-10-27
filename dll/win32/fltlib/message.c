@@ -32,6 +32,7 @@ FilterConnectCommunicationPort(_In_ LPCWSTR lpPortName,
     OBJECT_ATTRIBUTES ObjectAttributes;
     IO_STATUS_BLOCK IoStatusBlock;
     PFILTER_PORT_DATA PortData;
+    PFILE_FULL_EA_INFORMATION Ea;
     UNICODE_STRING DeviceName;
     UNICODE_STRING PortName;
     HANDLE FileHandle;
@@ -54,14 +55,20 @@ FilterConnectCommunicationPort(_In_ LPCWSTR lpPortName,
 
     /* Calculate and allocate the size of the required buffer */
     BufferSize = sizeof(FILTER_PORT_DATA) + PortNameSize + wSizeOfContext;
-    PortData = RtlAllocateHeap(GetProcessHeap(), 0, BufferSize);
-    if (PortData == NULL) return E_OUTOFMEMORY;
+    if (BufferSize > MAXUSHORT)
+        return E_INVALIDARG;
+    BufferSize += FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName) + sizeof(FILTER_PORT_EA_NAME);
+    Ea = RtlAllocateHeap(GetProcessHeap(), HEAP_ZERO_MEMORY, BufferSize);
+    if (Ea == NULL) return E_OUTOFMEMORY;
+    Ea->EaNameLength = sizeof(FILTER_PORT_EA_NAME) - 1;
+    Ea->EaValueLength = BufferSize - FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName) - sizeof(FILTER_PORT_EA_NAME);
+    RtlCopyMemory(Ea->EaName, FILTER_PORT_EA_NAME, sizeof(FILTER_PORT_EA_NAME));
+    PortData = (PFILTER_PORT_DATA)(Ea->EaName + sizeof(FILTER_PORT_EA_NAME));
 
     /* Clear out the buffer and find the end of the fixed struct */
-    RtlZeroMemory(PortData, BufferSize);
     Ptr = (PCHAR)(PortData + 1);
 
-    PortData->Size = BufferSize;
+    PortData->Size = Ea->EaValueLength;
     PortData->Options = dwOptions;
 
     /* Setup the port name */
@@ -76,6 +83,7 @@ FilterConnectCommunicationPort(_In_ LPCWSTR lpPortName,
     {
         /* Add that into the buffer too */
         PortData->Context = Ptr;
+        PortData->ContextSize = wSizeOfContext;
         RtlCopyMemory(PortData->Context, lpContext, wSizeOfContext);
     }
 
@@ -83,7 +91,7 @@ FilterConnectCommunicationPort(_In_ LPCWSTR lpPortName,
     RtlInitUnicodeString(&DeviceName, L"\\Global??\\FltMgrMsg");
     InitializeObjectAttributes(&ObjectAttributes,
                                &DeviceName,
-                               OBJ_EXCLUSIVE | OBJ_CASE_INSENSITIVE,
+                               OBJ_CASE_INSENSITIVE,
                                NULL,
                                NULL);
 
@@ -108,7 +116,7 @@ FilterConnectCommunicationPort(_In_ LPCWSTR lpPortName,
                           0,
                           FILE_OPEN_IF,
                           0,
-                          PortData,
+                          Ea,
                           BufferSize);
     if (NT_SUCCESS(Status))
     {
@@ -121,7 +129,7 @@ FilterConnectCommunicationPort(_In_ LPCWSTR lpPortName,
     }
 
     /* Cleanup and return */
-    RtlFreeHeap(GetProcessHeap(), 0, PortData);
+    RtlFreeHeap(GetProcessHeap(), 0, Ea);
     return hr;
 }
 
