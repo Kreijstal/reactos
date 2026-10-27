@@ -3887,13 +3887,27 @@ WritePartitionsToDisk(
     /* The PARTMGR should have notified the MOUNTMGR that new volumes
      * associated with the new partitions had to be created */
 
-    /* Assign valid device names to new volumes */
+    /* Assign valid device names to new volumes. They arrive asynchronously,
+     * so wait (up to 10 seconds) for each one to appear. */
     for (Entry = List->VolumesList.Flink;
          Entry != &List->VolumesList;
          Entry = Entry->Flink)
     {
+        LARGE_INTEGER Delay;
+        ULONG Retry;
+
         Volume = CONTAINING_RECORD(Entry, VOLENTRY, ListEntry);
-        InitVolumeDeviceName(Volume, NULL);
+        Delay.QuadPart = -100 * 10000LL; // 100 ms
+        for (Retry = 0; Retry < 100; Retry++)
+        {
+            Status = InitVolumeDeviceName(Volume, NULL);
+            if ((Status != STATUS_OBJECT_NAME_NOT_FOUND) &&
+                (Status != STATUS_OBJECT_PATH_NOT_FOUND))
+            {
+                break;
+            }
+            NtDelayExecution(FALSE, &Delay);
+        }
     }
 
     return TRUE;
