@@ -184,6 +184,20 @@ PspReapRoutine(IN PVOID Context)
             /* Get the first Thread Entry */
             Thread = CONTAINING_RECORD(NextEntry, ETHREAD, ReaperLink);
 
+#if defined(CONFIG_SMP) && defined(_M_AMD64)
+            /* KeTerminateThread queues the reaper before its final context
+             * switch. Another processor can run us while that thread still
+             * uses its stack, including inside the TLB-shootdown IPI issued
+             * by MmDeleteKernelStack. Wait for the amd64 switch hand-off. */
+#if (NTDDI_VERSION < NTDDI_WIN7)
+            while (Thread->Tcb.SwapBusy)
+#else
+            while (*(volatile BOOLEAN *)&Thread->Tcb.Running)
+#endif
+                YieldProcessor();
+            KeMemoryBarrier();
+#endif
+
             /* Delete this entry's kernel stack */
             MmDeleteKernelStack((PVOID)Thread->Tcb.StackBase,
 #if (NTDDI_VERSION >= NTDDI_WIN8)
