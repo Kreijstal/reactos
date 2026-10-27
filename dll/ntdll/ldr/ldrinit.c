@@ -790,7 +790,7 @@ LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL)
     RTL_CALLER_ALLOCATED_ACTIVATION_CONTEXT_STACK_FRAME_EXTENDED ActCtx;
     ULONG BreakOnDllLoad;
     PTEB OldTldTeb;
-    BOOLEAN DllStatus;
+    BOOLEAN DllStatus, AttachRaised;
 
     DPRINT("LdrpRunInitializeRoutines() called for %wZ (%p/%p)\n",
         &LdrpImageEntry->BaseDllName,
@@ -966,6 +966,7 @@ LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL)
             RtlActivateActivationContextUnsafeFast(&ActCtx,
                                                    LdrEntry->EntryPointActivationContext);
 
+            AttachRaised = FALSE;
             _SEH2_TRY
             {
                 /* Check if it has TLS */
@@ -989,6 +990,7 @@ LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL)
             _SEH2_EXCEPT(LdrpInitRoutineExceptionFilter(_SEH2_GetExceptionInformation(), LdrEntry))
             {
                 DllStatus = FALSE;
+                AttachRaised = TRUE;
                 DPRINT1("WARNING: Exception 0x%x during LdrpCallInitRoutine(DLL_PROCESS_ATTACH) for %wZ\n",
                         _SEH2_GetExceptionCode(), &LdrEntry->BaseDllName);
             }
@@ -1000,8 +1002,10 @@ LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL)
             /* Save the Current DLL Initializer */
             LdrpCurrentDllInitializer = OldInitializer;
 
-            /* Mark the entry as processed */
-            LdrEntry->Flags |= LDRP_PROCESS_ATTACH_CALLED;
+            /* Mark the entry as processed. A DLL whose attach raised gets no
+             * DLL_PROCESS_DETACH; one that returned FALSE does. */
+            if (!AttachRaised)
+                LdrEntry->Flags |= LDRP_PROCESS_ATTACH_CALLED;
 
             /* Fail if DLL init failed */
             if (!DllStatus)
