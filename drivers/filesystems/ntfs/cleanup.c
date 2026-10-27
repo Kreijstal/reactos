@@ -218,7 +218,8 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
         if (!DeletePending &&
             ((FileObject->Flags & FO_FILE_MODIFIED) ||
              (((PNTFS_CCB)FileObject->FsContext2)->Flags & CCB_UPDATE_CHANGE_TIME)) &&
-            !(DeviceExt->Flags & (VCB_VOLUME_DISMOUNTED | VCB_DEVICE_REMOVED | VCB_VOLUME_READ_ONLY)))
+            !(DeviceExt->Flags & (VCB_VOLUME_DISMOUNTED | VCB_DEVICE_REMOVED | VCB_VOLUME_READ_ONLY)) &&
+            !(Fcb->Flags & FCB_DELETED))
         {
             NTSTATUS Status = NtfsStampWriteTimes(DeviceExt, Fcb, FileObject);
             if (!NT_SUCCESS(Status))

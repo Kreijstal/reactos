@@ -258,7 +258,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         if (!NT_SUCCESS(Status))
             return Status;
 
-        if (ToRead != Length)
+        if (ToRead != Length && (IrpFlags & IRP_PAGING_IO))
             RtlZeroMemory(Buffer + ToRead, Length - ToRead);
         *LengthRead = ToRead;
         return STATUS_SUCCESS;
@@ -320,7 +320,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         RtlCopyMemory(Buffer, ReadBuffer + (ReadOffset - RealReadOffset), ToRead);
     }
 
-    if (ToRead != Length)
+    if (ToRead != Length && (IrpFlags & IRP_PAGING_IO))
     {
         RtlZeroMemory(Buffer + ToRead, Length - ToRead);
     }
@@ -445,6 +445,17 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
         PERESOURCE Resource = (Irp->Flags & IRP_PAGING_IO) ?
                               &Fcb->PagingIoResource : &Fcb->MainResource;
         IO_STATUS_BLOCK IoStatus;
+
+        /* Metadata reads may block even for an asynchronous data read.
+         * Pin the destination in the caller before posting to a worker. */
+        if (!(IrpContext->Flags & IRPCONTEXT_CANWAIT) &&
+            !(Irp->Flags & IRP_PAGING_IO) && !(Fcb->Flags & FCB_IS_VOLUME))
+        {
+            Status = NtfsLockUserBuffer(Irp, ReadLength, IoWriteAccess);
+            if (!NT_SUCCESS(Status))
+                return Status;
+            return NtfsMarkIrpContextForQueue(IrpContext);
+        }
 
         if (!NtfsCheckFileLock(Fcb, Irp, &ReadOffset, ReadLength, FALSE))
         {
@@ -825,8 +836,26 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     if (NT_SUCCESS(Status) && !(IrpFlags & IRP_PAGING_IO) &&
         WriteOffset + Length > (ULONGLONG)Fcb->RFCB.ValidDataLength.QuadPart)
     {
-        Fcb->RFCB.ValidDataLength.QuadPart = WriteOffset + Length;
-        CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
+        if (DataContext->pRecord->IsNonResident)
+        {
+            PNTFS_ATTR_RECORD Attribute;
+            PFILE_RECORD_HEADER InitializedRecord = NULL;
+            Status = NtfsResolveAttributeHolder(DeviceExt, DataContext, Holder,
+                                                 &InitializedRecord, &AttributeOffset);
+            if (NT_SUCCESS(Status))
+            {
+                Attribute = (PNTFS_ATTR_RECORD)((PUCHAR)InitializedRecord + AttributeOffset);
+                Attribute->NonResident.InitializedSize = max(Attribute->NonResident.InitializedSize,
+                                                              WriteOffset + Length);
+                Status = UpdateFileRecord(DeviceExt, InitializedRecord->MFTRecordNumber, InitializedRecord);
+            }
+            NtfsReleaseAttributeHolder(DeviceExt, Holder, InitializedRecord);
+        }
+        if (NT_SUCCESS(Status))
+        {
+            Fcb->RFCB.ValidDataLength.QuadPart = WriteOffset + Length;
+            CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
+        }
     }
 
     // A clamped paging write stored all the stream had room for, so as far as
@@ -869,7 +898,9 @@ NtfsRefreshDataCache(PDEVICE_EXTENSION Vcb, PFILE_OBJECT FileObject)
         Fcb->RFCB.AllocationSize.QuadPart = Context->pRecord->IsNonResident ?
                                           Context->pRecord->NonResident.AllocatedSize :
                                           Context->pRecord->Resident.ValueLength;
-        Fcb->RFCB.ValidDataLength = Fcb->RFCB.FileSize;
+        Fcb->RFCB.ValidDataLength.QuadPart = Context->pRecord->IsNonResident ?
+            min(Context->pRecord->NonResident.InitializedSize, Fcb->RFCB.FileSize.QuadPart) :
+            Fcb->RFCB.FileSize.QuadPart;
         CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
         Fcb->DataCacheGeneration = Generation;
         ReleaseAttributeContext(Context);
@@ -934,8 +965,9 @@ NtfsCachedWriteFile(PDEVICE_EXTENSION Vcb,
 
     if (End.QuadPart > Fcb->RFCB.ValidDataLength.QuadPart)
     {
-        Fcb->RFCB.ValidDataLength = End;
-        CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
+        Status = NtfsSetValidDataLength(Vcb, Fcb, FileObject, End.QuadPart, NULL);
+        if (!NT_SUCCESS(Status))
+            return Status;
     }
     *Written = Length;
     return STATUS_SUCCESS;
