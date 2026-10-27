@@ -88,7 +88,7 @@ START_TEST(MmCygwinSectionStress)
                                NULL);
 
     Status = ZwCreateFile(&FileHandle,
-                          GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,
+                          GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE,
                           &ObjectAttributes,
                           &IoStatus,
                           NULL,

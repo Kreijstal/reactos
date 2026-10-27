@@ -61,7 +61,8 @@ GetNtDdiIndex(ULONG NtDdiVersion)
 }
 
 #define GetTypeIndex(TypeName, NtDdiVersion) \
-    (TypeIndex_ ## TypeName[GetNtDdiIndex(NtDdiVersion)])
+    (TypeIndex_ ## TypeName[GetNtDdiIndex(NtDdiVersion)] + \
+     ((is_reactos() && TypeIndex_ ## TypeName[0] >= 17) ? 2 : 0))
 
 static
 POBJECT_TYPE
@@ -204,6 +205,12 @@ VOID
 TestObjectTypes(VOID)
 {
     using OBJECT_TYPE = TOBJECT_TYPE<NtDdiVersion>;
+    RTL_OSVERSIONINFOW Version = { sizeof(Version) };
+    RtlGetVersion(&Version);
+    /* ReactOS retains its legacy object-type layout and creation order, but
+     * the NT target selects the token and process access mappings. */
+    const ULONG MappingVersion = is_reactos() ?
+        (Version.dwMajorVersion << 24) | (Version.dwMinorVersion << 16) : NtDdiVersion;
     static OBJECT_TYPE* ObpTypeObjectType;
     static OBJECT_TYPE* ObpDefaultObject;
     using OB_SECURITY_METHOD = decltype(ObpTypeObjectType->TypeInfo.SecurityProcedure);
@@ -245,14 +252,15 @@ TestObjectTypes(VOID)
 #endif
 
 #define DIR_SEC_REQUIRED ((NtDdiVersion >= NTDDI_VISTA) ? OBT_SECURITY_REQUIRED : 0)
-#define TOKEN_GENERIC_READ ((NtDdiVersion >= NTDDI_VISTA) ? 0x02001a : 0x020008)
-#define TOKEN_GENERIC_WRITE ((NtDdiVersion >= NTDDI_VISTA) ? 0x0201e0 : 0x0200e0)
-#define TOKEN_GENERIC_EXECUTE ((NtDdiVersion >= NTDDI_VISTA) ? 0x020005 : 0x020000)
-#define PROCESS_GENERIC_WRITE ((NtDdiVersion >= NTDDI_VISTA) ? 0x020bea : 0x020beb)
-#define PROCESS_GENERIC_EXECUTE ((NtDdiVersion >= NTDDI_VISTA) ? 0x121001 : 0x120000)
+#define TOKEN_GENERIC_READ ((MappingVersion >= NTDDI_VISTA) ? 0x02001a : 0x020008)
+#define TOKEN_GENERIC_WRITE ((MappingVersion >= NTDDI_VISTA) ? 0x0201e0 : 0x0200e0)
+#define TOKEN_GENERIC_EXECUTE ((MappingVersion >= NTDDI_VISTA) ? 0x020005 : 0x020000)
+#define PROCESS_GENERIC_WRITE ((MappingVersion >= NTDDI_VISTA) ? 0x020bea : 0x020beb)
+#define PROCESS_GENERIC_EXECUTE ((MappingVersion >= NTDDI_VISTA) ? 0x121001 : 0x120000)
 #define PROCESS_GENERIC_ALL ((is_reactos() ||(NtDdiVersion >= NTDDI_VISTA)) ? 0x001fffff : 0x1f0fff)
 #define THREAD_GENERIC_WRITE ((is_reactos() ||(NtDdiVersion >= NTDDI_VISTA)) ? 0x020437 : 0x020037)
-#define THREAD_GENERIC_EXECUTE ((is_reactos() ||(NtDdiVersion >= NTDDI_VISTA)) ? 0x120800 : 0x120000)
+#define THREAD_GENERIC_EXECUTE ((is_reactos() || MappingVersion >= NTDDI_WIN8) ? 0x121800 : \
+                                MappingVersion >= NTDDI_VISTA ? 0x120800 : 0x120000)
 #define THREAD_GENERIC_ALL ((is_reactos() ||(NtDdiVersion >= NTDDI_VISTA)) ? 0x1fffff : 0x1f03ff)
 #define JOB_GENERIC_ALL ((is_reactos() ||(NtDdiVersion >= NTDDI_VISTA)) ? 0x1f001f : 0x1f03ff)
 #define KEY_GENERIC_EXECUTE ((NtDdiVersion >= NTDDI_VISTA) ? 0x020039 : 0x020019)
@@ -285,9 +293,9 @@ TestObjectTypes(VOID)
     if (NtDdiVersion <= NTDDI_WS03)
     {
         // 0x7b2 is used for Server 2003 SP2 RTM, it seems it was changed to 0xfb2 in some patch level.
-        CheckObjectType(Port, LpcPortObjectType,                    OBT_PAGED_POOL,                             0xfb2,  0x020001, 0x010001, 0x000000, 0x1f0001, 0x1f0001);
+        CheckObjectType(Port, LpcPortObjectType,                    OBT_PAGED_POOL,                             is_reactos() ? 0x7b2 : 0xfb2,  0x020001, 0x010001, 0x000000, 0x1f0001, 0x1f0001);
         // 0x7b2 is used for Server 2003 SP2 RTM, it seems it was changed to 0xfb2 in some patch level.
-        CheckObjectType(WaitablePort, LpcWaitablePortObjectType,    OBT_NO_DEFAULT,                             0xfb2,  0x020001, 0x010001, 0x000000, 0x1f0001, 0x1f0001);
+        CheckObjectType(WaitablePort, LpcWaitablePortObjectType,    OBT_NO_DEFAULT,                             is_reactos() ? 0x7b2 : 0xfb2,  0x020001, 0x010001, 0x000000, 0x1f0001, 0x1f0001);
     }
     CheckObjectType(Adapter, IoAdapterObjectType,               0,                                          0x100,  0x120089, 0x120116, 0x1200a0, 0x1f01ff, 0x1f01ff);
     CheckObjectType(Controller, IoControllerObjectType,         0,                                          0x100,  0x120089, 0x120116, 0x1200a0, 0x1f01ff, 0x1f01ff);

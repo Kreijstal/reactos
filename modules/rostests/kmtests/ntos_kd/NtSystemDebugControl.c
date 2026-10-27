@@ -37,6 +37,11 @@ GetNtDdiVersion(VOID)
         return 0;
     }
 
+    /* Windows 10 feature releases use the build number, not service packs,
+     * for the low NTDDI bits. This test only needs the 2004 boundary. */
+    if (verInfo.dwMajorVersion == 10 && verInfo.dwMinorVersion == 0)
+        return verInfo.dwBuildNumber >= 19041 ? NTDDI_WIN10_VB : NTDDI_WIN10;
+
     Version = ((((verInfo.dwMajorVersion & 0xFF)  << 8)  |
                  (verInfo.dwMinorVersion & 0xFF)) << 16) |
               (((verInfo.wServicePackMajor & 0xFF) << 8) |
