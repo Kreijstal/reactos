@@ -917,9 +917,9 @@ PartitionHandleDeviceControl(
         {
             PMOUNTDEV_NAME name = Irp->AssociatedIrp.SystemBuffer;
 
-            if (!VerifyIrpOutBufferSize(Irp, sizeof(USHORT)))
+            if (!VerifyIrpOutBufferSize(Irp, sizeof(MOUNTDEV_NAME)))
             {
-                status = STATUS_BUFFER_TOO_SMALL;
+                status = STATUS_INVALID_PARAMETER;
                 break;
             }
 
@@ -928,7 +928,7 @@ PartitionHandleDeviceControl(
             // return NameLength back
             if (!VerifyIrpOutBufferSize(Irp, sizeof(USHORT) + name->NameLength))
             {
-                Irp->IoStatus.Information = sizeof(USHORT);
+                Irp->IoStatus.Information = sizeof(MOUNTDEV_NAME);
                 status = STATUS_BUFFER_OVERFLOW;
                 break;
             }
@@ -946,10 +946,10 @@ PartitionHandleDeviceControl(
             PBASIC_VOLUME_UNIQUE_ID basicVolId = (PBASIC_VOLUME_UNIQUE_ID)&uniqueId->UniqueId;
             PUNICODE_STRING InterfaceName;
 
-            // Check whether the minimal header size was provided
-            if (!VerifyIrpOutBufferSize(Irp, headerSize))
+            // Check whether the minimal structure size was provided
+            if (!VerifyIrpOutBufferSize(Irp, sizeof(MOUNTDEV_UNIQUE_ID)))
             {
-                status = STATUS_BUFFER_TOO_SMALL;
+                status = STATUS_INVALID_PARAMETER;
                 break;
             }
 
@@ -984,7 +984,7 @@ PartitionHandleDeviceControl(
             if (!VerifyIrpOutBufferSize(Irp, headerSize + uniqueId->UniqueIdLength))
             {
                 PartMgrReleaseLayoutLock(fdoExtension);
-                Irp->IoStatus.Information = headerSize;
+                Irp->IoStatus.Information = sizeof(MOUNTDEV_UNIQUE_ID);
                 status = STATUS_BUFFER_OVERFLOW;
                 break;
             }
@@ -1026,6 +1026,14 @@ PartitionHandleDeviceControl(
             break;
         }
         case IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME:
+        {
+            // A basic volume suggests no drive letter
+            if (!VerifyIrpOutBufferSize(Irp, sizeof(MOUNTDEV_SUGGESTED_LINK_NAME)))
+                status = STATUS_INVALID_PARAMETER;
+            else
+                status = STATUS_NOT_FOUND;
+            break;
+        }
         case IOCTL_MOUNTDEV_LINK_CREATED:
         case IOCTL_MOUNTDEV_LINK_DELETED:
 #if (NTDDI_VERSION >= NTDDI_WS03)
