@@ -103,7 +103,11 @@ static BOOL WINAPI SdbpWriteStringtable(PDB pdb)
  */
 PDB WINAPI SdbCreateDatabase(LPCWSTR path, PATH_TYPE type)
 {
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN10)
+    static const DWORD version_major = 3, version_minor = 0;
+#else
     static const DWORD version_major = 2, version_minor = 1;
+#endif
     static const char* magic = "sdbf";
     PDB pdb;
 
