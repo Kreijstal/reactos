@@ -679,7 +679,7 @@ static void test__lwrite( void )
 static void test_CopyFileA(void)
 {
     char temp_path[MAX_PATH];
-    char source[MAX_PATH], dest[MAX_PATH];
+    char source[MAX_PATH], dest[MAX_PATH], alias[MAX_PATH];
     static const char prefix[] = "pfx";
     HANDLE hfile;
     HANDLE hmapfile;
@@ -899,6 +899,34 @@ static void test_CopyFileA(void)
     ok(ret, "SetFileAttributesA: error %ld\n", GetLastError());
     ret = SetFileAttributesA(dest, FILE_ATTRIBUTE_NORMAL);
     ok(ret, "SetFileAttributesA: error %ld\n", GetLastError());
+
+    /* Reject the same file before truncating a nonempty destination. */
+    retok = CopyFileA(source, source, FALSE);
+    ok(!retok && GetLastError() == ERROR_SHARING_VIOLATION,
+       "copying a nonempty file to itself returned %d, error %lu\n", retok, GetLastError());
+
+    ret = GetTempFileNameA(temp_path, prefix, 0, alias);
+    ok(ret != 0, "GetTempFileNameA error %lu\n", GetLastError());
+    ret = DeleteFileA(alias);
+    ok(ret, "DeleteFileA error %lu\n", GetLastError());
+    if (CreateHardLinkA(alias, source, NULL))
+    {
+        retok = CopyFileA(source, alias, FALSE);
+        ok(!retok && GetLastError() == ERROR_SHARING_VIOLATION,
+           "copying to a hard link returned %d, error %lu\n", retok, GetLastError());
+        ret = DeleteFileA(alias);
+        ok(ret, "DeleteFileA error %lu\n", GetLastError());
+    }
+    else
+        win_skip("Could not create a hard link, error %lu\n", GetLastError());
+
+    hfile = CreateFileA(source, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, 0);
+    ok(hfile != INVALID_HANDLE_VALUE, "failed to open source, error %lu\n", GetLastError());
+    memset(buf, 0xcc, sizeof(buf));
+    retok = ReadFile(hfile, buf, sizeof(buf), &ret, NULL);
+    ok(retok && ret == sizeof(prefix), "source size changed: ret %d, size %lu\n", retok, ret);
+    ok(!memcmp(buf, prefix, sizeof(prefix)), "source contents changed\n");
+    CloseHandle(hfile);
 
     ret = DeleteFileA(source);
     ok(ret, "DeleteFileA: error %ld\n", GetLastError());
