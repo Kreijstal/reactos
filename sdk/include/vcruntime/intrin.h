@@ -246,6 +246,17 @@ static __inline__ int _rdrand32_step(unsigned int *_Value)
     return (int)_Ok;
 }
 
+#define _REACTOS_INTRIN_FXSAVE
+static __inline__ void _fxsave(void *_Buffer)
+{
+    __asm__ __volatile__("fxsave (%0)" : : "r"(_Buffer) : "memory");
+}
+
+static __inline__ void _fxrstor(void const *_Buffer)
+{
+    __asm__ __volatile__("fxrstor (%0)" : : "r"(_Buffer) : "memory");
+}
+
 #if defined(_M_X64)
 #define _REACTOS_INTRIN_RDRAND64_STEP
 #define _REACTOS_INTRIN_XSAVE64
