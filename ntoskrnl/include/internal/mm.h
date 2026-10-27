@@ -715,6 +715,14 @@ MmReturnPoolQuota(
 
 VOID
 NTAPI
+MmProbeAndLockSelectedPages(
+    IN OUT PMDL MemoryDescriptorList,
+    IN LARGE_INTEGER PageList[],
+    IN KPROCESSOR_MODE AccessMode,
+    IN LOCK_OPERATION Operation);
+
+VOID
+NTAPI
 MmBuildMdlFromPages(
     PMDL Mdl,
     PPFN_NUMBER Pages

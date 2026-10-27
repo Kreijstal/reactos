@@ -3470,8 +3470,137 @@ NtReadFile(IN HANDLE FileHandle,
                                         IopReadTransfer);
 }
 
+static NTSTATUS
+IopReadWriteScatter(IN HANDLE FileHandle,
+                    IN HANDLE Event OPTIONAL,
+                    IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+                    IN PVOID ApcContext OPTIONAL,
+                    OUT PIO_STATUS_BLOCK IoStatusBlock,
+                    IN FILE_SEGMENT_ELEMENT Segments[],
+                    IN ULONG Length,
+                    IN PLARGE_INTEGER ByteOffset,
+                    IN PULONG Key OPTIONAL,
+                    IN BOOLEAN Write)
+{
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    PFILE_OBJECT FileObject;
+    PDEVICE_OBJECT DeviceObject;
+    PIO_STACK_LOCATION Stack;
+    PKEVENT EventObject = NULL;
+    OBJECT_HANDLE_INFORMATION HandleInfo;
+    LARGE_INTEGER Offset;
+    ULONG CapturedKey = 0;
+    PIRP Irp;
+    NTSTATUS Status;
+    PAGED_CODE();
+
+    if (Write)
+        Status = ObReferenceFileObjectForWrite(FileHandle, PreviousMode, &FileObject, &HandleInfo);
+    else
+        Status = ObReferenceObjectByHandle(FileHandle, FILE_READ_DATA, IoFileObjectType,
+                                           PreviousMode, (PVOID *)&FileObject, NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    DeviceObject = IoGetRelatedDeviceObject(FileObject);
+    if ((FileObject->Flags & FO_SYNCHRONOUS_IO) ||
+        !(FileObject->Flags & FO_NO_INTERMEDIATE_BUFFERING) || !ByteOffset ||
+        (FileObject->CompletionContext && ApcRoutine))
+    {
+        ObDereferenceObject(FileObject);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    _SEH2_TRY
+    {
+        if (PreviousMode != KernelMode)
+        {
+            ProbeForWriteIoStatusBlock(IoStatusBlock);
+            Offset = ProbeForReadLargeInteger(ByteOffset);
+            if (Key) CapturedKey = ProbeForReadUlong(Key);
+        }
+        else
+        {
+            Offset = *ByteOffset;
+            if (Key) CapturedKey = *Key;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ObDereferenceObject(FileObject);
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    if (Write && !(HandleInfo.GrantedAccess & FILE_WRITE_DATA) &&
+        (HandleInfo.GrantedAccess & FILE_APPEND_DATA))
+        Offset.QuadPart = FILE_WRITE_TO_END_OF_FILE;
+
+    if ((Offset.QuadPart < 0 && !(Write && Offset.QuadPart == FILE_WRITE_TO_END_OF_FILE)) ||
+        (DeviceObject->SectorSize != 0 &&
+         ((Length % DeviceObject->SectorSize) != 0 ||
+          (Offset.QuadPart >= 0 && (Offset.QuadPart % DeviceObject->SectorSize) != 0))))
+    {
+        ObDereferenceObject(FileObject);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (Event)
+    {
+        Status = ObReferenceObjectByHandle(Event, EVENT_MODIFY_STATE, ExEventObjectType,
+                                           PreviousMode, (PVOID *)&EventObject, NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            ObDereferenceObject(FileObject);
+            return Status;
+        }
+        KeClearEvent(EventObject);
+    }
+    KeClearEvent(&FileObject->Event);
+    Irp = IoAllocateIrp(DeviceObject->StackSize, FALSE);
+    if (!Irp)
+        return IopCleanupFailedIrp(FileObject, EventObject, NULL);
+
+    Irp->Tail.Overlay.OriginalFileObject = FileObject;
+    Irp->Tail.Overlay.Thread = PsGetCurrentThread();
+    Irp->RequestorMode = PreviousMode;
+    Irp->Overlay.AsynchronousParameters.UserApcRoutine = ApcRoutine;
+    Irp->Overlay.AsynchronousParameters.UserApcContext = ApcContext;
+    Irp->UserIosb = IoStatusBlock;
+    Irp->UserEvent = EventObject;
+    Irp->Flags = IRP_NOCACHE | IRP_DEFER_IO_COMPLETION |
+                 (Write ? IRP_WRITE_OPERATION : IRP_READ_OPERATION);
+
+    _SEH2_TRY
+    {
+        if (Length != 0)
+        {
+            PMDL Mdl = IoAllocateMdl(NULL, Length, FALSE, TRUE, Irp);
+            if (!Mdl) ExRaiseStatus(STATUS_INSUFFICIENT_RESOURCES);
+            MmProbeAndLockSelectedPages(Mdl, (PLARGE_INTEGER)Segments, PreviousMode,
+                                        Write ? IoReadAccess : IoWriteAccess);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        IopCleanupAfterException(FileObject, Irp, EventObject, NULL);
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    Stack = IoGetNextIrpStackLocation(Irp);
+    Stack->MajorFunction = Write ? IRP_MJ_WRITE : IRP_MJ_READ;
+    Stack->FileObject = FileObject;
+    Stack->Parameters.Read.Length = Length;
+    Stack->Parameters.Read.ByteOffset = Offset;
+    Stack->Parameters.Read.Key = CapturedKey;
+    return IopPerformSynchronousRequest(DeviceObject, Irp, FileObject, TRUE,
+                                        PreviousMode, FALSE,
+                                        Write ? IopWriteTransfer : IopReadTransfer);
+}
+
 /*
- * @unimplemented
+ * @implemented
  */
 NTSTATUS
 NTAPI
@@ -3485,8 +3614,9 @@ NtReadFileScatter(IN HANDLE FileHandle,
                   IN PLARGE_INTEGER  ByteOffset,
                   IN PULONG Key OPTIONAL)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    return IopReadWriteScatter(FileHandle, Event, UserApcRoutine, UserApcContext,
+                               UserIoStatusBlock, BufferDescription, BufferLength,
+                               ByteOffset, Key, FALSE);
 }
 
 /*
@@ -4850,8 +4980,9 @@ NtWriteFileGather(IN HANDLE FileHandle,
                   IN PLARGE_INTEGER ByteOffset,
                   IN PULONG Key OPTIONAL)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    return IopReadWriteScatter(FileHandle, Event, UserApcRoutine, UserApcContext,
+                               UserIoStatusBlock, BufferDescription, BufferLength,
+                               ByteOffset, Key, TRUE);
 }
 
 /*
