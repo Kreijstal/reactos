@@ -19,6 +19,7 @@ NTAPI
 LpcExitThread(IN PETHREAD Thread)
 {
     PLPCP_MESSAGE Message;
+    PVOID SectionToMap = NULL;
     ASSERT(Thread == PsGetCurrentThread());
 
     /* Acquire the lock */
@@ -29,6 +30,7 @@ LpcExitThread(IN PETHREAD Thread)
     {
         /* It's not, remove the entry */
         RemoveEntryList(&Thread->LpcReplyChain);
+        InitializeListHead(&Thread->LpcReplyChain);
     }
 
     /* Set the thread in exit mode */
@@ -39,12 +41,23 @@ LpcExitThread(IN PETHREAD Thread)
     Message = LpcpGetMessageFromThread(Thread);
     if (Message)
     {
-        /* FIXME: TODO */
-        ASSERT(FALSE);
+        /* A terminating client can still own a connection reply. Detach it
+         * before freeing the message so port teardown cannot consume it too. */
+        Thread->LpcReplyMessage = NULL;
+        Thread->LpcReceivedMessageId = 0;
+        if (Message->Request.u2.s2.Type == LPC_CONNECTION_REQUEST)
+        {
+            PLPCP_CONNECTION_MESSAGE Connection = (PLPCP_CONNECTION_MESSAGE)(Message + 1);
+            SectionToMap = Connection->SectionToMap;
+            Connection->SectionToMap = NULL;
+        }
+        LpcpFreeToPortZone(Message, LPCP_LOCK_HELD);
     }
 
     /* Release the lock */
     KeReleaseGuardedMutex(&LpcpLock);
+    if (SectionToMap)
+        ObDereferenceObject(SectionToMap);
 }
 
 VOID
