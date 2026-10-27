@@ -320,6 +320,7 @@ GetFileType(HANDLE hFile)
 	return FILE_TYPE_PIPE;
     }
 
+  SetLastError(ERROR_SUCCESS);
   return FILE_TYPE_UNKNOWN;
 }
 

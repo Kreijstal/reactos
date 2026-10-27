@@ -104,6 +104,11 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
 	break;
 
       case TRUNCATE_EXISTING:
+	if (!(dwDesiredAccess & GENERIC_WRITE))
+	{
+	   SetLastError(ERROR_INVALID_PARAMETER);
+	   return INVALID_HANDLE_VALUE;
+	}
 	dwCreationDisposition = FILE_OVERWRITE;
         break;
 
@@ -333,6 +338,18 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
       {
          SetLastError(ERROR_PATH_NOT_FOUND);
       }
+      else if (Status == STATUS_OBJECT_NAME_INVALID && TrailingBackslash)
+      {
+         /* A native non-directory open rejects the trailing separator.
+          * Distinguish an existing directory from a missing final component. */
+         DWORD Attributes = GetFileAttributesW(lpFileName);
+         if (Attributes != INVALID_FILE_ATTRIBUTES)
+             SetLastError(ERROR_PATH_NOT_FOUND);
+         else if (GetLastError() == ERROR_FILE_NOT_FOUND && dwCreationDisposition != FILE_OPEN)
+             SetLastError(ERROR_PATH_NOT_FOUND);
+         else if (GetLastError() != ERROR_FILE_NOT_FOUND)
+             BaseSetLastNTError(Status);
+      }
       else
       {
          BaseSetLastNTError (Status);
@@ -396,11 +413,21 @@ OpenFile(LPCSTR lpFileName,
 		return HFILE_ERROR;
 	}
 
-	if (!GetFullPathNameA(lpFileName,
+	if (strlen(lpFileName) >= sizeof(lpReOpenBuff->szPathName))
+	{
+	    SetLastError(ERROR_FILENAME_EXCED_RANGE);
+	    lpReOpenBuff->nErrCode = ERROR_FILENAME_EXCED_RANGE;
+	    return HFILE_ERROR;
+	}
+
+	Len = GetFullPathNameA(lpFileName,
 						  sizeof(lpReOpenBuff->szPathName),
 						  lpReOpenBuff->szPathName,
-						  NULL))
+						  NULL);
+	if (Len == 0 || Len >= sizeof(lpReOpenBuff->szPathName))
 	{
+	    if (Len >= sizeof(lpReOpenBuff->szPathName))
+	        SetLastError(ERROR_FILENAME_EXCED_RANGE);
 	    lpReOpenBuff->nErrCode = (WORD)GetLastError();
 		return HFILE_ERROR;
 	}

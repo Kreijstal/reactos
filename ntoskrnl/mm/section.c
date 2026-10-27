@@ -2633,7 +2633,8 @@ MmCreateDataFileSection(PSECTION *SectionObject,
             if (!NT_SUCCESS(Status))
             {
                 ObDereferenceObject(Section);
-                return STATUS_SECTION_NOT_EXTENDED;
+                /* An invalid requested size is not a failed valid extension. */
+                return (Status == STATUS_INVALID_PARAMETER) ? Status : STATUS_SECTION_NOT_EXTENDED;
             }
         }
         else if (MaximumSize.QuadPart < 0)
