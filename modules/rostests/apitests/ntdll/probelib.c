@@ -301,14 +301,21 @@ QuerySetThreadValidator(
                 /* These classes don't exist in Server 2003 SP2 */
                 case ThreadEventPair_Reusable:
                 case ThreadLastSystemCall:
-                case ThreadIoPriority:
-                case ThreadCycleTime:
-                case ThreadPagePriority:
-                case ThreadActualBasePriority:
                 case ThreadTebInformation:
                 case ThreadCSwitchMon:
                 {
                     SpecialStatus = STATUS_INVALID_INFO_CLASS;
+                    break;
+                }
+
+                /* These classes support queries only on Vista and above */
+                case ThreadIoPriority:
+                case ThreadCycleTime:
+                case ThreadPagePriority:
+                case ThreadActualBasePriority:
+                {
+                    if (GetNTVersion() < _WIN32_WINNT_VISTA)
+                        SpecialStatus = STATUS_INVALID_INFO_CLASS;
                     break;
                 }
 
