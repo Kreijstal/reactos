@@ -321,6 +321,12 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
     KeInitializeEvent(&Thread->AlertByIdEvent, SynchronizationEvent, FALSE);
 #endif
 
+    /* Inherit the process' default I/O and memory priority */
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+    Thread->ThreadIoPriority = Process->DefaultIoPriority;
+    Thread->ThreadPagePriority = Process->DefaultPagePriority;
+#endif
+
     /* Initialize the list heads and locks */
     InitializeListHead(&Thread->LpcReplyChain);
     InitializeListHead(&Thread->IrpList);
