@@ -867,7 +867,7 @@ NtOpenSymbolicLinkObject(OUT PHANDLE LinkHandle,
                                 NULL,
                                 &hLink);
 
-    if (NT_SUCCESS(Status)) _SEH2_TRY
+    _SEH2_TRY
     {
         /* Return the handle to caller */
         *LinkHandle = hLink;

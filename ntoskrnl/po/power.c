@@ -207,6 +207,12 @@ PopSendQuerySystemPowerState(PDEVICE_OBJECT DeviceObject, SYSTEM_POWER_STATE Sys
     IrpSp->Parameters.Power.Type = SystemPowerState;
     IrpSp->Parameters.Power.State.SystemState = SystemState;
     IrpSp->Parameters.Power.ShutdownType = PowerAction;
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+    IrpSp->Parameters.Power.SystemPowerStateContext.ContextAsUlong = 0;
+    IrpSp->Parameters.Power.SystemPowerStateContext.CurrentSystemState = PowerSystemWorking;
+    IrpSp->Parameters.Power.SystemPowerStateContext.TargetSystemState = SystemState;
+    IrpSp->Parameters.Power.SystemPowerStateContext.EffectiveSystemState = SystemState;
+#endif
 
     Status = PoCallDriver(DeviceObject, Irp);
     if (Status == STATUS_PENDING)
@@ -249,6 +255,12 @@ PopSendSetSystemPowerState(PDEVICE_OBJECT DeviceObject, SYSTEM_POWER_STATE Syste
     IrpSp->Parameters.Power.Type = SystemPowerState;
     IrpSp->Parameters.Power.State.SystemState = SystemState;
     IrpSp->Parameters.Power.ShutdownType = PowerAction;
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+    IrpSp->Parameters.Power.SystemPowerStateContext.ContextAsUlong = 0;
+    IrpSp->Parameters.Power.SystemPowerStateContext.CurrentSystemState = PowerSystemWorking;
+    IrpSp->Parameters.Power.SystemPowerStateContext.TargetSystemState = SystemState;
+    IrpSp->Parameters.Power.SystemPowerStateContext.EffectiveSystemState = SystemState;
+#endif
 
     Status = PoCallDriver(DeviceObject, Irp);
     if (Status == STATUS_PENDING)

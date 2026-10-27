@@ -560,6 +560,15 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
                                      DIRECTORY_ALL_ACCESS,
                                      &ObjectAttributes);
     ASSERT(NT_SUCCESS(Status));
+    if (Status == STATUS_OBJECT_NAME_EXISTS)
+    {
+        /* CSRSS can create BNO before loading the base server. Replace its
+         * bootstrap ACL with the named-object policy built above. */
+        Status = NtSetSecurityObject(BaseSrvNamedObjectDirectory,
+                                     DACL_SECURITY_INFORMATION,
+                                     BnoSd);
+        ASSERT(NT_SUCCESS(Status));
+    }
 
     /* Check if we are session 0 */
     if (SessionId == 0)

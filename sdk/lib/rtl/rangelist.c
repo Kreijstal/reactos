@@ -915,9 +915,6 @@ RtlIsRangeAvailable(IN PRTL_RANGE_LIST RangeList,
                     IN PRTL_CONFLICT_RANGE_CALLBACK Callback OPTIONAL,
                     OUT PBOOLEAN Available)
 {
-    if (Start > End)
-        return STATUS_INVALID_PARAMETER;
-
     *Available = RtlpWindowIsAvailable(RangeList,
                                        Start,
                                        End,
