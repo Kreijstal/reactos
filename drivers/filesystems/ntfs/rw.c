@@ -833,7 +833,9 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
         Status = STATUS_UNEXPECTED_IO_ERROR;
     }
 
-    if (NT_SUCCESS(Status) && !(IrpFlags & IRP_PAGING_IO) &&
+    /* A dirty mapped page initializes data just as an ordinary write does.
+     * Persist that boundary before the section's final reference is dropped. */
+    if (NT_SUCCESS(Status) &&
         WriteOffset + Length > (ULONGLONG)Fcb->RFCB.ValidDataLength.QuadPart)
     {
         if (DataContext->pRecord->IsNonResident)
@@ -854,7 +856,10 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
         if (NT_SUCCESS(Status))
         {
             Fcb->RFCB.ValidDataLength.QuadPart = WriteOffset + Length;
-            CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
+            /* A paging write may be Cc's own flush. Do not call back into
+             * the cache manager from its writeback path. */
+            if (!(IrpFlags & IRP_PAGING_IO))
+                CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
         }
     }
 

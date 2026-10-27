@@ -308,6 +308,7 @@ NtfsGetNameInformation(PFILE_OBJECT FileObject,
     /* Calculate amount of bytes to copy not to overflow the buffer */
     BytesToCopy = min(NameInfo->FileNameLength,
                       *BufferLength - FIELD_OFFSET(FILE_NAME_INFORMATION, FileName[0]));
+    BytesToCopy &= ~(sizeof(WCHAR) - 1);
 
     /* Fill in the bytes */
     RtlCopyMemory(NameInfo->FileName, Fcb->PathName, BytesToCopy);
@@ -2036,6 +2037,7 @@ NtfsClearRenameTarget(
     _In_ PUNICODE_STRING NewName,
     _In_z_ PCWSTR NewPath,
     _In_ BOOLEAN ReplaceIfExists,
+    _In_ BOOLEAN PosixSemantics,
     _In_ BOOLEAN CaseSensitive,
     _Out_opt_ PULONGLONG ReplacementMft,
     _Out_ PFILE_RECORD_HEADER Scratch)
@@ -2100,8 +2102,7 @@ NtfsClearRenameTarget(
         if (ExistingFcb->MFTIndex == ExistingMft && ExistingFcb->OpenHandleCount != 0)
         {
             Open = TRUE;
-            if (ExistingFcb->ShareAccess.Writers != 0 ||
-                ExistingFcb->ShareAccess.SharedDelete != ExistingFcb->ShareAccess.OpenCount)
+            if (ExistingFcb->ShareAccess.SharedDelete != ExistingFcb->ShareAccess.OpenCount)
             {
                 Denied = TRUE;
                 break;
@@ -2109,15 +2110,17 @@ NtfsClearRenameTarget(
         }
     }
     KeReleaseSpinLock(&DeviceExt->FcbListLock, OldIrql);
-    if (Denied || (Open && ReplacementMft == NULL))
+    if (Denied || (Open && (!PosixSemantics || ReplacementMft == NULL)))
         return STATUS_ACCESS_DENIED;
 
     /* A cached FCB means it's open or still mapped */
     ExistingFcb = NtfsGrabFCBFromTable(DeviceExt, NewPath);
     if (ExistingFcb != NULL)
     {
+        BOOLEAN CanReplace = ReplacementMft != NULL ||
+            MmForceSectionClosed(&ExistingFcb->SectionObjectPointers, FALSE);
         NtfsReleaseFCB(DeviceExt, ExistingFcb);
-        if (ReplacementMft == NULL)
+        if (!CanReplace)
             return STATUS_ACCESS_DENIED;
     }
 
@@ -2853,6 +2856,7 @@ NtfsSetRenameInformation(
     _In_ PNTFS_CCB Ccb,
     _In_opt_ PFILE_OBJECT TargetFileObject,
     _In_ BOOLEAN ReplaceIfExists,
+    _In_ BOOLEAN PosixSemantics,
     _In_ BOOLEAN CaseSensitive,
     _In_ PFILE_RENAME_INFORMATION RenameInfo,
     _In_ ULONG BufferLength)
@@ -3027,7 +3031,7 @@ NtfsSetRenameInformation(
 
     /* Allocate the new record image before removing a replacement target. */
     Status = NtfsClearRenameTarget(DeviceExt, Irp, Fcb, TargetDirMft, &NewName, NewPath,
-                                   ReplaceIfExists, CaseSensitive, &ReplacementMft, Scratch);
+                                   ReplaceIfExists, PosixSemantics, CaseSensitive, &ReplacementMft, Scratch);
     if (!NT_SUCCESS(Status))
     {
         if (Expanded && !NT_SUCCESS(NtfsRestoreExpandedRename(DeviceExt, Fcb, OldValue, DosValue, NewValue)))
@@ -3174,7 +3178,7 @@ NtfsSetLinkInformation(
         Status = STATUS_INSUFFICIENT_RESOURCES;
 
     if (NT_SUCCESS(Status))
-        Status = NtfsClearRenameTarget(DeviceExt, Irp, Fcb, TargetDirMft, &NewName, NewPath, ReplaceIfExists, CaseSensitive, NULL, Scratch);
+        Status = NtfsClearRenameTarget(DeviceExt, Irp, Fcb, TargetDirMft, &NewName, NewPath, ReplaceIfExists, FALSE, CaseSensitive, NULL, Scratch);
 
     if (NT_SUCCESS(Status))
         Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
@@ -3257,7 +3261,7 @@ NtfsJournalSetInformation(PDEVICE_EXTENSION DeviceExt,
 {
     LONGLONG NewSize = Fcb->RFCB.FileSize.QuadPart;
 
-    switch (FileInformationClass)
+    switch ((ULONG)FileInformationClass)
     {
         case FileBasicInformation:
             NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_BASIC_INFO_CHANGE);
@@ -3313,6 +3317,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     /* A rename or a link changes directories and the FCB table, which creates
      * rely on under DirResource. Take it first, the same order create does. */
     NeedDirResource = (FileInformationClass == FileRenameInformation ||
+                       FileInformationClass == FileRenameInformationEx ||
                        FileInformationClass == FileLinkInformation);
     if (NeedDirResource &&
         !ExAcquireResourceExclusiveLite(&DeviceExt->DirResource,
@@ -3335,7 +3340,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
     OldSize = Fcb->RFCB.FileSize.QuadPart;
 
-    switch (FileInformationClass)
+    switch ((ULONG)FileInformationClass)
     {
         PFILE_END_OF_FILE_INFORMATION EndOfFileInfo;
 
@@ -3455,9 +3460,18 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             break;
 
         case FileRenameInformation:
+        case FileRenameInformationEx:
             if (BufferLength < FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName))
             {
                 Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            if (FileInformationClass == FileRenameInformationEx &&
+                (((PFILE_RENAME_INFORMATION)SystemBuffer)->Flags &
+                 ~(FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS)))
+            {
+                Status = STATUS_INVALID_PARAMETER;
                 break;
             }
 
@@ -3467,6 +3481,9 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
                                               FileObject->FsContext2,
                                               Stack->Parameters.SetFile.FileObject,
                                               Stack->Parameters.SetFile.ReplaceIfExists,
+                                              FileInformationClass == FileRenameInformationEx &&
+                                                  BooleanFlagOn(((PFILE_RENAME_INFORMATION)SystemBuffer)->Flags,
+                                                                FILE_RENAME_POSIX_SEMANTICS),
                                               BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
                                               (PFILE_RENAME_INFORMATION)SystemBuffer,
                                               BufferLength);

@@ -251,7 +251,8 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
          * from the page holding it, which would discard the dirty, still valid
          * head of a partial last page that only a mapped view has written (a
          * file grown by a data section and filled through its view). */
-        CcUninitializeCacheMap(FileObject, DeletePending ? &Fcb->RFCB.FileSize : NULL, NULL);
+        if (FileObject->SectionObjectPointer != NULL)
+            CcUninitializeCacheMap(FileObject, DeletePending ? &Fcb->RFCB.FileSize : NULL, NULL);
 
         /* Only once the cache map is gone. Freeing the record while a section still refers to
          * it faults Mm on the next page-in. */

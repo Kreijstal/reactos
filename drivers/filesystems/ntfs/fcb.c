@@ -940,7 +940,6 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
         NtfsDestroyFCB(rcFCB);
         return Status;
     }
-    NtfsFCBInitializeCache(Vcb, rcFCB);
     NtfsAddFCBToTable(Vcb, rcFCB);
     *fileFCB = rcFCB;
 
@@ -1104,7 +1103,6 @@ NtfsMakeStreamFCB(
         NtfsDestroyFCB(Fcb);
         return Status;
     }
-    NtfsFCBInitializeCache(Vcb, Fcb);
     NtfsAddFCBToTable(Vcb, Fcb);
 
     *StreamFcb = Fcb;
@@ -1131,7 +1129,7 @@ NtfsAttachFCBToFileObject(PNTFS_VCB Vcb,
     newCCB->Identifier.Type = NTFS_TYPE_CCB;
     newCCB->Identifier.Size = sizeof(NTFS_TYPE_CCB);
 
-    FileObject->SectionObjectPointer = &Fcb->SectionObjectPointers;
+    FileObject->SectionObjectPointer = NtfsFCBIsDirectory(Fcb) ? NULL : &Fcb->SectionObjectPointers;
     FileObject->FsContext = Fcb;
     FileObject->FsContext2 = newCCB;
     newCCB->PtrFileObject = FileObject;
@@ -1202,6 +1200,10 @@ NtfsDirFindFile(PNTFS_VCB Vcb,
         ++Colon;
         DPRINT("Will now look for file '%wZ' with stream '%S'\n", &File, Colon);
     }
+
+    if (!NtfsIsValidFileName(&File) &&
+        !(File.Length == sizeof(WCHAR) && File.Buffer[0] == L'.'))
+        return STATUS_OBJECT_NAME_INVALID;
 
     Status = NtfsLookupFileAt(Vcb, &File, CaseSensitive, &FileRecord, &MFTIndex, CurrentDir);
     if (!NT_SUCCESS(Status))

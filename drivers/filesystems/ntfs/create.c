@@ -85,16 +85,15 @@ NtfsBuildCreatePath(
 
         if (BooleanFlagOn(RelatedFcb->Flags, FCB_IS_VOLUME))
         {
-            /* A volume handle roots an absolute path */
-            if (Name->Length == 0 || Name->Buffer[0] != L'\\')
-                return STATUS_INVALID_PARAMETER;
-
-            RelatedFcb = NULL;
+            return STATUS_INVALID_PARAMETER;
         }
-        else if (Name->Length != 0 &&
-                 (!NtfsFCBIsDirectory(RelatedFcb) || Name->Buffer[0] == L'\\'))
+        else if (Name->Length != 0 && Name->Buffer[0] == L'\\')
         {
             return STATUS_INVALID_PARAMETER;
+        }
+        else if (Name->Length != 0 && !NtfsFCBIsDirectory(RelatedFcb))
+        {
+            return STATUS_OBJECT_PATH_NOT_FOUND;
         }
         else
         {
@@ -159,13 +158,23 @@ NtfsCheckCreatePath(
     if (Path->Length == 0 || Path->Buffer[0] != L'\\')
         return STATUS_OBJECT_NAME_INVALID;
 
+    /* NTFS accepts one extra separator immediately after the volume name. */
+    if (Path->Length >= 2 * sizeof(WCHAR) && Path->Buffer[1] == L'\\')
+    {
+        if (Path->Length >= 3 * sizeof(WCHAR) && Path->Buffer[2] == L'\\')
+            return STATUS_OBJECT_NAME_INVALID;
+        Path->Length -= sizeof(WCHAR);
+        RtlMoveMemory(Path->Buffer, Path->Buffer + 1, Path->Length);
+        Path->Buffer[Path->Length / sizeof(WCHAR)] = UNICODE_NULL;
+    }
+
     /* The root directory */
     if (Path->Length == sizeof(WCHAR))
         return STATUS_SUCCESS;
 
     if (Path->Buffer[Path->Length / sizeof(WCHAR) - 1] == L'\\')
     {
-        if (BooleanFlagOn(Options, FILE_NON_DIRECTORY_FILE))
+        if (Path->Buffer[Path->Length / sizeof(WCHAR) - 2] == L'\\')
             return STATUS_OBJECT_NAME_INVALID;
 
         Path->Length -= sizeof(WCHAR);
@@ -206,7 +215,18 @@ NtfsCheckCreatePath(
             Remaining.Length -= Component.Length + sizeof(WCHAR);
         }
 
-        if (!NtfsIsValidFileName(&Component))
+        /* Check separators and dot components before walking the namespace.
+         * Other illegal characters are checked when their parent is reached,
+         * so a missing ancestor takes precedence over an invalid final name. */
+        if (Component.Length == 0 ||
+            (Component.Length == 2 * sizeof(WCHAR) &&
+             Component.Buffer[0] == L'.' && Component.Buffer[1] == L'.') ||
+            (Remaining.Length == 0 && Component.Length == sizeof(WCHAR) &&
+             Component.Buffer[0] == L'.'))
+            return STATUS_OBJECT_NAME_INVALID;
+        if (Remaining.Length != 0 &&
+            !(Component.Length == sizeof(WCHAR) && Component.Buffer[0] == L'.') &&
+            !NtfsIsValidFileName(&Component))
             return STATUS_OBJECT_NAME_INVALID;
     }
 
@@ -854,7 +874,8 @@ NtfsCheckExistingFile(
         return STATUS_NOT_A_DIRECTORY;
 
     if (Disposition == FILE_CREATE)
-        return STATUS_OBJECT_NAME_COLLISION;
+        return NtfsFCBIsRoot(Fcb) ? STATUS_ACCESS_DENIED :
+               (TrailingBackslash && !IsDirectory) ? STATUS_OBJECT_NAME_INVALID : STATUS_OBJECT_NAME_COLLISION;
 
     /* A trailing separator names a directory */
     if (TrailingBackslash && !IsDirectory)
@@ -1231,6 +1252,14 @@ NtfsOpenExistingFile(
 
     DesiredAccess = Stack->Parameters.Create.SecurityContext->DesiredAccess;
 
+    if (NtfsFCBIsDirectory(Fcb) &&
+        FileObject->FileName.Length > sizeof(WCHAR) &&
+        FileObject->FileName.Buffer[FileObject->FileName.Length / sizeof(WCHAR) - 1] == L'\\')
+    {
+        FileObject->FileName.Length -= sizeof(WCHAR);
+        FileObject->FileName.Buffer[FileObject->FileName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+    }
+
     /* A file mapped as a running image can't be written or deleted */
     if (!NtfsFCBIsDirectory(Fcb) &&
         (BooleanFlagOn(DesiredAccess, FILE_WRITE_DATA) || BooleanFlagOn(Options, FILE_DELETE_ON_CLOSE)) &&
@@ -1244,7 +1273,9 @@ NtfsOpenExistingFile(
     {
         /* Check the final granted rights before any destructive operation.
          * DirResource keeps the share state fixed until FinishOpen commits it. */
-        Status = IoCheckShareAccess(DesiredAccess, Stack->Parameters.Create.ShareAccess,
+        ACCESS_MASK OverwriteAccess = DesiredAccess |
+            ((Disposition == FILE_SUPERSEDE) ? DELETE : FILE_WRITE_DATA);
+        Status = IoCheckShareAccess(OverwriteAccess, Stack->Parameters.Create.ShareAccess,
                                      FileObject, &Fcb->ShareAccess, FALSE);
         if (!NT_SUCCESS(Status))
         {
