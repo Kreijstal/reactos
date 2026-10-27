@@ -70,6 +70,16 @@ NtfsCloseFile(PDEVICE_EXTENSION DeviceExt,
 
     if (Ccb->Flags & CCB_FCB_REFERENCE)
     {
+        if (Fcb->FileObject == FileObject)
+        {
+            /* CcPurgeCacheSection can tear down the internal stream while
+             * external opens still hold the FCB. This stream is now closing. */
+            KIRQL OldIrql;
+            KeAcquireSpinLock(&DeviceExt->FcbListLock, &OldIrql);
+            Fcb->FileObject = NULL;
+            Fcb->Flags &= ~FCB_CACHE_INITIALIZED;
+            KeReleaseSpinLock(&DeviceExt->FcbListLock, OldIrql);
+        }
         /* Both an external open and an internal cache stream own a reference.
          * MM keeps the stream file object alive until its sections are gone. */
         NtfsReleaseFCB(DeviceExt, Fcb);
