@@ -19,17 +19,28 @@ struct test_data
     WCHAR* ExpectedSubString;
 };
 
+/* The processor architecture prefix of the WinSxS directory names */
+#if defined(_M_AMD64)
+#define SXS_ARCH L"amd64_"
+#elif defined(_M_ARM64)
+#define SXS_ARCH L"arm64_"
+#elif defined(_M_ARM)
+#define SXS_ARCH L"arm_"
+#else
+#define SXS_ARCH L"x86_"
+#endif
+
 struct test_data Tests[] =
 {
     /* Not redirected file */
     {__LINE__, STATUS_SXS_KEY_NOT_FOUND, L"somefilesomefile", NULL},
     {__LINE__, STATUS_SXS_KEY_NOT_FOUND, L"ntdll.dll", NULL},
     /* Files redirected with sxs */
-    {__LINE__, STATUS_SUCCESS, L"GDIPLUS", L"\\winsxs\\x86_microsoft.windows.gdiplus_6595b64144ccf1df_1."},
-    {__LINE__, STATUS_SUCCESS, L"GDIPLUS.DLL", L"\\winsxs\\x86_microsoft.windows.gdiplus_6595b64144ccf1df_1."},
-    {__LINE__, STATUS_SUCCESS, L"COMCTL32.DLL", L"\\winsxs\\x86_microsoft.windows.common-controls_6595b64144ccf1df_5.82"},
-    {__LINE__, STATUS_SUCCESS, L"comctl32.DLL", L"\\winsxs\\x86_microsoft.windows.common-controls_6595b64144ccf1df_5.82"},
-    {__LINE__, STATUS_SUCCESS, L"c:\\windows\\system32\\comctl32.DLL", L"\\winsxs\\x86_microsoft.windows.common-controls_6595b64144ccf1df_5.82"},
+    {__LINE__, STATUS_SUCCESS, L"GDIPLUS", L"\\winsxs\\" SXS_ARCH L"microsoft.windows.gdiplus_6595b64144ccf1df_1."},
+    {__LINE__, STATUS_SUCCESS, L"GDIPLUS.DLL", L"\\winsxs\\" SXS_ARCH L"microsoft.windows.gdiplus_6595b64144ccf1df_1."},
+    {__LINE__, STATUS_SUCCESS, L"COMCTL32.DLL", L"\\winsxs\\" SXS_ARCH L"microsoft.windows.common-controls_6595b64144ccf1df_5.82"},
+    {__LINE__, STATUS_SUCCESS, L"comctl32.DLL", L"\\winsxs\\" SXS_ARCH L"microsoft.windows.common-controls_6595b64144ccf1df_5.82"},
+    {__LINE__, STATUS_SUCCESS, L"c:\\windows\\system32\\comctl32.DLL", L"\\winsxs\\" SXS_ARCH L"microsoft.windows.common-controls_6595b64144ccf1df_5.82"},
     /* Files not redirected with sxs */
     {__LINE__, STATUS_SXS_KEY_NOT_FOUND, L"MSVCR90.DLL", NULL},
     {__LINE__, STATUS_SXS_KEY_NOT_FOUND, L"c:\\windows\\system32\\MSVCR90.DLL", NULL},
@@ -39,7 +50,7 @@ struct test_data Tests[] =
     /* A file that exists in the same dir but isn't mentioned in the manifest */
     {__LINE__, STATUS_SUCCESS, L"fil1.txt", EXPECT_IN_SAME_DIR},
     /* This is a weird case; the source doesn't exist but does get redirected */
-    {__LINE__, STATUS_SUCCESS, L"c:\\windows\\system32\\gdiplus.DLL", L"\\winsxs\\x86_microsoft.windows.gdiplus_6595b64144ccf1df_1."},
+    {__LINE__, STATUS_SUCCESS, L"c:\\windows\\system32\\gdiplus.DLL", L"\\winsxs\\" SXS_ARCH L"microsoft.windows.gdiplus_6595b64144ccf1df_1."},
     /* But redirecting gdiplus from a different directory doesn't work */
     {__LINE__, STATUS_SXS_KEY_NOT_FOUND, L"c:\\GDIPLUS.DLL", NULL},
     {__LINE__, STATUS_SXS_KEY_NOT_FOUND, L"c:\\comctl32.DLL", NULL},
