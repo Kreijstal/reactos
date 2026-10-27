@@ -251,6 +251,16 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
          * from the page holding it, which would discard the dirty, still valid
          * head of a partial last page that only a mapped view has written (a
          * file grown by a data section and filled through its view). */
+        /* The last handle releases the file's cached pages. A failed purge (a
+         * mapped view) leaves them to the section. */
+        if (Fcb->OpenHandleCount == 0 &&
+            !DeletePending &&
+            FileObject->SectionObjectPointer != NULL &&
+            !(DeviceExt->Flags & VCB_DEVICE_REMOVED))
+        {
+            (VOID)NtfsFlushFileCache(FileObject, TRUE);
+        }
+
         if (FileObject->SectionObjectPointer != NULL)
             CcUninitializeCacheMap(FileObject, DeletePending ? &Fcb->RFCB.FileSize : NULL, NULL);
 
