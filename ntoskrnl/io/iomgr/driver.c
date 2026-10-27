@@ -1344,6 +1344,8 @@ IopUnloadDriver(PUNICODE_STRING DriverServiceName, BOOLEAN UnloadPnpDrivers)
     UNICODE_STRING ImagePath;
     UNICODE_STRING ServiceName;
     UNICODE_STRING ObjectName;
+    OBJECT_ATTRIBUTES ServiceAttributes;
+    HANDLE ServiceHandle;
     PDRIVER_OBJECT DriverObject;
     PDEVICE_OBJECT DeviceObject;
     PEXTENDED_DEVOBJ_EXTENSION DeviceExtension;
@@ -1404,25 +1406,24 @@ IopUnloadDriver(PUNICODE_STRING DriverServiceName, BOOLEAN UnloadPnpDrivers)
     /*
      * Construct the driver object name
      */
-    Status = RtlUShortAdd(sizeof(DRIVER_ROOT_NAME),
-                          ServiceName.Length,
-                          &ObjectName.MaximumLength);
+    /* Use the same name resolution as load: filesystem drivers live under
+     * \FileSystem, and ObjectName can override the default service name. */
+    InitializeObjectAttributes(&ServiceAttributes,
+                               &CapturedServiceName,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL,
+                               NULL);
+    Status = ZwOpenKey(&ServiceHandle, KEY_QUERY_VALUE, &ServiceAttributes);
+    if (NT_SUCCESS(Status))
+    {
+        Status = IopGetDriverNames(ServiceHandle, &ObjectName, NULL);
+        ZwClose(ServiceHandle);
+    }
     if (!NT_SUCCESS(Status))
     {
         ReleaseCapturedUnicodeString(&CapturedServiceName, PreviousMode);
         return Status;
     }
-    ObjectName.Length = 0;
-    ObjectName.Buffer = ExAllocatePoolWithTag(PagedPool,
-                                              ObjectName.MaximumLength,
-                                              TAG_IO);
-    if (!ObjectName.Buffer)
-    {
-        ReleaseCapturedUnicodeString(&CapturedServiceName, PreviousMode);
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-    NT_VERIFY(NT_SUCCESS(RtlAppendUnicodeToString(&ObjectName, DRIVER_ROOT_NAME)));
-    NT_VERIFY(NT_SUCCESS(RtlAppendUnicodeStringToString(&ObjectName, &ServiceName)));
 
     /*
      * Find the driver object
@@ -1463,9 +1464,12 @@ IopUnloadDriver(PUNICODE_STRING DriverServiceName, BOOLEAN UnloadPnpDrivers)
      * before performing any further work (such as querying the image path).
      */
     if (!DriverObject->DriverUnload || !DriverObject->DriverSection ||
-        !(UnloadPnpDrivers || (DriverObject->Flags & DRVO_LEGACY_DRIVER)))
+        !(UnloadPnpDrivers || (DriverObject->Flags & DRVO_LEGACY_DRIVER) ||
+          (!DriverObject->DeviceObject && !DriverObject->DriverExtension->AddDevice)))
     {
-        DPRINT1("No DriverUnload function! '%wZ' will not be unloaded!\n", &DriverObject->DriverName);
+        DPRINT1("Cannot unload '%wZ': routine %p, image %p, flags %lx\n",
+                &DriverObject->DriverName, DriverObject->DriverUnload,
+                DriverObject->DriverSection, DriverObject->Flags);
         ObDereferenceObject(DriverObject);
         ReleaseCapturedUnicodeString(&CapturedServiceName, PreviousMode);
         return STATUS_INVALID_DEVICE_REQUEST;
@@ -1488,13 +1492,11 @@ IopUnloadDriver(PUNICODE_STRING DriverServiceName, BOOLEAN UnloadPnpDrivers)
                                     NULL,
                                     NULL);
 
-    /* We no longer need service name */
-    ReleaseCapturedUnicodeString(&CapturedServiceName, PreviousMode);
-
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("RtlQueryRegistryValues() failed (Status %x)\n", Status);
         ObDereferenceObject(DriverObject);
+        ReleaseCapturedUnicodeString(&CapturedServiceName, PreviousMode);
         return Status;
     }
 
@@ -1502,6 +1504,8 @@ IopUnloadDriver(PUNICODE_STRING DriverServiceName, BOOLEAN UnloadPnpDrivers)
      * Normalize the image path for all later processing.
      */
     Status = IopNormalizeImagePath(&ImagePath, &ServiceName);
+    /* ServiceName borrows storage from CapturedServiceName. */
+    ReleaseCapturedUnicodeString(&CapturedServiceName, PreviousMode);
 
     if (!NT_SUCCESS(Status))
     {
