@@ -1345,6 +1345,10 @@ typedef enum _FILE_INFORMATION_CLASS {
   FileStorageReserveIdInformation,
   FileCaseSensitiveInformationForceAccessCheck,
   FileKnownFolderInformation,
+#elif defined(__REACTOS__)
+  /* The filesystem replacement path also supports extended rename on
+   * ReactOS targets that retain an older reported NT version. */
+  FileRenameInformationEx = 65,
 #endif
   FileMaximumInformation
 } FILE_INFORMATION_CLASS, *PFILE_INFORMATION_CLASS;
@@ -5957,11 +5961,21 @@ typedef struct _FILE_MOVE_CLUSTER_INFORMATION {
 } FILE_MOVE_CLUSTER_INFORMATION, *PFILE_MOVE_CLUSTER_INFORMATION;
 
 typedef struct _FILE_RENAME_INFORMATION {
+#if (NTDDI_VERSION >= NTDDI_WIN10) || defined(__REACTOS__)
+  union {
+    BOOLEAN ReplaceIfExists;
+    ULONG Flags;
+  };
+#else
   BOOLEAN ReplaceIfExists;
+#endif
   HANDLE RootDirectory;
   ULONG FileNameLength;
   WCHAR FileName[1];
 } FILE_RENAME_INFORMATION, *PFILE_RENAME_INFORMATION;
+
+#define FILE_RENAME_REPLACE_IF_EXISTS 0x00000001
+#define FILE_RENAME_POSIX_SEMANTICS   0x00000002
 
 typedef struct _FILE_STREAM_INFORMATION {
   ULONG NextEntryOffset;

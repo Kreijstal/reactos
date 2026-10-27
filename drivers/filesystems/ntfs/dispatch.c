@@ -70,7 +70,7 @@ NtfsReadOnlyMutation(PNTFS_IRP_CONTEXT Context)
             return !((Vcb->Flags & VCB_VOLUME_DISMOUNTED) && (Fcb->Flags & FCB_IS_VOLUME));
         }
         case IRP_MJ_SET_INFORMATION:
-            switch (Context->Stack->Parameters.SetFile.FileInformationClass)
+            switch ((ULONG)Context->Stack->Parameters.SetFile.FileInformationClass)
             {
                 case FileBasicInformation:
                 case FileAllocationInformation:
@@ -79,6 +79,7 @@ NtfsReadOnlyMutation(PNTFS_IRP_CONTEXT Context)
                 case FileLinkInformation:
                 case FileDispositionInformation:
                 case FileRenameInformation:
+                case FileRenameInformationEx:
                     return TRUE;
                 default:
                     return FALSE;

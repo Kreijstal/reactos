@@ -673,11 +673,24 @@ typedef struct _FILE_INTERNAL_INFORMATION
 
 typedef struct _FILE_RENAME_INFORMATION
 {
+#if (NTDDI_VERSION >= NTDDI_WIN10) || defined(__REACTOS__)
+    union
+    {
+        BOOLEAN ReplaceIfExists;
+        ULONG Flags;
+    };
+#else
     BOOLEAN ReplaceIfExists;
+#endif
     HANDLE  RootDirectory;
     ULONG FileNameLength;
     WCHAR FileName[1];
 } FILE_RENAME_INFORMATION, *PFILE_RENAME_INFORMATION;
+
+#ifndef FILE_RENAME_REPLACE_IF_EXISTS
+#define FILE_RENAME_REPLACE_IF_EXISTS 0x00000001
+#define FILE_RENAME_POSIX_SEMANTICS   0x00000002
+#endif
 
 typedef struct _FILE_PIPE_INFORMATION
 {

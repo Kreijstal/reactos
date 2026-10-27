@@ -53,6 +53,7 @@ UCHAR IopSetOperationLength[FileMaximumInformation] =
 {
     [FileBasicInformation] = sizeof(FILE_BASIC_INFORMATION),
     [FileRenameInformation] = sizeof(FILE_RENAME_INFORMATION),
+    [FileRenameInformationEx] = sizeof(FILE_RENAME_INFORMATION),
     [FileLinkInformation] = sizeof(FILE_LINK_INFORMATION),
     [FileDispositionInformation] = sizeof(FILE_DISPOSITION_INFORMATION),
     [FilePositionInformation] = sizeof(FILE_POSITION_INFORMATION),
@@ -102,6 +103,7 @@ ACCESS_MASK IopSetOperationAccess[FileMaximumInformation] =
 {
     [FileBasicInformation] = FILE_WRITE_ATTRIBUTES,
     [FileRenameInformation] = DELETE,
+    [FileRenameInformationEx] = DELETE,
     [FileDispositionInformation] = DELETE,
     [FileFullEaInformation] = FILE_WRITE_EA,
     [FileAllocationInformation] = FILE_WRITE_DATA,
