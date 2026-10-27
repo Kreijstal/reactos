@@ -444,6 +444,12 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
     /* Clean up the Object */
     RtlZeroMemory(Process, sizeof(EPROCESS));
 
+    /* Threads start with normal I/O and memory priority */
+    Process->DefaultIoPriority = IoPriorityNormal;
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+    Process->DefaultPagePriority = 5; // MEMORY_PRIORITY_NORMAL
+#endif
+
     /* Initialize pushlock and rundown protection */
     ExInitializeRundownProtection(&Process->RundownProtect);
     Process->ProcessLock.Value = 0;

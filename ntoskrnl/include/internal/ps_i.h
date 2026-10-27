@@ -646,17 +646,37 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
     /* ThreadLastSystemCall (covered by probelib special-case) */
     IQS_NONE,
 
-    /* ThreadIoPriority (covered by probelib special-case) */
-    IQS_NONE,
+    /* ThreadIoPriority */
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY
+    ),
 
-    /* ThreadCycleTime (covered by probelib special-case) */
-    IQS_NONE,
+    /* ThreadCycleTime */
+    IQS_SAME
+    (
+        THREAD_CYCLE_TIME_INFORMATION,
+        ULONG,
+        ICIF_QUERY
+    ),
 
-    /* ThreadPagePriority (covered by probelib special-case) */
-    IQS_NONE,
+    /* ThreadPagePriority */
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY
+    ),
 
-    /* ThreadActualBasePriority (covered by probelib special-case) */
-    IQS_NONE,
+    /* ThreadActualBasePriority */
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY
+    ),
 
     /* ThreadTebInformation (covered by probelib special-case) */
     IQS_NONE,
@@ -707,7 +727,12 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
 
     // Windows 8
     /* ThreadCpuAccountingInformation */
-    IQS_NONE,
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY
+    ),
 
     // Windows 8.1
     /* ThreadSuspendCount */
@@ -755,8 +780,13 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
         ICIF_QUERY | ICIF_SET | ICIF_SIZE_VARIABLE
     ),
 
-    /* ThreadSelectedCpuSets (variable; covered by probelib special-case) */
-    IQS_NONE,
+    /* ThreadSelectedCpuSets (variable) */
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE
+    ),
 
     /* ThreadSystemThreadInformation (Win10+; SYSTEM_THREAD_INFORMATION, query-only) */
 #if (NTDDI_VERSION >= NTDDI_WIN10)
