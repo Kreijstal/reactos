@@ -224,12 +224,13 @@ __INTRIN_INLINE int _rdseed64_step(unsigned __int64* random_val)
 }
 #endif // __x86_64__
 
+#ifndef _REACTOS_INTRIN_FXSAVE
 __INTRIN_INLINE void _fxsave(void *__P)
 {
 #if 0 // Needs newer GCC
     __builtin_ia32_fxsave(__P);
 #else
-    __asm__ __volatile__("fxsave (%0)" : : "r"(__P));
+    __asm__ __volatile__("fxsave (%0)" : : "r"(__P) : "memory");
 #endif
 }
 
@@ -238,9 +239,10 @@ __INTRIN_INLINE void _fxrstor(void const *__P)
 #if 0 // Needs newer GCC
     __builtin_ia32_fxrstor((void*)__P);
 #else
-    __asm__ __volatile__("fxrstor (%0)" : : "r"(__P));
+    __asm__ __volatile__("fxrstor (%0)" : : "r"(__P) : "memory");
 #endif
 }
+#endif
 
 #if defined(__x86_64__)
 #ifndef _REACTOS_INTRIN_XSAVE64

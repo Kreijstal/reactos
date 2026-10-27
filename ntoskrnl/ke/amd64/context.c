@@ -14,6 +14,58 @@
 
 /* FUNCTIONS *****************************************************************/
 
+/*
+ * The x87 part of CONTEXT_FLOATING_POINT is not kept in the trap or exception
+ * frame. These routines only run on the thread the frames belong to, so it is
+ * taken from, and put back into, the live FPU registers. XMM and MXCSR keep
+ * coming from the frames.
+ */
+static
+VOID
+KiGetLegacyFloatingPointState(
+    _Out_ PXMM_SAVE_AREA32 FltSave)
+{
+    DECLSPEC_ALIGN(16) XMM_SAVE_AREA32 Live;
+
+    _fxsave(&Live);
+
+    FltSave->ControlWord = Live.ControlWord;
+    FltSave->StatusWord = Live.StatusWord;
+    FltSave->TagWord = Live.TagWord;
+    FltSave->Reserved1 = 0;
+    FltSave->ErrorOpcode = Live.ErrorOpcode;
+    FltSave->ErrorOffset = Live.ErrorOffset;
+    FltSave->ErrorSelector = Live.ErrorSelector;
+    FltSave->Reserved2 = 0;
+    FltSave->DataOffset = Live.DataOffset;
+    FltSave->DataSelector = Live.DataSelector;
+    FltSave->Reserved3 = 0;
+    FltSave->MxCsr_Mask = Live.MxCsr_Mask;
+    RtlCopyMemory(FltSave->FloatRegisters, Live.FloatRegisters, sizeof(Live.FloatRegisters));
+}
+
+static
+VOID
+KiSetLegacyFloatingPointState(
+    _In_ PXMM_SAVE_AREA32 FltSave)
+{
+    DECLSPEC_ALIGN(16) XMM_SAVE_AREA32 Live;
+
+    _fxsave(&Live);
+
+    Live.ControlWord = FltSave->ControlWord;
+    Live.StatusWord = FltSave->StatusWord;
+    Live.TagWord = FltSave->TagWord;
+    Live.ErrorOpcode = FltSave->ErrorOpcode;
+    Live.ErrorOffset = FltSave->ErrorOffset;
+    Live.ErrorSelector = FltSave->ErrorSelector;
+    Live.DataOffset = FltSave->DataOffset;
+    Live.DataSelector = FltSave->DataSelector;
+    RtlCopyMemory(Live.FloatRegisters, FltSave->FloatRegisters, sizeof(Live.FloatRegisters));
+
+    _fxrstor(&Live);
+}
+
 VOID
 NTAPI
 KeContextToTrapFrame(IN PCONTEXT Context,
@@ -58,6 +110,7 @@ KeContextToTrapFrame(IN PCONTEXT Context,
     /* Handle floating point registers */
     if (ContextFlags & CONTEXT_FLOATING_POINT)
     {
+        KiSetLegacyFloatingPointState(&Context->FltSave);
         TrapFrame->MxCsr = Context->MxCsr;
         TrapFrame->Xmm0 = Context->Xmm0;
         TrapFrame->Xmm1 = Context->Xmm1;
@@ -215,7 +268,9 @@ KeTrapFrameToContext(IN PKTRAP_FRAME TrapFrame,
     /* Handle floating point registers */
     if (ContextFlags & CONTEXT_FLOATING_POINT)
     {
+        KiGetLegacyFloatingPointState(&Context->FltSave);
         Context->MxCsr = TrapFrame->MxCsr;
+        Context->FltSave.MxCsr = TrapFrame->MxCsr;
         Context->Xmm0 = TrapFrame->Xmm0;
         Context->Xmm1 = TrapFrame->Xmm1;
         Context->Xmm2 = TrapFrame->Xmm2;
