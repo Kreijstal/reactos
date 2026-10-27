@@ -69,7 +69,7 @@ WriteFile(
         /* return FALSE in case of failure and pending operations! */
         if (!NT_SUCCESS(Status) || Status == STATUS_PENDING)
         {
-            BaseSetLastNTError(Status);
+            BaseSetLastNTError(Status == STATUS_ACCESS_VIOLATION ? STATUS_INVALID_USER_BUFFER : Status);
             return FALSE;
         }
 
@@ -108,7 +108,7 @@ WriteFile(
 
         if (!NT_SUCCESS(Status))
         {
-            BaseSetLastNTError(Status);
+            BaseSetLastNTError(Status == STATUS_ACCESS_VIOLATION ? STATUS_INVALID_USER_BUFFER : Status);
             return FALSE;
         }
     }
@@ -355,16 +355,16 @@ ReadFileScatter(HANDLE hFile,
     pIOStatus->Information = 0;
 
     Status = NtReadFileScatter(hFile,
+                               (HANDLE)((ULONG_PTR)lpOverlapped->hEvent & ~1),
                                NULL,
-                               NULL,
-                               NULL,
+                               ((ULONG_PTR)lpOverlapped->hEvent & 1) ? NULL : lpOverlapped,
                                pIOStatus,
                                aSegmentArray,
                                nNumberOfBytesToRead,
                                &Offset,
                                NULL);
 
-    if (!NT_SUCCESS(Status))
+    if (Status == STATUS_PENDING || !NT_SUCCESS(Status))
     {
         SetLastError(RtlNtStatusToDosError(Status));
         return FALSE;
@@ -397,16 +397,16 @@ WriteFileGather(HANDLE hFile,
     IOStatus->Information = 0;
 
     Status = NtWriteFileGather(hFile,
+                               (HANDLE)((ULONG_PTR)lpOverlapped->hEvent & ~1),
                                NULL,
-                               NULL,
-                               NULL,
+                               ((ULONG_PTR)lpOverlapped->hEvent & 1) ? NULL : lpOverlapped,
                                IOStatus,
                                aSegmentArray,
                                nNumberOfBytesToWrite,
                                &Offset,
                                NULL);
 
-    if (!NT_SUCCESS(Status))
+    if (Status == STATUS_PENDING || !NT_SUCCESS(Status))
     {
         SetLastError(RtlNtStatusToDosError(Status));
         return FALSE;

@@ -2043,7 +2043,7 @@ MmProbeAndLockProcessPages(
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 VOID
 NTAPI
@@ -2052,7 +2052,74 @@ MmProbeAndLockSelectedPages(IN OUT PMDL MemoryDescriptorList,
                             IN KPROCESSOR_MODE AccessMode,
                             IN LOCK_OPERATION Operation)
 {
-    UNIMPLEMENTED;
+    struct
+    {
+        MDL Mdl;
+        PFN_NUMBER Page;
+    } SinglePage;
+    ULONG PageCount, LockedPages = 0;
+    ULONG ByteCount = MemoryDescriptorList->ByteCount;
+    PPFN_NUMBER Pages = MmGetMdlPfnArray(MemoryDescriptorList);
+    PVOID Address;
+    PAGED_CODE();
+
+    ASSERT(!(MemoryDescriptorList->MdlFlags & MDL_PAGES_LOCKED));
+    if (MemoryDescriptorList->ByteOffset != 0 || ByteCount == 0)
+        ExRaiseStatus(STATUS_INVALID_PARAMETER);
+    PageCount = BYTES_TO_PAGES(ByteCount);
+    RtlZeroMemory(&SinglePage, sizeof(SinglePage));
+
+    _SEH2_TRY
+    {
+        if (AccessMode != KernelMode)
+            ProbeForRead(PageList, PageCount * sizeof(*PageList), TYPE_ALIGNMENT(LARGE_INTEGER));
+
+        while (LockedPages < PageCount)
+        {
+            LARGE_INTEGER Page = PageList[LockedPages];
+            Address = (PVOID)(ULONG_PTR)Page.QuadPart;
+            if ((ULONG_PTR)Address & (PAGE_SIZE - 1))
+                ExRaiseStatus(STATUS_INVALID_PARAMETER);
+#ifndef _WIN64
+            if (Page.HighPart != 0)
+                ExRaiseStatus(STATUS_ACCESS_VIOLATION);
+#endif
+            MmInitializeMdl(&SinglePage.Mdl, Address, PAGE_SIZE);
+            MmProbeAndLockPages(&SinglePage.Mdl, AccessMode, Operation);
+
+            /* A single MDL cannot mix process-accounted pages with kernel
+             * pages or I/O space. Do not transfer such a page's lock. */
+            if ((SinglePage.Mdl.MdlFlags & MDL_IO_SPACE) ||
+                (LockedPages != 0 && MemoryDescriptorList->Process != SinglePage.Mdl.Process))
+            {
+                MmUnlockPages(&SinglePage.Mdl);
+                ExRaiseStatus(STATUS_INVALID_PARAMETER);
+            }
+
+            if (LockedPages == 0)
+            {
+                MemoryDescriptorList->StartVa = Address;
+                MemoryDescriptorList->Process = SinglePage.Mdl.Process;
+                MemoryDescriptorList->MdlFlags |= MDL_PAGES_LOCKED;
+                if (Operation != IoReadAccess)
+                    MemoryDescriptorList->MdlFlags |= MDL_WRITE_OPERATION;
+            }
+            Pages[LockedPages++] = MmGetMdlPfnArray(&SinglePage.Mdl)[0];
+            /* The aggregate MDL now owns this lock and its accounting. */
+            SinglePage.Mdl.MdlFlags &= ~MDL_PAGES_LOCKED;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        if (LockedPages != 0)
+        {
+            MemoryDescriptorList->ByteCount = LockedPages * PAGE_SIZE;
+            MmUnlockPages(MemoryDescriptorList);
+            MemoryDescriptorList->ByteCount = ByteCount;
+        }
+        _SEH2_YIELD(ExRaiseStatus(_SEH2_GetExceptionCode()));
+    }
+    _SEH2_END;
 }
 
 /*
