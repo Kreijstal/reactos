@@ -21,6 +21,8 @@ ULONG g_BaseHandlers = 0;
 
 DWORD g_dwWinVer = 0;
 
+/* Counts the x86 SEH registration records. x64 has no such chain, so the
+ * handler checks only apply to x86. */
 ULONG CountHandlers(VOID)
 {
     EXCEPTION_REGISTRATION_RECORD* exc;
@@ -42,16 +44,22 @@ int g_TLS_DETACH = 3;
 
 VOID WINAPI notify_TlsCallback(IN HINSTANCE hDllHandle, IN DWORD dwReason, IN LPVOID lpvReserved)
 {
+#ifdef _M_IX86
     ULONG handlers = CountHandlers() - g_BaseHandlers;
+#endif
 
     InterlockedIncrement(&g_TlsCalled);
     if (dwReason == DLL_PROCESS_ATTACH)
     {
+#ifdef _M_IX86
         ok_int(handlers, g_TLS_ATTACH);
+#endif
     }
     else
     {
+#ifdef _M_IX86
         ok_int(handlers, g_TLS_DETACH);
+#endif
     }
 
     if (InterlockedCompareExchange(&g_TlsExcept, 0xffffff, dwReason) == dwReason)
@@ -65,16 +73,22 @@ int g_DLL_DETACH = 2;
 
 BOOL WINAPI notify_DllMain(IN HINSTANCE hDllHandle, IN DWORD dwReason, IN LPVOID lpvReserved)
 {
+#ifdef _M_IX86
     ULONG handlers = CountHandlers() - g_BaseHandlers;
+#endif
 
     InterlockedIncrement(&g_DllMainCalled);
     if (dwReason == DLL_PROCESS_ATTACH)
     {
+#ifdef _M_IX86
         ok_int(handlers, g_DLL_ATTACH);
+#endif
     }
     else
     {
+#ifdef _M_IX86
         ok_int(handlers, g_DLL_DETACH); // For failures, see https://jira.reactos.org/browse/CORE-14857
+#endif
     }
 
     if (InterlockedCompareExchange(&g_DllMainExcept, 0xffffff, dwReason) == dwReason)
