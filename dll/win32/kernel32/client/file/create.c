@@ -557,7 +557,7 @@ OpenDataFile(HANDLE hFile, DWORD dwUnused)
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 HANDLE
 WINAPI
@@ -566,8 +566,75 @@ ReOpenFile(IN HANDLE hOriginalFile,
            IN DWORD dwShareMode,
            IN DWORD dwFlags)
 {
-   STUB;
-   return INVALID_HANDLE_VALUE;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    UNICODE_STRING FileName = RTL_CONSTANT_STRING(L"");
+    SECURITY_QUALITY_OF_SERVICE SecurityQos;
+    HANDLE FileHandle;
+    ULONG OpenOptions = 0;
+    NTSTATUS Status;
+
+    /* Attributes describe a new file and cannot be changed by reopening it. */
+    if (dwFlags & 0xFFFF)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    if (!(dwFlags & FILE_FLAG_OVERLAPPED))
+        OpenOptions |= FILE_SYNCHRONOUS_IO_NONALERT;
+    if (dwFlags & FILE_FLAG_WRITE_THROUGH)
+        OpenOptions |= FILE_WRITE_THROUGH;
+    if (dwFlags & FILE_FLAG_NO_BUFFERING)
+        OpenOptions |= FILE_NO_INTERMEDIATE_BUFFERING;
+    if (dwFlags & FILE_FLAG_RANDOM_ACCESS)
+        OpenOptions |= FILE_RANDOM_ACCESS;
+    if (dwFlags & FILE_FLAG_SEQUENTIAL_SCAN)
+        OpenOptions |= FILE_SEQUENTIAL_ONLY;
+    if (dwFlags & FILE_FLAG_DELETE_ON_CLOSE)
+    {
+        OpenOptions |= FILE_DELETE_ON_CLOSE;
+        dwDesiredAccess |= DELETE;
+    }
+    if (dwFlags & FILE_FLAG_BACKUP_SEMANTICS)
+        OpenOptions |= FILE_OPEN_FOR_BACKUP_INTENT;
+    else
+        OpenOptions |= FILE_NON_DIRECTORY_FILE;
+    if (dwFlags & FILE_FLAG_OPEN_REPARSE_POINT)
+        OpenOptions |= FILE_OPEN_REPARSE_POINT;
+    if (dwFlags & FILE_FLAG_OPEN_NO_RECALL)
+        OpenOptions |= FILE_OPEN_NO_RECALL;
+
+    /* An empty relative name reopens the object, even after it is renamed. */
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &FileName,
+                               (dwFlags & FILE_FLAG_POSIX_SEMANTICS) ? 0 : OBJ_CASE_INSENSITIVE,
+                               hOriginalFile,
+                               NULL);
+
+    if (dwFlags & SECURITY_SQOS_PRESENT)
+    {
+        SecurityQos.Length = sizeof(SecurityQos);
+        SecurityQos.ImpersonationLevel = (dwFlags >> 16) & 3;
+        SecurityQos.ContextTrackingMode = (dwFlags & SECURITY_CONTEXT_TRACKING) ?
+                                          SECURITY_DYNAMIC_TRACKING : SECURITY_STATIC_TRACKING;
+        SecurityQos.EffectiveOnly = !!(dwFlags & SECURITY_EFFECTIVE_ONLY);
+        ObjectAttributes.SecurityQualityOfService = &SecurityQos;
+    }
+
+    Status = NtOpenFile(&FileHandle,
+                        dwDesiredAccess | SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        dwShareMode,
+                        OpenOptions);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    return FileHandle;
 }
 
 /* EOF */
