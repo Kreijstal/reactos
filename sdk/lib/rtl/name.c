@@ -63,8 +63,11 @@ RtlIsNameInExpression(
     ULONG NameLen = Name->Length / sizeof(WCHAR);
     ULONG ExprLen = Expression->Length / sizeof(WCHAR);
     ULONG NamePos = 0, ExprPos = 0;
-    ULONG StarExprPos = MAXULONG;
-    ULONG StarNamePos = 0;
+    ULONG LastDot = MAXULONG;
+    ULONG StateCount = ExprLen + 1;
+    BOOLEAN StackStates[2][64];
+    PBOOLEAN States, NextStates, AllocatedStates = NULL;
+    BOOLEAN Result = FALSE;
 
     /* For more information about this algorithm, see
      * https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/0b034646-4e23-4874-8488-2adac231ff23
@@ -102,111 +105,84 @@ RtlIsNameInExpression(
         return TRUE;
     }
 
-    /* *** Main parser *** */
-
-    for (;;)
+    /* Keep every possible expression position. Remembering only the most
+     * recent star loses alternatives when DOS_STARs occur in the same mask. */
+    if (StateCount <= RTL_NUMBER_OF(StackStates[0]))
     {
-        /* We passed everything and reached the end of both the name and expression. */
-        if (NamePos >= NameLen && ExprPos >= ExprLen)
-            return TRUE;
+        States = StackStates[0];
+        NextStates = StackStates[1];
+    }
+    else
+    {
+        AllocatedStates = RtlpAllocateMemory(2 * StateCount * sizeof(BOOLEAN), 'NltR');
+        if (AllocatedStates == NULL)
+            RtlRaiseStatus(STATUS_NO_MEMORY);
+        States = AllocatedStates;
+        NextStates = States + StateCount;
+    }
+    RtlZeroMemory(States, StateCount * sizeof(BOOLEAN));
+    States[0] = TRUE;
+    for (NamePos = 0; NamePos < NameLen; NamePos++)
+    {
+        if (Name->Buffer[NamePos] == L'.')
+            LastDot = NamePos;
+    }
 
+    for (NamePos = 0; NamePos <= NameLen; NamePos++)
+    {
         WCHAR NameChar = RtlpGetExprChar(Name->Buffer, NamePos, NameLen, IgnoreCase, UpcaseTable);
-        WCHAR ExprChar = RtlpGetExprChar(Expression->Buffer, ExprPos, ExprLen, IgnoreCase, UpcaseTable);
+        BOOLEAN HaveNextState = FALSE;
+        PBOOLEAN Swap;
 
-        /* '?' or character literal */
-        if ((ExprChar == L'?' && NamePos < NameLen)
-            || (IS_LITERAL_OR_DOS_DOT(ExprChar) && ExprChar == NameChar))
+        RtlZeroMemory(NextStates, StateCount * sizeof(BOOLEAN));
+        for (ExprPos = 0; ExprPos < ExprLen; ExprPos++)
         {
-            NamePos++;
-            ExprPos++;
-            continue;
-        }
-
-        /* '*' */
-        if (ExprChar == L'*')
-        {
-            StarExprPos = ExprPos;
-            StarNamePos = NamePos;
-            ExprPos++;
-            continue;
-        }
-
-        /* DOS_STAR */
-        if (ExprChar == DOS_STAR)
-        {
-            ULONG LookPos = ExprPos + 1;
-            StarExprPos = ExprPos;
-            StarNamePos = NamePos;
-
-            while (LookPos < ExprLen)
-            {
-                WCHAR LookChar = Expression->Buffer[LookPos];
-                if (IS_LITERAL_OR_DOS_DOT(LookChar))
-                    break;
-                LookPos++;
-            }
-
-            ExprPos++;
-            continue;
-        }
-
-        /* DOS_QM */
-        if (ExprChar == DOS_QM)
-        {
-            if (NamePos >= NameLen || NameChar == L'.')
-            {
-                /* Dot or end-of-name: skip all consecutive DOS_QM tokens */
-                while (ExprPos < ExprLen && Expression->Buffer[ExprPos] == DOS_QM)
-                    ExprPos++;
+            WCHAR ExprChar;
+            if (!States[ExprPos])
                 continue;
-            }
+            ExprChar = RtlpGetExprChar(Expression->Buffer, ExprPos, ExprLen, IgnoreCase, UpcaseTable);
 
-            /* Normal DOS_QM: consume one non-dot character */
-            NamePos++;
-            ExprPos++;
-            continue;
-        }
-
-        /* DOS_DOT */
-        if (ExprChar == DOS_DOT)
-        {
-            if (NamePos >= NameLen)
+            if (ExprChar == L'*' || ExprChar == DOS_STAR)
             {
-                ExprPos++;
-                continue;
-            }
-
-            if (NameChar == L'.')
-            {
-                NamePos++;
-                ExprPos++;
-                continue;
-            }
-        }
-
-        /* Backtrack from a '*' or DOS_STAR */
-        if (StarExprPos != MAXULONG)
-        {
-            /* A DOS_STAR at the end cannot consume a trailing '.' in the name */
-            if (Expression->Buffer[StarExprPos] == DOS_STAR && ExprPos >= ExprLen)
-            {
-                ULONG i;
-                for (i = StarNamePos; i < NameLen; i++)
+                /* Both stars may match no characters. A DOS_STAR cannot
+                 * remain active after consuming the final dot. */
+                States[ExprPos + 1] = TRUE;
+                if (NamePos < NameLen)
                 {
-                    if (Name->Buffer[i] == L'.')
-                        return FALSE;
+                    NextStates[ExprPos + (ExprChar == DOS_STAR && NamePos == LastDot)] = TRUE;
+                    HaveNextState = TRUE;
                 }
             }
-
-            if (StarNamePos < NameLen)
+            else if (ExprChar == DOS_QM && (NamePos == NameLen || NameChar == L'.'))
             {
-                StarNamePos++;
-                NamePos = StarNamePos;
-                ExprPos = StarExprPos + 1;
-                continue;
+                States[ExprPos + 1] = TRUE;
+            }
+            else if (ExprChar == DOS_DOT && NamePos == NameLen)
+            {
+                States[ExprPos + 1] = TRUE;
+            }
+            else if (NamePos < NameLen &&
+                     (ExprChar == L'?' || ExprChar == DOS_QM ||
+                      (ExprChar == DOS_DOT && NameChar == L'.') || ExprChar == NameChar))
+            {
+                NextStates[ExprPos + 1] = TRUE;
+                HaveNextState = TRUE;
             }
         }
 
-        return FALSE;
+        if (NamePos == NameLen)
+        {
+            Result = States[ExprLen];
+            break;
+        }
+        if (!HaveNextState)
+            break;
+        Swap = States;
+        States = NextStates;
+        NextStates = Swap;
     }
+
+    if (AllocatedStates != NULL)
+        RtlpFreeMemory(AllocatedStates, 'NltR');
+    return Result;
 }
