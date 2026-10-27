@@ -244,13 +244,6 @@ SetRegFromStackValue(
     _In_ BYTE Reg,
     _In_ PDWORD64 ValuePointer)
 {
-    if (!RtlpIsUnwindStackAccessValid((ULONG64)ValuePointer, sizeof(*ValuePointer)))
-    {
-        Context->Rip = 0;
-        Context->Rsp = 0;
-        return;
-    }
-
     SetReg(Context, Reg, *ValuePointer);
     if (ContextPointers != NULL)
     {
@@ -300,13 +293,6 @@ SetXmmRegFromStackValue(
     _In_ BYTE Reg,
     _In_ M128A *ValuePointer)
 {
-    if (!RtlpIsUnwindStackAccessValid((ULONG64)ValuePointer, sizeof(*ValuePointer)))
-    {
-        Context->Rip = 0;
-        Context->Rsp = 0;
-        return;
-    }
-
     SetXmmReg(Context, Reg, *ValuePointer);
     if (ContextPointers != NULL)
     {
@@ -450,13 +436,6 @@ RtlpTryToUnwindEpilog(
     }
 
     /* Unwind is finished, pop new Rip from Stack */
-    if (!RtlpIsUnwindStackAccessValid(LocalContext.Rsp, sizeof(DWORD64)))
-    {
-        Context->Rip = 0;
-        Context->Rsp = 0;
-        return TRUE;
-    }
-
     LocalContext.Rip = *(DWORD64*)LocalContext.Rsp;
     LocalContext.Rsp += sizeof(DWORD64);
 
@@ -673,13 +652,6 @@ RepeatChainedInfo:
                 Context->Rsp += UnwindCode.OpInfo * sizeof(DWORD64);
 
                 /* Now pop the MACHINE_FRAME (RIP/RSP only. And yes, "magic numbers", deal with it) */
-                if (!RtlpIsUnwindStackAccessValid(Context->Rsp, 0x20))
-                {
-                    Context->Rip = 0;
-                    Context->Rsp = 0;
-                    goto Exit;
-                }
-
                 Context->Rip = *(PDWORD64)(Context->Rsp + 0x00);
                 Context->Rsp = *(PDWORD64)(Context->Rsp + 0x18);
                 ASSERT((i + 1) == UnwindInfo->CountOfCodes);
@@ -700,13 +672,6 @@ RepeatChainedInfo:
     /* Unwind is finished, pop new Rip from Stack */
     if (Context->Rsp != 0)
     {
-        if (!RtlpIsUnwindStackAccessValid(Context->Rsp, sizeof(DWORD64)))
-        {
-            Context->Rip = 0;
-            Context->Rsp = 0;
-            goto Exit;
-        }
-
         Context->Rip = *(DWORD64*)Context->Rsp;
         Context->Rsp += sizeof(DWORD64);
     }
