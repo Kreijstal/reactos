@@ -4389,6 +4389,213 @@ NtQueryInformationThread(
         }
 #endif /* (NTDDI_VERSION >= NTDDI_WIN10_RS1) || defined(__REACTOS__) */
 
+        /* Single ULONG values */
+        case ThreadIoPriority:
+        case ThreadPagePriority:
+        case ThreadActualBasePriority:
+        case ThreadCpuAccountingInformation:
+        case ThreadSuspendCount:
+        case ThreadHeterogeneousCpuPolicy:
+        case ThreadDynamicCodePolicyInfo:
+        case ThreadExplicitCaseSensitivity:
+        case ThreadSubsystemInformation:
+        {
+            ULONG Value;
+
+            Length = sizeof(ULONG);
+            if (ThreadInformationLength != Length)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            Status = ObReferenceObjectByHandle(ThreadHandle,
+                                               (ThreadInformationClass == ThreadCpuAccountingInformation) ?
+                                                   THREAD_QUERY_INFORMATION : THREAD_QUERY_LIMITED_INFORMATION,
+                                               PsThreadType,
+                                               PreviousMode,
+                                               (PVOID*)&Thread,
+                                               NULL);
+            if (!NT_SUCCESS(Status))
+                break;
+
+            switch (ThreadInformationClass)
+            {
+                case ThreadIoPriority:
+                    Value = Thread->ThreadIoPriority;
+                    break;
+
+                case ThreadPagePriority:
+                    Value = Thread->ThreadPagePriority;
+                    break;
+
+                case ThreadActualBasePriority:
+                    Value = Thread->Tcb.BasePriority;
+                    break;
+
+                case ThreadSuspendCount:
+                    Value = (UCHAR)Thread->Tcb.SuspendCount;
+                    break;
+
+                /* No CPU rate accounting, heterogeneous scheduling policy
+                 * (KHeteroCpuPolicyAll), dynamic code opt-out or explicit
+                 * case sensitivity; every thread is a Win32 thread. */
+                default:
+                    Value = 0;
+                    break;
+            }
+
+            _SEH2_TRY
+            {
+                *(PULONG)ThreadInformation = Value;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+
+            ObDereferenceObject(Thread);
+            break;
+        }
+
+        case ThreadCycleTime:
+        {
+            PTHREAD_CYCLE_TIME_INFORMATION CycleTimeInfo = ThreadInformation;
+
+            Length = sizeof(*CycleTimeInfo);
+            if (ThreadInformationLength != Length)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            Status = ObReferenceObjectByHandle(ThreadHandle,
+                                               THREAD_QUERY_LIMITED_INFORMATION,
+                                               PsThreadType,
+                                               PreviousMode,
+                                               (PVOID*)&Thread,
+                                               NULL);
+            if (!NT_SUCCESS(Status))
+                break;
+
+            _SEH2_TRY
+            {
+                CycleTimeInfo->AccumulatedCycles = Thread->Tcb.CycleTime;
+                CycleTimeInfo->CurrentCycleCount = 0;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+
+            ObDereferenceObject(Thread);
+            break;
+        }
+
+        case ThreadGroupInformation:
+        case ThreadActualGroupAffinity:
+        {
+            PGROUP_AFFINITY GroupAffinity = ThreadInformation;
+
+            Length = sizeof(*GroupAffinity);
+            if (ThreadInformationLength != Length)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            Status = ObReferenceObjectByHandle(ThreadHandle,
+                                               THREAD_QUERY_LIMITED_INFORMATION,
+                                               PsThreadType,
+                                               PreviousMode,
+                                               (PVOID*)&Thread,
+                                               NULL);
+            if (!NT_SUCCESS(Status))
+                break;
+
+            _SEH2_TRY
+            {
+                RtlZeroMemory(GroupAffinity, sizeof(*GroupAffinity));
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+                GroupAffinity->Mask = Thread->Tcb.Affinity.Mask;
+                GroupAffinity->Group = Thread->Tcb.Affinity.Group;
+#else
+                GroupAffinity->Mask = Thread->Tcb.Affinity;
+#endif
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+
+            ObDereferenceObject(Thread);
+            break;
+        }
+
+        case ThreadSelectedCpuSets:
+        {
+            /* CPU sets are not supported, so no thread has any selected */
+            Length = 0;
+
+            Status = ObReferenceObjectByHandle(ThreadHandle,
+                                               THREAD_QUERY_LIMITED_INFORMATION,
+                                               PsThreadType,
+                                               PreviousMode,
+                                               (PVOID*)&Thread,
+                                               NULL);
+            if (NT_SUCCESS(Status))
+                ObDereferenceObject(Thread);
+            break;
+        }
+
+        case ThreadSystemThreadInformation:
+        {
+            PSYSTEM_THREAD_INFORMATION ThreadInfo = ThreadInformation;
+
+            Length = sizeof(*ThreadInfo);
+            if (ThreadInformationLength != Length)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            Status = ObReferenceObjectByHandle(ThreadHandle,
+                                               THREAD_QUERY_LIMITED_INFORMATION,
+                                               PsThreadType,
+                                               PreviousMode,
+                                               (PVOID*)&Thread,
+                                               NULL);
+            if (!NT_SUCCESS(Status))
+                break;
+
+            _SEH2_TRY
+            {
+                RtlZeroMemory(ThreadInfo, sizeof(*ThreadInfo));
+                ThreadInfo->KernelTime.QuadPart = UInt32x32To64(Thread->Tcb.KernelTime, KeMaximumIncrement);
+                ThreadInfo->UserTime.QuadPart = UInt32x32To64(Thread->Tcb.UserTime, KeMaximumIncrement);
+                ThreadInfo->CreateTime.QuadPart = Thread->CreateTime.QuadPart;
+                ThreadInfo->WaitTime = Thread->Tcb.WaitTime;
+                ThreadInfo->StartAddress = Thread->StartAddress;
+                ThreadInfo->ClientId = Thread->Cid;
+                ThreadInfo->Priority = Thread->Tcb.Priority;
+                ThreadInfo->BasePriority = Thread->Tcb.BasePriority;
+                ThreadInfo->ContextSwitches = Thread->Tcb.ContextSwitches;
+                ThreadInfo->ThreadState = Thread->Tcb.State;
+                ThreadInfo->WaitReason = Thread->Tcb.WaitReason;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+
+            ObDereferenceObject(Thread);
+            break;
+        }
+
         /* Anything else */
         default:
             /* Not yet implemented */
