@@ -75,6 +75,7 @@ NtfsReadOnlyMutation(PNTFS_IRP_CONTEXT Context)
                 case FileBasicInformation:
                 case FileAllocationInformation:
                 case FileEndOfFileInformation:
+                case FileValidDataLengthInformation:
                 case FileLinkInformation:
                 case FileDispositionInformation:
                 case FileRenameInformation:

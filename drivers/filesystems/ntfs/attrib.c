@@ -3634,6 +3634,26 @@ GetFileNameFromRecord(PDEVICE_EXTENSION Vcb,
     return NULL;
 }
 
+PFILENAME_ATTRIBUTE
+NtfsGetDosNameFromRecord(PDEVICE_EXTENSION Vcb,
+                         PFILE_RECORD_HEADER FileRecord,
+                         PFILENAME_ATTRIBUTE LongName)
+{
+    PFILENAME_ATTRIBUTE Win32 = GetFileNameFromRecord(Vcb, FileRecord, NTFS_FILE_NAME_WIN32);
+    PFILENAME_ATTRIBUTE Dos = GetFileNameFromRecord(Vcb, FileRecord, NTFS_FILE_NAME_DOS);
+
+    /* A short name belongs to a directory link, not to every hard link of
+     * the file. Do not report the original link's alias for another name. */
+    if (!Win32 || !Dos || Dos->NameType != NTFS_FILE_NAME_DOS ||
+        Win32->DirectoryFileReferenceNumber != LongName->DirectoryFileReferenceNumber ||
+        Dos->DirectoryFileReferenceNumber != LongName->DirectoryFileReferenceNumber ||
+        Win32->NameLength != LongName->NameLength ||
+        RtlCompareMemory(Win32->Name, LongName->Name, LongName->NameLength * sizeof(WCHAR)) !=
+                        LongName->NameLength * sizeof(WCHAR))
+        return NULL;
+    return Dos;
+}
+
 /**
 * GetPackedByteCount
 * Returns the minimum number of bytes needed to represent the value of a
