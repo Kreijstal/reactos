@@ -133,12 +133,20 @@ HandleLoadUnloadIoctl(_In_ PDEVICE_OBJECT DeviceObject,
 
     FLT_ASSERT(ControlCode == IOCTL_FILTER_LOAD || ControlCode == IOCTL_FILTER_UNLOAD);
 
+    /* ZwLoadDriver/UnloadDriver run with KernelMode in the forwarding path.
+     * Check the original IOCTL caller before that privilege bypass. */
+    if (!SeSinglePrivilegeCheck(SeExports->SeLoadDriverPrivilege, Irp->RequestorMode))
+        return STATUS_PRIVILEGE_NOT_HELD;
+
     /* Make sure the buffer is valid */
     if (BufferLength < sizeof(FILTER_NAME))
         return STATUS_INVALID_PARAMETER;
 
     /* Convert the file name buffer into a string */
     FilterName = (PFILTER_NAME)Irp->AssociatedIrp.SystemBuffer;
+    if ((FilterName->Length & (sizeof(WCHAR) - 1)) ||
+        FilterName->Length > BufferLength - FIELD_OFFSET(FILTER_NAME, FilterName[0]))
+        return STATUS_INVALID_PARAMETER;
     Name.Length = FilterName->Length;
     Name.MaximumLength = FilterName->Length;
     Name.Buffer = (PWCH)((PCHAR)FilterName + FIELD_OFFSET(FILTER_NAME, FilterName[0]));
