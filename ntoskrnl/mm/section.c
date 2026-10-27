@@ -1310,9 +1310,11 @@ MmMakeSegmentResident(
     if (!NT_SUCCESS(Status))
         return Status;
 
-    /* If the file is not random access and we are not the page out thread
-     * read a 64K Chunk. */
-    if (((ULONG_PTR)IoGetTopLevelIrp() != FSRTL_MOD_WRITE_TOP_LEVEL_IRP)
+    /* Cache-manager requests provide their own range and valid-data limit.
+     * Reading ahead there could cache zero-filled pages beyond that limit
+     * before a later file extension. Keep 64K read-ahead for ordinary faults. */
+    if (!ValidDataLength &&
+        ((ULONG_PTR)IoGetTopLevelIrp() != FSRTL_MOD_WRITE_TOP_LEVEL_IRP)
         && !FlagOn(FileObject->Flags, FO_RANDOM_ACCESS))
     {
         RangeStart = Offset - (Offset % _64K);
@@ -4992,7 +4994,7 @@ MmForceSectionClosed(IN PSECTION_OBJECT_POINTERS SectionObjectPointer,
             BOOLEAN CanPurge;
 
             MmLockSectionSegment(Segment);
-            if (Segment->SectionCount > 1)
+            if (Segment->SectionCount != 0 || SectionObjectPointer->SharedCacheMap != NULL)
             {
                 DataOk = DelayClose;
                 CanPurge = FALSE;
