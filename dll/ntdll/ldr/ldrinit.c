@@ -1490,8 +1490,8 @@ LdrpAllocateTls(VOID)
 
     /* Allocate the vector array */
     TlsVector = RtlAllocateHeap(RtlGetProcessHeap(),
-                                    0,
-                                    LdrpNumberOfTlsEntries * sizeof(PVOID));
+                                HEAP_ZERO_MEMORY,
+                                LdrpNumberOfTlsEntries * sizeof(PVOID));
     if (!TlsVector) return STATUS_NO_MEMORY;
     Teb->ThreadLocalStoragePointer = TlsVector;
 
@@ -1508,8 +1508,9 @@ LdrpAllocateTls(VOID)
         TlsDataSize = TlsData->TlsDirectory.EndAddressOfRawData -
                       TlsData->TlsDirectory.StartAddressOfRawData;
         TlsVector[TlsData->TlsDirectory.Characteristics] = RtlAllocateHeap(RtlGetProcessHeap(),
-                                                                           0,
-                                                                           TlsDataSize);
+                                                                           HEAP_ZERO_MEMORY,
+                                                                           TlsDataSize +
+                                                                           TlsData->TlsDirectory.SizeOfZeroFill);
         if (!TlsVector[TlsData->TlsDirectory.Characteristics])
         {
             /* Out of memory */
