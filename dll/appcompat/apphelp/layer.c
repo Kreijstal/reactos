@@ -18,6 +18,13 @@
 #define LAYER_APPLY_TO_SYSTEM_EXES  1
 #define LAYER_UNK_FLAG2             2
 
+/* Windows 8 accepts more flag bits; only the first two are written */
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
+#define LAYER_VALID_FLAGS           0x3F
+#else
+#define LAYER_VALID_FLAGS           (LAYER_APPLY_TO_SYSTEM_EXES | LAYER_UNK_FLAG2)
+#endif
+
 #ifndef REG_SZ
 #define REG_SZ                      1
 #endif
@@ -476,7 +483,7 @@ BOOL WINAPI SetPermLayerState(PCWSTR wszPath, PCWSTR wszLayer, DWORD dwFlags, BO
         SHIM_ERR("Invalid argument\n");
         return FALSE;
     }
-    if (dwFlags & ~(LAYER_APPLY_TO_SYSTEM_EXES | LAYER_UNK_FLAG2))
+    if (dwFlags & ~LAYER_VALID_FLAGS)
     {
         SHIM_ERR("Invalid flags\n");
         return FALSE;
@@ -511,7 +518,7 @@ BOOL WINAPI SetPermLayerState(PCWSTR wszPath, PCWSTR wszLayer, DWORD dwFlags, BO
         start++;
     }
     if (bEnable)
-        dwWriteFlags |= dwFlags;
+        dwWriteFlags |= dwFlags & (LAYER_APPLY_TO_SYSTEM_EXES | LAYER_UNK_FLAG2);
     else
         dwWriteFlags &= ~dwFlags;
 
@@ -520,6 +527,14 @@ BOOL WINAPI SetPermLayerState(PCWSTR wszPath, PCWSTR wszLayer, DWORD dwFlags, BO
         *(p++) = '!';
     if (dwWriteFlags & LAYER_APPLY_TO_SYSTEM_EXES)
         *(p++) = '#';
+
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
+    /* Windows 8 puts a new layer first */
+    if (bEnable && wszLayer[0])
+    {
+        SdbpAppendLayer(newLayer, sizeof(newLayer), wszLayer, NULL);
+    }
+#endif
 
     do
     {
@@ -536,10 +551,12 @@ BOOL WINAPI SetPermLayerState(PCWSTR wszPath, PCWSTR wszLayer, DWORD dwFlags, BO
         start = p + 1;
     } while (p);
 
+#if (_WIN32_WINNT < _WIN32_WINNT_WIN8)
     if (bEnable && wszLayer[0])
     {
         SdbpAppendLayer(newLayer, sizeof(newLayer), wszLayer, NULL);
     }
+#endif
 
     return SdbSetPermLayerKeys(wszPath, newLayer, bMachine);
 }
