@@ -93,7 +93,7 @@ typedef struct _START_LOCK
 {
     DWORD Tag;             /* Must be LOCK_TAG */
     DWORD TimeWhenLocked;  /* Number of seconds since 1970 */
-    PSID LockOwnerSid;     /* It is NULL if the SCM acquired the lock */
+    WCHAR LockOwner[1];    /* "Domain\\User" of the locker */
 } START_LOCK, *PSTART_LOCK;
 
 
@@ -263,8 +263,12 @@ DWORD ScmSetServiceGroup(PSERVICE lpService,
 DWORD ScmAcquireServiceStartLock(IN BOOL IsServiceController,
                                  OUT LPSC_RPC_LOCK lpLock);
 DWORD ScmReleaseServiceStartLock(IN OUT LPSC_RPC_LOCK lpLock);
-VOID ScmQueryServiceLockStatusW(OUT LPQUERY_SERVICE_LOCK_STATUSW lpLockStatus);
-VOID ScmQueryServiceLockStatusA(OUT LPQUERY_SERVICE_LOCK_STATUSA lpLockStatus);
+DWORD ScmQueryServiceLockStatusW(OUT LPQUERY_SERVICE_LOCK_STATUSW lpLockStatus,
+                                 IN DWORD cbBufSize,
+                                 OUT LPDWORD pcbBytesNeeded);
+DWORD ScmQueryServiceLockStatusA(OUT LPQUERY_SERVICE_LOCK_STATUSA lpLockStatus,
+                                 IN DWORD cbBufSize,
+                                 OUT LPDWORD pcbBytesNeeded);
 
 
 /* rpcserver.c */
