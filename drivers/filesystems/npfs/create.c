@@ -221,8 +221,6 @@ NTAPI
 NpTranslateAlias(
     PUNICODE_STRING PipeName)
 {
-    static const UNICODE_STRING DoubleSlashName =
-        RTL_CONSTANT_STRING(L"\\$DoubleSlash");
     WCHAR UpcaseBuffer[MAX_INDEXED_LENGTH + 1];
     UNICODE_STRING UpcaseString;
     ULONG Length;
@@ -243,8 +241,7 @@ NpTranslateAlias(
         (PipeName->Buffer[0] == OBJ_NAME_PATH_SEPARATOR) &&
         (PipeName->Buffer[1] == OBJ_NAME_PATH_SEPARATOR))
     {
-        *PipeName = DoubleSlashName;
-        return STATUS_SUCCESS;
+        return STATUS_OBJECT_NAME_INVALID;
     }
 
     /* Check if the name starts with a path separator */

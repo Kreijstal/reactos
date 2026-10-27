@@ -557,7 +557,8 @@ KdpPrint(
     BOOLEAN Enable;
     STRING OutputString;
     CHAR TimestampPrefix[KD_TIMESTAMP_MAX_CHARS];
-    CHAR OutputBuffer[KD_PRINT_MAX_BYTES];
+    /* The timestamp is additional to the caller's full KD print payload. */
+    CHAR OutputBuffer[KD_PRINT_MAX_BYTES + KD_TIMESTAMP_MAX_CHARS];
     USHORT PrefixLength, OutputLength;
 
     if (NtQueryDebugFilterState(ComponentId, Level) == (NTSTATUS)FALSE)

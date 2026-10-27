@@ -253,6 +253,10 @@ IntDesktopObjectClose(
 {
     NTSTATUS Ret;
     PWIN32_CLOSEMETHOD_PARAMETERS CloseParameters = Parameters;
+    /* A process can hold several handles to one desktop. Its shared view
+     * must survive until the final handle closes. The count is before close. */
+    if (CloseParameters->ProcessHandleCount > 1)
+        return STATUS_SUCCESS;
     PPROCESSINFO ppi = PsGetProcessWin32Process(CloseParameters->Process);
     if (ppi == NULL)
     {

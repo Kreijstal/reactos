@@ -221,6 +221,22 @@ ExpDesktopDelete(PVOID DeletedObject)
 static
 NTSTATUS
 NTAPI
+ExpWindowStationOpen(IN OB_OPEN_REASON Reason,
+                     IN KPROCESSOR_MODE AccessMode,
+                     IN PEPROCESS Process OPTIONAL,
+                     IN PVOID ObjectBody,
+                     IN PACCESS_MASK GrantedAccess,
+                     IN ULONG HandleCount)
+{
+    /* Enable the object manager's per-process handle accounting. Window
+     * stations require no additional per-handle mapping; access is checked
+     * by their security descriptor and lifetime by the existing callbacks. */
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+NTAPI
 ExpDesktopOpen(IN OB_OPEN_REASON Reason,
                IN KPROCESSOR_MODE AccessMode,
                IN PEPROCESS Process OPTIONAL,
@@ -289,6 +305,8 @@ ExpWin32kInit(VOID)
     ObjectTypeInitializer.ParseProcedure = ExpWinStaObjectParse;
     ObjectTypeInitializer.OkayToCloseProcedure = ExpWindowStationOkToClose;
     ObjectTypeInitializer.SecurityRequired = TRUE;
+    ObjectTypeInitializer.MaintainHandleCount = TRUE;
+    ObjectTypeInitializer.OpenProcedure = ExpWindowStationOpen;
     ObjectTypeInitializer.InvalidAttributes = OBJ_OPENLINK |
                                               OBJ_PERMANENT |
                                               OBJ_EXCLUSIVE;
