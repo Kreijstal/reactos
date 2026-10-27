@@ -1788,6 +1788,22 @@ static VOID FASTCALL IntImeWindowPosChanged(VOID)
 }
 
 /* x and y are always screen relative */
+/* Whether showing and hiding the window is reported to the shell
+ * (HSHELL_WINDOWCREATED / HSHELL_WINDOWDESTROYED) */
+static BOOL
+IntIsShellHookWindow(PWND Window)
+{
+   if (Window->style & WS_CHILD)
+      return (Window->style & WS_POPUP) && (Window->ExStyle & WS_EX_APPWINDOW);
+
+   if (UserIsDesktopWindow(Window))
+      return FALSE;
+
+   return (Window->ExStyle & WS_EX_APPWINDOW) ||
+          (!(Window->ExStyle & WS_EX_TOOLWINDOW) && !Window->spwndOwner &&
+           (!Window->spwndParent || UserIsDesktopWindow(Window->spwndParent)));
+}
+
 BOOLEAN FASTCALL
 co_WinPosSetWindowPos(
    PWND Window,
@@ -1967,7 +1983,7 @@ co_WinPosSetWindowPos(
                            0,
                            RDW_VALIDATE | RDW_NOFRAME | RDW_NOERASE | RDW_NOINTERNALPAINT | RDW_ALLCHILDREN);
 
-      if (UserIsDesktopWindow(Window->spwndParent))
+      if (IntIsShellHookWindow(Window))
          co_IntShellHookNotify(HSHELL_WINDOWDESTROYED, (WPARAM)UserHMGetHandle(Window), 0);
 
       Window->style &= ~WS_VISIBLE; //IntSetStyle( Window, 0, WS_VISIBLE );
@@ -1976,25 +1992,11 @@ co_WinPosSetWindowPos(
    }
    else if (WinPos.flags & SWP_SHOWWINDOW)
    {
-      if (Window->style & WS_CHILD)
+      if (IntIsShellHookWindow(Window))
       {
-         if ((Window->style & WS_POPUP) && (Window->ExStyle & WS_EX_APPWINDOW))
-         {
-            co_IntShellHookNotify(HSHELL_WINDOWCREATED, (WPARAM)UserHMGetHandle(Window), 0);
-            if (!(WinPos.flags & SWP_NOACTIVATE))
-               UpdateShellHook(Window);
-         }
-      }
-      else if ((Window->ExStyle & WS_EX_APPWINDOW) ||
-          (!(Window->ExStyle & WS_EX_TOOLWINDOW) && !Window->spwndOwner &&
-           (!Window->spwndParent || UserIsDesktopWindow(Window->spwndParent))))
-      {
-         if (!UserIsDesktopWindow(Window))
-         {
-            co_IntShellHookNotify(HSHELL_WINDOWCREATED, (WPARAM)UserHMGetHandle(Window), 0);
-            if (!(WinPos.flags & SWP_NOACTIVATE))
-               UpdateShellHook(Window);
-         }
+         co_IntShellHookNotify(HSHELL_WINDOWCREATED, (WPARAM)UserHMGetHandle(Window), 0);
+         if (!(WinPos.flags & SWP_NOACTIVATE))
+            UpdateShellHook(Window);
       }
 
       Window->style |= WS_VISIBLE; //IntSetStyle( Window, WS_VISIBLE, 0 );
