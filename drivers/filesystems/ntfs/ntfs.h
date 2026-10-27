@@ -5,6 +5,10 @@
 #include <pseh/pseh2.h>
 #include <section_attribs.h>
 
+#if (NTDDI_VERSION < NTDDI_WIN8)
+#define FileRenameInformationEx ((FILE_INFORMATION_CLASS)65)
+#endif
+
 #if (NTDDI_VERSION < NTDDI_VISTA)
 /* Vista+ names this driver implements whatever the build's target version is. */
 #define FileHardLinkInformation ((FILE_INFORMATION_CLASS)46)

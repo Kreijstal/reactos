@@ -1267,11 +1267,11 @@ ReplaceFileW(
         Error = ERROR_NOT_ENOUGH_MEMORY;
         goto Cleanup;
     }
-    Rename->ReplaceIfExists = TRUE;
+    Rename->Flags = FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS;
     Rename->RootDirectory = NULL;
     Rename->FileNameLength = OriginalName.Length;
     RtlCopyMemory(Rename->FileName, OriginalName.Buffer, OriginalName.Length);
-    Status = NtSetInformationFile(Replacement, &IoStatus, Rename, RenameLength, FileRenameInformation);
+    Status = NtSetInformationFile(Replacement, &IoStatus, Rename, RenameLength, FileRenameInformationEx);
     if (!NT_SUCCESS(Status))
         goto NtError;
     Ret = TRUE;

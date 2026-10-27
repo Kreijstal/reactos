@@ -4079,6 +4079,7 @@ NtSetInformationFile(IN HANDLE FileHandle,
     }
 #endif
     else if (FileInformationClass == FileRenameInformation ||
+             FileInformationClass == FileRenameInformationEx ||
              FileInformationClass == FileLinkInformation ||
              FileInformationClass == FileMoveClusterInformation)
     {
@@ -4101,7 +4102,10 @@ NtSetInformationFile(IN HANDLE FileHandle,
             }
             else
             {
-                StackPtr->Parameters.SetFile.ReplaceIfExists = RenameInfo->ReplaceIfExists;
+                StackPtr->Parameters.SetFile.ReplaceIfExists =
+                    FileInformationClass == FileRenameInformationEx ?
+                    BooleanFlagOn(RenameInfo->Flags, FILE_RENAME_REPLACE_IF_EXISTS) :
+                    RenameInfo->ReplaceIfExists;
             }
 
             /* If we got fully path OR relative target, attempt a parent directory open */
@@ -4691,16 +4695,9 @@ NtWriteFile(IN HANDLE FileHandle,
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
-            NTSTATUS ExceptionCode = _SEH2_GetExceptionCode();
-
             /* Release the file object and return the exception code */
             ObDereferenceObject(FileObject);
-            if ((ExceptionCode == STATUS_ACCESS_VIOLATION) &&
-                !Buffer && Length)
-            {
-                ExceptionCode = STATUS_INVALID_USER_BUFFER;
-            }
-            _SEH2_YIELD(return ExceptionCode);
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
         }
         _SEH2_END;
     }
@@ -4885,7 +4882,7 @@ NtWriteFile(IN HANDLE FileHandle,
     if ((PreviousMode != KernelMode) && !Buffer && Length)
     {
         IopCleanupAfterException(FileObject, Irp, EventObject, NULL);
-        return STATUS_INVALID_USER_BUFFER;
+        return STATUS_ACCESS_VIOLATION;
     }
 
     /* Check if this is buffered I/O */

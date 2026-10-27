@@ -690,7 +690,9 @@ TestStoredAccess(PCWSTR Dir, WCHAR Letter)
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (NT_SUCCESS(Status))
     {
-        CheckGranted(File, FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA, 0);
+        /* Overwrite checks write permission and sharing, but the returned
+         * handle retains the caller's explicitly requested access. */
+        CheckGranted(File, FILE_READ_DATA, FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA);
         Status = NtfsKmtQueryStandard(File, &Standard);
         ok_eq_hex(Status, STATUS_SUCCESS);
         if (NT_SUCCESS(Status)) ok_eq_longlong(Standard.EndOfFile.QuadPart, 0);
@@ -976,7 +978,7 @@ TestReplacementAccess(PCWSTR Dir)
         }
         ZwClose(Victim); Victim = NULL;
         Status = ReplaceNamespace(File, i == 2 ? FileLinkInformation : FileRenameInformation, L"victim.bin");
-        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok(Status == STATUS_SUCCESS, "Replacement mode %lu returned %lx\n", i, Status);
         ZwClose(File); File = NULL;
         Status = NtfsKmtOpen(&Victim, Target, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
         ok_eq_hex(Status, STATUS_SUCCESS);

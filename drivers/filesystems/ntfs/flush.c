@@ -75,6 +75,9 @@ NtfsFlushFileCache(PFILE_OBJECT FileObject, BOOLEAN Purge)
 {
     IO_STATUS_BLOCK IoStatus;
 
+    if (FileObject->SectionObjectPointer == NULL)
+        return STATUS_SUCCESS;
+
     CcFlushCache(FileObject->SectionObjectPointer, NULL, 0, &IoStatus);
     if (!NT_SUCCESS(IoStatus.Status))
         return IoStatus.Status;
