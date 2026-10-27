@@ -576,13 +576,28 @@ VOID
 NtfsCountOpen(
     _In_ PDEVICE_EXTENSION DeviceExt,
     _In_ PNTFS_FCB Fcb,
-    _In_ PFILE_OBJECT FileObject)
+    _In_ PFILE_OBJECT FileObject,
+    _In_ PIO_STACK_LOCATION Stack)
 {
     PNTFS_CCB Ccb = FileObject->FsContext2;
+    PIO_SECURITY_CONTEXT Security = Stack->Parameters.Create.SecurityContext;
+    PRIVILEGE_SET Required;
 
     Fcb->OpenHandleCount++;
     DeviceExt->OpenHandleCount++;
     Ccb->Flags |= CCB_COUNTED;
+
+    /* SetFileValidData requires the privilege to have been enabled when
+     * the handle was opened. Use the captured caller, including queued creates. */
+    if (Security && Security->AccessState)
+    {
+        Required.PrivilegeCount = 1;
+        Required.Control = PRIVILEGE_SET_ALL_NECESSARY;
+        Required.Privilege[0].Luid = RtlConvertLongToLuid(SE_MANAGE_VOLUME_PRIVILEGE);
+        Required.Privilege[0].Attributes = SE_PRIVILEGE_ENABLED;
+        if (SePrivilegeCheck(&Required, &Security->AccessState->SubjectSecurityContext, UserMode))
+            Ccb->Flags |= CCB_MANAGE_VOLUME;
+    }
 }
 
 /**
@@ -623,7 +638,7 @@ NtfsGrantShareAccess(
     }
 
     if (NT_SUCCESS(Status))
-        NtfsCountOpen(DeviceExt, Fcb, FileObject);
+        NtfsCountOpen(DeviceExt, Fcb, FileObject, Stack);
 
     return Status;
 }
@@ -829,9 +844,6 @@ NtfsCheckExistingFile(
     BOOLEAN IsDirectory = NtfsFCBIsDirectory(Fcb);
     BOOLEAN ReadOnly = BooleanFlagOn(Fcb->Entry.FileAttributes, NTFS_FILE_TYPE_READ_ONLY);
 
-    if (Disposition == FILE_CREATE)
-        return STATUS_OBJECT_NAME_COLLISION;
-
     if (BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING))
         return STATUS_DELETE_PENDING;
 
@@ -841,15 +853,12 @@ NtfsCheckExistingFile(
     if (BooleanFlagOn(Options, FILE_DIRECTORY_FILE) && !IsDirectory)
         return STATUS_NOT_A_DIRECTORY;
 
+    if (Disposition == FILE_CREATE)
+        return STATUS_OBJECT_NAME_COLLISION;
+
     /* A trailing separator names a directory */
     if (TrailingBackslash && !IsDirectory)
         return STATUS_OBJECT_NAME_INVALID;
-
-    if (BooleanFlagOn(Options, FILE_DELETE_ON_CLOSE) &&
-        (ReadOnly || NtfsFCBIsRoot(Fcb)))
-    {
-        return STATUS_CANNOT_DELETE;
-    }
 
     /* The read-only attribute forbids changing a file's data, not a directory's */
     if (ReadOnly && !IsDirectory &&
@@ -857,6 +866,12 @@ NtfsCheckExistingFile(
          NtfsDispositionOverwrites(Disposition)))
     {
         return STATUS_ACCESS_DENIED;
+    }
+
+    if (BooleanFlagOn(Options, FILE_DELETE_ON_CLOSE) &&
+        (ReadOnly || NtfsFCBIsRoot(Fcb)))
+    {
+        return STATUS_CANNOT_DELETE;
     }
 
     return STATUS_SUCCESS;
@@ -1122,6 +1137,7 @@ NtfsAuthorizeOpen(PDEVICE_EXTENSION Vcb, PNTFS_FCB Fcb, PIRP Irp,
     KPROCESSOR_MODE Mode = NtfsCreateAccessMode(Irp, Stack);
     ULONG Disposition = Stack->Parameters.Create.Options >> 24;
     ACCESS_MASK Desired = AccessState->RemainingDesiredAccess;
+    ACCESS_MASK Requested = Desired | AccessState->PreviouslyGrantedAccess;
     ACCESS_MASK Granted = 0, Extra = 0;
     NTSTATUS Status;
 
@@ -1146,6 +1162,10 @@ NtfsAuthorizeOpen(PDEVICE_EXTENSION Vcb, PNTFS_FCB Fcb, PIRP Irp,
         Granted &= ~(FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_DELETE_CHILD);
     if (Desired & ~(Granted | MAXIMUM_ALLOWED))
         return STATUS_ACCESS_DENIED;
+    /* Overwriting requires additional rights, but those rights were not
+     * requested for the returned handle. */
+    if (!(Requested & MAXIMUM_ALLOWED))
+        Granted &= Requested;
     AccessState->PreviouslyGrantedAccess = Granted;
     AccessState->RemainingDesiredAccess = 0;
     Security->DesiredAccess = Granted;
@@ -1695,7 +1715,7 @@ NtfsOpenVolume(
         return Status;
 
     DeviceExt->VolumeFcb->RefCount++;
-    NtfsCountOpen(DeviceExt, DeviceExt->VolumeFcb, FileObject);
+    NtfsCountOpen(DeviceExt, DeviceExt->VolumeFcb, FileObject, IoGetCurrentIrpStackLocation(Irp));
 
     Irp->IoStatus.Information = FILE_OPENED;
     return STATUS_SUCCESS;
@@ -2145,9 +2165,12 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
     NTSTATUS Status;
     PFILE_RECORD_HEADER FileRecord;
     PNTFS_ATTR_RECORD NextAttribute;
-    PFILENAME_ATTRIBUTE FilenameAttribute;
+    PFILENAME_ATTRIBUTE FilenameAttribute, DosAttribute = NULL;
     ULONGLONG FileMftIndex;
     ULONGLONG FileReference;
+    WCHAR DosBuffer[13];
+    UNICODE_STRING DosName = {0, sizeof(DosBuffer), DosBuffer};
+    GENERATE_NAME_CONTEXT NameContext = {0};
 
     DPRINT("NtfsCreateFileRecord(%p, 0x%I64x, '%wZ', 0x%lx, %s, %s, %s)\n",
            DeviceExt,
@@ -2205,6 +2228,52 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
+    if (FilenameAttribute->NameType == NTFS_FILE_NAME_WIN32)
+    {
+        ULONG FirstEntry, AttributeLength;
+        ULONGLONG Existing;
+        UNICODE_STRING AliasSource = *Name;
+
+        /* Leading periods are not the extension separator of an NTFS
+         * short name (for example, ".config" has a base, not an extension). */
+        while (AliasSource.Length > sizeof(WCHAR) && AliasSource.Buffer[0] == L'.')
+        {
+            AliasSource.Buffer++;
+            AliasSource.Length -= sizeof(WCHAR);
+        }
+        AliasSource.MaximumLength = AliasSource.Length;
+
+        /* The parent is protected by DirResource across name generation
+         * and both index insertions, so an alias cannot be stolen between them. */
+        do
+        {
+            RtlGenerate8dot3Name(&AliasSource, FALSE, &NameContext, &DosName);
+            FirstEntry = 0;
+            Status = NtfsFindMftRecord(DeviceExt, ParentReference & NTFS_MFT_MASK,
+                                       &DosName, &FirstEntry, FALSE, FALSE, &Existing, NULL);
+        } while (NT_SUCCESS(Status));
+        if (Status != STATUS_OBJECT_NAME_NOT_FOUND && Status != STATUS_OBJECT_PATH_NOT_FOUND)
+            goto FreeRecord;
+
+        NextAttribute = (PNTFS_ATTR_RECORD)((PUCHAR)NextAttribute + NextAttribute->Length);
+        AttributeLength = ALIGN_UP_BY(FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR) +
+                                      FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) + DosName.Length,
+                                      ATTR_RECORD_ALIGNMENT);
+        if ((PUCHAR)NextAttribute - (PUCHAR)FileRecord + AttributeLength + 2 * sizeof(ULONG) >
+            DeviceExt->NtfsInfo.BytesPerFileRecord)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto FreeRecord;
+        }
+        Status = AddFileName(FileRecord, NextAttribute, ParentReference, &DosName, FALSE, FileAttributes);
+        if (!NT_SUCCESS(Status))
+            goto FreeRecord;
+        DosAttribute = (PFILENAME_ATTRIBUTE)((PUCHAR)NextAttribute + NextAttribute->Resident.ValueOffset);
+        RtlCopyMemory(DosAttribute, FilenameAttribute, FIELD_OFFSET(FILENAME_ATTRIBUTE, NameLength));
+        DosAttribute->NameType = NTFS_FILE_NAME_DOS;
+        FileRecord->LinkCount--; /* The alias is the same directory link. */
+    }
+
 #ifndef NDEBUG
     // dump file record in memory (for debugging)
     NtfsDumpFileRecord(DeviceExt, FileRecord);
@@ -2224,6 +2293,18 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
                                             FileReference,
                                             FilenameAttribute,
                                             CaseSensitive);
+        if (NT_SUCCESS(Status) && DosAttribute)
+        {
+            Status = NtfsAddFilenameToDirectory(DeviceExt, ParentReference & NTFS_MFT_MASK,
+                                                 FileReference, DosAttribute, FALSE);
+            if (!NT_SUCCESS(Status) &&
+                !NT_SUCCESS(NtfsRemoveFilenameFromDirectory(DeviceExt, ParentReference & NTFS_MFT_MASK,
+                                                            FilenameAttribute, CaseSensitive)))
+            {
+                NtfsMarkVolumeCorrupt(DeviceExt);
+                goto FreeRecord;
+            }
+        }
         if (!NT_SUCCESS(Status))
         {
             /* Nothing refers to the record, so give it back */
@@ -2235,6 +2316,7 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
         }
     }
 
+FreeRecord:
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
     return Status;

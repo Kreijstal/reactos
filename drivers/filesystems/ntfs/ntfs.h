@@ -286,6 +286,7 @@ typedef struct
 #define CCB_USER_SET_CHANGE_TIME 0x0080
 #define CCB_USER_SET_ACCESS_TIME 0x0100
 #define CCB_UPDATE_CHANGE_TIME   0x0200
+#define CCB_MANAGE_VOLUME       0x0400
 
 typedef struct
 {
@@ -751,9 +752,11 @@ typedef struct _NTFS_ATTR_CONTEXT
 typedef struct _NTFS_FILE_LOCK
 {
     LIST_ENTRY ListEntry;
+    LIST_ENTRY FcbList;
     LONG References;
     BOOLEAN Removed;
     BOOLEAN MultipleFcbs; /* sticky until this shared stream state is released */
+    BOOLEAN DeletePending; /* last name removed; retain data until the final close */
     ULONGLONG FileReference;
     WCHAR Stream[MAX_PATH];
     PNTFS_VCB Vcb;
@@ -791,6 +794,7 @@ typedef struct _FCB
     ULONG OpenHandleCount;
     SHARE_ACCESS ShareAccess;
     PNTFS_FILE_LOCK FileLock;
+    LIST_ENTRY FileLockListEntry;
 
     ULONGLONG MFTIndex;
     ULONGLONG ParentMFTIndex;  /* The directory holding the name the FCB was opened by */
@@ -1031,6 +1035,11 @@ PFILENAME_ATTRIBUTE
 GetFileNameFromRecord(PDEVICE_EXTENSION Vcb,
                       PFILE_RECORD_HEADER FileRecord,
                       UCHAR NameType);
+
+PFILENAME_ATTRIBUTE
+NtfsGetDosNameFromRecord(PDEVICE_EXTENSION Vcb,
+                         PFILE_RECORD_HEADER FileRecord,
+                         PFILENAME_ATTRIBUTE LongName);
 
 UCHAR
 GetPackedByteCount(LONGLONG NumberToPack,
@@ -1573,6 +1582,16 @@ NtfsSetLinkCount(
     _In_ PNTFS_VCB Vcb,
     _In_ ULONGLONG MftIndex,
     _In_ USHORT LinkCount);
+
+BOOLEAN
+NtfsDeferFileDeletion(PNTFS_VCB Vcb, ULONGLONG FileReference);
+
+NTSTATUS
+NtfsSetValidDataLength(PDEVICE_EXTENSION DeviceExt,
+                       PNTFS_FCB Fcb,
+                       PFILE_OBJECT FileObject,
+                       LONGLONG Length,
+                       PFILE_RECORD_HEADER Record);
 
 NTSTATUS
 NtfsMakeStreamFCB(

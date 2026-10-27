@@ -2999,7 +2999,7 @@ UpdateIndexEntryFileName(PDEVICE_EXTENSION Vcb,
     {
         if ((IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK) > NTFS_FILE_FIRST_USER_FILE &&
             *CurrentEntry >= *StartEntry &&
-            IndexEntry->FileName.NameType != NTFS_FILE_NAME_DOS &&
+            (!DirSearch || IndexEntry->FileName.NameType != NTFS_FILE_NAME_DOS) &&
             CompareFileName(Vcb, FileName, IndexEntry, DirSearch, CaseSensitive))
         {
             *StartEntry = *CurrentEntry;
@@ -5242,34 +5242,39 @@ NtfsUnlinkFileName(PDEVICE_EXTENSION DeviceExt,
     for (i = 0; NT_SUCCESS(Status) && i < Count; i++)
     {
         UNICODE_STRING DosName;
+        PFILENAME_ATTRIBUTE PairedDos;
+        ULONG DosIndex = Count, j;
 
         if (!NtfsFileNameMatches(DeviceExt, Names[i], ParentIndex, Name))
             continue;
 
+        PairedDos = NtfsGetDosNameFromRecord(DeviceExt, FileRecord, Names[i]);
+        if (Names[i]->NameType == NTFS_FILE_NAME_WIN32 && PairedDos != NULL)
+        {
+            for (j = 0; j < Count; j++)
+            {
+                if (Names[j]->NameType == NTFS_FILE_NAME_DOS &&
+                    Names[j]->DirectoryFileReferenceNumber == PairedDos->DirectoryFileReferenceNumber &&
+                    Names[j]->NameLength == PairedDos->NameLength &&
+                    RtlEqualMemory(Names[j]->Name, PairedDos->Name, PairedDos->NameLength * sizeof(WCHAR)))
+                {
+                    DosIndex = j;
+                    break;
+                }
+            }
+        }
         Status = NtfsRemoveFilenameFromDirectory(DeviceExt, ParentIndex, Names[i], CaseSensitive);
         if (NT_SUCCESS(Status))
             Status = NtfsRemoveFileNameAttribute(DeviceExt, FileRecord, ParentIndex, Name);
 
         /* A Win32 name with an 8.3 name of its own counts as one link with it */
-        if (NT_SUCCESS(Status) && Names[i]->NameType == NTFS_FILE_NAME_WIN32)
+        if (NT_SUCCESS(Status) && DosIndex != Count)
         {
-            ULONG j;
-
-            for (j = 0; j < Count; j++)
-            {
-                if (Names[j]->NameType != NTFS_FILE_NAME_DOS ||
-                    (Names[j]->DirectoryFileReferenceNumber & NTFS_MFT_MASK) != ParentIndex)
-                {
-                    continue;
-                }
-
-                DosName.Buffer = Names[j]->Name;
-                DosName.Length = DosName.MaximumLength = Names[j]->NameLength * sizeof(WCHAR);
-                Status = NtfsRemoveFilenameFromDirectory(DeviceExt, ParentIndex, Names[j], CaseSensitive);
-                if (NT_SUCCESS(Status))
-                    Status = NtfsRemoveFileNameAttribute(DeviceExt, FileRecord, ParentIndex, &DosName);
-                break;
-            }
+            DosName.Buffer = Names[DosIndex]->Name;
+            DosName.Length = DosName.MaximumLength = Names[DosIndex]->NameLength * sizeof(WCHAR);
+            Status = NtfsRemoveFilenameFromDirectory(DeviceExt, ParentIndex, Names[DosIndex], CaseSensitive);
+            if (NT_SUCCESS(Status))
+                Status = NtfsRemoveFileNameAttribute(DeviceExt, FileRecord, ParentIndex, &DosName);
         }
 
         if (NT_SUCCESS(Status))
@@ -5662,7 +5667,8 @@ CompareFileName(PDEVICE_EXTENSION Vcb,
         UNICODE_STRING IntFileName;
         if (!CaseSensitive)
         {
-            NT_VERIFY(NT_SUCCESS(RtlUpcaseUnicodeString(&IntFileName, FileName, TRUE)));
+            if (!NT_SUCCESS(RtlUpcaseUnicodeString(&IntFileName, FileName, TRUE)))
+                return FALSE;
             Alloc = TRUE;
         }
         else
@@ -5674,6 +5680,29 @@ CompareFileName(PDEVICE_EXTENSION Vcb,
          * which is what NTFS means by case-insensitive. */
         Ret = FsRtlIsNameInExpression(&IntFileName, &EntryName, !CaseSensitive,
                                       Vcb ? Vcb->UpCaseTable : NULL);
+
+        /* Enumerate each long name once, but accept its DOS alias too. The
+         * DOS index entries themselves are not returned as extra files. */
+        if (!Ret && Vcb && IndexEntry->FileName.NameType == NTFS_FILE_NAME_WIN32)
+        {
+            PFILE_RECORD_HEADER Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+            if (Record)
+            {
+                if (NT_SUCCESS(ReadFileRecord(Vcb, IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK,
+                                              Record)))
+                {
+                    PFILENAME_ATTRIBUTE Dos = NtfsGetDosNameFromRecord(Vcb, Record, &IndexEntry->FileName);
+                    if (Dos)
+                    {
+                        UNICODE_STRING Alias;
+                        Alias.Buffer = Dos->Name;
+                        Alias.Length = Alias.MaximumLength = Dos->NameLength * sizeof(WCHAR);
+                        Ret = FsRtlIsNameInExpression(&IntFileName, &Alias, !CaseSensitive, Vcb->UpCaseTable);
+                    }
+                }
+                ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+            }
+        }
 
         if (Alloc)
         {
@@ -5836,14 +5865,12 @@ DumpIndexEntry(PINDEX_ENTRY_ATTRIBUTE IndexEntry)
 }
 #endif
 
-/* An exact-name lookup matches one entry: the file's own long name, never a
- * DOS-only alias nor a system file's entry. */
+/* Exact lookups accept either namespace, but never expose system files. */
 static
 BOOLEAN
 IsLookupMatch(PINDEX_ENTRY_ATTRIBUTE IndexEntry)
 {
-    return (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK) >= NTFS_FILE_FIRST_USER_FILE &&
-           IndexEntry->FileName.NameType != NTFS_FILE_NAME_DOS;
+    return (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK) >= NTFS_FILE_FIRST_USER_FILE;
 }
 
 /* Exact-name lookups follow the $I30 B-tree by collation instead of visiting
@@ -6082,7 +6109,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
         // If we've found a file whose index is greater than or equal to StartEntry that matches the search criteria
         if ((IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK) >= NTFS_FILE_FIRST_USER_FILE &&
             *CurrentEntry >= *StartEntry &&
-            IndexEntry->FileName.NameType != NTFS_FILE_NAME_DOS &&
+            (!DirSearch || IndexEntry->FileName.NameType != NTFS_FILE_NAME_DOS) &&
             CompareFileName(Vcb, FileName, IndexEntry, DirSearch, CaseSensitive))
         {
             *StartEntry = *CurrentEntry;
@@ -6293,7 +6320,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
         // If we've found a file whose index is greater than or equal to StartEntry that matches the search criteria
         if ((IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK) >= NTFS_FILE_FIRST_USER_FILE &&
             *CurrentEntry >= *StartEntry &&
-            IndexEntry->FileName.NameType != NTFS_FILE_NAME_DOS &&
+            (!DirSearch || IndexEntry->FileName.NameType != NTFS_FILE_NAME_DOS) &&
             CompareFileName(Vcb, FileName, IndexEntry, DirSearch, CaseSensitive))
         {
             *StartEntry = *CurrentEntry;
