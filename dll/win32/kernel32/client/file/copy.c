@@ -163,9 +163,10 @@ CopyLoop (
 }
 
 static NTSTATUS
-SetLastWriteTime(
+SetLastWriteTimeAndAttributes(
     HANDLE FileHandle,
-    LARGE_INTEGER LastWriteTime
+    LARGE_INTEGER LastWriteTime,
+    ULONG FileAttributes
 )
 {
     NTSTATUS errCode = STATUS_SUCCESS;
@@ -184,6 +185,7 @@ SetLastWriteTime(
     else
     {
         FileBasic.LastWriteTime.QuadPart = LastWriteTime.QuadPart;
+        FileBasic.FileAttributes = FileAttributes;
         errCode = NtSetInformationFile (FileHandle,
                                         &IoStatusBlock,
                                         &FileBasic,
@@ -214,13 +216,14 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
     IO_STATUS_BLOCK IoStatusBlock;
     FILE_STANDARD_INFORMATION FileStandard;
     FILE_BASIC_INFORMATION FileBasic;
+    BY_HANDLE_FILE_INFORMATION SourceInfo, DestInfo;
     BOOL RC = FALSE;
     BOOL KeepDestOnError = FALSE;
     DWORD SystemError;
 
     FileHandleSource = CreateFileW(lpExistingFileName,
                                    GENERIC_READ,
-                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                    NULL,
                                    OPEN_EXISTING,
                                    FILE_ATTRIBUTE_NORMAL|FILE_FLAG_NO_BUFFERING,
@@ -251,16 +254,53 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
             else
             {
                 FileHandleDest = CreateFileW(lpNewFileName,
-                                             GENERIC_WRITE,
-                                             FILE_SHARE_WRITE,
+                                             GENERIC_WRITE | DELETE,
+                                             FILE_SHARE_READ | FILE_SHARE_WRITE,
                                              NULL,
-                                             (dwCopyFlags & COPY_FILE_FAIL_IF_EXISTS) ? CREATE_NEW : CREATE_ALWAYS,
+                                             (dwCopyFlags & COPY_FILE_FAIL_IF_EXISTS) ? CREATE_NEW : OPEN_ALWAYS,
                                              FileBasic.FileAttributes,
                                              NULL);
+                if (FileHandleDest == INVALID_HANDLE_VALUE &&
+                    (GetLastError() == ERROR_SHARING_VIOLATION || GetLastError() == ERROR_ACCESS_DENIED))
+                {
+                    /* A destination that denies deletion can still be copied. */
+                    FileHandleDest = CreateFileW(lpNewFileName,
+                                                 GENERIC_WRITE,
+                                                 FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                                 NULL,
+                                                 (dwCopyFlags & COPY_FILE_FAIL_IF_EXISTS) ? CREATE_NEW : OPEN_ALWAYS,
+                                                 FileBasic.FileAttributes,
+                                                 NULL);
+                }
                 if (INVALID_HANDLE_VALUE != FileHandleDest)
                 {
                     if (!(dwCopyFlags & COPY_FILE_FAIL_IF_EXISTS) && GetLastError() == ERROR_ALREADY_EXISTS)
+                    {
+                        /* Check identity before truncating: names can be hard links. */
+                        if (!GetFileInformationByHandle(FileHandleSource, &SourceInfo) ||
+                            !GetFileInformationByHandle(FileHandleDest, &DestInfo))
+                        {
+                            NtClose(FileHandleDest);
+                            NtClose(FileHandleSource);
+                            return FALSE;
+                        }
+                        if (SourceInfo.dwVolumeSerialNumber == DestInfo.dwVolumeSerialNumber &&
+                            SourceInfo.nFileIndexHigh == DestInfo.nFileIndexHigh &&
+                            SourceInfo.nFileIndexLow == DestInfo.nFileIndexLow)
+                        {
+                            NtClose(FileHandleDest);
+                            NtClose(FileHandleSource);
+                            SetLastError(ERROR_SHARING_VIOLATION);
+                            return FALSE;
+                        }
+                        if (!SetEndOfFile(FileHandleDest))
+                        {
+                            NtClose(FileHandleDest);
+                            NtClose(FileHandleSource);
+                            return FALSE;
+                        }
                         SetLastError(ERROR_SUCCESS);
+                    }
                     errCode = CopyLoop(FileHandleSource,
                                        FileHandleDest,
                                        FileStandard.EndOfFile,
@@ -277,7 +317,7 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
                         LARGE_INTEGER t;
 
                         t.QuadPart = FileBasic.LastWriteTime.QuadPart;
-                        errCode = SetLastWriteTime(FileHandleDest, t);
+                        errCode = SetLastWriteTimeAndAttributes(FileHandleDest, t, FileBasic.FileAttributes);
                         if (!NT_SUCCESS(errCode))
                         {
                             BaseSetLastNTError(errCode);
@@ -287,14 +327,29 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
                             RC = TRUE;
                         }
                     }
-                    NtClose(FileHandleDest);
                     if (! RC && ! KeepDestOnError)
                     {
+                        FILE_BASIC_INFORMATION DestBasic = {0};
+                        FILE_DISPOSITION_INFORMATION Disposition;
+
                         SystemError = GetLastError();
-                        SetFileAttributesW(lpNewFileName, FILE_ATTRIBUTE_NORMAL);
-                        DeleteFileW(lpNewFileName);
+                        DestBasic.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+                        NtSetInformationFile(FileHandleDest,
+                                             &IoStatusBlock,
+                                             &DestBasic,
+                                             sizeof(DestBasic),
+                                             FileBasicInformation);
+                        /* Use the access granted when copying began. A callback
+                         * may have closed a handle that originally denied DELETE. */
+                        Disposition.DeleteFile = TRUE;
+                        NtSetInformationFile(FileHandleDest,
+                                             &IoStatusBlock,
+                                             &Disposition,
+                                             sizeof(Disposition),
+                                             FileDispositionInformation);
                         SetLastError(SystemError);
                     }
+                    NtClose(FileHandleDest);
                 }
                 else
                 {
