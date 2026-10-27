@@ -98,8 +98,9 @@ KiInitializeContextThread(IN PKTHREAD Thread,
         /* Tell the thread it will run in User Mode */
         Thread->PreviousMode = UserMode;
 
-        /* Set the Thread's NPX State */
-        Thread->NpxState = SharedUserData->XState.EnabledFeatures;
+        /* Set the Thread's NPX State. The legacy x87/SSE state is switched
+           even without XSAVE, where EnabledFeatures is 0 and FXSAVE is used. */
+        Thread->NpxState = SharedUserData->XState.EnabledFeatures | XSTATE_MASK_LEGACY;
         /* TODO: NpxIrql was a ReactOS extension to DISPATCHER_HEADER; removed at Win7 */
 #if (NTDDI_VERSION < NTDDI_WIN7)
         Thread->Header.NpxIrql = PASSIVE_LEVEL;
