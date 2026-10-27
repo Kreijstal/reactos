@@ -31,10 +31,11 @@ int _fpclass(double __d)
         {
             return (d.d->sign == 0) ? _FPCLASS_PINF : _FPCLASS_NINF;
         }
-        /* Windows will never return Signaling NaN */
+        /* The top mantissa bit tells quiet from signaling NaN. On x86, an
+         * SNaN argument has usually been quieted by an x87 load already. */
         else
         {
-            return _FPCLASS_QNAN;
+            return (d.d->mantissah & 0x80000) ? _FPCLASS_QNAN : _FPCLASS_SNAN;
         }
     }
 
