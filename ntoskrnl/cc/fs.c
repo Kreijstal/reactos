@@ -174,6 +174,7 @@ CcPurgeCacheSection (
     PROS_VACB Vacb;
     LONGLONG ViewEnd;
     BOOLEAN Success;
+    PFILE_OBJECT CacheFileObject = NULL;
 
 #if (NTDDI_VERSION >= NTDDI_VISTA)
     CCTRACE(CC_API_DEBUG, "SectionObjectPointer=%p\n FileOffset=%p Length=%lu Flags=%lu",
@@ -184,7 +185,17 @@ CcPurgeCacheSection (
 #endif
 
     /* Obtain the shared cache from the section */
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
     SharedCacheMap = SectionObjectPointer->SharedCacheMap;
+    if (SharedCacheMap)
+    {
+        /* Uninitializing the final private map must not free the shared map
+         * underneath this purge or close its backing file object yet. */
+        SharedCacheMap->OpenCount++;
+        CacheFileObject = SharedCacheMap->FileObject;
+        ObReferenceObject(CacheFileObject);
+    }
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
     if (!SharedCacheMap)
     {
         Success = TRUE;
@@ -204,16 +215,27 @@ CcPurgeCacheSection (
          * have the shared cache map from above, iterate
          * over that cache's private lists.
          */
-        while (!IsListEmpty(&SharedCacheMap->PrivateList))
+        for (;;)
         {
+            PFILE_OBJECT PrivateFileObject;
+            OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+            if (IsListEmpty(&SharedCacheMap->PrivateList))
+            {
+                KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+                break;
+            }
             /*
              * This list is not empty, grab the
              * private cache map.
              */
             PrivateCacheMap = CONTAINING_RECORD(SharedCacheMap->PrivateList.Flink, PRIVATE_CACHE_MAP, PrivateLinks);
+            PrivateFileObject = PrivateCacheMap->FileObject;
+            ObReferenceObject(PrivateFileObject);
+            KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
 
             /* Unintialize the private cache now */
-            CcUninitializeCacheMap(PrivateCacheMap->FileObject, NULL, NULL);
+            CcUninitializeCacheMap(PrivateFileObject, NULL, NULL);
+            ObDereferenceObject(PrivateFileObject);
         }
     }
 
@@ -296,6 +318,16 @@ CcPurgeCacheSection (
 purgeMm:
     if (Success)
         Success = MmPurgeSegment(SectionObjectPointer, FileOffset, Length);
+
+    if (CacheFileObject)
+    {
+        OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+        ASSERT(SharedCacheMap->OpenCount != 0);
+        if (--SharedCacheMap->OpenCount == 0)
+            CcRosDeleteFileCache(CacheFileObject, SharedCacheMap, &OldIrql);
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+        ObDereferenceObject(CacheFileObject);
+    }
 
     return Success;
 }

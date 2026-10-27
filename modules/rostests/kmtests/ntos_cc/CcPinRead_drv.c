@@ -506,7 +506,7 @@ PerformTest(
                                    "Buffer %p not mapped in system space\n", TestContext->Buffer);
                             }
 #elif defined(_M_AMD64)
-                            ok(TestContext->Buffer >= (PVOID)0xFFFFF98000000000 && TestContext->Buffer < (PVOID)0xFFFFFA8000000000,
+                            ok(TestContext->Buffer >= MmSystemRangeStart,
                                "Buffer %p not mapped in system space\n", TestContext->Buffer);
 #else
                             skip(FALSE, "System space mapping not defined\n");
@@ -638,12 +638,13 @@ PerformTest(
                         ok_eq_ulong(WriteLength, 0x1000);
                     }
 
-                    /* Pin more than a VACB */
+                    /* Cover more than one VACB with separate pins. A single
+                     * CcPinRead request must not cross a view boundary. */
                     Ret = FALSE;
                     Offset.QuadPart = 0x0;
 
                     KmtStartSeh();
-                    Ret = CcPinRead(TestFileObject, &Offset, 0x1000 + VACB_MAPPING_GRANULARITY, PIN_WAIT, &Bcb, (PVOID *)&Buffer);
+                    Ret = CcPinRead(TestFileObject, &Offset, VACB_MAPPING_GRANULARITY, PIN_WAIT, &Bcb, (PVOID *)&Buffer);
                     KmtEndSeh(STATUS_SUCCESS);
                     ok(Ret == TRUE, "CcPinRead failed\n");
                     if (Ret)
@@ -652,6 +653,18 @@ PerformTest(
                         CcSetDirtyPinnedData(Bcb, NULL);
 
                         CcUnpinData(Bcb);
+
+                        Offset.QuadPart = VACB_MAPPING_GRANULARITY;
+                        KmtStartSeh();
+                        Ret = CcPinRead(TestFileObject, &Offset, PAGE_SIZE, PIN_WAIT, &Bcb, (PVOID *)&Buffer);
+                        KmtEndSeh(STATUS_SUCCESS);
+                        ok(Ret == TRUE, "CcPinRead of second view failed\n");
+                        if (Ret)
+                        {
+                            CcSetDirtyPinnedData(Bcb, NULL);
+                            CcUnpinData(Bcb);
+                        }
+                        Offset.QuadPart = 0;
 
                         /* The data is dirtified through the VACB */
                         WriteOffset.QuadPart = -1LL;
@@ -703,7 +716,8 @@ CleanupTest(
         if (CcIsFileCached(TestFileObject))
         {
             KeInitializeEvent(&CacheUninitEvent.Event, NotificationEvent, FALSE);
-            CcUninitializeCacheMap(TestFileObject, &Zero, &CacheUninitEvent);
+            /* Test 6 closes dirty data without truncating the file. */
+            CcUninitializeCacheMap(TestFileObject, TestTestId == 6 ? NULL : &Zero, &CacheUninitEvent);
             KeWaitForSingleObject(&CacheUninitEvent.Event, Executive, KernelMode, FALSE, NULL);
         }
 

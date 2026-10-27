@@ -390,6 +390,11 @@ CcRosFlushDirtyPages(
 VOID
 CcRosDereferenceCache(PFILE_OBJECT FileObject);
 
+NTSTATUS
+CcRosDeleteFileCache(PFILE_OBJECT FileObject,
+                     PROS_SHARED_CACHE_MAP SharedCacheMap,
+                     PKIRQL OldIrql);
+
 VOID
 CcRosReferenceCache(PFILE_OBJECT FileObject);
 

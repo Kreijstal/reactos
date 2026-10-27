@@ -444,6 +444,13 @@ START_TEST(MmForceSectionClosed)
     /* Each sub-test creates its own section against the same file, so the
      * SectionObjectPointers slot is reused - verifying that a clean teardown
      * leaves the slot ready for the next user. */
+    /* A file system may already have created an internal cache section at
+     * open. Remove its cache maps to establish the no-cache precondition of
+     * the clean-close test, using the public cache-manager purge contract. */
+    CcFlushCache(FileObject->SectionObjectPointer, NULL, 0, &IoStatusBlock);
+    MMFSC_OK(NT_SUCCESS(IoStatusBlock.Status), "Initial cache flush: 0x%08lx\n", IoStatusBlock.Status);
+    MMFSC_OK(CcPurgeCacheSection(FileObject->SectionObjectPointer, NULL, 0, TRUE),
+             "Initial cache purge failed\n");
     TestDataSectionDereferenced(FileHandle, FileObject);
     TestSystemViewSurvivesForceClose(FileHandle, FileObject);
     TestDataSectionWithLiveView(FileHandle, FileObject);

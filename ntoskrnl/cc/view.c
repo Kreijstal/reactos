@@ -251,7 +251,6 @@ quit:
     return Status;
 }
 
-static
 NTSTATUS
 CcRosDeleteFileCache (
     PFILE_OBJECT FileObject,
