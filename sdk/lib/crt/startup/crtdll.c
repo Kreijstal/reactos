@@ -40,9 +40,6 @@ extern _CRTALLOC(".CRT$XIZ") _PIFV __xi_z[];
 extern _CRTALLOC(".CRT$XCA") _PVFV __xc_a[];
 extern _CRTALLOC(".CRT$XCZ") _PVFV __xc_z[];
 
-/* TLS initialization hook.  */
-extern const PIMAGE_TLS_CALLBACK __dyn_tls_init_callback;
-
 static int __proc_attached = 0;
 
 extern _PVFV *__onexitbegin;
@@ -110,10 +107,6 @@ WINBOOL WINAPI _CRT_INIT (HANDLE hDllHandle, DWORD dwReason, LPVOID lpreserved)
         if (! nested)
         {
             (void) InterlockedExchangePointer ((volatile PVOID *) &__native_startup_lock, 0);
-        }
-        if (__dyn_tls_init_callback != NULL)
-        {
-            __dyn_tls_init_callback (hDllHandle, DLL_THREAD_ATTACH, lpreserved);
         }
         __proc_attached++;
     }
