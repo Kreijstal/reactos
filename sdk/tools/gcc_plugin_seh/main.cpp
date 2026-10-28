@@ -12,6 +12,12 @@
 #include <tree.h>
 #include <c-family/c-pragma.h>
 #include <c-family/c-common.h>
+#include <tree-pass.h>
+#include <context.h>
+#include <memmodel.h>
+#include <rtl.h>
+#include <emit-rtl.h>
+#include <diagnostic-core.h>
 
 #include <iostream>
 #include <sstream>
@@ -77,6 +83,9 @@ struct seh_function
 
 static std::unordered_map<struct function*, struct seh_function*> func_seh_map = {};
 
+/* Functions with SEH scopes, kept until code generation (see seh_check_pass) */
+static std::unordered_map<tree, location_t> seh_decls = {};
+
 static
 struct seh_function*
 get_seh_function()
@@ -132,7 +141,7 @@ handle_seh_pragma(cpp_reader* UNUSED parser)
         (pragma_lex(&x) != CPP_EOF)
         )
     {
-        error("%<#pragma REACTOS seh%> needs two parameters%>");
+        error("%<#pragma REACTOS seh%> needs two parameters");
         return;
     }
 
@@ -182,12 +191,11 @@ finish_seh_function(void* event_data, void* UNUSED user_data)
     seh_function* seh_fun = search->second;
     func_seh_map.erase(search);
 
-    if (DECL_FUNCTION_PERSONALITY(fndef) != nullptr)
-    {
-        error("Function %s has a personality. Are you mixing SEH with C++ exceptions ?",
-              IDENTIFIER_POINTER(fndef));
-        return;
-    }
+    /*
+     * Whether the function also needs C++ exception handling is only known
+     * after EH lowering (and inlining), so seh_check_pass checks it.
+     */
+    seh_decls.insert({fndef, DECL_SOURCE_LOCATION(fndef)});
 
     /* Update asm statement */
     std::stringstream asm_str;
@@ -203,25 +211,17 @@ finish_seh_function(void* event_data, void* UNUSED user_data)
     for (auto& handler : seh_fun->handlers)
     {
         /*
-         * Use __seh2$$filter__ as the scope End instead of __seh2$$end_try__.
-         *
-         * GCC may reorder basic blocks from the try body past the
-         * __seh2$$end_try__ label, placing them between end_try and the filter.
-         * __C_specific_handler checks whether the faulting RIP is within
-         * [BeginAddress, EndAddress).  If reordered code falls outside this
-         * range, the exception goes uncaught.
-         *
-         * The filter label is always emitted by GCC after all try-block code
-         * (it lives inside an unreachable "if (0)" branch), so using it as
-         * the scope End guarantees the entire try body is covered regardless
-         * of basic-block reordering past end_try.  The opposite direction --
-         * blocks hoisted before begin_try -- cannot be papered over here, so
-         * sdk/lib/pseh/CMakeLists.txt forces -fno-reorder-blocks on every
-         * translation unit that links pseh, keeping the source-order layout
-         * this plugin assumes.
+         * The scope is [__seh2$$begin_try__, __seh2$$end_try__): the try
+         * body only. __C_specific_handler treats an unwind whose target
+         * lies inside a scope as ending in that scope, so a scope that also
+         * covered the code after the try body (e.g. up to the filter, which
+         * GCC places after the function body) would keep the __finally of
+         * an inner scope from running when an outer __except of the same
+         * function catches. -fno-reorder-blocks (forced in plugin_init)
+         * keeps the try body between the two labels.
          */
         asm_str << "\n\t.rva " << "__seh2$$begin_try__" << handler.line; /* Begin of tried code */
-        asm_str << "\n\t.rva " << "__seh2$$filter__" << handler.line; /* End of tried code (filter is after all reordered try-block code) */
+        asm_str << "\n\t.rva " << "__seh2$$end_try__" << handler.line; /* End of tried code */
         asm_str << "\n\t.rva " << "__seh2$$filter__" << handler.line; /* Filter function */
         if (handler.is_except)
             asm_str << "\n\t.rva " << "__seh2$$begin_except__" << handler.line; /* Called on except */
@@ -238,6 +238,39 @@ finish_seh_function(void* event_data, void* UNUSED user_data)
 
     delete seh_fun;
 }
+
+/*
+ * A function gets one SEH handler: __C_specific_handler for its scopes, or
+ * GCC's personality for its C++ cleanups and catches, not both. Like MSVC
+ * (C2712, C2713), refuse functions that need both; this runs after inlining
+ * and EH lowering, so it also sees cleanups inlined from callees.
+ */
+static const pass_data seh_check_pass_data =
+{
+    RTL_PASS, "seh_check", OPTGROUP_NONE, TV_NONE, 0, 0, 0, 0, 0
+};
+
+struct seh_check_pass : rtl_opt_pass
+{
+    seh_check_pass(gcc::context* ctxt)
+        : rtl_opt_pass(seh_check_pass_data, ctxt)
+    {
+    }
+
+    unsigned int execute(function* fun) final override
+    {
+        auto search = seh_decls.find(fun->decl);
+        if (search == seh_decls.end())
+            return 0;
+        location_t loc = search->second;
+        seh_decls.erase(search);
+        if (crtl->uses_eh_lsda)
+            error_at(loc, "%qD uses %<__try%> and also needs C++ exception handling "
+                     "(objects with destructors, try/catch, or functions inlined with them); "
+                     "move the %<__try%> to a separate function", fun->decl);
+        return 0;
+    }
+};
 
 static
 void
@@ -257,6 +290,20 @@ int plugin_init(struct plugin_name_args   *info,  /* Argument infor */
         std::cerr << "This GCC plugin is for version " << GCCPLUGIN_VERSION_MAJOR << "." << GCCPLUGIN_VERSION_MINOR << "\n";
         return 1;
     }
+
+    /*
+     * The scope table describes each try body as one address range, so its
+     * basic blocks must stay in source order and in one section.
+     */
+    flag_reorder_blocks = 0;
+    flag_reorder_blocks_and_partition = 0;
+
+    struct register_pass_info check_pass;
+    check_pass.pass = new seh_check_pass(g);
+    check_pass.reference_pass_name = "final";
+    check_pass.ref_pass_instance_number = 1;
+    check_pass.pos_op = PASS_POS_INSERT_BEFORE;
+    register_callback(info->base_name, PLUGIN_PASS_MANAGER_SETUP, NULL, &check_pass);
 
     register_callback(info->base_name, PLUGIN_PRAGMAS, register_seh_pragmas, NULL);
     register_callback(info->base_name, PLUGIN_FINISH_PARSE_FUNCTION, finish_seh_function, NULL);
