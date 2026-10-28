@@ -973,7 +973,8 @@ static void test_ApplicationAttributes(void)
             g_AttrInfoSize = 43;
             break;
         case WINVER_WIN10:
-            g_AttrInfoSize = 38;
+            /* 1607 added TAG_FILESIZE, 1507 and 1511 return 33 */
+            g_AttrInfoSize = (num == 33) ? 33 : 34;
             break;
         default: 
             ok(0, "Unknown attrinfo size: %lu\n", num);
