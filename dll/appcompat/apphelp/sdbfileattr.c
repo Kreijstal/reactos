@@ -15,7 +15,86 @@
 #include "rtlfuncs.h"
 
 
-#define NUM_ATTRIBUTES  28
+#if _WIN32_WINNT >= _WIN32_WINNT_WIN10
+/* Layout of Windows 10 1607 and later (1507/1511 lack TAG_FILESIZE) */
+#define IDX_SIZE                    0
+#define IDX_FILESIZE                1
+#define IDX_SIZE_OF_IMAGE           2
+#define IDX_CHECKSUM                3
+#define IDX_BIN_FILE_VERSION        4
+#define IDX_BIN_PRODUCT_VERSION     5
+#define IDX_PRODUCT_VERSION         6
+#define IDX_FILE_DESCRIPTION        7
+#define IDX_COMPANY_NAME            8
+#define IDX_PRODUCT_NAME            9
+#define IDX_FILE_VERSION            10
+#define IDX_ORIGINAL_FILENAME       11
+#define IDX_INTERNAL_NAME           12
+#define IDX_LEGAL_COPYRIGHT         13
+#define IDX_VERDATEHI               14
+#define IDX_VERDATELO               15
+#define IDX_VERFILEOS               16
+#define IDX_VERFILETYPE             17
+#define IDX_MODULE_TYPE             18
+#define IDX_PE_CHECKSUM             19
+#define IDX_LINKER_VERSION          20
+#define IDX_16BIT_DESCRIPTION       21
+#define IDX_16BIT_MODULE_NAME       22
+#define IDX_FROM_BIN_FILE_VERSION   23
+#define IDX_FROM_BIN_PRODUCT_VERSION 24
+#define IDX_UPTO_BIN_FILE_VERSION   25
+#define IDX_UPTO_BIN_PRODUCT_VERSION 26
+#define IDX_LINK_DATE               27
+#define IDX_FROM_LINK_DATE          28
+#define IDX_UPTO_LINK_DATE          29
+#define IDX_EXPORT_NAME             30
+#define IDX_VER_LANGUAGE            31
+#define IDX_EXE_WRAPPER             32
+#define IDX_CRC_CHECKSUM            33
+#define NUM_ATTRIBUTES              34
+
+/* Windows 10 returns every entry with its tag; the ones that are not available have no flags */
+static const TAG g_AttrTags[NUM_ATTRIBUTES] =
+{
+    TAG_SIZE, TAG_FILESIZE, TAG_SIZE_OF_IMAGE, TAG_CHECKSUM, TAG_BIN_FILE_VERSION, TAG_BIN_PRODUCT_VERSION,
+    TAG_PRODUCT_VERSION, TAG_FILE_DESCRIPTION, TAG_COMPANY_NAME, TAG_PRODUCT_NAME, TAG_FILE_VERSION,
+    TAG_ORIGINAL_FILENAME, TAG_INTERNAL_NAME, TAG_LEGAL_COPYRIGHT, TAG_VERDATEHI, TAG_VERDATELO,
+    TAG_VERFILEOS, TAG_VERFILETYPE, TAG_MODULE_TYPE, TAG_PE_CHECKSUM, TAG_LINKER_VERSION,
+    TAG_16BIT_DESCRIPTION, TAG_16BIT_MODULE_NAME, TAG_FROM_BIN_FILE_VERSION, TAG_FROM_BIN_PRODUCT_VERSION,
+    TAG_UPTO_BIN_FILE_VERSION, TAG_UPTO_BIN_PRODUCT_VERSION, TAG_LINK_DATE, TAG_FROM_LINK_DATE,
+    TAG_UPTO_LINK_DATE, TAG_EXPORT_NAME, TAG_VER_LANGUAGE, TAG_EXE_WRAPPER, TAG_CRC_CHECKSUM,
+};
+#else
+#define IDX_SIZE                    0
+#define IDX_CHECKSUM                1
+#define IDX_BIN_FILE_VERSION        2
+#define IDX_BIN_PRODUCT_VERSION     3
+#define IDX_PRODUCT_VERSION         4
+#define IDX_FILE_DESCRIPTION        5
+#define IDX_COMPANY_NAME            6
+#define IDX_PRODUCT_NAME            7
+#define IDX_FILE_VERSION            8
+#define IDX_ORIGINAL_FILENAME       9
+#define IDX_INTERNAL_NAME           10
+#define IDX_LEGAL_COPYRIGHT         11
+#define IDX_VERDATEHI               12
+#define IDX_VERDATELO               13
+#define IDX_VERFILEOS               14
+#define IDX_VERFILETYPE             15
+#define IDX_MODULE_TYPE             16
+#define IDX_PE_CHECKSUM             17
+#define IDX_LINKER_VERSION          18
+#define IDX_16BIT_DESCRIPTION       19
+#define IDX_16BIT_MODULE_NAME       20
+#define IDX_UPTO_BIN_FILE_VERSION   21
+#define IDX_UPTO_BIN_PRODUCT_VERSION 22
+#define IDX_LINK_DATE               23
+#define IDX_UPTO_LINK_DATE          24
+#define IDX_EXPORT_NAME             25
+#define IDX_VER_LANGUAGE            26
+#define IDX_EXE_WRAPPER             27
+#define NUM_ATTRIBUTES              28
+#endif
 enum APPHELP_MODULETYPE
 {
     MODTYPE_UNKNOWN = 0,
@@ -39,22 +118,26 @@ static void WINAPI SdbpSetQWORDAttr(PATTRINFO attr, TAG tag, QWORD value)
     attr->qwattr = value;
 }
 
+static void WINAPI SdbpSetAttrFail(PATTRINFO attr)
+{
+#if _WIN32_WINNT >= _WIN32_WINNT_WIN10
+    attr->flags = 0;
+#else
+    attr->flags = ATTRIBUTE_FAILED;
+#endif
+}
+
 static void WINAPI SdbpSetStringAttr(PATTRINFO attr, TAG tag, WCHAR *string)
 {
     if (!string)
     {
-        attr->flags = ATTRIBUTE_FAILED;
+        SdbpSetAttrFail(attr);
         return;
     }
 
     attr->type = tag;
     attr->flags = ATTRIBUTE_AVAILABLE;
     attr->lpattr = SdbpStrDup(string);
-}
-
-static void WINAPI SdbpSetAttrFail(PATTRINFO attr)
-{
-    attr->flags = ATTRIBUTE_FAILED;
 }
 
 static WCHAR* WINAPI SdbpGetStringAttr(LPWSTR translation, LPCWSTR attr, PVOID file_info)
@@ -78,7 +161,7 @@ static void WINAPI SdbpSetStringAttrFromAnsiString(PATTRINFO attr, TAG tag, PBYT
     WCHAR* dest;
     if (!string)
     {
-        attr->flags = ATTRIBUTE_FAILED;
+        SdbpSetAttrFail(attr);
         return;
     }
 
@@ -94,7 +177,7 @@ static void WINAPI SdbpSetStringAttrFromPascalString(PATTRINFO attr, TAG tag, PB
 {
     if (!string)
     {
-        attr->flags = ATTRIBUTE_FAILED;
+        SdbpSetAttrFail(attr);
         return;
     }
 
@@ -114,30 +197,67 @@ static void SdbpReadFileVersion(PATTRINFO attr_info, PVOID file_info)
             LARGE_INTEGER version;
             version.HighPart = fixed_info->dwFileVersionMS;
             version.LowPart = fixed_info->dwFileVersionLS;
-            SdbpSetQWORDAttr(&attr_info[2], TAG_BIN_FILE_VERSION, version.QuadPart);
-            SdbpSetQWORDAttr(&attr_info[21], TAG_UPTO_BIN_FILE_VERSION, version.QuadPart);
+            SdbpSetQWORDAttr(&attr_info[IDX_BIN_FILE_VERSION], TAG_BIN_FILE_VERSION, version.QuadPart);
+#ifdef IDX_FROM_BIN_FILE_VERSION
+            SdbpSetQWORDAttr(&attr_info[IDX_FROM_BIN_FILE_VERSION], TAG_FROM_BIN_FILE_VERSION, version.QuadPart);
+#endif
+            SdbpSetQWORDAttr(&attr_info[IDX_UPTO_BIN_FILE_VERSION], TAG_UPTO_BIN_FILE_VERSION, version.QuadPart);
             version.HighPart = fixed_info->dwProductVersionMS;
             version.LowPart = fixed_info->dwProductVersionLS;
-            SdbpSetQWORDAttr(&attr_info[3], TAG_BIN_PRODUCT_VERSION, version.QuadPart);
-            SdbpSetQWORDAttr(&attr_info[22], TAG_UPTO_BIN_PRODUCT_VERSION, version.QuadPart);
+            SdbpSetQWORDAttr(&attr_info[IDX_BIN_PRODUCT_VERSION], TAG_BIN_PRODUCT_VERSION, version.QuadPart);
+#ifdef IDX_FROM_BIN_PRODUCT_VERSION
+            SdbpSetQWORDAttr(&attr_info[IDX_FROM_BIN_PRODUCT_VERSION], TAG_FROM_BIN_PRODUCT_VERSION, version.QuadPart);
+#endif
+            SdbpSetQWORDAttr(&attr_info[IDX_UPTO_BIN_PRODUCT_VERSION], TAG_UPTO_BIN_PRODUCT_VERSION, version.QuadPart);
 
-            SdbpSetDWORDAttr(&attr_info[12], TAG_VERDATEHI, fixed_info->dwFileDateMS);
-            SdbpSetDWORDAttr(&attr_info[13], TAG_VERDATELO, fixed_info->dwFileDateLS);
-            SdbpSetDWORDAttr(&attr_info[14], TAG_VERFILEOS, fixed_info->dwFileOS);  /* 0x000, 0x4, 0x40004, 0x40000, 0x10004, 0x10001*/
-            SdbpSetDWORDAttr(&attr_info[15], TAG_VERFILETYPE, fixed_info->dwFileType);  /* VFT_APP, VFT_DLL, .... */
+            SdbpSetDWORDAttr(&attr_info[IDX_VERDATEHI], TAG_VERDATEHI, fixed_info->dwFileDateMS);
+            SdbpSetDWORDAttr(&attr_info[IDX_VERDATELO], TAG_VERDATELO, fixed_info->dwFileDateLS);
+            SdbpSetDWORDAttr(&attr_info[IDX_VERFILEOS], TAG_VERFILEOS, fixed_info->dwFileOS);  /* 0x000, 0x4, 0x40004, 0x40000, 0x10004, 0x10001*/
+            SdbpSetDWORDAttr(&attr_info[IDX_VERFILETYPE], TAG_VERFILETYPE, fixed_info->dwFileType);  /* VFT_APP, VFT_DLL, .... */
             return;
         }
     }
 
-    SdbpSetAttrFail(&attr_info[2]);
-    SdbpSetAttrFail(&attr_info[3]);
-    SdbpSetAttrFail(&attr_info[12]);
-    SdbpSetAttrFail(&attr_info[13]);
-    SdbpSetAttrFail(&attr_info[14]);
-    SdbpSetAttrFail(&attr_info[15]);
-    SdbpSetAttrFail(&attr_info[21]);
-    SdbpSetAttrFail(&attr_info[22]);
+    SdbpSetAttrFail(&attr_info[IDX_BIN_FILE_VERSION]);
+    SdbpSetAttrFail(&attr_info[IDX_BIN_PRODUCT_VERSION]);
+    SdbpSetAttrFail(&attr_info[IDX_VERDATEHI]);
+    SdbpSetAttrFail(&attr_info[IDX_VERDATELO]);
+    SdbpSetAttrFail(&attr_info[IDX_VERFILEOS]);
+    SdbpSetAttrFail(&attr_info[IDX_VERFILETYPE]);
+#ifdef IDX_FROM_BIN_FILE_VERSION
+    SdbpSetAttrFail(&attr_info[IDX_FROM_BIN_FILE_VERSION]);
+    SdbpSetAttrFail(&attr_info[IDX_FROM_BIN_PRODUCT_VERSION]);
+#endif
+    SdbpSetAttrFail(&attr_info[IDX_UPTO_BIN_FILE_VERSION]);
+    SdbpSetAttrFail(&attr_info[IDX_UPTO_BIN_PRODUCT_VERSION]);
 }
+
+#ifdef IDX_CRC_CHECKSUM
+/* CRC-32 of the first 0x1000 and the last 0x1000 bytes, smaller files are zero-padded
+ * to 0x1000 (or to 0x2000 when they are larger than 0x1000) */
+static DWORD WINAPI SdbpCalculateFileCrc(PMEMMAPPED mapping)
+{
+    static const BYTE zeroes[0x400] = {0};
+    SIZE_T size = mapping->size, padded;
+    DWORD crc;
+
+    if (size >= 0x2000)
+    {
+        crc = RtlComputeCrc32(0, mapping->view, 0x1000);
+        return RtlComputeCrc32(crc, mapping->view + size - 0x1000, 0x1000);
+    }
+
+    padded = (size > 0x1000) ? 0x2000 : 0x1000;
+    crc = RtlComputeCrc32(0, mapping->view, (ULONG)size);
+    for (size = padded - size; size; )
+    {
+        ULONG chunk = (ULONG)min(size, sizeof(zeroes));
+        crc = RtlComputeCrc32(crc, zeroes, chunk);
+        size -= chunk;
+    }
+    return crc;
+}
+#endif
 
 static DWORD WINAPI SdbpCalculateFileChecksum(PMEMMAPPED mapping)
 {
@@ -219,7 +339,7 @@ BOOL WINAPI SdbFreeFileAttributes(PATTRINFO attr_info)
         return FALSE;
 
     for (i = 0; i < NUM_ATTRIBUTES; i++)
-        if ((attr_info[i].type & TAG_TYPE_MASK) == TAG_TYPE_STRINGREF)
+        if ((attr_info[i].type & TAG_TYPE_MASK) == TAG_TYPE_STRINGREF && attr_info[i].flags == ATTRIBUTE_AVAILABLE)
             SdbFree(attr_info[i].lpattr);
     SdbFree(attr_info);
     return TRUE;
@@ -270,18 +390,39 @@ BOOL WINAPI SdbGetFileAttributes(LPCWSTR path, PATTRINFO *attr_info_ret, LPDWORD
     mapping_end = mapped.view + mapped.size;
 
     attr_info = (PATTRINFO)SdbAlloc(NUM_ATTRIBUTES * sizeof(ATTRINFO));
+#if _WIN32_WINNT >= _WIN32_WINNT_WIN10
+    {
+        DWORD n;
+        for (n = 0; n < NUM_ATTRIBUTES; ++n)
+            attr_info[n].type = g_AttrTags[n];
+    }
+#endif
 
-    SdbpSetDWORDAttr(&attr_info[0], TAG_SIZE, mapped.size);
+    SdbpSetDWORDAttr(&attr_info[IDX_SIZE], TAG_SIZE, mapped.size);
     if (mapped.size)
-        SdbpSetDWORDAttr(&attr_info[1], TAG_CHECKSUM, SdbpCalculateFileChecksum(&mapped));
+    {
+#ifdef IDX_FILESIZE
+        SdbpSetQWORDAttr(&attr_info[IDX_FILESIZE], TAG_FILESIZE, mapped.size);
+#endif
+        SdbpSetDWORDAttr(&attr_info[IDX_CHECKSUM], TAG_CHECKSUM, SdbpCalculateFileChecksum(&mapped));
+#ifdef IDX_CRC_CHECKSUM
+        SdbpSetDWORDAttr(&attr_info[IDX_CRC_CHECKSUM], TAG_CRC_CHECKSUM, SdbpCalculateFileCrc(&mapped));
+#endif
+    }
     else
-        SdbpSetAttrFail(&attr_info[1]);
+    {
+        SdbpSetAttrFail(&attr_info[IDX_CHECKSUM]);
+    }
     module_type = SdbpGetModuleType(&mapped, &headers);
 
+#if _WIN32_WINNT >= _WIN32_WINNT_WIN10
+    SdbpSetDWORDAttr(&attr_info[IDX_MODULE_TYPE], TAG_MODULE_TYPE, module_type);
+#else
     if (module_type != MODTYPE_UNKNOWN)
-        SdbpSetDWORDAttr(&attr_info[16], TAG_MODULE_TYPE, module_type);
+        SdbpSetDWORDAttr(&attr_info[IDX_MODULE_TYPE], TAG_MODULE_TYPE, module_type);
     else
-        SdbpSetAttrFail(&attr_info[16]); /* TAG_MODULE_TYPE */
+        SdbpSetAttrFail(&attr_info[IDX_MODULE_TYPE]);
+#endif
 
     if (headers && module_type == MODTYPE_PE && ((PBYTE)(headers+1) <= mapping_end))
     {
@@ -311,29 +452,35 @@ BOOL WINAPI SdbGetFileAttributes(LPCWSTR path, PATTRINFO *attr_info_ret, LPDWORD
             StringCchPrintfW(translation, ARRAYSIZE(translation), str_trans, lang_page->language, lang_page->code_page);
         }
 
-        /* Handles 2, 3, 12, 13, 14, 15, 21, 22 */
+        /* Handles the binary versions, VERDATE* and VERFILE* */
         SdbpReadFileVersion(attr_info, file_info);
 
-        SdbpSetStringAttr(&attr_info[4], TAG_PRODUCT_VERSION, SdbpGetStringAttr(translation, str_ProductVersion, file_info));
-        SdbpSetStringAttr(&attr_info[5], TAG_FILE_DESCRIPTION, SdbpGetStringAttr(translation, str_FileDescription, file_info));
-        SdbpSetStringAttr(&attr_info[6], TAG_COMPANY_NAME, SdbpGetStringAttr(translation, str_CompanyName, file_info));
-        SdbpSetStringAttr(&attr_info[7], TAG_PRODUCT_NAME, SdbpGetStringAttr(translation, str_ProductName, file_info));
-        SdbpSetStringAttr(&attr_info[8], TAG_FILE_VERSION, SdbpGetStringAttr(translation, str_FileVersion, file_info));
-        SdbpSetStringAttr(&attr_info[9], TAG_ORIGINAL_FILENAME, SdbpGetStringAttr(translation, str_OriginalFilename, file_info));
-        SdbpSetStringAttr(&attr_info[10], TAG_INTERNAL_NAME, SdbpGetStringAttr(translation, str_InternalName, file_info));
-        SdbpSetStringAttr(&attr_info[11], TAG_LEGAL_COPYRIGHT, SdbpGetStringAttr(translation, str_LegalCopyright, file_info));
+        SdbpSetStringAttr(&attr_info[IDX_PRODUCT_VERSION], TAG_PRODUCT_VERSION, SdbpGetStringAttr(translation, str_ProductVersion, file_info));
+        SdbpSetStringAttr(&attr_info[IDX_FILE_DESCRIPTION], TAG_FILE_DESCRIPTION, SdbpGetStringAttr(translation, str_FileDescription, file_info));
+        SdbpSetStringAttr(&attr_info[IDX_COMPANY_NAME], TAG_COMPANY_NAME, SdbpGetStringAttr(translation, str_CompanyName, file_info));
+        SdbpSetStringAttr(&attr_info[IDX_PRODUCT_NAME], TAG_PRODUCT_NAME, SdbpGetStringAttr(translation, str_ProductName, file_info));
+        SdbpSetStringAttr(&attr_info[IDX_FILE_VERSION], TAG_FILE_VERSION, SdbpGetStringAttr(translation, str_FileVersion, file_info));
+        SdbpSetStringAttr(&attr_info[IDX_ORIGINAL_FILENAME], TAG_ORIGINAL_FILENAME, SdbpGetStringAttr(translation, str_OriginalFilename, file_info));
+        SdbpSetStringAttr(&attr_info[IDX_INTERNAL_NAME], TAG_INTERNAL_NAME, SdbpGetStringAttr(translation, str_InternalName, file_info));
+        SdbpSetStringAttr(&attr_info[IDX_LEGAL_COPYRIGHT], TAG_LEGAL_COPYRIGHT, SdbpGetStringAttr(translation, str_LegalCopyright, file_info));
 
         /* https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_optional_header32 */
 
-        SdbpSetDWORDAttr(&attr_info[17], TAG_PE_CHECKSUM, headers->OptionalHeader.CheckSum);
+#ifdef IDX_SIZE_OF_IMAGE
+        SdbpSetDWORDAttr(&attr_info[IDX_SIZE_OF_IMAGE], TAG_SIZE_OF_IMAGE, headers->OptionalHeader.SizeOfImage);
+#endif
+        SdbpSetDWORDAttr(&attr_info[IDX_PE_CHECKSUM], TAG_PE_CHECKSUM, headers->OptionalHeader.CheckSum);
 
-        SdbpSetDWORDAttr(&attr_info[18], TAG_LINKER_VERSION,     /* mislabeled! */
+        SdbpSetDWORDAttr(&attr_info[IDX_LINKER_VERSION], TAG_LINKER_VERSION,     /* mislabeled! */
             ((DWORD)headers->OptionalHeader.MajorImageVersion) << 16 | headers->OptionalHeader.MinorImageVersion);
-        SdbpSetAttrFail(&attr_info[19]); /* TAG_16BIT_DESCRIPTION */
-        SdbpSetAttrFail(&attr_info[20]); /* TAG_16BIT_MODULE_NAME */
+        SdbpSetAttrFail(&attr_info[IDX_16BIT_DESCRIPTION]);
+        SdbpSetAttrFail(&attr_info[IDX_16BIT_MODULE_NAME]);
 
-        SdbpSetDWORDAttr(&attr_info[23], TAG_LINK_DATE, headers->FileHeader.TimeDateStamp);
-        SdbpSetDWORDAttr(&attr_info[24], TAG_UPTO_LINK_DATE, headers->FileHeader.TimeDateStamp);
+        SdbpSetDWORDAttr(&attr_info[IDX_LINK_DATE], TAG_LINK_DATE, headers->FileHeader.TimeDateStamp);
+#ifdef IDX_FROM_LINK_DATE
+        SdbpSetDWORDAttr(&attr_info[IDX_FROM_LINK_DATE], TAG_FROM_LINK_DATE, headers->FileHeader.TimeDateStamp);
+#endif
+        SdbpSetDWORDAttr(&attr_info[IDX_UPTO_LINK_DATE], TAG_UPTO_LINK_DATE, headers->FileHeader.TimeDateStamp);
 
         export_dir = (PIMAGE_EXPORT_DIRECTORY)RtlImageDirectoryEntryToData(mapped.view, FALSE, IMAGE_DIRECTORY_ENTRY_EXPORT, &export_dir_size);
         if (export_dir && ((PBYTE)(export_dir+1) <= mapping_end))
@@ -341,28 +488,31 @@ BOOL WINAPI SdbGetFileAttributes(LPCWSTR path, PATTRINFO *attr_info_ret, LPDWORD
             PIMAGE_SECTION_HEADER section = NULL;
             PBYTE export_name = RtlImageRvaToVa(headers, mapped.view, export_dir->Name, &section);
             if (export_name)
-                SdbpSetStringAttrFromAnsiString(&attr_info[25], TAG_EXPORT_NAME, export_name, strlen((char*)export_name));
+                SdbpSetStringAttrFromAnsiString(&attr_info[IDX_EXPORT_NAME], TAG_EXPORT_NAME, export_name, strlen((char*)export_name));
             else
-                SdbpSetAttrFail(&attr_info[25]); /* TAG_EXPORT_NAME */
+                SdbpSetAttrFail(&attr_info[IDX_EXPORT_NAME]);
         }
         else
         {
-            SdbpSetAttrFail(&attr_info[25]); /* TAG_EXPORT_NAME */
+            SdbpSetAttrFail(&attr_info[IDX_EXPORT_NAME]);
         }
 
         if (info_size)
-            SdbpSetDWORDAttr(&attr_info[26], TAG_VER_LANGUAGE, lang_page->language);
+            SdbpSetDWORDAttr(&attr_info[IDX_VER_LANGUAGE], TAG_VER_LANGUAGE, lang_page->language);
 
-        SdbpSetDWORDAttr(&attr_info[27], TAG_EXE_WRAPPER, 0); /* boolean */
+        SdbpSetDWORDAttr(&attr_info[IDX_EXE_WRAPPER], TAG_EXE_WRAPPER, 0); /* boolean */
     }
     else
     {
+#if _WIN32_WINNT < _WIN32_WINNT_WIN10
+        /* Windows 10 already returned these with their tag and without flags */
         int n;
-        for (n = 2; n < NUM_ATTRIBUTES; ++n)
+        for (n = IDX_BIN_FILE_VERSION; n < NUM_ATTRIBUTES; ++n)
         {
-            if (n != 16 && n != 26)
+            if (n != IDX_MODULE_TYPE && n != IDX_VER_LANGUAGE)
                 SdbpSetAttrFail(&attr_info[n]);
         }
+#endif
         if (module_type == MODTYPE_NE)
         {
             PBYTE ptr;
@@ -371,16 +521,16 @@ BOOL WINAPI SdbGetFileAttributes(LPCWSTR path, PATTRINFO *attr_info_ret, LPDWORD
             {
                 ptr = mapped.view + os2->ne_nrestab;
                 if (ptr <= mapping_end && (ptr + 1 + *ptr) <= mapping_end)
-                    SdbpSetStringAttrFromPascalString(&attr_info[19], TAG_16BIT_DESCRIPTION, ptr);
+                    SdbpSetStringAttrFromPascalString(&attr_info[IDX_16BIT_DESCRIPTION], TAG_16BIT_DESCRIPTION, ptr);
                 ptr = (PBYTE)os2 + os2->ne_restab;
                 if (ptr <= mapping_end && (ptr + 1 + *ptr) <= mapping_end)
-                    SdbpSetStringAttrFromPascalString(&attr_info[20], TAG_16BIT_MODULE_NAME, ptr);
+                    SdbpSetStringAttrFromPascalString(&attr_info[IDX_16BIT_MODULE_NAME], TAG_16BIT_MODULE_NAME, ptr);
             }
         }
     }
 
     *attr_info_ret = attr_info;
-    *attr_count = NUM_ATTRIBUTES; /* As far as I know, this one is always 28 */
+    *attr_count = NUM_ATTRIBUTES;
 
     SdbFree(file_info);
     SdbpCloseMemMappedFile(&mapped);
