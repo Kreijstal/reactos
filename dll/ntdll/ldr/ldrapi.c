@@ -1604,9 +1604,12 @@ LdrUnloadDll(
             RtlActivateActivationContextUnsafeFast(&ActCtx,
                                                    LdrEntry->EntryPointActivationContext);
 
-            /* Call the entrypoint */
+            /* Call the TLS callbacks and the entrypoint */
             _SEH2_TRY
             {
+                if (LdrEntry->TlsIndex)
+                    LdrpCallTlsInitializers(LdrEntry, DLL_PROCESS_DETACH);
+
                 LdrpCallInitRoutine(LdrEntry->EntryPoint,
                                     LdrEntry->DllBase,
                                     DLL_PROCESS_DETACH,
@@ -1653,6 +1656,9 @@ LdrUnloadDll(
 #if (_WIN32_WINNT >= _WIN32_WINNT_VISTA) || (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
         /* Send shutdown notification */
         LdrpSendDllNotifications(CurrentEntry, LDR_DLL_NOTIFICATION_REASON_UNLOADED);
+
+        /* No thread may keep TLS data of an unmapped image */
+        LdrpReleaseTlsData(LdrEntry);
 #endif
 
         /* Check if this is a .NET executable */
