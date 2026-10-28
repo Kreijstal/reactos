@@ -29,6 +29,7 @@
 #pragma section(".CRT$XCA",long,_ATTRIBUTES)
 #pragma section(".CRT$XCAA",long,_ATTRIBUTES)
 #pragma section(".CRT$XCC",long,_ATTRIBUTES)
+#pragma section(".CRT$XCY",long,_ATTRIBUTES)
 #pragma section(".CRT$XCZ",long,_ATTRIBUTES)
 #pragma section(".CRT$XDA",long,_ATTRIBUTES)
 #pragma section(".CRT$XDC",long,_ATTRIBUTES)
