@@ -49,7 +49,6 @@ extern _CRTALLOC(".CRT$XCA") _PVFV __xc_a[];
 extern _CRTALLOC(".CRT$XCZ") _PVFV __xc_z[];
 
 /* TLS initialization hook.  */
-extern const PIMAGE_TLS_CALLBACK __dyn_tls_init_callback;
 
 extern _PVFV *__onexitbegin;
 extern _PVFV *__onexitend;
@@ -283,9 +282,6 @@ __tmainCRTStartup (void)
     _ASSERTE(__native_startup_state == __initialized);
     if (! nested)
       (VOID)InterlockedExchangePointer ((volatile PVOID *) &__native_startup_lock, 0);
-
-    if (__dyn_tls_init_callback != NULL)
-      __dyn_tls_init_callback (NULL, DLL_THREAD_ATTACH, NULL);
 
     _pei386_runtime_relocator ();
     __mingw_oldexcpt_handler = SetUnhandledExceptionFilter (_gnu_exception_handler);
