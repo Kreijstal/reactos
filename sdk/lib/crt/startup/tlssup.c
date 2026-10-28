@@ -105,6 +105,23 @@ __dyn_tls_init (HANDLE hDllHandle, DWORD dwReason, LPVOID lpreserved)
 }
 
 const PIMAGE_TLS_CALLBACK __dyn_tls_init_callback = (const PIMAGE_TLS_CALLBACK) __dyn_tls_init;
+
+/* The loader calls the TLS callbacks of the thread that initializes the
+   module with DLL_PROCESS_ATTACH only, so run its dynamic TLS initializers
+   at the end of the C initializers.  The startup code does not reference
+   this file, so only a module that uses thread-local storage gets a TLS
+   directory: the loader allocates a TLS slot for every module that has
+   one, and DisableThreadLibraryCalls fails for such a DLL.
+   The linker looks _tls_used up by name only, so take its address here, or
+   --gc-sections discards it and leaves a dangling TLS directory.  */
+static void __cdecl __dyn_tls_init_initial_thread (void)
+{
+  const IMAGE_TLS_DIRECTORY *volatile TlsDirectory = &_tls_used;
+
+  (void) TlsDirectory;
+  __dyn_tls_init (NULL, DLL_THREAD_ATTACH, NULL);
+}
+_CRTALLOC(".CRT$XCY") _PVFV __xc_dyn_tls_init = __dyn_tls_init_initial_thread;
 _CRTALLOC(".CRT$XLC") PIMAGE_TLS_CALLBACK __xl_c = (PIMAGE_TLS_CALLBACK) __dyn_tls_init;
 
 int __cdecl __tlregdtor (_PVFV);

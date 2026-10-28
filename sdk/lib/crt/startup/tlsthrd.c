@@ -40,6 +40,11 @@ struct __mingwthr_key {
 
 static __mingwthr_key_t volatile *key_dtor_list;
 
+/* The key destructors run from the TLS callbacks of tlssup.c, which the
+   startup code does not reference: pull them in here.  */
+extern const IMAGE_TLS_DIRECTORY _tls_used;
+const IMAGE_TLS_DIRECTORY *const __mingwthr_tls_used_ref = &_tls_used;
+
 int
 ___w64_mingwthr_add_key_dtor (DWORD key, void (*dtor)(void *))
 {
