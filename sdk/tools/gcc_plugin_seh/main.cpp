@@ -199,8 +199,13 @@ finish_seh_function(void* event_data, void* UNUSED user_data)
 
     /* Update asm statement */
     std::stringstream asm_str;
+    /*
+     * An __except also gets @unwind, as clang emits it: the handler then
+     * sees the EXCEPTION_TARGET_UNWIND call that ends an unwind to it, which
+     * __C_specific_handler ignores but a wrapper of it may need.
+     */
     asm_str << ".seh_handler __C_specific_handler";
-    if (seh_fun->unwind)
+    if (seh_fun->unwind || seh_fun->except)
         asm_str << ", @unwind";
     if (seh_fun->except)
         asm_str << ", @except";
