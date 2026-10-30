@@ -3236,6 +3236,30 @@ QSI_DEF(SystemProcessorBrandString)
     return STATUS_SUCCESS;
 }
 
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+/* Class 90 - Boot environment information (Vista and later) */
+QSI_DEF(SystemBootEnvironmentInformation)
+{
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* Windows 8 added BootFlags, the Vista layout is still accepted */
+    if (Size < sizeof(SYSTEM_BOOT_ENVIRONMENT_V1))
+    {
+        *ReqSize = sizeof(SYSTEM_BOOT_ENVIRONMENT_INFORMATION);
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+    *ReqSize = (Size < sizeof(SYSTEM_BOOT_ENVIRONMENT_INFORMATION)) ?
+               sizeof(SYSTEM_BOOT_ENVIRONMENT_V1) : sizeof(SYSTEM_BOOT_ENVIRONMENT_INFORMATION);
+#else
+    *ReqSize = sizeof(SYSTEM_BOOT_ENVIRONMENT_INFORMATION);
+    if (Size < *ReqSize)
+        return STATUS_INFO_LENGTH_MISMATCH;
+#endif
+
+    RtlCopyMemory(Buffer, &ExpBootEnvironmentInformation, *ReqSize);
+    return STATUS_SUCCESS;
+}
+#endif
+
 /* Query/Set Calls Table */
 typedef
 struct _QSSI_CALLS
@@ -3346,6 +3370,9 @@ CallQS[] =
     SI_QX(SystemModuleInformationEx),
     SI_QX(SystemProcessorIdleCycleTimeInformation),
     SI_QX(SystemProcessIdInformation),
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    SI_QX(SystemBootEnvironmentInformation),
+#endif
     SI_QX(SystemProcessorBrandString),
 };
 

@@ -97,6 +97,11 @@ PVOID ExpNlsSectionPointer;
 BOOLEAN ExCmosClockIsSane = TRUE;
 BOOLEAN ExpRealTimeIsUniversal;
 
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+/* Boot environment, for SystemBootEnvironmentInformation */
+SYSTEM_BOOT_ENVIRONMENT_INFORMATION ExpBootEnvironmentInformation;
+#endif
+
 /* FUNCTIONS ****************************************************************/
 
 CODE_SEG("INIT")
@@ -1159,6 +1164,12 @@ ExpInitializeExecutive(IN ULONG Cpu,
         /* Setup headless terminal settings */
         HeadlessInit(LoaderBlock);
     }
+
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    /* Remember which firmware booted us */
+    ExpBootEnvironmentInformation.FirmwareType =
+        LoaderBlock->FirmwareInformation.FirmwareTypeEfi ? FirmwareTypeUefi : FirmwareTypeBios;
+#endif
 
     /* Set system ranges */
 #ifdef _M_AMD64
