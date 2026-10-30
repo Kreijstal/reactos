@@ -739,6 +739,8 @@ NTSTATUS get_buffer(LPWSTR *buffer, SIZE_T needed, PUNICODE_STRING CallerBuffer,
     return STATUS_SUCCESS;
 }
 
+HANDLE NTAPI RtlpGetSystemDefaultActivationContext(VOID);
+
 /* NOTE: Remove this one once our actctx support becomes better */
 NTSTATUS find_actctx_dll( PUNICODE_STRING pnameW, LPWSTR *fullname, PUNICODE_STRING CallerBuffer, BOOLEAN bAllocateBuffer)
 {
@@ -760,6 +762,10 @@ NTSTATUS find_actctx_dll( PUNICODE_STRING pnameW, LPWSTR *fullname, PUNICODE_STR
         //DPRINT1("RtlFindActivationContextSectionString returned 0x%x for %wZ\n", status, pnameW);
         return status;
     }
+
+    /* A NULL handle means the system default context, which a query with NULL would not reach */
+    if (!data.hActCtx)
+        data.hActCtx = RtlpGetSystemDefaultActivationContext();
 
     for (;;)
     {
