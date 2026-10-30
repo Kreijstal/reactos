@@ -572,8 +572,11 @@ GetDriveTypeW(IN LPCWSTR lpRootPathName)
 
         /* Get our index in the device map */
         Index = DriveLetter - L'A';
-        /* Check we're in the device map (bit set) */
-        if (((1 << Index) & DeviceMap.Query.DriveMap) != 0)
+        /* Check we're in the device map (bit set). The kernel could not
+         * tell the type of a drive that does not point to a device, such
+         * as a subst drive, so compute that one the slow way. */
+        if (((1 << Index) & DeviceMap.Query.DriveMap) != 0 &&
+            DeviceMap.Query.DriveType[Index] != DOSDEVICE_DRIVE_CALCULATE)
         {
             /* Validate device type and return it */
             if (DeviceMap.Query.DriveType[Index] >= DRIVE_REMOVABLE &&
