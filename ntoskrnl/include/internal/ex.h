@@ -27,6 +27,9 @@ extern PVOID ExpNlsSectionPointer;
 extern ULONG NtGlobalFlag;
 extern UNICODE_STRING NtSystemRoot;
 extern ULONG ExpInitializationPhase;
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+extern SYSTEM_BOOT_ENVIRONMENT_INFORMATION ExpBootEnvironmentInformation;
+#endif
 extern ULONG ExpAltTimeZoneBias;
 extern LIST_ENTRY ExSystemLookasideListHead;
 extern PCALLBACK_OBJECT PowerStateCallback;
