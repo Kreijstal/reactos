@@ -42,7 +42,7 @@ if(STACK_PROTECTOR)
     target_link_libraries(ntkrnlk gcc_ssp_nt)
 endif()
 
-target_link_libraries(ntkrnlk ntoskrnl_vista cportlib csq ${PSEH_LIB} arbiter cmlib ntlsalib rtl rtl_vista rossym libcntpr setjmp wdmguid poguid ioevent)
+target_link_libraries(ntkrnlk ntoskrnl_vista cportlib csq ${PSEH_LIB} arbiter cmlib ntlsalib rtl rtl_vista rossym libcntpr setjmp wdmguid poguid ioevent sdbread_km)
 add_importlibs(ntkrnlk hal kdcom bootvid)
 add_pch(ntkrnlk ${REACTOS_SOURCE_DIR}/ntoskrnl/include/ntoskrnl.h "${NTKRNLK_PCH_SKIP_SOURCE}")
 add_dependencies(ntkrnlk psdk asm)
