@@ -5690,6 +5690,14 @@ static NTSTATUS find_string(ACTIVATION_CONTEXT* actctx, ULONG section_kind,
 
     if (data && (flags & FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX))
     {
+#ifdef __REACTOS__
+        /* The system default context has no handle, a hit in it returns NULL */
+        if (actctx == implicit_actctx)
+        {
+            data->hActCtx = NULL;
+            return STATUS_SUCCESS;
+        }
+#endif
         actctx_addref(actctx);
         data->hActCtx = actctx;
     }
@@ -5724,6 +5732,14 @@ static NTSTATUS find_guid(ACTIVATION_CONTEXT* actctx, ULONG section_kind,
 
     if (flags & FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX)
     {
+#ifdef __REACTOS__
+        /* The system default context has no handle, a hit in it returns NULL */
+        if (actctx == implicit_actctx)
+        {
+            data->hActCtx = NULL;
+            return STATUS_SUCCESS;
+        }
+#endif
         actctx_addref(actctx);
         data->hActCtx = actctx;
     }
@@ -5807,6 +5823,17 @@ static void init_implicit_actctx(void)
                           NULL,
                           NULL);
 }
+
+#ifdef __REACTOS__
+/* Returns a reference to the system default context, which section lookups
+ * report with a NULL handle */
+HANDLE NTAPI RtlpGetSystemDefaultActivationContext(VOID)
+{
+    init_implicit_actctx();
+    actctx_addref(implicit_actctx);
+    return implicit_actctx;
+}
+#endif // __REACTOS__
 
 
 /***********************************************************************
