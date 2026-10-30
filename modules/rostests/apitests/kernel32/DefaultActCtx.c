@@ -80,7 +80,11 @@ START_TEST(DefaultActCtx)
                        &buffer,
                        sizeof(buffer),
                        NULL);
-    ok(res == TRUE, "Expected success\n"); /* This is FALSE in win10 */
+    /* The default context has no assembly 1 since Windows 10 */
+    if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+        ok(res == FALSE, "Expected failure\n");
+    else
+        ok(res == TRUE, "Expected success\n");
     if (res)
     {
         ok(details->lpAssemblyEncodedAssemblyIdentity == NULL, "Expected null lpAssemblyEncodedAssemblyIdentity, got %S\n", details->lpAssemblyEncodedAssemblyIdentity);
