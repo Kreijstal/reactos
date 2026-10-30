@@ -87,7 +87,7 @@ BaseQuerySystemFirmware(
 {
     SYSTEM_FIRMWARE_TABLE_INFORMATION* SysFirmwareInfo;
     ULONG Result = 0, ReturnedSize;
-    ULONG TotalSize = BufferSize + sizeof(SYSTEM_FIRMWARE_TABLE_INFORMATION);
+    ULONG TotalSize = BufferSize + FIELD_OFFSET(SYSTEM_FIRMWARE_TABLE_INFORMATION, TableBuffer);
     NTSTATUS Status;
 
     SysFirmwareInfo = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, TotalSize);
@@ -96,28 +96,31 @@ BaseQuerySystemFirmware(
         SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
     }
-    _SEH2_TRY
+    SysFirmwareInfo->ProviderSignature = FirmwareTableProviderSignature;
+    SysFirmwareInfo->TableID = FirmwareTableID;
+    SysFirmwareInfo->Action = Action;
+    SysFirmwareInfo->TableBufferLength = BufferSize;
+
+    Status = NtQuerySystemInformation(SystemFirmwareTableInformation, SysFirmwareInfo, TotalSize, &ReturnedSize);
+
+    if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_TOO_SMALL)
+        Result = SysFirmwareInfo->TableBufferLength;
+
+    if (NT_SUCCESS(Status) && pFirmwareTableBuffer)
     {
-        SysFirmwareInfo->ProviderSignature = FirmwareTableProviderSignature;
-        SysFirmwareInfo->TableID = FirmwareTableID;
-        SysFirmwareInfo->Action = Action;
-        SysFirmwareInfo->TableBufferLength = BufferSize;
-
-        Status = NtQuerySystemInformation(SystemFirmwareTableInformation, SysFirmwareInfo, TotalSize, &ReturnedSize);
-
-        if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_TOO_SMALL)
-            Result = SysFirmwareInfo->TableBufferLength;
-
-        if (NT_SUCCESS(Status) && pFirmwareTableBuffer)
+        /* An invalid caller buffer fails with ERROR_NOACCESS, the size is still returned */
+        _SEH2_TRY
         {
             RtlCopyMemory(pFirmwareTableBuffer, SysFirmwareInfo->TableBuffer, SysFirmwareInfo->TableBufferLength);
         }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
     }
-    _SEH2_FINALLY
-    {
-        RtlFreeHeap(RtlGetProcessHeap(), 0, SysFirmwareInfo);
-    }
-    _SEH2_END;
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, SysFirmwareInfo);
 
     BaseSetLastNTError(Status);
     return Result;
