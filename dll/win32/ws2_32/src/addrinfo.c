@@ -29,7 +29,7 @@ Dns_Ip4AddressToReverseName_W(IN LPWSTR AddressBuffer,
                               IN IN_ADDR Address)
 {
     /* Convert the address into IPv4 format */
-    wsprintfW(AddressBuffer, L"%u.%u.%u.%u.in-addr.arpa.",
+    _swprintf(AddressBuffer, L"%u.%u.%u.%u.in-addr.arpa.",
               Address.S_un.S_un_b.s_b4,
               Address.S_un.S_un_b.s_b3,
               Address.S_un.S_un_b.s_b2,
