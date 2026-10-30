@@ -630,6 +630,9 @@ typedef struct _ACTIVATION_CONTEXT
     DWORD               sections;
     struct strsection_header  *wndclass_section;
     struct strsection_header  *dllredirect_section;
+#ifdef __REACTOS__
+    struct strsection_header  *assembly_section;
+#endif
     struct strsection_header  *progid_section;
     struct strsection_header  *activatable_class_section;
     struct guidsection_header *tlib_section;
@@ -1184,6 +1187,9 @@ static void actctx_release( ACTIVATION_CONTEXT *actctx )
         RtlFreeHeap( GetProcessHeap(), 0, actctx->appdir.info );
         RtlFreeHeap( GetProcessHeap(), 0, actctx->assemblies );
         RtlFreeHeap( GetProcessHeap(), 0, actctx->dllredirect_section );
+#ifdef __REACTOS__
+        RtlFreeHeap( GetProcessHeap(), 0, actctx->assembly_section );
+#endif
         RtlFreeHeap( GetProcessHeap(), 0, actctx->wndclass_section );
         RtlFreeHeap( GetProcessHeap(), 0, actctx->tlib_section );
         RtlFreeHeap( GetProcessHeap(), 0, actctx->comserver_section );
@@ -3653,6 +3659,11 @@ static NTSTATUS find_query_actctx( HANDLE *handle, DWORD flags, ULONG class )
         if (*handle) return STATUS_INVALID_PARAMETER;
 
         *handle = get_current_actctx_no_addref();
+#ifdef __REACTOS__
+        /* Without an active context, the process default one is active */
+        if (!*handle && (class != ActivationContextBasicInformation))
+            *handle = process_actctx;
+#endif
     }
     else if (flags & (RTL_QUERY_ACTIVATION_CONTEXT_FLAG_IS_ADDRESS | RTL_QUERY_ACTIVATION_CONTEXT_FLAG_IS_HMODULE))
     {
@@ -3896,6 +3907,214 @@ static NTSTATUS find_dll_redirection(ACTIVATION_CONTEXT* actctx, const UNICODE_S
 
     return STATUS_SUCCESS;
 }
+
+#ifdef __REACTOS__
+#include <pshpack4.h>
+typedef struct _ACTIVATION_CONTEXT_DATA_ASSEMBLY_INFORMATION
+{
+    ULONG Size;
+    ULONG Flags;
+    ULONG EncodedAssemblyIdentityLength;
+    ULONG EncodedAssemblyIdentityOffset;  /* offset to the section base */
+    ULONG ManifestPathType;
+    ULONG ManifestPathLength;
+    ULONG ManifestPathOffset;             /* offset to the section base */
+    LARGE_INTEGER ManifestLastWriteTime;
+    ULONG PolicyPathType;
+    ULONG PolicyPathLength;
+    ULONG PolicyPathOffset;               /* offset to the section base */
+    LARGE_INTEGER PolicyLastWriteTime;
+    ULONG MetadataSatelliteRosterIndex;
+    ULONG Unused2;
+    ULONG ManifestVersionMajor;
+    ULONG ManifestVersionMinor;
+    ULONG PolicyVersionMajor;
+    ULONG PolicyVersionMinor;
+    ULONG AssemblyDirectoryNameLength;
+    ULONG AssemblyDirectoryNameOffset;    /* offset to the section base */
+    ULONG NumOfFilesInAssembly;
+    ULONG LanguageLength;
+    ULONG LanguageOffset;                 /* offset to the section base */
+} ACTIVATION_CONTEXT_DATA_ASSEMBLY_INFORMATION;
+#include <poppack.h>
+
+/* The manifest path that AssemblyDetailedInformationInActivationContext reports */
+static const WCHAR *get_assembly_manifest_path(const struct assembly *assembly)
+{
+    if (assembly->type != ASSEMBLY_MANIFEST && assembly->type != ASSEMBLY_SHARED_MANIFEST)
+        return NULL;
+    return assembly->manifest.info;
+}
+
+/* The last write time of the manifest file, or 0 when there is none */
+static LARGE_INTEGER get_assembly_manifest_time(const struct assembly *assembly)
+{
+    const WCHAR *path = get_assembly_manifest_path(assembly);
+    FILE_NETWORK_OPEN_INFORMATION info;
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING nt_name;
+    LARGE_INTEGER time;
+
+    time.QuadPart = 0;
+    if (!path || !RtlDosPathNameToNtPathName_U(path, &nt_name, NULL, NULL))
+        return time;
+
+    InitializeObjectAttributes(&attr, &nt_name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (NT_SUCCESS(NtQueryFullAttributesFile(&attr, &info)))
+        time = info.LastWriteTime;
+    RtlFreeUnicodeString(&nt_name);
+    return time;
+}
+
+/* One entry per assembly, keyed by its name: the data is followed by the
+   encoded identity, then the manifest path and directory, both terminated */
+static NTSTATUS build_assembly_section(ACTIVATION_CONTEXT* actctx, struct strsection_header **section)
+{
+    unsigned int i, count = 0;
+    ULONG total_len = sizeof(struct strsection_header), name_offset;
+    struct strsection_header *header;
+    struct string_index *index;
+    WCHAR **ids;
+
+    ids = RtlAllocateHeap(GetProcessHeap(), HEAP_ZERO_MEMORY, max(actctx->num_assemblies, 1) * sizeof(*ids));
+    if (!ids) return STATUS_NO_MEMORY;
+
+    for (i = 0; i < actctx->num_assemblies; i++)
+    {
+        struct assembly *assembly = &actctx->assemblies[i];
+        const WCHAR *path = get_assembly_manifest_path(assembly);
+        ULONG data_len;
+
+        if (!assembly->id.name) continue;
+        if (!(ids[i] = build_assembly_id(&assembly->id)))
+        {
+            while (i--) RtlFreeHeap(GetProcessHeap(), 0, ids[i]);
+            RtlFreeHeap(GetProcessHeap(), 0, ids);
+            return STATUS_NO_MEMORY;
+        }
+
+        data_len = sizeof(ACTIVATION_CONTEXT_DATA_ASSEMBLY_INFORMATION) +
+                   (wcslen(ids[i]) + (path ? wcslen(path) : 0) +
+                    (assembly->directory ? wcslen(assembly->directory) : 0) + 2) * sizeof(WCHAR);
+        total_len += sizeof(*index);
+        total_len += aligned_string_len((wcslen(assembly->id.name) + 1) * sizeof(WCHAR));
+        total_len += aligned_string_len(data_len);
+        count++;
+    }
+
+    header = RtlAllocateHeap(GetProcessHeap(), HEAP_ZERO_MEMORY, total_len);
+    if (!header)
+    {
+        for (i = 0; i < actctx->num_assemblies; i++) RtlFreeHeap(GetProcessHeap(), 0, ids[i]);
+        RtlFreeHeap(GetProcessHeap(), 0, ids);
+        return STATUS_NO_MEMORY;
+    }
+
+    header->magic = STRSECTION_MAGIC;
+    header->size  = sizeof(*header);
+    header->count = count;
+    header->index_offset = sizeof(*header);
+    index = (struct string_index*)((BYTE*)header + header->index_offset);
+    name_offset = header->index_offset + header->count * sizeof(*index);
+
+    for (i = 0; i < actctx->num_assemblies; i++)
+    {
+        struct assembly *assembly = &actctx->assemblies[i];
+        const WCHAR *path = get_assembly_manifest_path(assembly);
+        ACTIVATION_CONTEXT_DATA_ASSEMBLY_INFORMATION *data;
+        UNICODE_STRING str;
+        ULONG offset, len;
+
+        if (!ids[i]) continue;
+
+        RtlInitUnicodeString(&str, assembly->id.name);
+        RtlHashUnicodeString(&str, TRUE, HASH_STRING_ALGORITHM_X65599, &index->hash);
+        index->name_offset = name_offset;
+        index->name_len = str.Length;
+        memcpy((BYTE*)header + name_offset, str.Buffer, str.Length);
+        name_offset += aligned_string_len(str.Length + sizeof(WCHAR));
+        index->data_offset = name_offset;
+        index->rosterindex = i + 1;
+
+        data = (ACTIVATION_CONTEXT_DATA_ASSEMBLY_INFORMATION*)((BYTE*)header + index->data_offset);
+        data->Size = sizeof(*data);
+        data->ManifestPathType = assembly->manifest.type;
+        data->PolicyPathType = ACTIVATION_CONTEXT_PATH_TYPE_NONE;
+        data->ManifestLastWriteTime = get_assembly_manifest_time(assembly);
+        data->ManifestVersionMajor = 1;
+        data->NumOfFilesInAssembly = assembly->num_dlls;
+        offset = index->data_offset + data->Size;
+
+        /* The encoded identity is not terminated */
+        len = wcslen(ids[i]) * sizeof(WCHAR);
+        data->EncodedAssemblyIdentityLength = len;
+        data->EncodedAssemblyIdentityOffset = offset;
+        memcpy((BYTE*)header + offset, ids[i], len);
+        offset += len;
+
+        len = path ? wcslen(path) * sizeof(WCHAR) : 0;
+        data->ManifestPathLength = len;
+        data->ManifestPathOffset = len ? offset : 0;
+        if (len) memcpy((BYTE*)header + offset, path, len);
+        offset += len + sizeof(WCHAR);
+
+        len = assembly->directory ? wcslen(assembly->directory) * sizeof(WCHAR) : 0;
+        data->AssemblyDirectoryNameLength = len;
+        data->AssemblyDirectoryNameOffset = len ? offset : 0;
+        if (len) memcpy((BYTE*)header + offset, assembly->directory, len);
+        offset += len + sizeof(WCHAR);
+
+        index->data_len = offset - index->data_offset;
+        name_offset += aligned_string_len(index->data_len);
+        index++;
+
+        RtlFreeHeap(GetProcessHeap(), 0, ids[i]);
+    }
+    RtlFreeHeap(GetProcessHeap(), 0, ids);
+
+    *section = header;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS find_assembly_information(ACTIVATION_CONTEXT* actctx, const UNICODE_STRING *name,
+                                          PACTCTX_SECTION_KEYED_DATA data)
+{
+    struct string_index *index;
+
+    if (!actctx->num_assemblies) return STATUS_SXS_KEY_NOT_FOUND;
+
+    if (!actctx->assembly_section)
+    {
+        struct strsection_header *section;
+
+        NTSTATUS status = build_assembly_section(actctx, &section);
+        if (status) return status;
+
+        if (InterlockedCompareExchangePointer((void**)&actctx->assembly_section, section, NULL))
+            RtlFreeHeap(GetProcessHeap(), 0, section);
+    }
+
+    index = find_string_index(actctx->assembly_section, name);
+    if (!index) return STATUS_SXS_KEY_NOT_FOUND;
+
+    if (data)
+    {
+        data->ulDataFormatVersion = 1;
+        data->lpData = (BYTE *)actctx->assembly_section + index->data_offset;
+        data->ulLength = index->data_len;
+        data->lpSectionGlobalData = NULL;
+        data->ulSectionGlobalDataLength = 0;
+        data->lpSectionBase = actctx->assembly_section;
+        data->ulSectionTotalLength = RtlSizeHeap( GetProcessHeap(), 0, actctx->assembly_section );
+        data->hActCtx = NULL;
+
+        if (data->cbSize >= FIELD_OFFSET(ACTCTX_SECTION_KEYED_DATA, ulAssemblyRosterIndex) + sizeof(ULONG))
+            data->ulAssemblyRosterIndex = index->rosterindex;
+    }
+
+    return STATUS_SUCCESS;
+}
+#endif // __REACTOS__
 
 static inline struct string_index *get_wndclass_first_index(ACTIVATION_CONTEXT *actctx)
 {
@@ -5444,8 +5663,8 @@ static NTSTATUS find_string(ACTIVATION_CONTEXT* actctx, ULONG section_kind,
     {
 #ifdef __REACTOS__
     case ACTIVATION_CONTEXT_SECTION_ASSEMBLY_INFORMATION:
-        DPRINT1("Unsupported yet section_kind %x\n", section_kind);
-        return STATUS_SXS_KEY_NOT_FOUND;
+        status = find_assembly_information(actctx, section_name, data);
+        break;
 #endif // __REACTOS__
     case ACTIVATION_CONTEXT_SECTION_DLL_REDIRECTION:
         status = find_dll_redirection(actctx, section_name, data);
@@ -6033,6 +6252,16 @@ NTSTATUS WINAPI RtlQueryInformationActivationContext( ULONG flags, HANDLE handle
             if (!subinst) return STATUS_INVALID_PARAMETER;
 
             index = *(DWORD*)subinst;
+#ifdef __REACTOS__
+            /* Roster index 0 is the empty entry that every context has */
+            if (!index)
+            {
+                if (retlen) *retlen = sizeof(*afdi);
+                if (!buffer || bufsize < sizeof(*afdi)) return STATUS_BUFFER_TOO_SMALL;
+                RtlZeroMemory(afdi, sizeof(*afdi));
+                break;
+            }
+#endif
             if (!index || index > actctx->num_assemblies) return STATUS_INVALID_PARAMETER;
 
             assembly = &actctx->assemblies[index - 1];
@@ -6058,10 +6287,15 @@ NTSTATUS WINAPI RtlQueryInformationActivationContext( ULONG flags, HANDLE handle
             afdi->ulEncodedAssemblyIdentityLength = (id_len - 1) * sizeof(WCHAR);
             afdi->ulManifestPathType = assembly->manifest.type;
             afdi->ulManifestPathLength = assembly->manifest.info ? (path_len - 1) * sizeof(WCHAR) : 0;
+#ifdef __REACTOS__
+            afdi->liManifestLastWriteTime = get_assembly_manifest_time(assembly);
+            afdi->liPolicyLastWriteTime.QuadPart = 0;
+#else
             /* FIXME afdi->liManifestLastWriteTime = 0; */
+            /* FIXME afdi->liPolicyLastWriteTime = 0; */
+#endif
             afdi->ulPolicyPathType = ACTIVATION_CONTEXT_PATH_TYPE_NONE; /* FIXME */
             afdi->ulPolicyPathLength = 0;
-            /* FIXME afdi->liPolicyLastWriteTime = 0; */
             afdi->ulMetadataSatelliteRosterIndex = 0; /* FIXME */
             afdi->ulManifestVersionMajor = 1;
             afdi->ulManifestVersionMinor = 0;
