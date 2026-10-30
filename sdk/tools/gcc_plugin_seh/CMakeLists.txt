@@ -10,3 +10,7 @@ if (CMAKE_HOST_SYSTEM MATCHES "Windows")
     add_host_module(g++_plugin_seh $<TARGET_OBJECTS:gcc_plugin_seh>)
     target_link_libraries(g++_plugin_seh PRIVATE ${GCC_PLUGIN_DIR}/cc1plus.exe.a)
 endif()
+
+# GCC is built without RTTI, so cc1 exports no typeinfo for its pass classes.
+# A pass derived from rtl_opt_pass must not reference one either.
+target_compile_options(gcc_plugin_seh PRIVATE -fno-rtti)
