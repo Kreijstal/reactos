@@ -360,6 +360,7 @@ void ar9485_hw_set_txstatus_ring(void *hwctx, u32 ts_paddr_start,
 NDIS_STATUS AR9485InitializeReceiver(_In_ PAR9485_ADAPTER Adapter);
 VOID AR9485ShutdownReceiver(_In_ PAR9485_ADAPTER Adapter);
 NDIS_STATUS AR9485StartScan(_In_ PAR9485_ADAPTER Adapter);
+VOID AR9485IndicateScanConfirm(_In_ PAR9485_ADAPTER Adapter, _In_ NDIS_STATUS ScanStatus);
 NDIS_STATUS AR9485BuildBssList(_In_ PAR9485_ADAPTER Adapter,
                               _In_ PNDIS_OID_REQUEST Request);
 

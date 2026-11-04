@@ -614,14 +614,27 @@ ULONG AR9485PollReceive(PAR9485_ADAPTER Adapter)
  *  Scan
  * ================================================================== */
 
+VOID AR9485IndicateScanConfirm(PAR9485_ADAPTER Adapter, NDIS_STATUS ScanStatus)
+{
+    NDIS_STATUS_INDICATION Indication;
+
+    NdisZeroMemory(&Indication, sizeof(Indication));
+    Indication.Header.Type = NDIS_OBJECT_TYPE_STATUS_INDICATION;
+    Indication.Header.Revision = NDIS_STATUS_INDICATION_REVISION_1;
+    Indication.Header.Size = sizeof(Indication);
+    Indication.SourceHandle = Adapter->MiniportAdapterHandle;
+    Indication.StatusCode = NDIS_STATUS_DOT11_SCAN_CONFIRM;
+    Indication.StatusBuffer = &ScanStatus;
+    Indication.StatusBufferSize = sizeof(ScanStatus);
+    NdisMIndicateStatusEx(Adapter->MiniportAdapterHandle, &Indication);
+}
+
 VOID AR9485RunScan(PAR9485_ADAPTER Adapter)
 {
     ULONG Channel;
     NDIS_STATUS ScanStatus = NDIS_STATUS_SUCCESS;
-    NDIS_STATUS_INDICATION Indication;
-    /* AR9485StartScan() refuses while a link is up, so a scan never runs
-     * over an association; the PHY reset on each of thirteen channels would
-     * destroy one. */
+    /* The chip worker only runs a scan from MlmeIdle: the PHY reset on each
+     * of thirteen channels would destroy an association. */
     NT_ASSERT(Adapter->MlmeState == AR9485MlmeIdle);
 
     Adapter->ScanInProgress = TRUE;
@@ -656,17 +669,9 @@ VOID AR9485RunScan(PAR9485_ADAPTER Adapter)
         AR9485ProgramMacState(Adapter);
         AR9485ArmReceiver(Adapter);
 
-        NdisZeroMemory(&Indication, sizeof(Indication));
-        Indication.Header.Type = NDIS_OBJECT_TYPE_STATUS_INDICATION;
-        Indication.Header.Revision = NDIS_STATUS_INDICATION_REVISION_1;
-        Indication.Header.Size = sizeof(Indication);
-        Indication.SourceHandle = Adapter->MiniportAdapterHandle;
-        Indication.StatusCode = NDIS_STATUS_DOT11_SCAN_CONFIRM;
-        Indication.StatusBuffer = &ScanStatus;
-        Indication.StatusBufferSize = sizeof(ScanStatus);
         DPRINT1("AR9485: real scan complete: %lu BSSes status 0x%08x\n",
                 Adapter->BssCount, ScanStatus);
-        NdisMIndicateStatusEx(Adapter->MiniportAdapterHandle, &Indication);
+        AR9485IndicateScanConfirm(Adapter, ScanStatus);
     }
 }
 
@@ -762,7 +767,12 @@ NDIS_STATUS AR9485StartScan(PAR9485_ADAPTER Adapter)
     if (Adapter->MlmeState != AR9485MlmeIdle)
         return NDIS_STATUS_MEDIA_BUSY;
 
-    AR9485QueueCommand(Adapter, AR9485_CMD_SCAN);
+    /* The command slot holds one request: a scan must not overwrite a
+     * connect or disconnect the worker has not picked up yet. */
+    if (InterlockedCompareExchange(&Adapter->ChipCommand, AR9485_CMD_SCAN,
+                                   AR9485_CMD_NONE) != AR9485_CMD_NONE)
+        return NDIS_STATUS_MEDIA_BUSY;
+    KeSetEvent(&Adapter->ChipWake, IO_NO_INCREMENT, FALSE);
     return NDIS_STATUS_SUCCESS;
 }
 
