@@ -1336,7 +1336,13 @@ AR9485ChipWorker(_In_ PVOID Context)
             switch (Command)
             {
                 case AR9485_CMD_SCAN:
-                    AR9485RunScan(Adapter);
+                    /* StartScan saw MlmeIdle, but a connect queued or run
+                     * since then may have left it; only this thread moves
+                     * MlmeState, so the check here is the one that holds. */
+                    if (Adapter->MlmeState == AR9485MlmeIdle)
+                        AR9485RunScan(Adapter);
+                    else
+                        AR9485IndicateScanConfirm(Adapter, NDIS_STATUS_MEDIA_BUSY);
                     break;
                 case AR9485_CMD_CONNECT:
                     AR9485DoConnect(Adapter);
