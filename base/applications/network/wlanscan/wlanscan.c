@@ -509,7 +509,7 @@ wmain(int argc, WCHAR *argv[])
                     L"<WLANProfile><name>%s</name><SSIDConfig><SSID>"
                     L"<name>%s</name></SSID></SSIDConfig>"
                     L"<connectionType>ESS</connectionType>"
-                    L"<connectionMode>manual</connectionMode><MSM><security>"
+                    L"<connectionMode>auto</connectionMode><MSM><security>"
                     L"<authEncryption><authentication>%s</authentication>"
                     L"<encryption>%s</encryption></authEncryption>"
                     L"<sharedKey><keyType>passPhrase</keyType>"

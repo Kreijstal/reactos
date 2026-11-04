@@ -370,6 +370,7 @@ NwifiDispatchNotification(const NWIFI_NOTIFICATION *pNotif)
                 iface->Rssi = -100;
                 iface->LinkQuality = 0;
                 WlanSvcIndicateAcm(iface, wlan_notification_acm_disconnected);
+                WlanSvcAcmKick();
             }
             break;
 
@@ -387,8 +388,11 @@ NwifiDispatchNotification(const NWIFI_NOTIFICATION *pNotif)
             WlanSvcRefreshInterfaces();
             iface = WlanSvcFindInterfaceByIndex(pNotif->InterfaceIndex);
             if (iface != NULL)
+            {
                 WlanSvcIndicateAcm(iface,
                                    wlan_notification_acm_interface_arrival);
+                WlanSvcAcmKick();
+            }
             break;
 
         case NwifiNotifyInterfaceRemoval:

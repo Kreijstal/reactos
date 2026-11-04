@@ -221,6 +221,7 @@ WlanSvcInitialize(VOID)
     /* Start receiving asynchronous interface events from nwifi (no-op if the
      * driver is absent). */
     NwifiStartNotifyWorker();
+    WlanSvcAcmStart();
 }
 
 VOID
@@ -230,6 +231,9 @@ WlanSvcCleanup(VOID)
 
     if (!WlanSvcInitialized)
         return;
+
+    /* The ACM scans through the notify worker, so it stops first. */
+    WlanSvcAcmStop();
 
     /* Stop the notify worker (and unblock its pended IOCTL) first. */
     NwifiStopNotifyWorker();

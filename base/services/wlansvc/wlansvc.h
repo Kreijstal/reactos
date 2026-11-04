@@ -166,6 +166,10 @@ typedef struct _WLANSVC_INTERFACE
     DOT11_AUTH_ALGORITHM  ConnectedAuth;
     DOT11_CIPHER_ALGORITHM ConnectedCipher;
     WCHAR                 ConnectedProfile[WLAN_MAX_NAME_LENGTH];
+    /* Set by WlanDisconnect, cleared by WlanConnect: keeps the ACM off. */
+    BOOL                  UserDisconnected;
+    /* GetTickCount() of the last connect request, for the ACM's back-off. */
+    DWORD                 LastConnectTick;
     LONG                  Rssi;
     ULONG                 LinkQuality;
 } WLANSVC_INTERFACE, *PWLANSVC_INTERFACE;
@@ -208,6 +212,11 @@ typedef struct _WLANSVCHANDLE
 extern LIST_ENTRY            WlanSvcInterfaceListHead;
 extern CRITICAL_SECTION      WlanSvcLock;
 extern LIST_ENTRY            WlanSvcHandleListHead;
+
+/* acm.c */
+VOID WlanSvcAcmStart(VOID);
+VOID WlanSvcAcmStop(VOID);
+VOID WlanSvcAcmKick(VOID);
 
 /* core.c */
 VOID WlanSvcInitialize(VOID);
