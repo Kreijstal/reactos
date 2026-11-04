@@ -624,8 +624,19 @@ NdisAllocateMdl(
     _In_ PVOID VirtualAddress,
     _In_ UINT Length)
 {
+    PMDL Mdl;
+
     UNREFERENCED_PARAMETER(NdisHandle);
-    return IoAllocateMdl(VirtualAddress, Length, FALSE, FALSE, NULL);
+
+    /* The buffer is nonpaged by contract, and the MDL Windows returns is
+     * already built: without the PFN array a consumer's
+     * MmGetSystemAddressForMdlSafe maps whatever garbage IoAllocateMdl left
+     * there, and the mapping is leaked by the IoFreeMdl in NdisFreeMdl. */
+    Mdl = IoAllocateMdl(VirtualAddress, Length, FALSE, FALSE, NULL);
+    if (Mdl != NULL)
+        MmBuildMdlForNonPagedPool(Mdl);
+
+    return Mdl;
 }
 
 VOID
