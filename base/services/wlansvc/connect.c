@@ -121,7 +121,13 @@ WlanSvcConnect(PWLANSVC_INTERFACE Iface, const PWLAN_CONNECTION_PARAMETERS pPara
     if (ssid.uSSIDLength == 0 || ssid.uSSIDLength > DOT11_SSID_MAX_LENGTH)
         return ERROR_INVALID_PARAMETER;
 
+    Iface->UserDisconnected = FALSE;
+    Iface->LastConnectTick = GetTickCount();
     WlanSvcIndicateAcm(Iface, wlan_notification_acm_connection_start);
+
+    /* Claim the interface before the scan below drops the lock, so the ACM
+     * does not start a second connect meanwhile. */
+    Iface->State = wlan_interface_state_associating;
 
     /* Choose a BSS from the cache; fall back to a fresh scan if none. */
     bss = WlanSvcPickBss(Iface, &ssid, bssType);
@@ -172,7 +178,6 @@ WlanSvcConnect(PWLANSVC_INTERFACE Iface, const PWLAN_CONNECTION_PARAMETERS pPara
     else
         ZeroMemory(&Iface->ConnectedBssid, sizeof(DOT11_MAC_ADDRESS));
 
-    Iface->State = wlan_interface_state_associating;
     dwResult = NwifiConnect(&req);
     if (dwResult != ERROR_SUCCESS)
     {
@@ -195,6 +200,7 @@ WlanSvcDisconnect(PWLANSVC_INTERFACE Iface)
 
     WlanSvcIndicateAcm(Iface, wlan_notification_acm_disconnecting);
     Iface->State = wlan_interface_state_disconnecting;
+    Iface->UserDisconnected = TRUE;
 
     dwResult = NwifiDisconnect(Iface->NwifiIndex, Iface->UpperLuid,
                                &Iface->MacAddress);
