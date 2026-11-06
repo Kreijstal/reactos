@@ -1066,8 +1066,15 @@ PspTerminateThreadByPointer(IN PETHREAD Thread,
                               ((PEPROCESS)Thread->ThreadsProcess)->ImageFileName);
     }
 
-    /* Check if we are already inside the thread */
-    if ((bSelf) || (PsGetCurrentThread() == Thread))
+    /*
+     * Exit synchronously only when the caller asked for it. A sweep that
+     * meets the current thread (PspTerminateProcess from a job kill, under
+     * the job lock) must queue the exit APC like for any other thread, as
+     * Windows does: exiting here would run PspExitThread inside the
+     * caller's critical regions (bugcheck 0x20, ApcDisable != 0).
+     */
+    ASSERT(!bSelf || (PsGetCurrentThread() == Thread));
+    if ((bSelf) && (PsGetCurrentThread() == Thread))
     {
         /* This should only happen at passive */
         ASSERT_IRQL_EQUAL(PASSIVE_LEVEL);
