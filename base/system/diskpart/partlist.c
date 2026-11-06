@@ -2991,6 +2991,10 @@ UpdateGptDiskLayout(
         ZeroMemory(PartitionInfo, sizeof(PARTITION_INFORMATION_EX));
         PartitionInfo->RewritePartition = TRUE;
     }
+
+    /* As UpdateMbrDiskLayout does: without it WriteGptPartitions sees a
+     * clean disk and returns success without writing anything */
+    DiskEntry->Dirty = TRUE;
 }
 
 
