@@ -26,12 +26,16 @@ PLEGO_NOTIFY_ROUTINE PspLegoNotifyRoutine;
 /* PUBLIC FUNCTIONS **********************************************************/
 
 /*
- * @implemented
+ * Internal worker shared by PsSetCreateProcessNotifyRoutine and
+ * PsSetCreateProcessNotifyRoutineEx. As on Windows, the flavour of the routine
+ * is kept in the callback block's context (PSP_PROCESS_NOTIFY_EX for the Ex
+ * signature), so a routine can only be removed through the API that added it.
  */
+static
 NTSTATUS
-NTAPI
-PsSetCreateProcessNotifyRoutine(IN PCREATE_PROCESS_NOTIFY_ROUTINE NotifyRoutine,
-                                IN BOOLEAN Remove)
+PspSetCreateProcessNotifyRoutine(IN PVOID NotifyRoutine,
+                                 IN PVOID Flavour,
+                                 IN BOOLEAN Remove)
 {
     ULONG i;
     PEX_CALLBACK_ROUTINE_BLOCK CallBack;
@@ -48,7 +52,8 @@ PsSetCreateProcessNotifyRoutine(IN PCREATE_PROCESS_NOTIFY_ROUTINE NotifyRoutine,
             if (!CallBack) continue;
 
             /* Check it this is a matching block */
-            if (ExGetCallBackBlockRoutine(CallBack) == (PVOID)NotifyRoutine)
+            if ((ExGetCallBackBlockRoutine(CallBack) == (PVOID)NotifyRoutine) &&
+                (ExGetCallBackBlockContext(CallBack) == Flavour))
             {
                 /* Try removing it if it matches */
                 if (ExCompareExchangeCallBack(&PspProcessNotifyRoutine[i],
@@ -82,7 +87,7 @@ PsSetCreateProcessNotifyRoutine(IN PCREATE_PROCESS_NOTIFY_ROUTINE NotifyRoutine,
     else
     {
         /* Allocate a callback */
-        CallBack = ExAllocateCallBack((PVOID)NotifyRoutine, NULL);
+        CallBack = ExAllocateCallBack((PVOID)NotifyRoutine, Flavour);
         if (!CallBack) return STATUS_INSUFFICIENT_RESOURCES;
 
         /* Loop all callbacks */
@@ -103,6 +108,35 @@ PsSetCreateProcessNotifyRoutine(IN PCREATE_PROCESS_NOTIFY_ROUTINE NotifyRoutine,
         ExFreeCallBack(CallBack);
         return STATUS_INVALID_PARAMETER;
     }
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+PsSetCreateProcessNotifyRoutine(IN PCREATE_PROCESS_NOTIFY_ROUTINE NotifyRoutine,
+                                IN BOOLEAN Remove)
+{
+    return PspSetCreateProcessNotifyRoutine((PVOID)NotifyRoutine, NULL, Remove);
+}
+
+/*
+ * @implemented
+ *
+ * The routine receives a PS_CREATE_NOTIFY_INFO on process creation and NULL on
+ * exit. dxgkrnl registers its per-process cleanup here.
+ */
+NTSTATUS
+NTAPI
+PsSetCreateProcessNotifyRoutineEx(IN PCREATE_PROCESS_NOTIFY_ROUTINE_EX NotifyRoutine,
+                                  IN BOOLEAN Remove)
+{
+    PAGED_CODE();
+
+    return PspSetCreateProcessNotifyRoutine((PVOID)NotifyRoutine,
+                                            PSP_PROCESS_NOTIFY_EX,
+                                            Remove);
 }
 
 /*

@@ -63,25 +63,61 @@ PspRunCreateProcessNotifyRoutines(IN PEPROCESS CurrentProcess,
                                   IN BOOLEAN Create)
 {
     ULONG i;
+    PEX_CALLBACK_ROUTINE_BLOCK CallBack;
+    PS_CREATE_NOTIFY_INFO CreateInfo;
 
     /* Check if we have registered routines */
-    if (PspProcessNotifyRoutineCount)
-    {
-        /* As on Windows, the routines run with normal kernel APCs disabled */
-        KeEnterCriticalRegion();
+    if (!PspProcessNotifyRoutineCount) return;
 
-        /* Loop callbacks */
-        for (i = 0; i < PSP_MAX_CREATE_PROCESS_NOTIFY; i++)
+    /* The Ex routines get the creation info on create, NULL on exit */
+    if (Create)
+    {
+        RtlZeroMemory(&CreateInfo, sizeof(CreateInfo));
+        CreateInfo.Size = sizeof(CreateInfo);
+        CreateInfo.ParentProcessId = CurrentProcess->InheritedFromUniqueProcessId;
+        CreateInfo.CreatingThreadId = PsGetCurrentThread()->Cid;
+        CreateInfo.CreationStatus = STATUS_SUCCESS;
+        if (CurrentProcess->SeAuditProcessCreationInfo.ImageFileName)
         {
-            /* Do the callback */
-            ExDoCallBack(&PspProcessNotifyRoutine[i],
-                         CurrentProcess->InheritedFromUniqueProcessId,
-                         CurrentProcess->UniqueProcessId,
-                         (PVOID)(ULONG_PTR)Create);
+            CreateInfo.ImageFileName =
+                &CurrentProcess->SeAuditProcessCreationInfo.ImageFileName->Name;
+            CreateInfo.FileOpenNameAvailable = TRUE;
+        }
+    }
+
+    /* As on Windows, the routines run with normal kernel APCs disabled */
+    KeEnterCriticalRegion();
+
+    /* Loop callbacks */
+    for (i = 0; i < PSP_MAX_CREATE_PROCESS_NOTIFY; i++)
+    {
+        CallBack = ExReferenceCallBackBlock(&PspProcessNotifyRoutine[i]);
+        if (!CallBack) continue;
+
+        if (ExGetCallBackBlockContext(CallBack) == PSP_PROCESS_NOTIFY_EX)
+        {
+            PCREATE_PROCESS_NOTIFY_ROUTINE_EX Routine =
+                (PCREATE_PROCESS_NOTIFY_ROUTINE_EX)ExGetCallBackBlockRoutine(CallBack);
+
+            /* FIXME: CreationStatus is not honoured, a routine cannot veto */
+            Routine(CurrentProcess,
+                    CurrentProcess->UniqueProcessId,
+                    Create ? &CreateInfo : NULL);
+        }
+        else
+        {
+            PCREATE_PROCESS_NOTIFY_ROUTINE Routine =
+                (PCREATE_PROCESS_NOTIFY_ROUTINE)ExGetCallBackBlockRoutine(CallBack);
+
+            Routine(CurrentProcess->InheritedFromUniqueProcessId,
+                    CurrentProcess->UniqueProcessId,
+                    Create);
         }
 
-        KeLeaveCriticalRegion();
+        ExDereferenceCallBackBlock(&PspProcessNotifyRoutine[i], CallBack);
     }
+
+    KeLeaveCriticalRegion();
 }
 
 FORCEINLINE

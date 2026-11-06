@@ -66,6 +66,11 @@
 #define PSP_MAX_CREATE_PROCESS_NOTIFY           8
 
 //
+// Callback block context of a PsSetCreateProcessNotifyRoutineEx routine
+//
+#define PSP_PROCESS_NOTIFY_EX                   ((PVOID)(ULONG_PTR)1)
+
+//
 // Job Scheduling Classes
 //
 // The default is 5 per Yosifovich, P., "Windows 10 System Programming, Part 1"
