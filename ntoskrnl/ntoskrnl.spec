@@ -752,6 +752,7 @@
 @ stdcall -arch=i386 KeRestoreFloatingPointState(ptr)
 @ stdcall -arch=x86_64,arm64 KeRestoreFloatingPointState(ptr) KxRestoreFloatingPointState
 @ stdcall KeRevertToUserAffinityThread()
+@ stdcall -version=0x600+ KeRevertToUserAffinityThreadEx(long)
 @ stdcall -version=0x601+ KeRevertToUserGroupAffinityThread(ptr)
 @ stdcall KeRundownQueue(ptr)
 @ stdcall -arch=i386 KeSaveFloatingPointState(ptr)
@@ -769,6 +770,7 @@
 @ stdcall KeSetPriorityThread(ptr long)
 @ stdcall KeSetProfileIrql(long)
 @ stdcall KeSetSystemAffinityThread(long)
+@ stdcall -version=0x600+ KeSetSystemAffinityThreadEx(long)
 @ stdcall -version=0x601+ KeSetSystemGroupAffinityThread(ptr ptr)
 @ stdcall KeSetCoalescableTimer(ptr int64 long long ptr)
 @ stdcall KeSetTargetProcessorDpc(ptr long)
