@@ -27,7 +27,16 @@ HalpInitProcessor(
 {
     if (ProcessorNumber == 0)
     {
-        HalpParseApicTables(LoaderBlock);
+        /*
+         * Identify the boot processor by the ID its local APIC has now, which
+         * is what the MADT lists. CPUID's initial APIC ID is the power-on
+         * value, and firmware may renumber the local APICs afterwards: AMD
+         * family 15h systems apply an APIC ID offset (e.g. 0x10..0x13 in the
+         * MADT while CPUID still reports 0..3). Matching on CPUID there made
+         * the MADT look like it lacked the boot processor, so only one
+         * processor was ever started.
+         */
+        HalpParseApicTables(LoaderBlock, ApicRead(APIC_ID) >> 24);
     }
 
     HalpSetupProcessorsTable(ProcessorNumber);

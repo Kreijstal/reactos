@@ -41,7 +41,8 @@ typedef struct _HALP_APIC_INFO_TABLE
 
 VOID
 HalpParseApicTables(
-    _In_ PLOADER_PARAMETER_BLOCK LoaderBlock);
+    _In_ PLOADER_PARAMETER_BLOCK LoaderBlock,
+    _In_ ULONG BootApicId);
 
 VOID
 HalpSetupProcessorsTable(

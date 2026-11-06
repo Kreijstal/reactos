@@ -333,20 +333,20 @@ HalpMadtParseEntries(
  * Moves the boot processor to the first entry, since NT processor numbers
  * follow the entry order.
  *
+ * @param[in] BootApicId
+ * Current local APIC ID of the boot processor, as its local APIC reports it.
+ *
  * @remarks
  * When the MADT does not describe the boot processor, only the boot
  * processor is kept so that no other processor is started.
  */
 static
 VOID
-HalpMadtPlaceBootProcessor(VOID)
+HalpMadtPlaceBootProcessor(
+    _In_ ULONG BootApicId)
 {
     PROCESSOR_IDENTITY BootProcessor;
     ULONG Index;
-    UCHAR BootApicId;
-
-    /* The kernel fills this from CPUID before initializing the processor with the HAL */
-    BootApicId = (UCHAR)KeGetCurrentPrcb()->InitialApicId;
 
     for (Index = 0; Index < HalpApicInfoTable.ProcessorCount; Index++)
     {
@@ -376,7 +376,8 @@ HalpMadtPlaceBootProcessor(VOID)
 
 VOID
 HalpParseApicTables(
-    _In_ PLOADER_PARAMETER_BLOCK LoaderBlock)
+    _In_ PLOADER_PARAMETER_BLOCK LoaderBlock,
+    _In_ ULONG BootApicId)
 {
     ACPI_TABLE_MADT *MadtTable;
 
@@ -391,7 +392,7 @@ HalpParseApicTables(
         HalpMadtTruncated = TRUE;
     }
 
-    HalpMadtPlaceBootProcessor();
+    HalpMadtPlaceBootProcessor(BootApicId);
 }
 
 BOOLEAN
