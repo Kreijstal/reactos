@@ -33,19 +33,33 @@
 #endif
 
 /*
- * IOCTL_DXGKRNL_GET_INIT_ENTRY (0x230043)
+ * Display-port registration IOCTLs (IRP_MJ_INTERNAL_DEVICE_CONTROL only).
  *
- * Sent by Windows 10+ WDDM miniport thunks (embedded in the miniport binary)
- * to resolve the DxgkInitialize/DxgkInitializeEx entry point at runtime.
+ * The displib DxgkInitialize stub linked into every WDDM miniport opens
+ * \Device\DxgKrnl and sends one of these with IoBuildDeviceIoControlRequest
+ * (InternalDeviceIoControl = TRUE, METHOD_NEITHER, no input, an 8-byte output
+ * at Irp->UserBuffer).  dxgkrnl answers with the entry point the miniport
+ * then calls as Fn(DriverObject, RegistryPath, InitData).  Windows 10
+ * dxgkrnl (DxgkInternalDeviceIoctl, 10.0.10240 and 10.0.19041) answers:
  *
- * The miniport's built-in DxgkInitialize wrapper opens \Device\DxgKrnl,
- * sends this IOCTL with METHOD_NEITHER, and expects a pointer to
- * DxgkInitializeEx in the output buffer.
+ *   0x23003F  DpiInitialize          full WDDM, pre-Win8 displib
+ *   0x230043  DpiKmdDodInitialize    display-only (KMDDOD_INITIALIZATION_DATA)
+ *   0x230047  DpiInitializeWin8      full WDDM, Win8+ displib
+ *   other     STATUS_INVALID_DEVICE_REQUEST
  *
- * CTL_CODE(FILE_DEVICE_VIDEO, 0x10, METHOD_NEITHER, FILE_ANY_ACCESS)
+ * The Win8 displib picks 0x230047 when RtlGetVersion reports 6.2 or later
+ * and falls back to 0x23003F only on STATUS_INVALID_DEVICE_REQUEST.
+ * An output buffer under 8 bytes or a NULL one is STATUS_BUFFER_TOO_SMALL.
  */
-#define IOCTL_DXGKRNL_GET_INIT_ENTRY \
-    CTL_CODE(0x23, 0x10, METHOD_NEITHER, FILE_ANY_ACCESS)
+#define IOCTL_DXGKRNL_DDI_INITIALIZE \
+    CTL_CODE(FILE_DEVICE_VIDEO, 0x0F, METHOD_NEITHER, FILE_ANY_ACCESS)
+#define IOCTL_DXGKRNL_DDI_INITIALIZE_DOD \
+    CTL_CODE(FILE_DEVICE_VIDEO, 0x10, METHOD_NEITHER, FILE_ANY_ACCESS)
+#define IOCTL_DXGKRNL_DDI_INITIALIZE_WIN8 \
+    CTL_CODE(FILE_DEVICE_VIDEO, 0x11, METHOD_NEITHER, FILE_ANY_ACCESS)
+C_ASSERT(IOCTL_DXGKRNL_DDI_INITIALIZE == 0x23003F);
+C_ASSERT(IOCTL_DXGKRNL_DDI_INITIALIZE_DOD == 0x230043);
+C_ASSERT(IOCTL_DXGKRNL_DDI_INITIALIZE_WIN8 == 0x230047);
 
 /* Forward declaration from adapter.c */
 NTSTATUS APIENTRY
@@ -4469,48 +4483,47 @@ DxgkDispatchDeviceControl(
 
     switch (Stack->Parameters.DeviceIoControl.IoControlCode)
     {
-        case IOCTL_DXGKRNL_GET_INIT_ENTRY:
+        case IOCTL_DXGKRNL_DDI_INITIALIZE:
+        case IOCTL_DXGKRNL_DDI_INITIALIZE_DOD:
+        case IOCTL_DXGKRNL_DDI_INITIALIZE_WIN8:
         {
-            /*
-             * Windows 10+ miniport thunks send this IOCTL (METHOD_NEITHER,
-             * IRP_MJ_INTERNAL_DEVICE_CONTROL) to resolve DxgkInitializeEx.
-             * Output goes to Irp->UserBuffer (METHOD_NEITHER output path).
-             */
+            ULONG Code = Stack->Parameters.DeviceIoControl.IoControlCode;
             PVOID *OutputPtr = (PVOID *)Irp->UserBuffer;
+            PVOID Entry;
 
-            /*
-             * Return DxgkInitializeDisplayOnlyDriver.  Prebuilt DOD
-             * miniports (viogpudo) fill KMDDOD_INITIALIZATION_DATA
-             * and expect to call DxgkInitializeDisplayOnlyDriver.
-             */
-            DXGKRNL_TRACE("IOCTL_DXGKRNL_GET_INIT_ENTRY: returning "
-                          "DxgkInitializeDisplayOnlyDriver=%p\n",
-                          DxgkInitializeDisplayOnlyDriver);
+            /* Registration is a kernel-to-kernel internal request only;
+             * Windows does not answer it on IRP_MJ_DEVICE_CONTROL. */
+            if (Stack->MajorFunction != IRP_MJ_INTERNAL_DEVICE_CONTROL)
+            {
+                DXGKRNL_WARN("DxgkDispatchDeviceControl: registration IOCTL "
+                             "0x%lX on a non-internal request\n", Code);
+                Status = STATUS_INVALID_DEVICE_REQUEST;
+                break;
+            }
+            ASSERT(Irp->RequestorMode == KernelMode);
+
+            if (Code == IOCTL_DXGKRNL_DDI_INITIALIZE)
+                Entry = (PVOID)DxgkpDdiInitialize;
+            else if (Code == IOCTL_DXGKRNL_DDI_INITIALIZE_WIN8)
+                Entry = (PVOID)DxgkpDdiInitializeWin8;
+            else
+                Entry = (PVOID)DxgkInitializeDisplayOnlyDriver;
+
+            DXGKRNL_TRACE("DxgkDispatchDeviceControl: registration IOCTL 0x%lX "
+                          "-> %s=%p\n", Code,
+                          Code == IOCTL_DXGKRNL_DDI_INITIALIZE ? "DxgkpDdiInitialize" :
+                          Code == IOCTL_DXGKRNL_DDI_INITIALIZE_WIN8 ? "DxgkpDdiInitializeWin8" :
+                          "DxgkInitializeDisplayOnlyDriver",
+                          Entry);
 
             if (Stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(PVOID) ||
                 OutputPtr == NULL)
             {
                 Status = STATUS_BUFFER_TOO_SMALL;
-                Irp->IoStatus.Information = 0;
-                Irp->IoStatus.Status = Status;
-                IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                return Status;
+                break;
             }
 
-            _SEH2_TRY
-            {
-                *OutputPtr = (PVOID)DxgkInitializeDisplayOnlyDriver;
-            }
-            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-            {
-                Status = _SEH2_GetExceptionCode();
-                Irp->IoStatus.Information = 0;
-                Irp->IoStatus.Status = Status;
-                IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                return Status;
-            }
-            _SEH2_END;
-
+            *OutputPtr = Entry;
             Status = STATUS_SUCCESS;
             Irp->IoStatus.Information = sizeof(PVOID);
             Irp->IoStatus.Status = Status;
@@ -4621,7 +4634,7 @@ DxgkDispatchDeviceControl(
         default:
             DXGKRNL_WARN("DxgkDispatchDeviceControl: unknown IOCTL 0x%lX\n",
                          Stack->Parameters.DeviceIoControl.IoControlCode);
-            Status = STATUS_NOT_IMPLEMENTED;
+            Status = STATUS_INVALID_DEVICE_REQUEST;
             break;
     }
 

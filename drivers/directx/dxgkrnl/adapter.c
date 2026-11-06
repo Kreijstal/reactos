@@ -4568,12 +4568,129 @@ DxgkInitializeEx(
 }
 
 /*
+ * DxgkpGetDriverDataSizeFromVersion
+ *
+ * Size of the DRIVER_INITIALIZATION_DATA a miniport of the given
+ * DXGKDDI_INTERFACE_VERSION hands us.  Same thresholds as Windows'
+ * DpiGetDriverDataSizeFromVersion (dxgkrnl 10.0.10240), in pointer-sized
+ * slots so the table holds on 32-bit too (amd64 byte sizes in comments).
+ * Windows treats every version from 0x5000 on as the WDDM 2.0 table, so
+ * pre-release WDDM 2.0 miniports such as AMD's 0x5020 hand over the full
+ * 0x340-byte table.
+ */
+static ULONG
+DxgkpGetDriverDataSizeFromVersion(
+    _In_ ULONG Version)
+{
+    ULONG Slots;
+
+    if (Version < 0x2001)       Slots = 0x3E;   /* 0x1F0 Vista              */
+    else if (Version < 0x2002)  Slots = 0x44;   /* 0x220                    */
+    else if (Version < 0x2003)  Slots = 0x45;   /* 0x228                    */
+    else if (Version < 0x3001)  Slots = 0x47;   /* 0x238 Win7 (0x2005)      */
+    else if (Version < 0x3002)  Slots = 0x48;   /* 0x240                    */
+    else if (Version < 0x3004)  Slots = 0x4E;   /* 0x270                    */
+    else if (Version < 0x3005)  Slots = 0x4F;   /* 0x278                    */
+    else if (Version < 0x300D)  Slots = 0x52;   /* 0x290                    */
+    else if (Version < 0x4000)  Slots = 0x53;   /* 0x298 Win8 (0x300E)      */
+    else if (Version < 0x4002)  Slots = 0x57;   /* 0x2B8                    */
+    else if (Version < 0x5000)  Slots = 0x59;   /* 0x2C8 WDDM 1.3 (0x4002)  */
+    else                        Slots = 0x68;   /* 0x340 WDDM 2.0 (0x5000+) */
+
+    /* Never more than the table this dxgkrnl was built with. */
+    return min(Slots * (ULONG)sizeof(PVOID),
+               (ULONG)sizeof(DRIVER_INITIALIZATION_DATA));
+}
+
+/*
+ * DxgkpInitializeInternal
+ *
+ * Windows' DpiInitializeInternal: the full-WDDM registration reached through
+ * the displib IOCTLs.  Rejects a version below 0x104E or a missing mandatory
+ * callback with STATUS_REVISION_MISMATCH, then registers the version-sized
+ * table.  Win8Initialization records which displib called (0x230047 vs.
+ * 0x23003F), as Windows does in its driver extension.
+ */
+static NTSTATUS
+DxgkpInitializeInternal(
+    _In_ PDRIVER_OBJECT              DriverObject,
+    _In_ PUNICODE_STRING             RegistryPath,
+    _In_ PDRIVER_INITIALIZATION_DATA InitData,
+    _In_ BOOLEAN                     Win8Initialization)
+{
+    PDXGKRNL_MINIPORT_CONTEXT MpCtx;
+    ULONG Size;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (InitData->Version < 0x104E ||
+        InitData->DxgkDdiAddDevice == NULL ||
+        InitData->DxgkDdiStartDevice == NULL ||
+        InitData->DxgkDdiStopDevice == NULL ||
+        InitData->DxgkDdiRemoveDevice == NULL ||
+        InitData->DxgkDdiDispatchIoRequest == NULL ||
+        InitData->DxgkDdiInterruptRoutine == NULL ||
+        InitData->DxgkDdiDpcRoutine == NULL ||
+        InitData->DxgkDdiQueryChildRelations == NULL ||
+        InitData->DxgkDdiQueryChildStatus == NULL ||
+        InitData->DxgkDdiQueryDeviceDescriptor == NULL ||
+        InitData->DxgkDdiSetPowerState == NULL ||
+        InitData->DxgkDdiResetDevice == NULL ||
+        InitData->DxgkDdiUnload == NULL)
+    {
+        DXGKRNL_ERR("DxgkpInitializeInternal: Version 0x%lX or a mandatory "
+                    "callback rejected\n", InitData->Version);
+        return STATUS_REVISION_MISMATCH;
+    }
+
+    Size = DxgkpGetDriverDataSizeFromVersion(InitData->Version);
+    DXGKRNL_TRACE("DxgkpInitializeInternal: Version=0x%lX table=0x%lX bytes "
+                  "Win8=%u\n", InitData->Version, Size, Win8Initialization);
+
+    Status = DxgkInitializeEx(DriverObject, RegistryPath, Size, InitData);
+    if (NT_SUCCESS(Status))
+    {
+        MpCtx = (PDXGKRNL_MINIPORT_CONTEXT)
+                IoGetDriverObjectExtension(DriverObject, DriverObject);
+        ASSERT(MpCtx != NULL);
+        MpCtx->Win8Initialization = Win8Initialization;
+    }
+
+    DXGKRNL_TRACE("DxgkpInitializeInternal: returning 0x%08lX\n", Status);
+    return Status;
+}
+
+/* IOCTL 0x23003F target: Windows' DpiInitialize. */
+NTSTATUS
+APIENTRY
+DxgkpDdiInitialize(
+    _In_ PDRIVER_OBJECT              DriverObject,
+    _In_ PUNICODE_STRING             RegistryPath,
+    _In_ PDRIVER_INITIALIZATION_DATA DriverInitializationData)
+{
+    return DxgkpInitializeInternal(DriverObject, RegistryPath,
+                                   DriverInitializationData, FALSE);
+}
+
+/* IOCTL 0x230047 target: Windows' DpiInitializeWin8. */
+NTSTATUS
+APIENTRY
+DxgkpDdiInitializeWin8(
+    _In_ PDRIVER_OBJECT              DriverObject,
+    _In_ PUNICODE_STRING             RegistryPath,
+    _In_ PDRIVER_INITIALIZATION_DATA DriverInitializationData)
+{
+    return DxgkpInitializeInternal(DriverObject, RegistryPath,
+                                   DriverInitializationData, TRUE);
+}
+
+/*
  * DxgkInitialize
  *
- * Simplified wrapper around DxgkInitializeEx.  Passes sizeof of the local
- * DRIVER_INITIALIZATION_DATA definition as the size parameter.
- * Exported by dxgkrnl.sys; called from WDDM miniport DriverEntry routines
- * that do not know about DxgkInitializeEx.
+ * Exported for in-tree miniports (softgpu) that link dxgkrnl directly
+ * instead of the displib IOCTL stub.  Copies the table size that belongs
+ * to the miniport's Version, never sizeof() of our own definition.
  *
  * IRQL: PASSIVE_LEVEL
  */
@@ -4584,9 +4701,13 @@ DxgkInitialize(
     _In_ PUNICODE_STRING             RegistryPath,
     _In_ PDRIVER_INITIALIZATION_DATA DriverInitializationData)
 {
+    if (DriverInitializationData == NULL)
+        return STATUS_INVALID_PARAMETER;
+
     return DxgkInitializeEx(DriverObject,
                             RegistryPath,
-                            sizeof(DRIVER_INITIALIZATION_DATA),
+                            DxgkpGetDriverDataSizeFromVersion(
+                                DriverInitializationData->Version),
                             DriverInitializationData);
 }
 
