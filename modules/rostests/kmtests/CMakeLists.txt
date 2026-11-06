@@ -163,6 +163,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_wmi/EtwProvider.c
     rtl/RtlIsValidOemCharacter.c
     rtl/RtlRangeList.c
+    win32ss/CddDisplay.c
     ${COMMON_SOURCE}
     usb_xhci/XhciBulkTrb.c
     ${REACTOS_SOURCE_DIR}/drivers/usb/usbxhci/trb.c
