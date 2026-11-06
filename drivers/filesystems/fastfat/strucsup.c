@@ -269,15 +269,15 @@ Return Value:
     //  The following variables are used for abnormal unwind
     //
 
-    PLIST_ENTRY UnwindEntryList = NULL;
-    PERESOURCE UnwindResource = NULL;
-    PERESOURCE UnwindResource2 = NULL;
-    PFILE_OBJECT UnwindFileObject = NULL;
-    PFILE_OBJECT UnwindCacheMap = NULL;
-    BOOLEAN UnwindWeAllocatedMcb = FALSE;
-    PFILE_SYSTEM_STATISTICS UnwindStatistics = NULL;
-    BOOLEAN UnwindWeAllocatedBadBlockMap = FALSE;
-    BOOLEAN CloseContextAllocated = FALSE;
+    PLIST_ENTRY _SEH2_VOLATILE UnwindEntryList = NULL;
+    PERESOURCE _SEH2_VOLATILE UnwindResource = NULL;
+    PERESOURCE _SEH2_VOLATILE UnwindResource2 = NULL;
+    PFILE_OBJECT _SEH2_VOLATILE UnwindFileObject = NULL;
+    PFILE_OBJECT _SEH2_VOLATILE UnwindCacheMap = NULL;
+    BOOLEAN _SEH2_VOLATILE UnwindWeAllocatedMcb = FALSE;
+    PFILE_SYSTEM_STATISTICS _SEH2_VOLATILE UnwindStatistics = NULL;
+    BOOLEAN _SEH2_VOLATILE UnwindWeAllocatedBadBlockMap = FALSE;
+    BOOLEAN _SEH2_VOLATILE CloseContextAllocated = FALSE;
 
     PAGED_CODE();
     UNREFERENCED_PARAMETER( FsDeviceObject );
@@ -1022,9 +1022,9 @@ Return Value:
     //
 
     PVOID UnwindStorage[2] = { NULL, NULL };
-    PERESOURCE UnwindResource = NULL;
-    PERESOURCE UnwindResource2 = NULL;
-    PLARGE_MCB UnwindMcb = NULL;
+    PERESOURCE _SEH2_VOLATILE UnwindResource = NULL;
+    PERESOURCE _SEH2_VOLATILE UnwindResource2 = NULL;
+    PLARGE_MCB _SEH2_VOLATILE UnwindMcb = NULL;
     PFILE_OBJECT UnwindFileObject = NULL;
 
     PAGED_CODE();
@@ -1307,12 +1307,12 @@ Return Value:
     //
 
     PVOID UnwindStorage[2] = { NULL, NULL };
-    PERESOURCE UnwindResource = NULL;
-    PERESOURCE UnwindResource2 = NULL;
-    PLIST_ENTRY UnwindEntryList = NULL;
-    PLARGE_MCB UnwindMcb = NULL;
-    PFILE_LOCK UnwindFileLock = NULL;
-    POPLOCK UnwindOplock = NULL;
+    PERESOURCE _SEH2_VOLATILE UnwindResource = NULL;
+    PERESOURCE _SEH2_VOLATILE UnwindResource2 = NULL;
+    PLIST_ENTRY _SEH2_VOLATILE UnwindEntryList = NULL;
+    PLARGE_MCB _SEH2_VOLATILE UnwindMcb = NULL;
+    PFILE_LOCK _SEH2_VOLATILE UnwindFileLock = NULL;
+    POPLOCK _SEH2_VOLATILE UnwindOplock = NULL;
 
     PAGED_CODE();
 
@@ -1672,11 +1672,11 @@ Return Value:
     //
 
     PVOID UnwindStorage[2] = { NULL, NULL  };
-    PERESOURCE UnwindResource = NULL;
-    PERESOURCE UnwindResource2 = NULL;
-    PLIST_ENTRY UnwindEntryList = NULL;
-    PLARGE_MCB UnwindMcb = NULL;
-    POPLOCK UnwindOplock = NULL;
+    PERESOURCE _SEH2_VOLATILE UnwindResource = NULL;
+    PERESOURCE _SEH2_VOLATILE UnwindResource2 = NULL;
+    PLIST_ENTRY _SEH2_VOLATILE UnwindEntryList = NULL;
+    PLARGE_MCB _SEH2_VOLATILE UnwindMcb = NULL;
+    POPLOCK _SEH2_VOLATILE UnwindOplock = NULL;
 
     PAGED_CODE();
 

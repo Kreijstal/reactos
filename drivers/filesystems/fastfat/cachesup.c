@@ -453,7 +453,7 @@ FatPrepareWriteDirectoryFile (
     IN PDCB Dcb,
     IN VBO StartingVbo,
     IN ULONG ByteCount,
-    OUT PBCB *Bcb,
+    OUT PBCB *_SEH2_VOLATILE Bcb,
     OUT PVOID *Buffer,
     IN BOOLEAN Zero,
     IN BOOLEAN Reversible,
@@ -495,8 +495,8 @@ Arguments:
 
 {
     LARGE_INTEGER Vbo;
-    ULONG InitialAllocation = 0;
-    BOOLEAN UnwindWeAllocatedDiskSpace = FALSE;
+    ULONG _SEH2_VOLATILE InitialAllocation = 0;
+    BOOLEAN _SEH2_VOLATILE UnwindWeAllocatedDiskSpace = FALSE;
     PBCB    LocalBcb = NULL;
     PVOID   LocalBuffer = NULL;
     ULONG   InitialRequest = ByteCount;
@@ -872,7 +872,7 @@ Return Value:
 
     if (Dcb->Specific.Dcb.DirectoryFile == NULL) {
 
-        PFILE_OBJECT DirectoryFileObject = NULL;
+        PFILE_OBJECT _SEH2_VOLATILE DirectoryFileObject = NULL;
 
         FatAcquireDirectoryFileMutex( Dcb->Vcb );
 

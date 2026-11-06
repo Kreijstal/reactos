@@ -873,7 +873,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE Status = STATUS_SUCCESS;
     PDCB ParentDcb;
     BOOLEAN RecursiveClose;
     BOOLEAN LocalVcbDeleted;

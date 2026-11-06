@@ -62,8 +62,8 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
-    PIRP_CONTEXT IrpContext = NULL;
+    NTSTATUS _SEH2_VOLATILE Status;
+    PIRP_CONTEXT _SEH2_VOLATILE IrpContext = NULL;
 
     BOOLEAN TopLevel;
 

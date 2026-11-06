@@ -94,8 +94,8 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
-    PIRP_CONTEXT IrpContext = NULL;
+    NTSTATUS _SEH2_VOLATILE Status;
+    PIRP_CONTEXT _SEH2_VOLATILE IrpContext = NULL;
 
     BOOLEAN TopLevel;
 
@@ -169,7 +169,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
+    NTSTATUS _SEH2_VOLATILE Status;
 
     PIO_STACK_LOCATION IrpSp;
 
@@ -181,8 +181,8 @@ Return Value:
     PFCB NextFcb;
     PCCB Ccb;
 
-    BOOLEAN VcbAcquired = FALSE;
-    BOOLEAN FcbAcquired = FALSE;
+    BOOLEAN _SEH2_VOLATILE VcbAcquired = FALSE;
+    BOOLEAN _SEH2_VOLATILE FcbAcquired = FALSE;
     BOOLEAN FatFlushRequired = FALSE;
 
     PAGED_CODE();
@@ -574,7 +574,7 @@ Return Value:
     PBCB DirentBcb = NULL;
 
     NTSTATUS Status;
-    NTSTATUS ReturnStatus = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE ReturnStatus = STATUS_SUCCESS;
 
     BOOLEAN ClearWriteThroughOnExit = FALSE;
     BOOLEAN ClearWaitOnExit = FALSE;
@@ -842,7 +842,7 @@ Return Value:
     IO_STATUS_BLOCK Iosb;
     LARGE_INTEGER Offset;
 
-    NTSTATUS ReturnStatus = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE ReturnStatus = STATUS_SUCCESS;
 
     PAGED_CODE();
 

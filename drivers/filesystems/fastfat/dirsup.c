@@ -3349,18 +3349,18 @@ Return Value:
     UNICODE_STRING Lfn = {0,0,NULL};
 
     LARGE_MCB Mcb;
-    BOOLEAN McbInitialized = FALSE;
+    BOOLEAN _SEH2_VOLATILE McbInitialized = FALSE;
     BOOLEAN InvalidateFcbs = FALSE;
 
     PUCHAR Directory = NULL;
     PUCHAR UnusedDirents;
-    PUCHAR UnusedDirentBuffer = NULL;
+    PUCHAR _SEH2_VOLATILE UnusedDirentBuffer = NULL;
     PUCHAR UsedDirents;
-    PUCHAR UsedDirentBuffer = NULL;
+    PUCHAR _SEH2_VOLATILE UsedDirentBuffer = NULL;
 
     PBCB *Bcbs = NULL;
-    ULONG Page;
-    ULONG PagesPinned = 0;
+    ULONG _SEH2_VOLATILE Page;
+    ULONG _SEH2_VOLATILE PagesPinned = 0;
     PERESOURCE *AcquiredResources = NULL;
     ULONG AcquiredResourceCount = 0;
     ULONG AcquiredResourceCapacity = 0;

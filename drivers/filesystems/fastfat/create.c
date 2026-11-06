@@ -305,8 +305,8 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
-    PIRP_CONTEXT IrpContext = NULL;
+    NTSTATUS _SEH2_VOLATILE Status;
+    PIRP_CONTEXT _SEH2_VOLATILE IrpContext = NULL;
 
     BOOLEAN TopLevel;
     BOOLEAN ExceptionCompletedIrp = FALSE;
@@ -572,8 +572,8 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
-    IO_STATUS_BLOCK Iosb = {0};
+    NTSTATUS _SEH2_VOLATILE Status;
+    IO_STATUS_BLOCK _SEH2_VOLATILE Iosb = {0};
     PIO_STACK_LOCATION IrpSp;
 
     PFILE_OBJECT FileObject;
@@ -2333,7 +2333,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
+    NTSTATUS _SEH2_VOLATILE Status;
     PIO_STACK_LOCATION IrpSp;
 
 #ifndef __REACTOS__
@@ -2348,10 +2348,10 @@ Return Value:
     //  The following variables are for abnormal termination
     //
 
-    BOOLEAN UnwindShareAccess = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindShareAccess = FALSE;
     PCCB UnwindCcb = NULL;
-    BOOLEAN UnwindCounts = FALSE;
-    BOOLEAN UnwindVolumeLock = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindCounts = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindVolumeLock = FALSE;
 
     PAGED_CODE();
 
@@ -2637,9 +2637,9 @@ Arguments:
     //  The following variables are for abnormal termination
     //
 
-    BOOLEAN UnwindShareAccess = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindShareAccess = FALSE;
     PCCB UnwindCcb = NULL;
-    BOOLEAN UnwindCounts = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindCounts = FALSE;
     BOOLEAN RootDcbAcquired = FALSE;
 
     PAGED_CODE();
@@ -2825,7 +2825,7 @@ Return Value:
     //  The following variables are for abnormal termination
     //
 
-    BOOLEAN UnwindShareAccess = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindShareAccess = FALSE;
     PCCB UnwindCcb = NULL;
     BOOLEAN DcbAcquired = FALSE;
 
@@ -3260,7 +3260,7 @@ Return Value:
 --*/
 
 {
-    IO_STATUS_BLOCK Iosb = {0};
+    IO_STATUS_BLOCK _SEH2_VOLATILE Iosb = {0};
 
     PBCB DirentBcb = NULL;
     PDIRENT Dirent;
@@ -3271,9 +3271,9 @@ Return Value:
     //  The following variables are for abnormal termination
     //
 
-    BOOLEAN UnwindShareAccess = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindShareAccess = FALSE;
     PCCB UnwindCcb = NULL;
-    BOOLEAN DecrementFcbOpenCount = FALSE;
+    BOOLEAN _SEH2_VOLATILE DecrementFcbOpenCount = FALSE;
     BOOLEAN FcbAcquired = FALSE;
 
 
@@ -3975,7 +3975,7 @@ Return Value:
     //  The following variables are for abnormal termination
     //
 
-    BOOLEAN UnwindShareAccess = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindShareAccess = FALSE;
     PCCB UnwindCcb = NULL;
     BOOLEAN DcbAcquired = FALSE;
 
@@ -4148,7 +4148,7 @@ FatOpenExistingDirectory (
     _In_ PIO_STACK_LOCATION IrpSp,
     _Inout_ PFILE_OBJECT FileObject,
     _Inout_ PVCB Vcb,
-    _Outptr_result_maybenull_ PDCB *Dcb,
+    _Outptr_result_maybenull_ PDCB *_SEH2_VOLATILE Dcb,
     _In_ PDCB ParentDcb,
     _In_ PDIRENT Dirent,
     _In_ ULONG LfnByteOffset,
@@ -4222,7 +4222,7 @@ Return Value:
     PDCB UnwindDcb = NULL;
     PCCB UnwindCcb = NULL;
 
-    BOOLEAN CountsIncremented = FALSE;
+    BOOLEAN _SEH2_VOLATILE CountsIncremented = FALSE;
 
     UNREFERENCED_PARAMETER( DeleteOnClose );
 #if (NTDDI_VERSION <= NTDDI_WIN7)
@@ -4424,7 +4424,7 @@ FatOpenExistingFile (
     _In_ PIRP_CONTEXT IrpContext,
     _Inout_ PFILE_OBJECT FileObject,
     _Inout_ PVCB Vcb,
-    _Outptr_result_maybenull_ PFCB *Fcb,
+    _Outptr_result_maybenull_ PFCB *_SEH2_VOLATILE Fcb,
     _In_ PDCB ParentDcb,
     _In_ PDIRENT Dirent,
     _In_ ULONG LfnByteOffset,
@@ -4509,7 +4509,7 @@ Return Value:
 --*/
 
 {
-    IO_STATUS_BLOCK Iosb = {0};
+    IO_STATUS_BLOCK _SEH2_VOLATILE Iosb = {0};
 
     ACCESS_MASK AddedAccess = 0;
 
@@ -4521,7 +4521,7 @@ Return Value:
 
     PFCB UnwindFcb = NULL;
     PCCB UnwindCcb = NULL;
-    BOOLEAN CountsIncremented = FALSE;
+    BOOLEAN _SEH2_VOLATILE CountsIncremented = FALSE;
 
 
 #if (NTDDI_VERSION < NTDDI_WIN7)
@@ -5713,14 +5713,14 @@ Return Value:
     BOOLEAN CreateLfn;
 
     ULONG BytesInFirstPage = 0;
-    ULONG DirentsInFirstPage = 0;
-    PDIRENT FirstPageDirent = NULL;
+    ULONG _SEH2_VOLATILE DirentsInFirstPage = 0;
+    PDIRENT _SEH2_VOLATILE FirstPageDirent = NULL;
 
     PBCB SecondPageBcb = NULL;
     ULONG SecondPageOffset;
     PDIRENT SecondPageDirent = NULL;
 
-    BOOLEAN DirentFromPool = FALSE;
+    BOOLEAN _SEH2_VOLATILE DirentFromPool = FALSE;
 
     OEM_STRING ShortName;
     UCHAR ShortNameBuffer[12];
@@ -5741,10 +5741,10 @@ Return Value:
     //  The following variables are for abnormal termination
     //
 
-    PDIRENT UnwindDirent = NULL;
+    PDIRENT _SEH2_VOLATILE UnwindDirent = NULL;
     PFCB UnwindFcb = NULL;
-    BOOLEAN UnwindAllocation = FALSE;
-    BOOLEAN CountsIncremented = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindAllocation = FALSE;
+    BOOLEAN _SEH2_VOLATILE CountsIncremented = FALSE;
     PCCB UnwindCcb = NULL;
 
     ULONG LocalAbnormalTermination = FALSE;
@@ -6414,7 +6414,7 @@ Return Value:
 
     USHORT EaHandle = 0;
     BOOLEAN EaChange = FALSE;
-    BOOLEAN ReleasePaging = FALSE;
+    BOOLEAN _SEH2_VOLATILE ReleasePaging = FALSE;
 
     PCCB Ccb;
 
@@ -6427,7 +6427,7 @@ Return Value:
     //
 
     PCCB UnwindCcb = NULL;
-    USHORT UnwindEa = 0;
+    USHORT _SEH2_VOLATILE UnwindEa = 0;
 
     PAGED_CODE();
 

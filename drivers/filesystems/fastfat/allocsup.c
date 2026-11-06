@@ -1151,14 +1151,14 @@ Arguments:
 {
     PVCB Vcb;
     LARGE_MCB NewMcb = {0};
-    PLARGE_MCB McbToCleanup = NULL;
+    PLARGE_MCB _SEH2_VOLATILE McbToCleanup = NULL;
     PDIRENT Dirent = NULL;
     ULONG NewAllocation = 0;
     PBCB Bcb = NULL;
-    BOOLEAN UnwindWeAllocatedDiskSpace = FALSE;
-    BOOLEAN UnwindAllocationSizeSet = FALSE;
-    BOOLEAN UnwindCacheManagerInformed = FALSE;
-    BOOLEAN UnwindWeInitializedMcb = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindWeAllocatedDiskSpace = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindAllocationSizeSet = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindCacheManagerInformed = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindWeInitializedMcb = FALSE;
 
     PAGED_CODE();
 
@@ -1504,11 +1504,11 @@ Return Value:
     LARGE_MCB RemainingMcb = {0};
     ULONG BytesPerCluster;
     PDIRENT Dirent = NULL;
-    BOOLEAN UpdatedDirent = FALSE;
+    BOOLEAN _SEH2_VOLATILE UpdatedDirent = FALSE;
 
     ULONG UnwindInitialAllocationSize;
     ULONG UnwindInitialFirstClusterOfFile;
-    BOOLEAN UnwindWeAllocatedMcb = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindWeAllocatedMcb = FALSE;
 
     PAGED_CODE();
 
@@ -1864,9 +1864,9 @@ Arguments:
     ULONG PreviousClear = 0;
 #endif
 
-    PFAT_WINDOW Window;
-    BOOLEAN Wait = FALSE;
-    BOOLEAN Result = TRUE;
+    PFAT_WINDOW _SEH2_VOLATILE Window;
+    BOOLEAN _SEH2_VOLATILE Wait = FALSE;
+    BOOLEAN _SEH2_VOLATILE Result = TRUE;
 
     PAGED_CODE();
 
@@ -2183,15 +2183,15 @@ Arguments:
         //
 
         ULONG Index = 0;
-        ULONG Cluster = 0;
-        ULONG CurrentVbo = 0;
+        ULONG _SEH2_VOLATILE Cluster = 0;
+        ULONG _SEH2_VOLATILE CurrentVbo = 0;
         ULONG PriorLastCluster = 0;
-        ULONG BytesFound = 0;
+        ULONG _SEH2_VOLATILE BytesFound = 0;
 
-        ULONG ClustersFound = 0;
+        ULONG _SEH2_VOLATILE ClustersFound = 0;
         ULONG ClustersRemaining = 0;
 
-        BOOLEAN LockedBitMap = FALSE;
+        BOOLEAN _SEH2_VOLATILE LockedBitMap = FALSE;
         BOOLEAN SelectNextContigWindow = FALSE;
 
         //
@@ -2702,13 +2702,13 @@ Return Value:
     ULONG ByteCount;
     ULONG ClusterCount = 0;
     ULONG ClusterIndex = 0;
-    ULONG McbIndex = 0;
+    ULONG _SEH2_VOLATILE McbIndex = 0;
 
     UCHAR LogOfBytesPerCluster;
 
     PFAT_WINDOW Window;
 
-    NTSTATUS ZeroingStatus = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE ZeroingStatus = STATUS_SUCCESS;
 
     PAGED_CODE();
 
@@ -3269,8 +3269,8 @@ Return Value:
 --*/
 
 {
-    VBO SourceVbo;
-    VBO TargetVbo;
+    VBO _SEH2_VOLATILE SourceVbo;
+    VBO _SEH2_VOLATILE TargetVbo;
     VBO DontCare;
 
     LBO Lbo;
@@ -3449,7 +3449,7 @@ Return Value:
     LBO SpliceLbo;
 
     VBO SourceVbo;
-    VBO TargetVbo = 0;
+    VBO _SEH2_VOLATILE TargetVbo = 0;
 
     LBO Lbo;
 
@@ -3854,7 +3854,7 @@ Arguments:
     ULONG WasWait = TRUE;
     BOOLEAN RegularOperation = TRUE;
     BOOLEAN CleaningOperation = FALSE;
-    BOOLEAN ReleaseMutex = FALSE;
+    BOOLEAN _SEH2_VOLATILE ReleaseMutex = FALSE;
 
     PAGED_CODE();
 
@@ -4191,7 +4191,7 @@ VOID
 FatSetFatRun (
     IN PIRP_CONTEXT IrpContext,
     IN PVCB Vcb,
-    IN ULONG StartingFatIndex,
+    IN ULONG _SEH2_VOLATILE StartingFatIndex,
     IN ULONG ClusterCount,
     IN BOOLEAN ChainTogether
     )
@@ -4238,7 +4238,7 @@ Return Value:
 
     PVOID PinnedFat;
 
-    BOOLEAN ReleaseMutex = FALSE;
+    BOOLEAN _SEH2_VOLATILE ReleaseMutex = FALSE;
 
     ULONG SavedStartingFatIndex = StartingFatIndex;
 
@@ -4839,7 +4839,7 @@ Return Value:
 
     PFAT_WINDOW CurrentWindow = NULL;
 
-    PVOID NewBitMapBuffer = NULL;
+    PVOID _SEH2_VOLATILE NewBitMapBuffer = NULL;
     PRTL_BITMAP BitMap = NULL;
     RTL_BITMAP PrivateBitMap;
 
