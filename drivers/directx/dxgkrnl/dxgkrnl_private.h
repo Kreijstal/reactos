@@ -333,6 +333,11 @@ struct _DXGKRNL_MINIPORT_CONTEXT
      * miniport-visible contract is attached to it. */
     BOOLEAN                     IsBasicDisplayFallback;
 
+    /* TRUE when registered through IOCTL 0x230047 (Win8+ displib), FALSE
+     * through 0x23003F or the DxgkInitialize export.  Windows keeps the same
+     * flag in its driver extension (DpiInitializeEx). */
+    BOOLEAN                     Win8Initialization;
+
     /*
      * Copy of the miniport's RegistryPath (NUL-terminated buffer
      * allocated from NonPagedPool with TAG_DXGK_REGISTRY).
@@ -1061,6 +1066,21 @@ DxgkInitializeEx(
     _In_ PDRIVER_OBJECT              DriverObject,
     _In_ PUNICODE_STRING             RegistryPath,
     _In_ ULONG                       DriverInitDataSize,
+    _In_ PDRIVER_INITIALIZATION_DATA DriverInitializationData);
+
+/* Entry points handed out by the displib registration IOCTLs (d3dkmt.c). */
+NTSTATUS
+APIENTRY
+DxgkpDdiInitialize(
+    _In_ PDRIVER_OBJECT              DriverObject,
+    _In_ PUNICODE_STRING             RegistryPath,
+    _In_ PDRIVER_INITIALIZATION_DATA DriverInitializationData);
+
+NTSTATUS
+APIENTRY
+DxgkpDdiInitializeWin8(
+    _In_ PDRIVER_OBJECT              DriverObject,
+    _In_ PUNICODE_STRING             RegistryPath,
     _In_ PDRIVER_INITIALIZATION_DATA DriverInitializationData);
 
 /*
