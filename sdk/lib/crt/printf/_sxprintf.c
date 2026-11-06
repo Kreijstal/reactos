@@ -78,7 +78,10 @@ _sxprintf(
     /* Validate parameters */
     if (MSVCRT_CHECK_PMT(((buffer == NULL) || (format == NULL) || (sizeOfBuffer <= 0))))
     {
+#ifndef _LIBCNT_
+        /* The kernel CRT has no errno; ntoskrnl's sprintf_s only returns -1 */
         errno = EINVAL;
+#endif
         return -1;
     }
 
