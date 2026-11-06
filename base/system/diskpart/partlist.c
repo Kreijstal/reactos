@@ -2177,7 +2177,7 @@ static
 VOID
 SortVolumeList(VOID)
 {
-    PLIST_ENTRY Entry, TempEntry, LastInsertEntry;
+    PLIST_ENTRY Entry, NextEntry, LastInsertEntry;
     PVOLENTRY VolumeEntry;
     ULONG VolumeNumber;
 
@@ -2186,27 +2186,27 @@ SortVolumeList(VOID)
     if (IsListEmpty(&VolumeListHead))
         return;
 
-    /* Move CDROM volumes to the head of the list */
-    LastInsertEntry = NULL;
-    Entry = VolumeListHead.Flink;
-    while (Entry != &VolumeListHead)
+    /* Move CDROM volumes to the head of the list, keeping their order.
+     * Take the successor before moving an entry: the moved entry lands in
+     * front of every entry not visited yet, so each entry is visited once.
+     * Stepping back to its predecessor instead revisits a CDROM volume that
+     * is already first, which then gets inserted after itself, making the
+     * list a cycle that never reaches the head again. */
+    LastInsertEntry = &VolumeListHead;
+    for (Entry = VolumeListHead.Flink; Entry != &VolumeListHead; Entry = NextEntry)
     {
+        NextEntry = Entry->Flink;
         VolumeEntry = CONTAINING_RECORD(Entry, VOLENTRY, ListEntry);
 
         if (VolumeEntry->VolumeType == VOLUME_TYPE_CDROM)
         {
-            TempEntry = Entry;
-            Entry = Entry->Blink;
-
-            RemoveEntryList(TempEntry);
-            if (LastInsertEntry == NULL)
-                InsertHeadList(&VolumeListHead, TempEntry);
-            else
-                InsertListAfter(LastInsertEntry, TempEntry);
-            LastInsertEntry = TempEntry;
+            if (Entry != LastInsertEntry->Flink)
+            {
+                RemoveEntryList(Entry);
+                InsertListAfter(LastInsertEntry, Entry);
+            }
+            LastInsertEntry = Entry;
         }
-
-        Entry = Entry->Flink;
     }
 
     /* Update the VolumeNumber */
