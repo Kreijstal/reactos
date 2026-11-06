@@ -2992,7 +2992,7 @@ DxgkWaitForSynchronizationObjectFromCpu(
  *
  * Returns the NTSTATUS that should be placed in IoStatus.
  * ====================================================================== */
-static NTSTATUS
+NTSTATUS
 DxgkpDispatchBufferedIoctl(
     _In_ PIRP              Irp,
     _In_ PIO_STACK_LOCATION Stack)
