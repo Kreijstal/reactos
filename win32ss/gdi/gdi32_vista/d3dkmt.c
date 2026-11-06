@@ -6,7 +6,7 @@
  */
 
 #include <gdi32_vista.h>
-#include <d3dkmddi.h>
+#include <d3dkmthk.h>
 #include <winuser.h>
 
 /*
