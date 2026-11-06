@@ -1,63 +1,22 @@
 ; WDDM kernel display stack service registration (livecd preinstall)
 ;
-; Registers the three WDDM kernel-mode drivers so they load at boot and
-; replace the legacy XPDM display path (uefifb/vga). Load order is driven by
-; PE imports (softgpu -> dxgkrnl -> dxgmms1), reinforced by Video groups:
+; dxgkrnl is the WDDM display port driver. It is loaded at boot, like on
+; Windows, and is also pulled in as an import by every WDDM miniport
+; (e.g. viogpudo.sys). For each started WDDM adapter it creates
+; \Device\VideoN, writes the HARDWARE\DEVICEMAP\VIDEO entry and sets
+; InstalledDisplayDrivers=cdd, so win32k drives the adapter through cdd.dll.
 ;
-;   dxgmms1  WDDM video memory manager      (Video Init) -- dxgkrnl import
-;   dxgkrnl  WDDM port driver / D3DKMT      (Video Init) -- softgpu import,
-;                                           creates \Device\DxgKrnl + \Device\Video0
-;   softgpu  WDDM software miniport         (Video)      -- PnP, binds the
-;            firmware framebuffer PnP device (DETECTEDInternal\uefifb) and
-;            triggers DxgkAdapterStart -> DxgkDisplayRegister.
+; Machines without a WDDM adapter keep the legacy XPDM path (videoprt +
+; vga/vbe/uefifb miniports); dxgkrnl stays idle there.
 ;
-; win32k loads framebuf.dll (Services\softgpu\Device0\InstalledDisplayDrivers)
-; as the GDI display driver; it renders into dxgkrnl's shadow framebuffer which
-; the present timer copies to the firmware GOP framebuffer.
+; dxgmms1 and the softgpu Basic-Display fallback are built but not registered:
+; dxgkrnl does not use dxgmms1 yet, and softgpu would take the firmware
+; framebuffer away from uefifb. See softgpu/softgpu_reg.inf.
 
 [AddReg]
-; --- dxgmms1 (video memory manager) ---
-HKLM,"SYSTEM\CurrentControlSet\Services\dxgmms1","ErrorControl",0x00010001,0x00000000
-HKLM,"SYSTEM\CurrentControlSet\Services\dxgmms1","Group",0x00000000,"Video Init"
-HKLM,"SYSTEM\CurrentControlSet\Services\dxgmms1","ImagePath",0x00020000,"system32\drivers\dxgmms1.sys"
-HKLM,"SYSTEM\CurrentControlSet\Services\dxgmms1","Start",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Services\dxgmms1","Type",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Services\dxgmms1","Tag",0x00010001,0x00000001
-
-; --- dxgkrnl (WDDM port driver / DirectX graphics kernel) ---
 HKLM,"SYSTEM\CurrentControlSet\Services\dxgkrnl","ErrorControl",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\dxgkrnl","Group",0x00000000,"Video Init"
 HKLM,"SYSTEM\CurrentControlSet\Services\dxgkrnl","ImagePath",0x00020000,"system32\drivers\dxgkrnl.sys"
 HKLM,"SYSTEM\CurrentControlSet\Services\dxgkrnl","Start",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\dxgkrnl","Type",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\dxgkrnl","Tag",0x00010001,0x00000002
-
-; --- softgpu (WDDM software miniport) — Win11-style Basic Display fallback ---
-; softgpu is Root-enumerated and started at boot, but SoftGpuDdiStartDevice
-; only proceeds when DxgkCbAcquirePostDisplayOwnership hands it a usable boot
-; framebuffer.  dxgkrnl returns an empty descriptor when none exists (e.g.
-; virtio-gpu machines) or when a real miniport (viogpudo, rpi5vc4) already
-; owns the boot display, so the fallback declines; conversely, a real
-; miniport's later acquire stops an already-running softgpu (the MSBDD
-; handover in dxgkrnl/adapter.c) — no two-adapter mode conflicts either way.
-HKLM,"SYSTEM\CurrentControlSet\Services\softgpu","ErrorControl",0x00010001,0x00000000
-HKLM,"SYSTEM\CurrentControlSet\Services\softgpu","Group",0x00000000,"Video"
-HKLM,"SYSTEM\CurrentControlSet\Services\softgpu","ImagePath",0x00020000,"system32\drivers\softgpu.sys"
-HKLM,"SYSTEM\CurrentControlSet\Services\softgpu","Start",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Services\softgpu","Type",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Services\softgpu","Tag",0x00010001,0x00000003
-HKLM,"SYSTEM\CurrentControlSet\Services\softgpu\Video","Service",0x00000000,"softgpu"
-HKLM,"SYSTEM\CurrentControlSet\Services\softgpu\Device0","InstalledDisplayDrivers",0x00010000,"framebuf"
-HKLM,"SYSTEM\CurrentControlSet\Services\softgpu\Device0","DefaultSettings.VRefresh",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Services\softgpu\Device0","DefaultSettings.BitsPerPel",0x00010001,0x00000020
-HKLM,"SYSTEM\CurrentControlSet\Services\softgpu\Device0","DefaultSettings.XResolution",0x00010001,0x00000400
-HKLM,"SYSTEM\CurrentControlSet\Services\softgpu\Device0","DefaultSettings.YResolution",0x00010001,0x00000300
-HKLM,"SYSTEM\CurrentControlSet\Services\softgpu\Device0","Device Description",0x00000000,"ReactOS WDDM Software GPU"
-HKLM,"SYSTEM\CurrentControlSet\Services\softgpu\Device0","VgaCompatible",0x00010001,0x00000000
-; Root-enumerated PnP device instance (Service+ClassGUID set -> started at boot)
-HKLM,"SYSTEM\CurrentControlSet\Enum\Root\SOFTGPU\0000","DeviceDesc",0x00000000,"ReactOS WDDM Software GPU"
-HKLM,"SYSTEM\CurrentControlSet\Enum\Root\SOFTGPU\0000","HardwareID",0x00010000,"ROOT\SOFTGPU"
-HKLM,"SYSTEM\CurrentControlSet\Enum\Root\SOFTGPU\0000","Service",0x00000000,"softgpu"
-HKLM,"SYSTEM\CurrentControlSet\Enum\Root\SOFTGPU\0000","Class",0x00000000,"Display"
-HKLM,"SYSTEM\CurrentControlSet\Enum\Root\SOFTGPU\0000","ClassGUID",0x00000000,"{4D36E968-E325-11CE-BFC1-08002BE10318}"
-HKLM,"SYSTEM\CurrentControlSet\Enum\Root\SOFTGPU\0000","ConfigFlags",0x00010001,0x00000000
