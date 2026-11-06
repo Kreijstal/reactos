@@ -1,0 +1,15 @@
+; ARM64 only: enable MSI-X for viogpudo.
+;
+; viogpudo is bound via the CriticalDeviceDatabase, so its INF's
+; [VioGpuDod_Inst.HW] AddReg (which sets MSISupported on the device's enum key)
+; never runs. pci.sys reads the same MSI policy off the SERVICE key for boot/
+; CDDB-bound devices, so carry it here. Without MSISupported=1 the PDO assigns a
+; line-based (INTx) interrupt that is never delivered on ROS ARM64: viogpudo's
+; VirtIO completion IRQs never fire, its command queue fills after ~128 presents,
+; and the display freezes a few seconds into the desktop.
+;
+; amd64 has no MSI support in the HAL yet and uses the INTx line interrupt.
+
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\viogpudo\Interrupt Management\MessageSignaledInterruptProperties","MSISupported",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\viogpudo\Interrupt Management\MessageSignaledInterruptProperties","MessageNumberLimit",0x00010001,0x00000004
