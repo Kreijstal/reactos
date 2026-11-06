@@ -642,6 +642,7 @@ AddGptPartitionToDisk(
     CopyMemory(&PartEntry->Gpt.PartitionType, &PartitionInfo->Gpt.PartitionType, sizeof(GUID));
     CopyMemory(&PartEntry->Gpt.PartitionId, &PartitionInfo->Gpt.PartitionId, sizeof(GUID));
     PartEntry->Gpt.Attributes = PartitionInfo->Gpt.Attributes;
+    CopyMemory(PartEntry->Gpt.Name, PartitionInfo->Gpt.Name, sizeof(PartEntry->Gpt.Name));
 
     PartEntry->LogicalPartition = FALSE;
     PartEntry->IsPartitioned = TRUE;
@@ -2977,7 +2978,7 @@ UpdateGptDiskLayout(
             CopyMemory(&PartitionInfo->Gpt.PartitionType, &PartEntry->Gpt.PartitionType, sizeof(GUID));
             CopyMemory(&PartitionInfo->Gpt.PartitionId, &PartEntry->Gpt.PartitionId, sizeof(GUID));
             PartitionInfo->Gpt.Attributes = PartEntry->Gpt.Attributes;
-            ZeroMemory(&PartitionInfo->Gpt.Name, 36 * sizeof(WCHAR)); /* ??? */
+            CopyMemory(PartitionInfo->Gpt.Name, PartEntry->Gpt.Name, sizeof(PartitionInfo->Gpt.Name));
 
             PartEntry->PartitionNumber = PartitionInfo->PartitionNumber;
 

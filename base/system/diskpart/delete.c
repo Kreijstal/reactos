@@ -242,6 +242,7 @@ DeleteGptPartition(
         ZeroMemory(&CurrentPartition->Gpt.PartitionType, sizeof(GUID));
         ZeroMemory(&CurrentPartition->Gpt.PartitionId, sizeof(GUID));
         CurrentPartition->Gpt.Attributes = 0ULL;
+        ZeroMemory(CurrentPartition->Gpt.Name, sizeof(CurrentPartition->Gpt.Name));
 
         CurrentPartition->FormatState = Unformatted;
         CurrentPartition->FileSystemName[0] = L'\0';
