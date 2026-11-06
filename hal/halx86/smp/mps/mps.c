@@ -24,9 +24,11 @@ PROCESSOR_IDENTITY HalpProcessorIdentity[MAXIMUM_PROCESSORS];
 
 VOID
 HalpParseApicTables(
-    _In_ PLOADER_PARAMETER_BLOCK LoaderBlock)
+    _In_ PLOADER_PARAMETER_BLOCK LoaderBlock,
+    _In_ ULONG BootApicId)
 {
     UNREFERENCED_PARAMETER(LoaderBlock);
+    UNREFERENCED_PARAMETER(BootApicId);
 
     // TODO: Fill HalpProcessorIdentity[].
     UNIMPLEMENTED;
