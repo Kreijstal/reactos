@@ -1676,7 +1676,7 @@ Return Value:
 --*/
 
 {
-    PIRP Irp;
+    PIRP _SEH2_VOLATILE Irp;
     PIO_STACK_LOCATION IrpSp;
     PMDL Mdl;
     BOOLEAN Wait;
@@ -1684,9 +1684,9 @@ Return Value:
     BOOLEAN IsAWrite = FALSE;
     ULONG Length = 0;
 
-    ULONG UnwindRunCount = 0;
+    ULONG _SEH2_VOLATILE UnwindRunCount = 0;
 
-    BOOLEAN ExceptionExpected = TRUE;
+    BOOLEAN _SEH2_VOLATILE ExceptionExpected = TRUE;
 
     PAGED_CODE();
 

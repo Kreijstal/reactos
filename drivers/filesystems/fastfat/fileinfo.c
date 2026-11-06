@@ -226,8 +226,8 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
-    PIRP_CONTEXT IrpContext = NULL;
+    NTSTATUS _SEH2_VOLATILE Status;
+    PIRP_CONTEXT _SEH2_VOLATILE IrpContext = NULL;
 
     BOOLEAN TopLevel;
 
@@ -307,8 +307,8 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
-    PIRP_CONTEXT IrpContext = NULL;
+    NTSTATUS _SEH2_VOLATILE Status;
+    PIRP_CONTEXT _SEH2_VOLATILE IrpContext = NULL;
 
     BOOLEAN TopLevel;
 
@@ -361,8 +361,8 @@ Return Value:
 _Requires_lock_held_(_Global_critical_region_)
 NTSTATUS
 FatCommonQueryInformation (
-    IN PIRP_CONTEXT IrpContext,
-    IN PIRP Irp
+    IN PIRP_CONTEXT _SEH2_VOLATILE IrpContext,
+    IN PIRP _SEH2_VOLATILE Irp
     )
 
 /*++
@@ -383,7 +383,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
+    NTSTATUS _SEH2_VOLATILE Status;
 
     PIO_STACK_LOCATION IrpSp;
 
@@ -398,8 +398,8 @@ Return Value:
     PFCB Fcb;
     PCCB Ccb;
 
-    BOOLEAN FcbAcquired = FALSE;
-    BOOLEAN VcbAcquired = FALSE;
+    BOOLEAN _SEH2_VOLATILE FcbAcquired = FALSE;
+    BOOLEAN _SEH2_VOLATILE VcbAcquired = FALSE;
 
     PFILE_ALL_INFORMATION AllInfo;
 
@@ -680,8 +680,8 @@ Return Value:
 _Requires_lock_held_(_Global_critical_region_)
 NTSTATUS
 FatCommonSetInformation (
-    IN PIRP_CONTEXT IrpContext,
-    IN PIRP Irp
+    IN PIRP_CONTEXT _SEH2_VOLATILE IrpContext,
+    IN PIRP _SEH2_VOLATILE Irp
     )
 
 /*++
@@ -702,7 +702,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE Status = STATUS_SUCCESS;
 
     PIO_STACK_LOCATION IrpSp;
 
@@ -714,8 +714,8 @@ Return Value:
     PFCB Fcb;
     PCCB Ccb;
 
-    BOOLEAN VcbAcquired = FALSE;
-    BOOLEAN FcbAcquired = FALSE;
+    BOOLEAN _SEH2_VOLATILE VcbAcquired = FALSE;
+    BOOLEAN _SEH2_VOLATILE FcbAcquired = FALSE;
 
     PAGED_CODE();
 
@@ -1269,7 +1269,7 @@ FatQueryInternalInfo (
     IN PIRP_CONTEXT IrpContext,
     IN PFCB Fcb,
     IN OUT PFILE_INTERNAL_INFORMATION Buffer,
-    IN OUT PLONG Length
+    IN OUT PLONG _SEH2_VOLATILE Length
     )
 
 /*++
@@ -1333,7 +1333,7 @@ FatQueryEaInfo (
     IN PIRP_CONTEXT IrpContext,
     IN PFCB Fcb,
     IN OUT PFILE_EA_INFORMATION Buffer,
-    IN OUT PLONG Length
+    IN OUT PLONG _SEH2_VOLATILE Length
     )
 
 /*++
@@ -1968,7 +1968,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
+    NTSTATUS _SEH2_VOLATILE Status;
 
     PFILE_BASIC_INFORMATION Buffer;
 
@@ -2764,11 +2764,11 @@ Return Value:
     BOOLEAN AllLowerComponent;
     BOOLEAN AllLowerExtension;
     BOOLEAN CaseOnlyRename;
-    BOOLEAN ContinueWithRename;
+    BOOLEAN _SEH2_VOLATILE ContinueWithRename;
     BOOLEAN CreateLfn = FALSE;
     BOOLEAN DeleteSourceDirent;
     BOOLEAN DeleteTarget;
-    BOOLEAN NewDirentFromPool;
+    BOOLEAN _SEH2_VOLATILE NewDirentFromPool;
     BOOLEAN RenamedAcrossDirectories;
     BOOLEAN ReplaceIfExists;
 
@@ -2846,7 +2846,7 @@ Return Value:
 
     BOOLEAN InvalidateFcbOnRaise = FALSE;
 
-    PFILE_OBJECT DirectoryFileObject = NULL;
+    PFILE_OBJECT _SEH2_VOLATILE DirectoryFileObject = NULL;
     ULONG Flags = 0;
 
     PAGED_CODE();
@@ -4160,10 +4160,10 @@ Return Value:
 
     BOOLEAN FileSizeTruncated = FALSE;
     BOOLEAN CacheMapInitialized = FALSE;
-    BOOLEAN ResourceAcquired = FALSE;
-    ULONG OriginalFileSize = 0;
-    ULONG OriginalValidDataLength = 0;
-    ULONG OriginalValidDataToDisk = 0;
+    BOOLEAN _SEH2_VOLATILE ResourceAcquired = FALSE;
+    ULONG _SEH2_VOLATILE OriginalFileSize = 0;
+    ULONG _SEH2_VOLATILE OriginalValidDataLength = 0;
+    ULONG _SEH2_VOLATILE OriginalValidDataToDisk = 0;
 
     PAGED_CODE();
 
@@ -4453,18 +4453,18 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE Status = STATUS_SUCCESS;
 
     PFILE_END_OF_FILE_INFORMATION Buffer;
 
     ULONG NewFileSize = 0;
-    ULONG InitialFileSize = 0;
-    ULONG InitialValidDataLength = 0;
-    ULONG InitialValidDataToDisk = 0;
+    ULONG _SEH2_VOLATILE InitialFileSize = 0;
+    ULONG _SEH2_VOLATILE InitialValidDataLength = 0;
+    ULONG _SEH2_VOLATILE InitialValidDataToDisk = 0;
 
-    BOOLEAN CacheMapInitialized = FALSE;
+    BOOLEAN _SEH2_VOLATILE CacheMapInitialized = FALSE;
     BOOLEAN UnwindFileSizes = FALSE;
-    BOOLEAN ResourceAcquired = FALSE;
+    BOOLEAN _SEH2_VOLATILE ResourceAcquired = FALSE;
 
 
     PAGED_CODE();
@@ -4851,12 +4851,12 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE Status = STATUS_SUCCESS;
 
     PFILE_VALID_DATA_LENGTH_INFORMATION Buffer;
 
     ULONG NewValidDataLength;
-    BOOLEAN ResourceAcquired = FALSE;
+    BOOLEAN _SEH2_VOLATILE ResourceAcquired = FALSE;
 
     PAGED_CODE();
 
@@ -5012,7 +5012,7 @@ FatRenameEAs (
     IN POEM_STRING OldOemName
     )
 {
-    BOOLEAN LockedEaFcb = FALSE;
+    BOOLEAN _SEH2_VOLATILE LockedEaFcb = FALSE;
 
     PBCB EaBcb = NULL;
     PDIRENT EaDirent;

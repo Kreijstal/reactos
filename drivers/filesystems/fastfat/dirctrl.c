@@ -95,8 +95,8 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
-    PIRP_CONTEXT IrpContext = NULL;
+    NTSTATUS _SEH2_VOLATILE Status;
+    PIRP_CONTEXT _SEH2_VOLATILE IrpContext = NULL;
 
     BOOLEAN TopLevel;
 
@@ -249,7 +249,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
+    NTSTATUS _SEH2_VOLATILE Status;
     PIO_STACK_LOCATION IrpSp;
 
     PVCB Vcb;
@@ -273,8 +273,8 @@ Return Value:
     BOOLEAN IndexSpecified;
 
     BOOLEAN InitialQuery;
-    VBO CurrentVbo = 0;
-    BOOLEAN UpdateCcb;
+    VBO _SEH2_VOLATILE CurrentVbo = 0;
+    BOOLEAN _SEH2_VOLATILE UpdateCcb;
     PDIRENT Dirent;
     UCHAR Fat8Dot3Buffer[12];
     OEM_STRING Fat8Dot3String;
@@ -1472,7 +1472,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE Status = STATUS_SUCCESS;
     PIO_STACK_LOCATION IrpSp;
     PVCB Vcb;
     PDCB Dcb;
@@ -1480,7 +1480,7 @@ Return Value:
     ULONG CompletionFilter;
     BOOLEAN WatchTree;
 
-    BOOLEAN CompleteRequest;
+    BOOLEAN _SEH2_VOLATILE CompleteRequest;
 
     PAGED_CODE();
 

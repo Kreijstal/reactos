@@ -148,8 +148,8 @@ Return Value:
 
 {
     PFCB Fcb = NULL;
-    NTSTATUS Status;
-    PIRP_CONTEXT IrpContext = NULL;
+    NTSTATUS _SEH2_VOLATILE Status;
+    PIRP_CONTEXT _SEH2_VOLATILE IrpContext = NULL;
 
     BOOLEAN TopLevel = FALSE;
 
@@ -562,10 +562,10 @@ Return Value:
     PFILE_OBJECT FileObject;
     TYPE_OF_OPEN TypeOfOpen;
 
-    BOOLEAN PostIrp = FALSE;
+    BOOLEAN _SEH2_VOLATILE PostIrp = FALSE;
     BOOLEAN OplockPostIrp = FALSE;
 
-    BOOLEAN FcbOrDcbAcquired = FALSE;
+    BOOLEAN _SEH2_VOLATILE FcbOrDcbAcquired = FALSE;
 
     BOOLEAN Wait;
     BOOLEAN PagingIo;
@@ -573,7 +573,7 @@ Return Value:
     BOOLEAN SynchronousIo;
 
 
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE Status = STATUS_SUCCESS;
 
     FAT_IO_CONTEXT StackFatIoContext;
 

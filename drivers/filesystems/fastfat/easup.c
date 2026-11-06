@@ -85,7 +85,7 @@ Return Value:
 
 {
     PBCB EaBcb = NULL;
-    BOOLEAN LockedEaFcb = FALSE;
+    BOOLEAN _SEH2_VOLATILE LockedEaFcb = FALSE;
     EA_RANGE EaSetRange;
 
     PAGED_CODE();
@@ -209,7 +209,7 @@ FatGetNeedEaCount (
     IN PIRP_CONTEXT IrpContext,
     IN PVCB Vcb,
     IN PDIRENT Dirent,
-    OUT PULONG NeedEaCount
+    OUT PULONG _SEH2_VOLATILE NeedEaCount
     )
 
 /*++
@@ -235,7 +235,7 @@ Return Value:
 
 {
     PBCB EaBcb = NULL;
-    BOOLEAN LockedEaFcb = FALSE;
+    BOOLEAN _SEH2_VOLATILE LockedEaFcb = FALSE;
     EA_RANGE EaSetRange;
 
     PAGED_CODE();
@@ -393,7 +393,7 @@ Return Value:
 {
     PBCB EaBcb;
     PBCB LocalEaBcb;
-    BOOLEAN LockedEaFcb;
+    BOOLEAN _SEH2_VOLATILE LockedEaFcb;
 
     PEA_SET_HEADER EaSetHeader = NULL;
     EA_RANGE EaSetRange;
@@ -694,7 +694,7 @@ Return Value:
 
 {
     PBCB EaBcb;
-    BOOLEAN LockedEaFcb;
+    BOOLEAN _SEH2_VOLATILE LockedEaFcb;
 
     PAGED_CODE();
 
@@ -840,14 +840,14 @@ Return Value:
 --*/
 
 {
-    PFILE_OBJECT EaStreamFile = NULL;
+    PFILE_OBJECT _SEH2_VOLATILE EaStreamFile = NULL;
     EA_RANGE EaFileRange;
 
-    BOOLEAN UnwindLockedEaFcb = FALSE;
-    BOOLEAN UnwindLockedRootDcb = FALSE;
-    BOOLEAN UnwindAllocatedDiskSpace = FALSE;
-    BOOLEAN UnwindEaDirentCreated = FALSE;
-    BOOLEAN UnwindUpdatedSizes = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindLockedEaFcb = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindLockedRootDcb = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindAllocatedDiskSpace = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindEaDirentCreated = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindUpdatedSizes = FALSE;
 
     PAGED_CODE();
 
@@ -1588,17 +1588,17 @@ Return Value:
     LARGE_INTEGER FileOffset;
 
     LARGE_MCB DataMcb;
-    BOOLEAN UnwindInitializeDataMcb = FALSE;
-    BOOLEAN UnwindSplitData = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindInitializeDataMcb = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindSplitData = FALSE;
 
     LARGE_MCB TailMcb;
-    BOOLEAN UnwindInitializeTailMcb = FALSE;
-    BOOLEAN UnwindSplitTail = FALSE;
-    BOOLEAN UnwindMergeTail = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindInitializeTailMcb = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindSplitTail = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindMergeTail = FALSE;
 
-    BOOLEAN UnwindModifiedEaHeader = FALSE;
-    BOOLEAN UnwindCacheValues = FALSE;
-    ULONG UnwindPrevFileSize = 0;
+    BOOLEAN _SEH2_VOLATILE UnwindModifiedEaHeader = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindCacheValues = FALSE;
+    ULONG _SEH2_VOLATILE UnwindPrevFileSize = 0;
 
     ULONG EaOffsetVbo;
     USHORT EaOffsetIndex;
@@ -1612,7 +1612,7 @@ Return Value:
     PEA_FILE_HEADER EaHeader;
     USHORT EaHeaderBaseIndex;
 
-    ULONG EaSetVbo = 0;
+    ULONG _SEH2_VOLATILE EaSetVbo = 0;
     ULONG EaSetLength;
     EA_RANGE EaSetRange;
     PEA_SET_HEADER EaSet;
@@ -2096,7 +2096,7 @@ VOID
 FatAddEaSet (
     IN PIRP_CONTEXT IrpContext,
     IN PVCB Vcb,
-    IN ULONG EaSetLength,
+    IN ULONG _SEH2_VOLATILE EaSetLength,
     IN PBCB EaBcb,
     OUT PDIRENT EaDirent,
     OUT PUSHORT EaHandle,
@@ -2148,7 +2148,7 @@ Return Value:
     PEA_FILE_HEADER EaHeader;
 
     EA_RANGE EaOffsetRange;
-    ULONG EaNewOffsetVbo = 0;
+    ULONG _SEH2_VOLATILE EaNewOffsetVbo = 0;
     USHORT EaOffsetIndex;
     ULONG EaOffsetTableSize;
     PUSHORT EaOffsetTable;
@@ -2162,24 +2162,24 @@ Return Value:
     PFCB EaFcb = Vcb->EaFcb;
 
     LARGE_MCB EaSetMcb;
-    BOOLEAN UnwindInitializedEaSetMcb = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindInitializedEaSetMcb = FALSE;
     BOOLEAN UnwindAllocatedNewAllocation = FALSE;
-    BOOLEAN UnwindMergedNewEaSet = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindMergedNewEaSet = FALSE;
 
     LARGE_MCB EaOffsetMcb;
-    BOOLEAN UnwindInitializedOffsetMcb = FALSE;
-    BOOLEAN UnwindSplitNewAllocation = FALSE;
-    BOOLEAN UnwindMergedNewOffset = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindInitializedOffsetMcb = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindSplitNewAllocation = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindMergedNewOffset = FALSE;
 
     LARGE_MCB EaTailMcb;
-    BOOLEAN UnwindInitializedTailMcb = FALSE;
-    BOOLEAN UnwindSplitTail = FALSE;
-    BOOLEAN UnwindMergedTail = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindInitializedTailMcb = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindSplitTail = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindMergedTail = FALSE;
 
     LARGE_MCB EaInitialEaMcb;
-    BOOLEAN UnwindInitializedInitialEaMcb = FALSE;
-    BOOLEAN UnwindSplitInitialEa = FALSE;
-    BOOLEAN UnwindMergedInitialEa = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindInitializedInitialEaMcb = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindSplitInitialEa = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindMergedInitialEa = FALSE;
 
     USHORT NewEaIndex;
     PUSHORT NextEaOffset;
@@ -2188,12 +2188,12 @@ Return Value:
     LARGE_INTEGER FileOffset;
     ULONG Count;
 
-    ULONG UnwindPrevFileSize = 0;
-    BOOLEAN UnwindCacheValues = FALSE;
+    ULONG _SEH2_VOLATILE UnwindPrevFileSize = 0;
+    BOOLEAN _SEH2_VOLATILE UnwindCacheValues = FALSE;
 
     BOOLEAN TailExists = FALSE;
     BOOLEAN AddedOffsetTableCluster = FALSE;
-    BOOLEAN UnwindPurgeCacheMap = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindPurgeCacheMap = FALSE;
 
     PAGED_CODE();
 

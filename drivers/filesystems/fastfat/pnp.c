@@ -106,8 +106,8 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
-    PIRP_CONTEXT IrpContext = NULL;
+    NTSTATUS _SEH2_VOLATILE Status;
+    PIRP_CONTEXT _SEH2_VOLATILE IrpContext = NULL;
 
     BOOLEAN TopLevel;
     BOOLEAN Wait;
@@ -362,8 +362,8 @@ Return Value:
 {
     NTSTATUS Status = STATUS_SUCCESS;
     KEVENT Event;
-    BOOLEAN VcbDeleted = FALSE;
-    BOOLEAN GlobalHeld = TRUE;
+    BOOLEAN _SEH2_VOLATILE VcbDeleted = FALSE;
+    BOOLEAN _SEH2_VOLATILE GlobalHeld = TRUE;
 
     PAGED_CODE();
 
@@ -552,7 +552,7 @@ Return Value:
 {
     NTSTATUS Status;
     KEVENT Event;
-    BOOLEAN VcbDeleted = FALSE;
+    BOOLEAN _SEH2_VOLATILE VcbDeleted = FALSE;
 
     PAGED_CODE();
 
@@ -702,7 +702,7 @@ Return Value:
 {
     NTSTATUS Status;
     KEVENT Event;
-    BOOLEAN VcbDeleted = FALSE;
+    BOOLEAN _SEH2_VOLATILE VcbDeleted = FALSE;
 
     PAGED_CODE();
 

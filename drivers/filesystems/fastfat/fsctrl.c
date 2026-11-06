@@ -679,8 +679,8 @@ Return Value:
 
 {
     BOOLEAN Wait;
-    NTSTATUS Status;
-    PIRP_CONTEXT IrpContext = NULL;
+    NTSTATUS _SEH2_VOLATILE Status;
+    PIRP_CONTEXT _SEH2_VOLATILE IrpContext = NULL;
 
     BOOLEAN TopLevel;
 
@@ -968,7 +968,7 @@ _Requires_lock_held_(_Global_critical_region_)
 NTSTATUS
 FatMountVolume (
     IN PIRP_CONTEXT IrpContext,
-    IN PDEVICE_OBJECT TargetDeviceObject,
+    IN PDEVICE_OBJECT _SEH2_VOLATILE TargetDeviceObject,
     IN PVPB Vpb,
     IN PDEVICE_OBJECT FsDeviceObject
     )
@@ -1014,7 +1014,7 @@ Return Value:
 
 {
     PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation( IrpContext->OriginatingIrp );
-    NTSTATUS Status = STATUS_INVALID_PARAMETER;
+    NTSTATUS _SEH2_VOLATILE Status = STATUS_INVALID_PARAMETER;
 
     PPACKED_BOOT_SECTOR _SEH2_VOLATILE BootSector = NULL;
     ULONG BootSectorLength = 0;
@@ -1034,7 +1034,7 @@ Return Value:
     PVCB _SEH2_VOLATILE OldVcb = NULL;
     PVPB OldVpb = NULL;
 
-    PDEVICE_OBJECT RealDevice = NULL;
+    PDEVICE_OBJECT _SEH2_VOLATILE RealDevice = NULL;
     PVOLUME_DEVICE_OBJECT _SEH2_VOLATILE VolDo = NULL;
     PVCB _SEH2_VOLATILE Vcb = NULL;
     PFILE_OBJECT RootDirectoryFile = NULL;
@@ -2098,11 +2098,11 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE Status = STATUS_SUCCESS;
 
     PIO_STACK_LOCATION IrpSp;
 
-    PDIRENT RootDirectory = NULL;
+    PDIRENT _SEH2_VOLATILE RootDirectory = NULL;
     PPACKED_BOOT_SECTOR BootSector = NULL;
 
     BIOS_PARAMETER_BLOCK Bpb;
@@ -2113,7 +2113,7 @@ Return Value:
 
     ULONG SectorSize;
     BOOLEAN ClearVerify = FALSE;
-    BOOLEAN ReleaseEntireVolume = FALSE;
+    BOOLEAN _SEH2_VOLATILE ReleaseEntireVolume = FALSE;
     BOOLEAN VerifyAlreadyDone = FALSE;
 
     DISK_GEOMETRY DiskGeometry;
@@ -3182,7 +3182,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE Status = STATUS_SUCCESS;
     ULONG FsControlCode;
     PFCB Fcb;
     PVCB Vcb;
@@ -3192,8 +3192,8 @@ Return Value:
 
     PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation( Irp );
 
-    BOOLEAN AcquiredVcb = FALSE;
-    BOOLEAN AcquiredFcb = FALSE;
+    BOOLEAN _SEH2_VOLATILE AcquiredVcb = FALSE;
+    BOOLEAN _SEH2_VOLATILE AcquiredFcb = FALSE;
 
 #if (NTDDI_VERSION >= NTDDI_WIN7)
     PREQUEST_OPLOCK_INPUT_BUFFER InputBuffer = NULL;
@@ -3465,7 +3465,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE Status = STATUS_SUCCESS;
 
     PIO_STACK_LOCATION IrpSp;
 
@@ -3900,7 +3900,7 @@ Return Value:
 {
     PIO_STACK_LOCATION IrpSp;
     NTSTATUS Status = STATUS_SUCCESS;
-    BOOLEAN VcbHeld = FALSE;
+    BOOLEAN _SEH2_VOLATILE VcbHeld = FALSE;
     KIRQL SavedIrql;
 
     PVCB Vcb;
@@ -4934,7 +4934,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE Status = STATUS_SUCCESS;
 
     PIO_STACK_LOCATION IrpSp;
 
@@ -5492,7 +5492,7 @@ Return Value:
 
 --*/
 {
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE Status = STATUS_SUCCESS;
     PIO_STACK_LOCATION IrpSp;
 
     PVCB Vcb;
@@ -5945,15 +5945,15 @@ Return Value:
 
     KEVENT StackEvent;
 
-    PVOID Buffer = NULL;
+    PVOID _SEH2_VOLATILE Buffer = NULL;
     ULONG BufferSize;
 
-    BOOLEAN SourceMcbInitialized = FALSE;
-    BOOLEAN TargetMcbInitialized = FALSE;
+    BOOLEAN _SEH2_VOLATILE SourceMcbInitialized = FALSE;
+    BOOLEAN _SEH2_VOLATILE TargetMcbInitialized = FALSE;
 
     BOOLEAN FcbAcquired = FALSE;
-    BOOLEAN EventArmed = FALSE;
-    BOOLEAN DiskSpaceAllocated = FALSE;
+    BOOLEAN _SEH2_VOLATILE EventArmed = FALSE;
+    BOOLEAN _SEH2_VOLATILE DiskSpaceAllocated = FALSE;
 
     PDIRENT Dirent;
     PBCB DirentBcb = NULL;
@@ -7553,7 +7553,7 @@ Return Value:
     TYPE_OF_OPEN                    TypeOfOpen;
     PMARK_HANDLE_INFO               HandleInfo = NULL;
     PFILE_OBJECT                    DasdFileObject = NULL;
-    BOOLEAN                         ReleaseFcb = FALSE;
+    BOOLEAN                         _SEH2_VOLATILE ReleaseFcb = FALSE;
 
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
     MARK_HANDLE_INFO                LocalMarkHandleInfo = {0};
@@ -7921,7 +7921,7 @@ Return Value:
     PFCB Fcb;
     PCCB Ccb;
     PSET_PURGE_FAILURE_MODE_INPUT SetPurgeInput;
-    BOOLEAN FcbAcquired = FALSE;
+    BOOLEAN _SEH2_VOLATILE FcbAcquired = FALSE;
 
     PAGED_CODE();
 
