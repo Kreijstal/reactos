@@ -343,15 +343,10 @@ GetFileSize(HANDLE hFile,
 				    FileStandardInformation);
    if (!NT_SUCCESS(errCode))
      {
+	/* INVALID_FILE_SIZE whether or not the caller asked for the high
+	 * part: a 0 would read as the size of an empty file */
 	BaseSetLastNTError(errCode);
-	if ( lpFileSizeHigh == NULL )
-	  {
-	     return -1;
-	  }
-	else
-	  {
-	     return 0;
-	  }
+	return INVALID_FILE_SIZE;
      }
    if ( lpFileSizeHigh != NULL )
      *lpFileSizeHigh = FileStandard.EndOfFile.u.HighPart;
