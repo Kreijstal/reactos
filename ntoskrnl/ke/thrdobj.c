@@ -1290,6 +1290,55 @@ KeRevertToUserGroupAffinityThread(
 
 /*
  * @implemented
+ *
+ * Returns the system affinity the thread had before, or zero when it was
+ * running on its user affinity; KeRevertToUserAffinityThreadEx takes that
+ * value back.
+ */
+KAFFINITY
+NTAPI
+KeSetSystemAffinityThreadEx(
+    _In_ KAFFINITY Affinity)
+{
+    PKTHREAD CurrentThread = KeGetCurrentThread();
+    KAFFINITY PreviousAffinity = 0;
+
+    if (CurrentThread->SystemAffinityActive)
+    {
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+        PreviousAffinity = CurrentThread->Affinity.Mask;
+#else
+        PreviousAffinity = CurrentThread->Affinity;
+#endif
+    }
+
+    KeSetSystemAffinityThread(Affinity);
+    return PreviousAffinity;
+}
+
+/*
+ * @implemented
+ */
+VOID
+NTAPI
+KeRevertToUserAffinityThreadEx(
+    _In_ KAFFINITY Affinity)
+{
+    if (Affinity == 0)
+    {
+        /* Back to the user affinity; a no-op for a thread that never had a
+         * system affinity, like KeRevertToUserGroupAffinityThread */
+        if (KeGetCurrentThread()->SystemAffinityActive)
+            KeRevertToUserAffinityThread();
+    }
+    else
+    {
+        KeSetSystemAffinityThread(Affinity);
+    }
+}
+
+/*
+ * @implemented
  */
 UCHAR
 NTAPI
