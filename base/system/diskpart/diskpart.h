@@ -134,6 +134,7 @@ typedef struct _GPT_PARTITION_DATA
     GUID PartitionType;
     GUID PartitionId;
     DWORD64 Attributes;
+    WCHAR Name[36];
 } GPT_PARTITION_DATA, *PGPT_PARTITION_DATA;
 
 typedef struct _PARTENTRY
