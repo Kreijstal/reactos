@@ -29,6 +29,7 @@ list(APPEND SOURCE
     IsDBCSLeadByteEx.c
     JapaneseCalendar.c
     JobObject.c
+    JobSelfTerminate.c
     LCMapString.c
     LoadLibraryExW.c
     LocaleNameToLCID.c
