@@ -1419,8 +1419,10 @@ typedef NTSTATUS
  * The base (WDDM 1.0 / Vista) layout contains 62 slots (1 ULONG Version
  * + 61 function pointers) for a total of 496 bytes on amd64.  Successive
  * WDDM versions add fields at the end, guarded by #if on
- * DXGKDDI_INTERFACE_VERSION.  dxgkrnl accepts larger or smaller
- * structures; it copies min(caller size, our size) bytes.
+ * DXGKDDI_INTERFACE_VERSION.  The layout is the WDK one, field for field;
+ * DxgkDdiPresentDisplayOnly is NOT part of it (only display-only drivers
+ * have it, in KMDDOD_INITIALIZATION_DATA).  dxgkrnl derives the table size
+ * from Version, the way Windows' DpiGetDriverDataSizeFromVersion does.
  * =========================================================================
  */
 typedef struct _DRIVER_INITIALIZATION_DATA
@@ -1547,7 +1549,6 @@ typedef struct _DRIVER_INITIALIZATION_DATA
     PVOID                                       DxgkDdiPowerRuntimeControlRequest;
     PVOID                                       DxgkDdiSetVidPnSourceAddressWithMultiPlaneOverlay;
     PVOID                                       DxgkDdiNotifySurpriseRemoval;
-    PVOID                                       DxgkDdiPresentDisplayOnly;
 #endif
 
     /* ---- WDDM 1.3 / Win8.1 additions ------------------------------------ */
@@ -1580,6 +1581,42 @@ typedef struct _DRIVER_INITIALIZATION_DATA
 #endif
 
 } DRIVER_INITIALIZATION_DATA, *PDRIVER_INITIALIZATION_DATA;
+
+/* Layout checks against the WDK: every field is one pointer-sized slot. */
+#define DXGKP_DID_SLOT(Field) \
+    (FIELD_OFFSET(DRIVER_INITIALIZATION_DATA, Field) / sizeof(PVOID))
+C_ASSERT(DXGKP_DID_SLOT(DxgkDdiAddDevice) == 1);
+C_ASSERT(DXGKP_DID_SLOT(DxgkDdiQueryAdapterInfo) == 0x11);
+C_ASSERT(DXGKP_DID_SLOT(DxgkDdiCreateDevice) == 0x12);
+C_ASSERT(DXGKP_DID_SLOT(DxgkDdiPresent) == 0x36);
+C_ASSERT(DXGKP_DID_SLOT(DxgkDdiSetDisplayPrivateDriverFormat) == 0x3D);
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7)
+C_ASSERT(DXGKP_DID_SLOT(DxgkDdiDescribePageTable) == 0x3E);
+C_ASSERT(DXGKP_DID_SLOT(DxgkDdiQueryVidPnHWCapability) == 0x46);
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
+C_ASSERT(DXGKP_DID_SLOT(DxgkDdiSetPowerComponentFState) == 0x47);
+C_ASSERT(DXGKP_DID_SLOT(DxgkDdiNotifySurpriseRemoval) == 0x52);
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM1_3)
+C_ASSERT(DXGKP_DID_SLOT(DxgkDdiGetNodeMetadata) == 0x53);
+C_ASSERT(DXGKP_DID_SLOT(DxgkDdiFormatHistoryBuffer) == 0x58);
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+C_ASSERT(DXGKP_DID_SLOT(DxgkDdiRenderGdi) == 0x59);
+C_ASSERT(DXGKP_DID_SLOT(DxgkDdiSetVideoProtectedRegion) == 0x67);
+/* 0x340 bytes on amd64, as in Windows (DpiGetDriverDataSizeFromVersion) */
+C_ASSERT(sizeof(DRIVER_INITIALIZATION_DATA) == 0x68 * sizeof(PVOID));
+#elif (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM1_3)
+C_ASSERT(sizeof(DRIVER_INITIALIZATION_DATA) == 0x59 * sizeof(PVOID));
+#elif (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
+C_ASSERT(sizeof(DRIVER_INITIALIZATION_DATA) == 0x53 * sizeof(PVOID));
+#elif (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7)
+C_ASSERT(sizeof(DRIVER_INITIALIZATION_DATA) == 0x47 * sizeof(PVOID));
+#else
+C_ASSERT(sizeof(DRIVER_INITIALIZATION_DATA) == 0x3E * sizeof(PVOID));
+#endif
+#undef DXGKP_DID_SLOT
 
 
 /*
@@ -1650,6 +1687,17 @@ struct _KMDDOD_INITIALIZATION_DATA
     PVOID                                       DxgkDdiNotifySurpriseRemoval;
     PVOID                                       DxgkDdiPowerRuntimeSetDeviceHandle;
 };
+
+#define DXGKP_DOD_SLOT(Field) \
+    (FIELD_OFFSET(KMDDOD_INITIALIZATION_DATA, Field) / sizeof(PVOID))
+C_ASSERT(DXGKP_DOD_SLOT(DxgkDdiQueryAdapterInfo) == 0x11);
+C_ASSERT(DXGKP_DOD_SLOT(DxgkDdiSetPalette) == 0x12);
+C_ASSERT(DXGKP_DOD_SLOT(DxgkDdiQueryVidPnHWCapability) == 0x1F);
+C_ASSERT(DXGKP_DOD_SLOT(DxgkDdiPresentDisplayOnly) == 0x20);
+C_ASSERT(DXGKP_DOD_SLOT(DxgkDdiNotifySurpriseRemoval) == 0x28);
+C_ASSERT(DXGKP_DOD_SLOT(DxgkDdiPowerRuntimeSetDeviceHandle) == 0x29);
+C_ASSERT(sizeof(KMDDOD_INITIALIZATION_DATA) == 0x2A * sizeof(PVOID));
+#undef DXGKP_DOD_SLOT
 
 
 /* =========================================================================

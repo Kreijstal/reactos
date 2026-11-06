@@ -978,45 +978,14 @@ DxgkpPresentShadowFbInternal(
         return STATUS_UNSUCCESSFUL;
 
     /*
-     * DxgkDdiPresentDisplayOnly is a Win8+ (WDDM 1.2) field.
-     * For DOD drivers, it's in the KMDDOD_INITIALIZATION_DATA struct.
-     * For full WDDM drivers, it's after the Win7 extension fields.
+     * DxgkDdiPresentDisplayOnly exists only in KMDDOD_INITIALIZATION_DATA.
+     * Full WDDM tables (DRIVER_INITIALIZATION_DATA) have no such slot; Windows
+     * zeroes its private PresentDisplayOnly copy for them (DpiInitializeEx).
      */
-    if (Adapter->MiniportContext->IsDisplayOnlyDriver)
-    {
-        /* DOD drivers: DxgkDdiPresentDisplayOnly is in the KMDDOD struct. */
-        SIZE_T Offset = FIELD_OFFSET(KMDDOD_INITIALIZATION_DATA,
-                                     DxgkDdiPresentDisplayOnly);
-        if (Adapter->MiniportContext->InitDataSize >= Offset + sizeof(PVOID))
-        {
-            PfnPresent = *(PFN_PRESENT_DISPLAY_ONLY *)
-                ((PUCHAR)&Adapter->MiniportContext->InitData + Offset);
-        }
-        else
-        {
-            PfnPresent = NULL;
-        }
-    }
-    else
-    {
-#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
-        SIZE_T Offset = FIELD_OFFSET(DRIVER_INITIALIZATION_DATA,
-                                     DxgkDdiPresentDisplayOnly);
-
-        if (Adapter->MiniportContext->InitDataSize >= Offset + sizeof(PVOID))
-        {
-            PfnPresent = *(PFN_PRESENT_DISPLAY_ONLY *)
-                ((PUCHAR)&Adapter->MiniportContext->InitData + Offset);
-        }
-        else
-        {
-            PfnPresent = NULL;
-        }
-#else
-        /* Win7 full WDDM miniports do not expose PresentDisplayOnly. */
-        PfnPresent = NULL;
-#endif
-    }
+    PfnPresent = Adapter->MiniportContext->UseDodLayout
+        ? (PFN_PRESENT_DISPLAY_ONLY)
+              Adapter->MiniportContext->InitData.dod.DxgkDdiPresentDisplayOnly
+        : NULL;
 
     /*
      * Validate the function pointer.  DOD drivers may have a KMDDOD struct
