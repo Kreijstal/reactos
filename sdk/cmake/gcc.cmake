@@ -805,6 +805,20 @@ if(_nm_executable)
         target_link_libraries(libsupc++ INTERFACE gcc_ssp_compat)
         target_link_libraries(libwinpthread INTERFACE gcc_ssp_compat)
     endif()
+
+    # UCRT64's libwinpthread 14.0.0.r598+ copies the floating point
+    # environment to new threads with fegetenv/fesetenv, which only ucrtbase
+    # exports in that environment.
+    if(LIBWINPTHREAD_LOCATION MATCHES "mingw32")
+        execute_process(
+            COMMAND ${_nm_executable} ${LIBWINPTHREAD_LOCATION}
+            OUTPUT_VARIABLE _winpthread_syms
+            ERROR_QUIET)
+        if(_winpthread_syms MATCHES " U fegetenv")
+            message(STATUS "libwinpthread needs fegetenv/fesetenv shim (MSYS2/ucrt64 toolchain)")
+            target_link_libraries(libwinpthread INTERFACE fenv_compat)
+        endif()
+    endif()
 endif()
 
 add_library(libstdc++ STATIC IMPORTED GLOBAL)
