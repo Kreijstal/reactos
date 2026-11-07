@@ -1439,6 +1439,7 @@ DxgkVidMmDestroyAllocation(
 }
 
 NTSTATUS
+NTAPI
 DxgkCreateAllocation(
     _Inout_ D3DKMT_CREATEALLOCATION *pCreateAllocation)
 {
@@ -1748,6 +1749,7 @@ DxgkCreateAllocation(
 }
 
 NTSTATUS
+NTAPI
 DxgkDestroyAllocation(
     _In_ CONST D3DKMT_DESTROYALLOCATION *pDestroyAllocation)
 {

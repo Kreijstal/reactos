@@ -1352,10 +1352,12 @@ DxgkVidMmGetAllocationPrimaryAddress(
     _In_ PDXGKVMM_ALLOCATION Allocation);
 
 NTSTATUS
+NTAPI
 DxgkCreateAllocation(
     _Inout_ D3DKMT_CREATEALLOCATION *pCreateAllocation);
 
 NTSTATUS
+NTAPI
 DxgkDestroyAllocation(
     _In_ CONST D3DKMT_DESTROYALLOCATION *pDestroyAllocation);
 
