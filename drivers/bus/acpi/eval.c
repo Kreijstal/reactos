@@ -693,7 +693,7 @@ DefaultStatus:
 static
 ACPI_STATUS
 EvalEvaluateObject(
-    _In_ PPDO_DEVICE_DATA DeviceData,
+    _In_ ACPI_HANDLE AcpiHandle,
     _In_ PACPI_EVAL_INPUT_BUFFER EvalInputBuffer,
     _In_ ACPI_OBJECT_LIST* ParamList,
     _In_ ACPI_BUFFER* ReturnBuffer)
@@ -703,7 +703,7 @@ EvalEvaluateObject(
     RtlCopyMemory(MethodName, EvalInputBuffer->MethodName, ACPI_OBJECT_NAME_LENGTH - 1);
     MethodName[ACPI_OBJECT_NAME_LENGTH - 1] = ANSI_NULL;
 
-    return AcpiEvaluateObject(DeviceData->AcpiHandle, MethodName, ParamList, ReturnBuffer);
+    return AcpiEvaluateObject(AcpiHandle, MethodName, ParamList, ReturnBuffer);
 }
 
 /**
@@ -773,11 +773,16 @@ EvalCreateOutputArguments(
     return STATUS_SUCCESS;
 }
 
-/* IOCTL handlers for asynchronous evaluation requests must not be paged */
+/**
+ * @brief Handles IOCTL_ACPI_EVAL_METHOD and IOCTL_ACPI_ASYNC_EVAL_METHOD
+ * against the given ACPI namespace node. Shared by the ACPI PDOs and by the
+ * bus filters ACPI attaches above the PDOs of other bus drivers (PCI etc.).
+ * IOCTL handlers for asynchronous evaluation requests must not be paged.
+ */
 NTSTATUS
 NTAPI
-Bus_PDO_EvalMethod(
-    _In_ PPDO_DEVICE_DATA DeviceData,
+Bus_EvalMethod(
+    _In_ ACPI_HANDLE AcpiHandle,
     _Inout_ PIRP Irp)
 {
     PIO_STACK_LOCATION IoStack;
@@ -801,7 +806,7 @@ Bus_PDO_EvalMethod(
     if (!NT_SUCCESS(Status))
         return Status;
 
-    AcpiStatus = EvalEvaluateObject(DeviceData, EvalInputBuffer, &ParamList, &ReturnBuffer);
+    AcpiStatus = EvalEvaluateObject(AcpiHandle, EvalInputBuffer, &ParamList, &ReturnBuffer);
 
     if (ParamList.Count != 0)
         EvalFreeParametersList(&ParamList);
@@ -810,7 +815,7 @@ Bus_PDO_EvalMethod(
     {
         DPRINT("Query method '%.4s' failed on %p with status 0x%04x\n",
                EvalInputBuffer->MethodName,
-               DeviceData->AcpiHandle,
+               AcpiHandle,
                AcpiStatus);
 
         return EvalAcpiStatusToNtStatus(AcpiStatus);
@@ -822,4 +827,13 @@ Bus_PDO_EvalMethod(
         AcpiOsFree(ReturnBuffer.Pointer);
 
     return Status;
+}
+
+NTSTATUS
+NTAPI
+Bus_PDO_EvalMethod(
+    _In_ PPDO_DEVICE_DATA DeviceData,
+    _Inout_ PIRP Irp)
+{
+    return Bus_EvalMethod(DeviceData->AcpiHandle, Irp);
 }

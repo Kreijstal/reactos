@@ -1920,7 +1920,22 @@ Return Value:
         Irp->IoStatus.Information = (ULONG_PTR) deviceRelations;
         break;
 
-    case BusRelations: // Not handled by PDO
+    case BusRelations:
+        //
+        // We are the bottom of the stack of a bus device (a PCI host bridge
+        // under pci.sys): its function driver has filled in the relations on
+        // the way down. Filter the children that have a node under ours.
+        //
+        deviceRelations = (PDEVICE_RELATIONS) Irp->IoStatus.Information;
+        if (deviceRelations && DeviceData->AcpiHandle)
+        {
+            ACPIDetectFilterDevices(DeviceData->Common.Self->DriverObject,
+                                    DeviceData->AcpiHandle,
+                                    deviceRelations);
+        }
+        status = Irp->IoStatus.Status;
+        break;
+
     case EjectionRelations: // optional for PDO
     case RemovalRelations: // // optional for PDO
     default:

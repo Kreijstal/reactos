@@ -180,6 +180,9 @@ ACPIDispatchCreateClose(
    IN PDEVICE_OBJECT DeviceObject,
    IN PIRP Irp)
 {
+   if (IS_ACPI_FILTER(DeviceObject))
+       return ACPIFilterDispatchPassThrough(DeviceObject, Irp);
+
    Irp->IoStatus.Status = STATUS_SUCCESS;
    Irp->IoStatus.Information = 0;
 
@@ -245,6 +248,9 @@ ACPIDispatchDeviceControl(
 
     irpStack = IoGetCurrentIrpStackLocation (Irp);
     ASSERT (IRP_MJ_DEVICE_CONTROL == irpStack->MajorFunction);
+
+    if (IS_ACPI_FILTER(DeviceObject))
+        return ACPIFilterDispatchDeviceControl(DeviceObject, Irp);
 
     commonData = (PCOMMON_DEVICE_DATA) DeviceObject->DeviceExtension;
 
@@ -703,6 +709,26 @@ done:
     return Status;
 }
 
+/*
+ * Every request we do not otherwise handle. Our bus filters pass it down to
+ * the PDO they filter; our FDO and PDOs fail it as the I/O manager would.
+ */
+static
+NTSTATUS
+NTAPI
+ACPIDispatchUnhandled(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp)
+{
+    if (IS_ACPI_FILTER(DeviceObject))
+        return ACPIFilterDispatchPassThrough(DeviceObject, Irp);
+
+    Irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_INVALID_DEVICE_REQUEST;
+}
+
 CODE_SEG("INIT")
 NTSTATUS
 NTAPI
@@ -712,6 +738,7 @@ DriverEntry (
     )
 {
     NTSTATUS Status;
+    ULONG i;
     DPRINT("Driver Entry \n");
 
     Status = GetProcessorInformation();
@@ -724,6 +751,9 @@ DriverEntry (
     //
     // Set entry points into the driver
     //
+    for (i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
+        DriverObject->MajorFunction[i] = ACPIDispatchUnhandled;
+
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = ACPIDispatchDeviceControl;
     DriverObject->MajorFunction [IRP_MJ_PNP] = Bus_PnP;
     DriverObject->MajorFunction [IRP_MJ_POWER] = Bus_Power;

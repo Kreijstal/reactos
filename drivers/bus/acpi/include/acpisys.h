@@ -31,6 +31,8 @@ typedef struct _COMMON_DEVICE_DATA
 {
     PDEVICE_OBJECT  Self;
     BOOLEAN         IsFDO;
+    /* A bus filter attached above another bus driver's PDO (FILTER_DEVICE_DATA) */
+    BOOLEAN         IsFilter;
     DEVICE_PNP_STATE DevicePnPState;
     DEVICE_PNP_STATE PreviousPnPState;
     SYSTEM_POWER_STATE  SystemPowerState;
@@ -88,6 +90,28 @@ typedef struct _FDO_DEVICE_DATA
 
 } FDO_DEVICE_DATA, *PFDO_DEVICE_DATA;
 
+//
+// The device extension of a bus filter: ACPI attaches one directly above
+// each PDO that another bus driver (PCI, the IDE controller, ...) reports
+// and that has a matching (_ADR) node in the ACPI namespace, so that the
+// drivers of that device can evaluate their ACPI methods down their stack.
+//
+
+typedef struct _FILTER_DEVICE_DATA
+{
+    COMMON_DEVICE_DATA Common;
+
+    // The ACPI namespace node of the filtered device
+    ACPI_HANDLE     AcpiHandle;
+
+    // The PDO we filter and the device object we are attached to
+    PDEVICE_OBJECT  PhysicalDeviceObject;
+    PDEVICE_OBJECT  NextLowerDriver;
+
+    IO_REMOVE_LOCK  RemoveLock;
+
+} FILTER_DEVICE_DATA, *PFILTER_DEVICE_DATA;
+
 #define FDO_FROM_PDO(pdoData) \
           ((PFDO_DEVICE_DATA) (pdoData)->ParentFdo->DeviceExtension)
 
@@ -107,6 +131,12 @@ typedef struct _FDO_DEVICE_DATA
 NTSTATUS
 ACPIEnumerateDevices(
   PFDO_DEVICE_DATA DeviceExtension);
+
+NTSTATUS
+NTAPI
+Bus_EvalMethod(
+    _In_ ACPI_HANDLE AcpiHandle,
+    _Inout_ PIRP Irp);
 
 NTSTATUS
 NTAPI
@@ -306,6 +336,36 @@ VOID
 Bus_InterfaceDereference (
     PVOID Context
    );
+
+/* filter.c */
+VOID
+ACPIDetectFilterDevices(
+    _In_ PDRIVER_OBJECT DriverObject,
+    _In_ ACPI_HANDLE ParentHandle,
+    _In_ PDEVICE_RELATIONS DeviceRelations);
+
+NTSTATUS
+ACPIFilterDispatchPnp(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp);
+
+NTSTATUS
+ACPIFilterDispatchPower(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp);
+
+NTSTATUS
+ACPIFilterDispatchDeviceControl(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp);
+
+NTSTATUS
+ACPIFilterDispatchPassThrough(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp);
+
+#define IS_ACPI_FILTER(DeviceObject) \
+    (((PCOMMON_DEVICE_DATA)(DeviceObject)->DeviceExtension)->IsFilter)
 
 /* fwtable.c */
 NTSTATUS

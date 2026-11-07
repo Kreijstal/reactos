@@ -20,6 +20,9 @@ Bus_Power (
 
     commonData = (PCOMMON_DEVICE_DATA) DeviceObject->DeviceExtension;
 
+    if (commonData->IsFilter)
+        return ACPIFilterDispatchPower(DeviceObject, Irp);
+
     if (commonData->IsFDO) {
 
             DPRINT("FDO %s IRP:0x%p %s %s\n",

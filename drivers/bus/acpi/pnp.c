@@ -38,6 +38,12 @@ Bus_PnP (
 
     commonData = (PCOMMON_DEVICE_DATA) DeviceObject->DeviceExtension;
 
+    if (commonData->IsFilter) {
+        //
+        // Request is for one of our bus filters over another driver's PDO
+        //
+        return ACPIFilterDispatchPnp(DeviceObject, Irp);
+    }
 
     if (commonData->IsFDO) {
         DPRINT("FDO %s IRP:0x%p\n",

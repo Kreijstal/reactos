@@ -195,6 +195,7 @@ list(APPEND ACPI_SOURCE
     osl.c
     acpienum.c
     eval.c
+    filter.c
     fwtable.c
     interface.c
     pnp.c
