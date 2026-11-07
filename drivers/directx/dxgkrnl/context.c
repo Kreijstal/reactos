@@ -92,7 +92,7 @@ DxgkProcessCleanup(
  * field in each object records the encoded value so we can do a round-trip
  * check without a separate lookup table.
  */
-FORCEINLINE D3DKMT_HANDLE
+static __inline D3DKMT_HANDLE
 DxgkpEncodeHandle(
     _In_ PVOID Pointer)
 {
@@ -366,51 +366,6 @@ DxgkpDestroyContextNoLock(
 #endif
 
     ExFreePoolWithTag(Context, TAG_DXGK_CONTEXT);
-}
-
-/*
- * DxgkpQueryFence
- *
- * Query the most recently completed GPU fence from the miniport.
- * Writes to *OutFence on success.
- *
- * IRQL: PASSIVE_LEVEL (miniport DDI contract).
- */
-static NTSTATUS __attribute__((unused))
-DxgkpQueryFence(
-    _In_  PDXGKRNL_ADAPTER Adapter,
-    _Out_ PULONG           OutFence)
-{
-    DXGKARG_QUERYCURRENTFENCE FenceArg;
-    NTSTATUS                  Status;
-
-    PAGED_CODE();
-
-    *OutFence = 0;
-
-    if (Adapter->MiniportContext->InitData.s.DxgkDdiQueryCurrentFence == NULL)
-    {
-        DXGKRNL_WARN("DxgkpQueryFence: no DxgkDdiQueryCurrentFence DDI\n");
-        return STATUS_NOT_SUPPORTED;
-    }
-
-    RtlZeroMemory(&FenceArg, sizeof(FenceArg));
-
-    Status = Adapter->MiniportContext->InitData.s.DxgkDdiQueryCurrentFence(
-                 Adapter->MiniportDeviceContext,
-                 &FenceArg);
-
-    if (NT_SUCCESS(Status))
-    {
-        *OutFence = FenceArg.CurrentFence;
-        DXGKRNL_TRACE("DxgkpQueryFence: fence = %lu\n", FenceArg.CurrentFence);
-    }
-    else
-    {
-        DXGKRNL_ERR("DxgkpQueryFence: DDI returned 0x%08lX\n", Status);
-    }
-
-    return Status;
 }
 
 /* PUBLIC FUNCTIONS **********************************************************/

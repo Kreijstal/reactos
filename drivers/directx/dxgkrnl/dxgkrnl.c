@@ -375,11 +375,11 @@ TdrHistoryIsLimitExhausted(
     /* Convert TdrLimitTime (seconds) to 100ns units */
     LimitWindow = (ULONGLONG)g_TdrConfig.TdrLimitTime * 10000000ULL;
 
-    /* Read current timestamp from SharedUserData (same source as creation) */
-    CurrentTimestamp = *((volatile PULONGLONG)((PUCHAR)(ULONG_PTR)0xFFFFF78000000320ULL));
+    /* Interrupt time, in the same 100ns units as LimitWindow and the creation stamp */
+    CurrentTimestamp = KeQueryInterruptTime();
 
     /* Read current write index */
-    WriteIndex = *(volatile PLONG)((PUCHAR)HistoryBuffer + TDR_HIST_WRITE_INDEX);
+    WriteIndex = *(volatile LONG *)((PUCHAR)HistoryBuffer + TDR_HIST_WRITE_INDEX);
     WriteIndex = (WriteIndex - 1) & (TDR_HISTORY_ENTRY_COUNT - 1);
 
     Count = IncludeCurrentRecovery ? 1 : 0;
@@ -452,9 +452,8 @@ TdrCreateRecoveryContext(
     *(PULONG)(Ctx + TDR_CTX_TDR_DDI_DELAY) = g_TdrConfig.TdrDdiDelay;
     *(PULONG)(Ctx + TDR_CTX_TDR_LEVEL)     = g_TdrConfig.TdrLevel;
 
-    /* Store creation timestamp from SharedUserData */
-    *(PULONGLONG)(Ctx + TDR_CTX_TIMESTAMP) =
-        *((volatile PULONGLONG)((PUCHAR)(ULONG_PTR)0xFFFFF78000000320ULL));
+    /* Store the creation timestamp (interrupt time, 100ns units) */
+    *(PULONGLONG)(Ctx + TDR_CTX_TIMESTAMP) = KeQueryInterruptTime();
 
     *RecoveryContext = (PVOID)Ctx;
     return STATUS_SUCCESS;

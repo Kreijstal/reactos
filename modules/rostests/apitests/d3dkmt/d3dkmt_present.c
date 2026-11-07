@@ -11,8 +11,6 @@
 
 static void Test_Present_NullParam(void)
 {
-    NTSTATUS Status;
-
     LOAD_D3DKMT(D3DKMTPresent);
 
     EXPECT_NULL_REJECTED(pfnD3DKMTPresent, "D3DKMTPresent");
@@ -75,8 +73,6 @@ static void Test_Present_NoSourceNoColor(void)
 
 static void Test_Render_NullParam(void)
 {
-    NTSTATUS Status;
-
     LOAD_D3DKMT(D3DKMTRender);
 
     EXPECT_NULL_REJECTED(pfnD3DKMTRender, "D3DKMTRender");
@@ -98,8 +94,6 @@ static void Test_Render_InvalidContext(void)
 
 static void Test_GetPresentHistory_NullParam(void)
 {
-    NTSTATUS Status;
-
     LOAD_D3DKMT(D3DKMTGetPresentHistory);
 
     EXPECT_NULL_REJECTED(pfnD3DKMTGetPresentHistory, "D3DKMTGetPresentHistory");

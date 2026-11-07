@@ -40,6 +40,7 @@ add_library(dxgkrnl MODULE
     ${CMAKE_CURRENT_BINARY_DIR}/dxgkrnl.def)
 
 set_module_type(dxgkrnl kernelmodedriver)
+target_link_libraries(dxgkrnl ${PSEH_LIB})
 add_importlibs(dxgkrnl ntoskrnl hal)
 add_pch(dxgkrnl dxgkrnl_private.h "${SOURCE}")
 add_cd_file(TARGET dxgkrnl DESTINATION reactos/system32/drivers FOR all)
