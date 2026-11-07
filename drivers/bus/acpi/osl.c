@@ -1421,10 +1421,19 @@ AcpiOsReadPciConfiguration (
 
     DPRINT("AcpiOsReadPciConfiguration, slot=0x%X, func=0x%X\n", slot.u.AsULONG, Reg);
 
+    /* Like a real config cycle, a function that is absent or powered down
+     * (e.g. a switchable GPU in D3cold) reads as all ones; AML probes for
+     * exactly that, so it is not an error */
+    *Value = (Width >= 64) ? ~0ULL : ((1ULL << Width) - 1);
     if (!OslIsPciDevicePresent(PciId->Bus, slot.u.AsULONG))
-        return AE_NOT_FOUND;
+    {
+        DPRINT1("PCI_Config read of absent %02x:%02x.%x reg 0x%x\n",
+                PciId->Bus, PciId->Device, PciId->Function, Reg);
+        return AE_OK;
+    }
 
     /* Width is in BITS */
+    *Value = 0;
     HalGetBusDataByOffset(PCIConfiguration,
         PciId->Bus,
         slot.u.AsULONG,
@@ -1450,8 +1459,14 @@ AcpiOsWritePciConfiguration (
     slot.u.bits.FunctionNumber = PciId->Function;
 
     DPRINT("AcpiOsWritePciConfiguration, slot=0x%x\n", slot.u.AsULONG);
+
+    /* A write to an absent function goes nowhere, as on the bus */
     if (!OslIsPciDevicePresent(PciId->Bus, slot.u.AsULONG))
-        return AE_NOT_FOUND;
+    {
+        DPRINT1("PCI_Config write to absent %02x:%02x.%x reg 0x%x\n",
+                PciId->Bus, PciId->Device, PciId->Function, Reg);
+        return AE_OK;
+    }
 
     /* Width is in BITS */
     HalSetBusDataByOffset(PCIConfiguration,
