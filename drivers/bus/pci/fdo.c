@@ -591,9 +591,19 @@ FdoPnpControl(
                 break;
 
             Status = FdoQueryBusRelations(DeviceObject, Irp, IrpSp);
-            Irp->IoStatus.Status = Status;
-            IoCompleteRequest(Irp, IO_NO_INCREMENT);
-            return Status;
+            if (!NT_SUCCESS(Status))
+            {
+                Irp->IoStatus.Status = Status;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                return Status;
+            }
+
+            /*
+             * Pass the relations down like any function driver does: the
+             * ACPI PDO of a host bridge, or the ACPI filter over the PDO of a
+             * PCI-to-PCI bridge, attaches its bus filters to the children.
+             */
+            break;
 #if 0
         case IRP_MN_QUERY_PNP_DEVICE_STATE:
             Status = STATUS_NOT_IMPLEMENTED;
