@@ -19,8 +19,6 @@
 /* The maximum size of an environment value (in bytes) */
 #define MAX_ENVVAL_SIZE 1024
 
-#define SIG_ACPI 0x41435049
-#define SIG_FIRM 0x4649524D
 #define SIG_RSMB 0x52534D42
 
 extern LIST_ENTRY HandleTableListHead;
@@ -2883,6 +2881,209 @@ QSI_DEF(SystemLogicalProcessorInformation)
     return Status;
 }
 
+/* Class 75 - Register a firmware table provider */
+
+/*
+ * One registered provider, as ExpRegisterFirmwareTableInformationHandler
+ * keeps it in ExpFirmwareTableProviderListHead.
+ */
+typedef struct _EXP_FIRMWARE_TABLE_PROVIDER
+{
+    ULONG ProviderSignature;
+    PFNFTH FirmwareTableHandler;
+    PVOID DriverObject;
+    LIST_ENTRY ListEntry;
+} EXP_FIRMWARE_TABLE_PROVIDER, *PEXP_FIRMWARE_TABLE_PROVIDER;
+
+#define TAG_FIRMWARE_TABLE 'TFRA'
+
+static
+PEXP_FIRMWARE_TABLE_PROVIDER
+ExpFindFirmwareTableProvider(
+    _In_ ULONG ProviderSignature)
+{
+    PLIST_ENTRY Entry;
+    PEXP_FIRMWARE_TABLE_PROVIDER Provider;
+
+    for (Entry = ExpFirmwareTableProviderListHead.Flink;
+         Entry != &ExpFirmwareTableProviderListHead;
+         Entry = Entry->Flink)
+    {
+        Provider = CONTAINING_RECORD(Entry, EXP_FIRMWARE_TABLE_PROVIDER, ListEntry);
+        if (Provider->ProviderSignature == ProviderSignature)
+            return Provider;
+    }
+
+    return NULL;
+}
+
+SSI_DEF(SystemRegisterFirmwareTableInformationHandler)
+{
+    PSYSTEM_FIRMWARE_TABLE_HANDLER Handler = (PSYSTEM_FIRMWARE_TABLE_HANDLER)Buffer;
+    PEXP_FIRMWARE_TABLE_PROVIDER Provider;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    /* Only kernel-mode components may register a provider */
+    if (ExGetPreviousMode() != KernelMode)
+        return STATUS_PRIVILEGE_NOT_HELD;
+
+    if ((Handler == NULL) || (Size != sizeof(SYSTEM_FIRMWARE_TABLE_HANDLER)))
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&ExpFirmwareTableResource, TRUE);
+
+    Provider = ExpFindFirmwareTableProvider(Handler->ProviderSignature);
+    if (Provider != NULL)
+    {
+        if (Handler->Register)
+        {
+            /* The first registration of a signature stays in place */
+            Status = STATUS_OBJECT_NAME_EXISTS;
+        }
+        else if (Provider->DriverObject != Handler->DriverObject)
+        {
+            /* Only the registering driver may remove its provider */
+            Status = STATUS_INVALID_PARAMETER;
+        }
+        else
+        {
+            RemoveEntryList(&Provider->ListEntry);
+            ObDereferenceObject(Provider->DriverObject);
+            ExFreePoolWithTag(Provider, TAG_FIRMWARE_TABLE);
+        }
+    }
+    else if (!Handler->Register)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+    }
+    else
+    {
+        Provider = ExAllocatePoolWithTag(NonPagedPool,
+                                         sizeof(EXP_FIRMWARE_TABLE_PROVIDER),
+                                         TAG_FIRMWARE_TABLE);
+        if (Provider == NULL)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        }
+        else
+        {
+            Provider->ProviderSignature = Handler->ProviderSignature;
+            Provider->FirmwareTableHandler = Handler->FirmwareTableHandler;
+            Provider->DriverObject = Handler->DriverObject;
+            ObReferenceObject(Provider->DriverObject);
+            InsertTailList(&ExpFirmwareTableProviderListHead, &Provider->ListEntry);
+        }
+    }
+
+    ExReleaseResourceLite(&ExpFirmwareTableResource);
+    KeLeaveCriticalRegion();
+
+    return Status;
+}
+
+/*
+ * Hands a SystemFirmwareTableInformation request to the provider registered
+ * for its signature. The provider receives TableBufferLength set to the space
+ * that follows the header and returns in it the size it used or needs.
+ */
+static
+NTSTATUS
+ExpGetSystemFirmwareTableInformation(
+    _Inout_ PSYSTEM_FIRMWARE_TABLE_INFORMATION SysFirmwareInfo,
+    _In_ KPROCESSOR_MODE PreviousMode,
+    _In_ ULONG Length,
+    _Out_ PULONG ReturnLength)
+{
+    PSYSTEM_FIRMWARE_TABLE_INFORMATION Info = SysFirmwareInfo;
+    PEXP_FIRMWARE_TABLE_PROVIDER Provider;
+    PFNFTH FirmwareTableHandler = NULL;
+    NTSTATUS Status = STATUS_NOT_IMPLEMENTED;
+
+    ASSERT(Length >= FIELD_OFFSET(SYSTEM_FIRMWARE_TABLE_INFORMATION, TableBuffer));
+
+    if (PreviousMode != KernelMode)
+    {
+        /* The provider runs on a captured copy of the caller's buffer */
+        Info = ExAllocatePoolWithQuotaTag(PagedPool | POOL_QUOTA_FAIL_INSTEAD_OF_RAISE,
+                                          Length,
+                                          TAG_FIRMWARE_TABLE);
+        if (Info == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        _SEH2_TRY
+        {
+            RtlCopyMemory(Info, SysFirmwareInfo, Length);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            ExFreePoolWithTag(Info, TAG_FIRMWARE_TABLE);
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+
+    Info->TableBufferLength = Length - FIELD_OFFSET(SYSTEM_FIRMWARE_TABLE_INFORMATION, TableBuffer);
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceSharedLite(&ExpFirmwareTableResource, TRUE);
+
+    Provider = ExpFindFirmwareTableProvider(Info->ProviderSignature);
+    if (Provider != NULL)
+    {
+        FirmwareTableHandler = Provider->FirmwareTableHandler;
+        Status = FirmwareTableHandler(Info);
+    }
+
+    ExReleaseResourceLite(&ExpFirmwareTableResource);
+    KeLeaveCriticalRegion();
+
+    if (FirmwareTableHandler == NULL)
+    {
+        /* No provider is registered for this signature */
+        DPRINT1("SystemFirmwareTableInformation: no provider for 0x%x\n",
+                Info->ProviderSignature);
+        if (Info != SysFirmwareInfo)
+            ExFreePoolWithTag(Info, TAG_FIRMWARE_TABLE);
+        *ReturnLength = 0;
+        return Status;
+    }
+
+    /* A provider that succeeds never claims more than it was given */
+    ASSERT(!NT_SUCCESS(Status) ||
+           (Info->TableBufferLength <=
+            Length - FIELD_OFFSET(SYSTEM_FIRMWARE_TABLE_INFORMATION, TableBuffer)));
+
+    if (Info != SysFirmwareInfo)
+    {
+        _SEH2_TRY
+        {
+            if (NT_SUCCESS(Status))
+            {
+                RtlCopyMemory(SysFirmwareInfo->TableBuffer,
+                              Info->TableBuffer,
+                              Info->TableBufferLength);
+            }
+
+            if (NT_SUCCESS(Status) || (Status == STATUS_BUFFER_TOO_SMALL))
+                SysFirmwareInfo->TableBufferLength = Info->TableBufferLength;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+    }
+
+    *ReturnLength = Info->TableBufferLength +
+                    FIELD_OFFSET(SYSTEM_FIRMWARE_TABLE_INFORMATION, TableBuffer);
+
+    if (Info != SysFirmwareInfo)
+        ExFreePoolWithTag(Info, TAG_FIRMWARE_TABLE);
+
+    return Status;
+}
+
 /* Class 76 - System firmware table information */
 QSI_DEF(SystemFirmwareTableInformation)
 {
@@ -2903,58 +3104,39 @@ QSI_DEF(SystemFirmwareTableInformation)
         return STATUS_INFO_LENGTH_MISMATCH;
     }
 
-    DataBufSize = Size - *ReqSize;
-    switch (SysFirmwareInfo->ProviderSignature)
+    /*
+     * 'RSMB' is served here. Every other signature ('ACPI' from acpi.sys,
+     * for one) goes to the provider registered through class 75.
+     */
+    if (SysFirmwareInfo->ProviderSignature != SIG_RSMB)
     {
-        /*
-         * ExpFirmwareTableResource and ExpFirmwareTableProviderListHead
-         * variables should be used there somehow...
-         */
-        case SIG_ACPI:
+        return ExpGetSystemFirmwareTableInformation(SysFirmwareInfo,
+                                                    ExGetPreviousMode(),
+                                                    Size,
+                                                    ReqSize);
+    }
+
+    DataBufSize = Size - *ReqSize;
+
+    Status = ExpGetRawSMBiosTable(NULL, &DataSize, 0);
+    if (DataSize > 0)
+    {
+        TableCount = 1;
+        if (SysFirmwareInfo->Action == SystemFirmwareTable_Enumerate)
         {
-            /* FIXME: Not implemented yet */
-            DPRINT1("ACPI provider not implemented\n");
-            Status = STATUS_NOT_IMPLEMENTED;
-            break;
-        }
-        case SIG_FIRM:
-        {
-            /* FIXME: Not implemented yet */
-            DPRINT1("FIRM provider not implemented\n");
-            Status = STATUS_NOT_IMPLEMENTED;
-            break;
-        }
-        case SIG_RSMB:
-        {
-            Status = ExpGetRawSMBiosTable(NULL, &DataSize, 0);
-            if (DataSize > 0)
+            DataSize = TableCount * sizeof(ULONG);
+            if (DataSize <= DataBufSize)
             {
-                TableCount = 1;
-                if (SysFirmwareInfo->Action == SystemFirmwareTable_Enumerate)
-                {
-                    DataSize = TableCount * sizeof(ULONG);
-                    if (DataSize <= DataBufSize)
-                    {
-                        *(ULONG *)SysFirmwareInfo->TableBuffer = 0;
-                    }
-                }
-                else if (SysFirmwareInfo->Action == SystemFirmwareTable_Get
-                         && DataSize <= DataBufSize)
-                {
-                    Status = ExpGetRawSMBiosTable(SysFirmwareInfo->TableBuffer, &DataSize, DataBufSize);
-                }
-                SysFirmwareInfo->TableBufferLength = DataSize;
-                *ReqSize += DataSize;
+                *(ULONG *)SysFirmwareInfo->TableBuffer = 0;
             }
-            break;
         }
-        default:
+        else if (SysFirmwareInfo->Action == SystemFirmwareTable_Get
+                 && DataSize <= DataBufSize)
         {
-            DPRINT1("SystemFirmwareTableInformation: Unsupported provider (0x%x)\n",
-                    SysFirmwareInfo->ProviderSignature);
-            *ReqSize = 0;
-            Status = STATUS_NOT_IMPLEMENTED;
+            Status = ExpGetRawSMBiosTable(SysFirmwareInfo->TableBuffer, &DataSize, DataBufSize);
         }
+        SysFirmwareInfo->TableBufferLength = DataSize;
+        *ReqSize += DataSize;
     }
 
     if (NT_SUCCESS(Status))
@@ -3363,7 +3545,7 @@ CallQS[] =
     SI_XX(SystemWatchdogTimerInformation), /* FIXME: not implemented */
     SI_QX(SystemLogicalProcessorInformation),
     SI_XX(SystemWow64SharedInformationObsolete), /* FIXME: not implemented */
-    SI_XX(SystemRegisterFirmwareTableInformationHandler), /* FIXME: not implemented */
+    SI_XS(SystemRegisterFirmwareTableInformationHandler),
     SI_QX(SystemFirmwareTableInformation),
 
     // Vista and later
