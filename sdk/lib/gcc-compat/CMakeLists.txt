@@ -30,3 +30,11 @@ target_compile_definitions(stdc++compat PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:PAL_S
 # MSYS2's libwinpthread additionally references __ms_snprintf.
 add_library(gcc_ssp_compat gcc_ssp_compat.c ms_snprintf_compat.c)
 add_dependencies(gcc_ssp_compat xdk)
+
+# fegetenv/fesetenv for the UCRT64 libwinpthread (14.0.0.r598+), which
+# carries the floating point environment over to new threads. Only linked
+# when gcc.cmake finds libwinpthread importing them.
+if(ARCH STREQUAL "amd64")
+    add_library(fenv_compat fenv_compat.c)
+    add_dependencies(fenv_compat xdk)
+endif()
