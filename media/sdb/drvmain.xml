@@ -25,6 +25,12 @@
             <KSHIM_REF NAME="IgnoreFreePoolTag" />
         </KDRIVER>
 
+        <!-- Frees its 'MINI' pool class with the 'UNKN' tag during DxgkDdiStartDevice -->
+        <KDRIVER NAME="atikmdag.sys" APP_NAME="AMD Radeon display driver" VENDOR="Advanced Micro Devices, Inc.">
+            <MATCHING_FILE NAME="*" LINK_DATE="0x56d0b5a2" />
+            <KSHIM_REF NAME="IgnoreFreePoolTag" />
+        </KDRIVER>
+
         <!-- DriverEntry fails when the major version is above 5 -->
         <KDRIVER NAME="nv4_mini.sys" APP_NAME="NVIDIA Windows XP / Server 2003 display driver" VENDOR="NVIDIA Corporation">
             <KSHIM_REF NAME="KmWin2k3VersionLie" />
