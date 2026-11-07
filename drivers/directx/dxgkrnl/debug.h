@@ -32,7 +32,9 @@
 #define DXGKRNL_TRACE(fmt, ...) \
     DPRINT1("DXGKRNL: " fmt, ##__VA_ARGS__)
 #else
-#define DXGKRNL_TRACE(fmt, ...) ((void)0)
+/* Never executed, but keeps the arguments referenced and type-checked */
+#define DXGKRNL_TRACE(fmt, ...) \
+    do { if (0) DbgPrint("DXGKRNL: " fmt, ##__VA_ARGS__); } while (0)
 #endif
 
 /*
@@ -52,7 +54,9 @@
 #define DXGKRNL_VERBOSE(fmt, ...) \
     DPRINT1("DXGKRNL: " fmt, ##__VA_ARGS__)
 #else
-#define DXGKRNL_VERBOSE(fmt, ...) ((void)0)
+/* Never executed, but keeps the arguments referenced and type-checked */
+#define DXGKRNL_VERBOSE(fmt, ...) \
+    do { if (0) DbgPrint("DXGKRNL: " fmt, ##__VA_ARGS__); } while (0)
 #endif
 
 /*

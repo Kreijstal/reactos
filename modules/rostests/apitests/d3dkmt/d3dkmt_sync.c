@@ -15,8 +15,6 @@
 
 static void Test_CreateSyncObject_NullParam(void)
 {
-    NTSTATUS Status;
-
     LOAD_D3DKMT(D3DKMTCreateSynchronizationObject);
 
     EXPECT_NULL_REJECTED(pfnD3DKMTCreateSynchronizationObject, "D3DKMTCreateSynchronizationObject");
@@ -24,8 +22,6 @@ static void Test_CreateSyncObject_NullParam(void)
 
 static void Test_DestroySyncObject_NullParam(void)
 {
-    NTSTATUS Status;
-
     LOAD_D3DKMT(D3DKMTDestroySynchronizationObject);
 
     EXPECT_NULL_REJECTED(pfnD3DKMTDestroySynchronizationObject, "D3DKMTDestroySynchronizationObject");
@@ -182,8 +178,6 @@ static void Test_CreateSyncObject_Semaphore(void)
 
 static void Test_WaitForSyncObject_NullParam(void)
 {
-    NTSTATUS Status;
-
     LOAD_D3DKMT(D3DKMTWaitForSynchronizationObject);
 
     EXPECT_NULL_REJECTED(pfnD3DKMTWaitForSynchronizationObject, "D3DKMTWaitForSynchronizationObject");
@@ -191,8 +185,6 @@ static void Test_WaitForSyncObject_NullParam(void)
 
 static void Test_SignalSyncObject_NullParam(void)
 {
-    NTSTATUS Status;
-
     LOAD_D3DKMT(D3DKMTSignalSynchronizationObject);
 
     EXPECT_NULL_REJECTED(pfnD3DKMTSignalSynchronizationObject, "D3DKMTSignalSynchronizationObject");
@@ -200,8 +192,6 @@ static void Test_SignalSyncObject_NullParam(void)
 
 static void Test_WaitForIdle_NullParam(void)
 {
-    NTSTATUS Status;
-
     LOAD_D3DKMT(D3DKMTWaitForIdle);
 
     EXPECT_NULL_REJECTED(pfnD3DKMTWaitForIdle, "D3DKMTWaitForIdle");
