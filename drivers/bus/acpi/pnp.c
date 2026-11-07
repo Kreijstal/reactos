@@ -321,6 +321,13 @@ Bus_StartFdo (
     }
     DPRINT("ACPITRACE: registry table export complete 0x%08lx\n", status);
 
+    /* Serve the 'ACPI' provider of GetSystemFirmwareTable */
+    status = AcpiInitializeKernelTableHandler(TRUE, FdoData->Common.Self->DriverObject);
+    if (!NT_SUCCESS(status))
+    {
+        DPRINT1("Unable to register the ACPI firmware table provider (0x%08lx)\n", status);
+    }
+
 	DPRINT("Acpi subsystem init\n");
     /* Initialize ACPI bus manager */
     DPRINT("ACPITRACE: acpi_init begin\n");
