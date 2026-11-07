@@ -502,8 +502,8 @@ IopInitializeDriverModule(
                                 &infoLength);
             if (NT_SUCCESS(Status))
             {
-                /* The registry key name must fit alongside the header in one page */
-                if (sizeof(UNICODE_STRING) + nameInfo->NameLength > PAGE_SIZE)
+                /* The registry key name and its terminator must fit alongside the header in one page */
+                if (sizeof(UNICODE_STRING) + nameInfo->NameLength + sizeof(UNICODE_NULL) > PAGE_SIZE)
                 {
                     Status = STATUS_NAME_TOO_LONG;
                 }
@@ -518,6 +518,10 @@ IopInitializeDriverModule(
                         RtlCopyMemory(RegistryPath->Buffer,
                                       nameInfo->Name,
                                       nameInfo->NameLength);
+                        /* Drivers treat the buffer as a C string (AMD's atikmdag
+                         * derives its device name with wcslen), so terminate it
+                         * past Length; the block is otherwise uninitialized pool */
+                        RegistryPath->Buffer[nameInfo->NameLength / sizeof(WCHAR)] = UNICODE_NULL;
                     }
                     else
                     {
