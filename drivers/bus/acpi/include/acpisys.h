@@ -307,4 +307,10 @@ Bus_InterfaceDereference (
     PVOID Context
    );
 
+/* fwtable.c */
+NTSTATUS
+AcpiInitializeKernelTableHandler(
+    _In_ BOOLEAN Register,
+    _In_ PDRIVER_OBJECT DriverObject);
+
 /* EOF */
