@@ -268,12 +268,22 @@ static volatile LONG DxgkpTrackedSampleTraceCount = 0;
 #define DXGKP_FIELD_END(Type, Field) \
     (FIELD_OFFSET(Type, Field) + sizeof(((Type *)0)->Field))
 
+typedef enum _DXGK_MAPMEM_KIND
+{
+    DxgkMapMemMdl,      /* MDL over the BAR + MmMapLockedPagesSpecifyCache */
+    DxgkMapMemIoSpace,  /* MmMapIoSpace */
+    DxgkMapMemPort      /* x86 I/O port space: the "address" is the port */
+} DXGK_MAPMEM_KIND;
+
+/* DxgkCbUnmapMemory gets only the address, so every mapping is tracked */
 typedef struct _DXGK_MAPMEM_ENTRY
 {
-    LIST_ENTRY ListEntry;
-    PVOID      VirtualAddress;
-    PVOID      BaseAddress;
-    PMDL       Mdl;
+    LIST_ENTRY       ListEntry;
+    PVOID            VirtualAddress;
+    PVOID            BaseAddress;
+    PMDL             Mdl;
+    SIZE_T           Length;
+    DXGK_MAPMEM_KIND Kind;
 } DXGK_MAPMEM_ENTRY, *PDXGK_MAPMEM_ENTRY;
 
 FORCEINLINE ULONGLONG
@@ -1226,12 +1236,19 @@ DxgkCbPowerRuntimeControlRequestStub(
 }
 
 /*
- * DxgkCbEvalAcpiMethodStub — offset 0x10
- * ACPI method evaluation for GPU power management.
+ * DxgkCbEvalAcpiMethod — offset 0x10
+ *
+ * Evaluates an ACPI method for the miniport.  For the adapter itself
+ * (DISPLAY_ADAPTER_HW_ID) the request goes down our device stack as
+ * IOCTL_ACPI_EVAL_METHOD, where the ACPI driver owning the adapter's
+ * namespace node answers it.  The buffers are the miniport's own
+ * ACPI_EVAL_INPUT_BUFFER* / ACPI_EVAL_OUTPUT_BUFFER, passed through.
+ *
+ * IRQL: PASSIVE_LEVEL
  */
 static NTSTATUS
 APIENTRY
-DxgkCbEvalAcpiMethodStub(
+DxgkCbEvalAcpiMethod(
     _In_  HANDLE DeviceHandle,
     _In_  ULONG  DeviceUid,
     _In_  PVOID  AcpiInputBuffer,
@@ -1239,14 +1256,78 @@ DxgkCbEvalAcpiMethodStub(
     _Out_ PVOID  AcpiOutputBuffer,
     _In_  ULONG  AcpiOutputSize)
 {
-    UNREFERENCED_PARAMETER(DeviceHandle);
-    UNREFERENCED_PARAMETER(DeviceUid);
-    UNREFERENCED_PARAMETER(AcpiInputBuffer);
-    UNREFERENCED_PARAMETER(AcpiInputSize);
-    UNREFERENCED_PARAMETER(AcpiOutputBuffer);
-    UNREFERENCED_PARAMETER(AcpiOutputSize);
-    DXGKRNL_TRACE("DxgkCbEvalAcpiMethod: called (stub returning NOT_SUPPORTED)\n");
-    return STATUS_NOT_SUPPORTED;
+    PDXGKRNL_ADAPTER Adapter = (PDXGKRNL_ADAPTER)DeviceHandle;
+    PDEVICE_OBJECT Target;
+    IO_STATUS_BLOCK IoStatus;
+    KEVENT Event;
+    PIRP Irp;
+    NTSTATUS Status;
+    ULONG Signature = 0, MethodName = 0;
+    PVOID Input = AcpiInputBuffer;
+
+    PAGED_CODE();
+
+    if (Adapter == NULL || AcpiInputBuffer == NULL || AcpiInputSize < 2 * sizeof(ULONG))
+        return STATUS_INVALID_PARAMETER;
+
+    Signature = ((PULONG)AcpiInputBuffer)[0];
+    MethodName = ((PULONG)AcpiInputBuffer)[1];
+
+    if (DeviceUid != DISPLAY_ADAPTER_HW_ID)
+    {
+        /* Child devices are ACPI nodes below the adapter, matched by _ADR;
+         * nothing in our ACPI driver resolves those for a PCI function yet */
+        DXGKRNL_ERR("DxgkCbEvalAcpiMethod: child Uid=0x%lX method %.4s not supported\n",
+                    DeviceUid, (PCHAR)&MethodName);
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    /* WDDM miniports tag a complex input buffer with
+     * DXGK_ACPI_PASS_ARGS_TO_CHILDREN; the ACPI driver only knows the
+     * standard complex signature, so hand it a retagged copy */
+    if (Signature == DXGK_ACPI_PASS_ARGS_TO_CHILDREN)
+    {
+        Input = ExAllocatePoolWithTag(NonPagedPool, AcpiInputSize, TAG_DXGK_RESOURCES);
+        if (Input == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        RtlCopyMemory(Input, AcpiInputBuffer, AcpiInputSize);
+        ((PULONG)Input)[0] = ACPI_EVAL_INPUT_BUFFER_COMPLEX_SIGNATURE;
+    }
+
+    /* Below our FDO: the PDO, or the ACPI filter over it */
+    Target = Adapter->LowerDeviceObject;
+    ObReferenceObject(Target);
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp = IoBuildDeviceIoControlRequest(IOCTL_ACPI_EVAL_METHOD,
+                                        Target,
+                                        Input,
+                                        AcpiInputSize,
+                                        AcpiOutputBuffer,
+                                        AcpiOutputSize,
+                                        FALSE,
+                                        &Event,
+                                        &IoStatus);
+    if (Irp == NULL)
+    {
+        ObDereferenceObject(Target);
+        if (Input != AcpiInputBuffer)
+            ExFreePoolWithTag(Input, TAG_DXGK_RESOURCES);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Status = IoCallDriver(Target, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = IoStatus.Status;
+    }
+    ObDereferenceObject(Target);
+    if (Input != AcpiInputBuffer)
+        ExFreePoolWithTag(Input, TAG_DXGK_RESOURCES);
+
+    DXGKRNL_TRACE("DxgkCbEvalAcpiMethod: sig %.4s method %.4s in=%lu out=%lu -> 0x%08lX\n",
+                  (PCHAR)&Signature, (PCHAR)&MethodName, AcpiInputSize, AcpiOutputSize, Status);
+    return Status;
 }
 
 /*
@@ -1275,7 +1356,7 @@ DxgkpFillInterface(
                   Interface->DeviceHandle, Interface->Size, Interface->Version);
 
     /* WDDM 1.0 (Vista) baseline callbacks — correct WDK field order */
-    Interface->DxgkCbEvalAcpiMethod                = (PVOID)DxgkCbEvalAcpiMethodStub; /* 0x10 */
+    Interface->DxgkCbEvalAcpiMethod                = (PVOID)DxgkCbEvalAcpiMethod; /* 0x10 */
     Interface->DxgkCbGetDeviceInformation          = DxgkCbGetDeviceInformation;  /* 0x18 */
     Interface->DxgkCbIndicateChildStatus           = DxgkCbIndicateChildStatus;   /* 0x20 */
     Interface->DxgkCbMapMemory                     = DxgkCbMapMemory;             /* 0x28 */
@@ -1470,6 +1551,36 @@ DxgkCbNotifyDpc(
     KeSetEvent(&Adapter->SyncEvent, IO_NO_INCREMENT, FALSE);
 }
 
+/* The end of the highest RAM range, as DXGK_DEVICE_INFO reports it */
+static
+PHYSICAL_ADDRESS
+DxgkpHighestPhysicalAddress(VOID)
+{
+    PPHYSICAL_MEMORY_RANGE Ranges;
+    PHYSICAL_ADDRESS Highest;
+    ULONG i;
+
+    Highest.QuadPart = 0;
+    Ranges = MmGetPhysicalMemoryRanges();
+    if (Ranges == NULL)
+        return Highest;
+
+    for (i = 0; Ranges[i].NumberOfBytes.QuadPart != 0; i++)
+    {
+        LONGLONG Last = Ranges[i].BaseAddress.QuadPart + Ranges[i].NumberOfBytes.QuadPart - 1;
+        if (Last > Highest.QuadPart)
+            Highest.QuadPart = Last;
+    }
+
+    ExFreePool(Ranges);
+    return Highest;
+}
+
+#ifdef _WIN64
+C_ASSERT(sizeof(DXGK_DEVICE_INFO) == 0x50);
+C_ASSERT(FIELD_OFFSET(DXGK_DEVICE_INFO, DeviceRegistryPath.Buffer) == 0x18);
+#endif
+
 /*
  * DxgkCbGetDeviceInformation
  *
@@ -1485,7 +1596,7 @@ DxgkCbGetDeviceInformation(
     _Out_ PDXGK_DEVICE_INFO DeviceInformation)
 {
     PDXGKRNL_ADAPTER Adapter;
-    ULONG            BusNumber = 0;
+    NTSTATUS         Status;
     ULONGLONG        TotalStart100ns;
     ULONGLONG        PropertyStart100ns;
     ULONGLONG        PropertyUs;
@@ -1510,38 +1621,59 @@ DxgkCbGetDeviceInformation(
 
     RtlZeroMemory(DeviceInformation, sizeof(*DeviceInformation));
 
-    DeviceInformation->PhysicalDeviceObject = Adapter->PhysicalDeviceObject;
-    DeviceInformation->MiniportRegistryPath = &Adapter->MiniportContext->RegistryPath;
-    DeviceInformation->TranslatedResourceList = Adapter->TranslatedResources;
-
-    /* Query the PCI bus number for the GPU's PDO. */
+    /* The driver key path: \Registry\Machine\...\Control\Class\{GUID}\NNNN */
+    if (Adapter->DeviceRegistryPath.Buffer == NULL)
     {
+        static const WCHAR ClassPrefix[] =
+            L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Class\\";
+        WCHAR DriverKeyName[96];
         ULONG ResultLength = 0;
+        USHORT Size;
+        PWCHAR Buffer;
 
         PropertyStart100ns = DxgkpTraceNow100ns();
-        IoGetDeviceProperty(Adapter->PhysicalDeviceObject,
-                            DevicePropertyBusNumber,
-                            sizeof(BusNumber),
-                            &BusNumber,
-                            &ResultLength);
+        Status = IoGetDeviceProperty(Adapter->PhysicalDeviceObject,
+                                     DevicePropertyDriverKeyName,
+                                     sizeof(DriverKeyName),
+                                     DriverKeyName,
+                                     &ResultLength);
         PropertyUs = DxgkpTraceElapsedUs(PropertyStart100ns);
+        if (!NT_SUCCESS(Status))
+        {
+            DXGKRNL_ERR("DxgkCbGetDeviceInformation: no driver key name 0x%08lX\n", Status);
+            return Status;
+        }
+
+        Size = (USHORT)(sizeof(ClassPrefix) + ResultLength);
+        Buffer = ExAllocatePoolZero(PagedPool, Size, TAG_DXGK_REGISTRY);
+        if (Buffer == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        Adapter->DeviceRegistryPath.Buffer = Buffer;
+        Adapter->DeviceRegistryPath.Length = 0;
+        Adapter->DeviceRegistryPath.MaximumLength = Size;
+        RtlAppendUnicodeToString(&Adapter->DeviceRegistryPath, ClassPrefix);
+        RtlAppendUnicodeToString(&Adapter->DeviceRegistryPath, DriverKeyName);
     }
-    DeviceInformation->SystemIoBusNumber  = BusNumber;
-    DeviceInformation->AdapterInterfaceType = PCIBus;
-    DeviceInformation->DmaAddressWidth = 64; /* VirtIO GPU supports 64-bit DMA */
-    DeviceInformation->BusInterruptVector = Adapter->InterruptVector;
-    DeviceInformation->BusInterruptLevel = (ULONG)Adapter->InterruptLevel;
-    DeviceInformation->InterruptMode = Adapter->InterruptMode;
+    else
+    {
+        PropertyStart100ns = DxgkpTraceNow100ns();
+        PropertyUs = 0;
+    }
 
-    /*
-     * Report system memory size in MB.  Use SharedUserData which is always
-     * accessible from kernel mode without a syscall.
-     */
-    DeviceInformation->SystemMemorySize = (ULONG)(SharedUserData->NumberOfPhysicalPages >> (20 - PAGE_SHIFT));
+    DeviceInformation->MiniportDeviceContext = Adapter->MiniportDeviceContext;
+    DeviceInformation->PhysicalDeviceObject = Adapter->PhysicalDeviceObject;
+    DeviceInformation->DeviceRegistryPath = Adapter->DeviceRegistryPath;
+    DeviceInformation->TranslatedResourceList = Adapter->TranslatedResources;
+    DeviceInformation->SystemMemorySize.QuadPart =
+        (LONGLONG)SharedUserData->NumberOfPhysicalPages << PAGE_SHIFT;
+    DeviceInformation->HighestPhysicalAddress = DxgkpHighestPhysicalAddress();
+    DeviceInformation->DockingState = DockStateUnsupported;
 
-    DXGKRNL_TRACE("DxgkCbGetDeviceInformation: PDO %p Bus %lu SysMem=%luMB TransRes=%p\n",
-                  Adapter->PhysicalDeviceObject, BusNumber,
-                  DeviceInformation->SystemMemorySize,
+    DXGKRNL_TRACE("DxgkCbGetDeviceInformation: PDO %p Key %wZ SysMem=%I64u TransRes=%p\n",
+                  Adapter->PhysicalDeviceObject,
+                  &Adapter->DeviceRegistryPath,
+                  DeviceInformation->SystemMemorySize.QuadPart,
                   DeviceInformation->TranslatedResourceList);
     DXGKRNL_TRACE("DxgkCbGetDeviceInformation: property=%I64u us total=%I64u us\n",
                   PropertyUs,
@@ -1703,15 +1835,22 @@ DxgkCbMapMemory(
 
     if (InIoSpace)
     {
+#if defined(_M_IX86) || defined(_M_AMD64)
         /*
-         * I/O port mapping: not typical for modern GPU devices but must
-         * be handled.  On amd64 I/O ports are accessed directly, but
-         * MmMapIoSpace still works for the mapping.
+         * I/O port space is not memory: like VideoPortMapMemory, hand back
+         * the translated port number, which the miniport passes to the
+         * READ_PORT_* / WRITE_PORT_* routines.  Mapping it with
+         * MmMapIoSpace would map RAM at that physical address instead.
          */
+        ASSERT(TranslatedAddress.HighPart == 0);
+        Va = (PVOID)(ULONG_PTR)TranslatedAddress.LowPart;
+        MapMethod = "port";
+#else
         MapStart100ns = DxgkpTraceNow100ns();
         Va = MmMapIoSpace(TranslatedAddress, Length, MmNonCached);
         MapUs = DxgkpTraceElapsedUs(MapStart100ns);
         MapMethod = "iospace";
+#endif
     }
     else if (MapToUserMode)
     {
@@ -1800,6 +1939,8 @@ DxgkCbMapMemory(
                     Entry->VirtualAddress = Va;
                     Entry->BaseAddress = BaseVa;
                     Entry->Mdl = Mdl;
+                    Entry->Length = Length;
+                    Entry->Kind = DxgkMapMemMdl;
 
                     ExAcquireFastMutex(&DxgkpMapMemoryMutex);
                     InsertTailList(&DxgkpMapMemoryList, &Entry->ListEntry);
@@ -1833,6 +1974,29 @@ DxgkCbMapMemory(
         DXGKRNL_ERR("DxgkCbMapMemory: MmMapIoSpace failed PA=0x%I64X Len=0x%lX\n",
                      TranslatedAddress.QuadPart, Length);
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    /* The MDL path tracks its own mapping; record every other kind here */
+    if (strcmp(MapMethod, "mdl") != 0)
+    {
+        PDXGK_MAPMEM_ENTRY Tracked;
+        BOOLEAN IsPort = (strcmp(MapMethod, "port") == 0);
+
+        Tracked = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Tracked), TAG_DXGK_RESOURCES);
+        if (Tracked == NULL)
+        {
+            if (!IsPort)
+                MmUnmapIoSpace(Va, Length);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        Tracked->VirtualAddress = Va;
+        Tracked->BaseAddress = Va;
+        Tracked->Mdl = NULL;
+        Tracked->Length = Length;
+        Tracked->Kind = IsPort ? DxgkMapMemPort : DxgkMapMemIoSpace;
+        ExAcquireFastMutex(&DxgkpMapMemoryMutex);
+        InsertTailList(&DxgkpMapMemoryList, &Tracked->ListEntry);
+        ExReleaseFastMutex(&DxgkpMapMemoryMutex);
     }
 
     *VirtualAddress = Va;
@@ -1882,26 +2046,29 @@ DxgkCbUnmapMemory(
             RemoveEntryList(&MapEntry->ListEntry);
             ExReleaseFastMutex(&DxgkpMapMemoryMutex);
 
-            MmUnmapLockedPages(MapEntry->BaseAddress, MapEntry->Mdl);
-            IoFreeMdl(MapEntry->Mdl);
+            switch (MapEntry->Kind)
+            {
+                case DxgkMapMemMdl:
+                    MmUnmapLockedPages(MapEntry->BaseAddress, MapEntry->Mdl);
+                    IoFreeMdl(MapEntry->Mdl);
+                    break;
+                case DxgkMapMemIoSpace:
+                    MmUnmapIoSpace(MapEntry->BaseAddress, MapEntry->Length);
+                    break;
+                case DxgkMapMemPort:
+                    /* Port space was never mapped */
+                    break;
+            }
             ExFreePoolWithTag(MapEntry, TAG_DXGK_RESOURCES);
             return STATUS_SUCCESS;
         }
     }
     ExReleaseFastMutex(&DxgkpMapMemoryMutex);
 
-    /*
-     * MmUnmapIoSpace requires the byte count, but the WDDM 1.0
-     * DxgkCbUnmapMemory callback does not receive it.  Windows dxgkrnl
-     * maintains an internal tracking table for this purpose.
-     *
-     * As a practical workaround we pass 0 to MmUnmapIoSpace.  On ReactOS
-     * the implementation will look up the mapping size from the PTE range.
-     * This matches the behavior of videoprt's VideoPortUnmapMemory.
-     */
-    MmUnmapIoSpace(VirtualAddress, 0);
-
-    return STATUS_SUCCESS;
+    /* Every address DxgkCbMapMemory hands out is tracked above */
+    DXGKRNL_ERR("DxgkCbUnmapMemory: %p was not mapped by DxgkCbMapMemory\n", VirtualAddress);
+    ASSERT(FALSE);
+    return STATUS_INVALID_PARAMETER;
 }
 
 /*
@@ -3234,16 +3401,37 @@ DxgkAdapterStart(
             DXGKRNL_ERR("DxgkAdapterStart: IoConnectInterruptEx failed 0x%08lX\n", Status);
     }
 
+    /* Like Windows, let a full WDDM miniport describe its link chain before
+     * it is started: AMD's atikmdag allocates its per-adapter table in
+     * DxgkDdiLinkDevice and dereferences it during DxgkDdiStartDevice */
+    Status = STATUS_SUCCESS;
+    if (DXGK_CB_FULL(Adapter, DxgkDdiLinkDevice))
+    {
+        RtlZeroMemory(&Adapter->LinkedDevice, sizeof(Adapter->LinkedDevice));
+        Status = DXGK_CB_FULL(Adapter, DxgkDdiLinkDevice)(Adapter->PhysicalDeviceObject,
+                                                          Adapter->MiniportDeviceContext,
+                                                          &Adapter->LinkedDevice);
+        DXGKRNL_TRACE("DxgkAdapterStart: DxgkDdiLinkDevice returned 0x%08lX ChainUid=%lu Links=%lu Lead=%u\n",
+                      Status, Adapter->LinkedDevice.ChainUid,
+                      Adapter->LinkedDevice.NumberOfLinksInChain,
+                      Adapter->LinkedDevice.LeadLink);
+        if (!NT_SUCCESS(Status))
+            DXGKRNL_ERR("DxgkAdapterStart: DxgkDdiLinkDevice failed 0x%08lX\n", Status);
+    }
+
     /* Call miniport start. */
     DXGKRNL_TRACE("DxgkAdapterStart: calling DxgkDdiStartDevice MiniportCtx=%p\n",
                   Adapter->MiniportDeviceContext);
     StepStart100ns = DxgkpTraceNow100ns();
-    Status = Adapter->MiniportContext->InitData.s.DxgkDdiStartDevice(
-                 Adapter->MiniportDeviceContext,
-                 &StartInfo,
-                 &Interface,
-                 &Adapter->NumberOfVideoPresentSources,
-                 &Adapter->NumberOfChildren);
+    if (NT_SUCCESS(Status))
+    {
+        Status = Adapter->MiniportContext->InitData.s.DxgkDdiStartDevice(
+                     Adapter->MiniportDeviceContext,
+                     &StartInfo,
+                     &Interface,
+                     &Adapter->NumberOfVideoPresentSources,
+                     &Adapter->NumberOfChildren);
+    }
     MiniportStartUs = DxgkpTraceElapsedUs(StepStart100ns);
     DXGKRNL_TRACE("DxgkAdapterStart: DxgkDdiStartDevice returned 0x%08lX after %I64u us\n",
                   Status,
@@ -3683,6 +3871,12 @@ DxgkAdapterRemove(
     }
 
     Adapter->State = DxgkAdapterStateRemoved;
+
+    if (Adapter->DeviceRegistryPath.Buffer != NULL)
+    {
+        ExFreePoolWithTag(Adapter->DeviceRegistryPath.Buffer, TAG_DXGK_REGISTRY);
+        RtlInitEmptyUnicodeString(&Adapter->DeviceRegistryPath, NULL, 0);
+    }
 
     /* The DeviceExtension (Adapter) is freed by IoDeleteDevice below. */
     IoDeleteDevice(Adapter->FunctionalDeviceObject);

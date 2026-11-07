@@ -79,9 +79,12 @@ typedef struct _QUERY_INTERFACE
     PVOID       InterfaceSpecificData;
 } QUERY_INTERFACE, *PQUERY_INTERFACE;
 
-/* Multi-GPU linked adapter descriptor (no public header yet) */
-typedef struct _LINKED_DEVICE          LINKED_DEVICE;
-typedef struct _LINKED_DEVICE         *PLINKED_DEVICE;
+/* Multi-GPU linked adapter descriptor, filled by DxgkDdiLinkDevice */
+typedef struct _LINKED_DEVICE {
+    ULONG   ChainUid;
+    ULONG   NumberOfLinksInChain;
+    BOOLEAN LeadLink;
+} LINKED_DEVICE, *PLINKED_DEVICE;
 
 
 /* =========================================================================
@@ -243,25 +246,29 @@ typedef struct _DXGK_DEVICE_DESCRIPTOR
  * Hardware resource information filled by dxgkrnl and handed to the
  * miniport's DxgkDdiStartDevice callback.
  *
- * This layout matches the Vista WDK definition exactly.
+ * Same layout as the WDK: AMD's KMD reads DeviceRegistryPath.Buffer at
+ * offset 0x18 and copies it up to its terminator.
  * =========================================================================
  */
+typedef enum _DOCKING_STATE
+{
+    DockStateUnsupported = 0,
+    DockStateUnDocked    = 1,
+    DockStateDocked      = 2,
+    DockStateUnknown     = 3,
+} DOCKING_STATE, *PDOCKING_STATE;
+
 typedef struct _DXGK_DEVICE_INFO
 {
+    PVOID               MiniportDeviceContext;
     PDEVICE_OBJECT      PhysicalDeviceObject;
-    PUNICODE_STRING     MiniportRegistryPath;
-    PHYSICAL_ADDRESS    SegmentAperture;
-    ULONGLONG           SegmentFrameBufferLength;
+    UNICODE_STRING      DeviceRegistryPath;
     PCM_RESOURCE_LIST   TranslatedResourceList;
-    ULONG               SystemIoBusNumber;
-    INTERFACE_TYPE      AdapterInterfaceType;
-    ULONG               BusInterruptLevel;
-    ULONG               BusInterruptVector;
-    KINTERRUPT_MODE     InterruptMode;
-    ULONG               DmaAddressWidth;
-    ULONG               AgpApertureBase;
-    ULONG               AgpApertureSize;
-    ULONG               SystemMemorySize;
+    LARGE_INTEGER       SystemMemorySize;
+    PHYSICAL_ADDRESS    HighestPhysicalAddress;
+    PHYSICAL_ADDRESS    AgpApertureBase;
+    SIZE_T              AgpApertureSize;
+    DOCKING_STATE       DockingState;
 } DXGK_DEVICE_INFO, *PDXGK_DEVICE_INFO;
 
 
@@ -315,8 +322,12 @@ typedef enum _DXGK_EVENT_TYPE
  * =========================================================================
  */
 #ifndef DISPLAY_ADAPTER_HW_ID
-#define DISPLAY_ADAPTER_HW_ID   0xFFFEFFFFUL
+#define DISPLAY_ADAPTER_HW_ID   0xFFFFFFFF
 #endif
+
+/* DxgkCbEvalAcpiMethod input signature: an ACPI_EVAL_INPUT_BUFFER_COMPLEX
+ * whose arguments are also meant for the adapter's child devices */
+#define DXGK_ACPI_PASS_ARGS_TO_CHILDREN 'araP'
 
 
 /* =========================================================================

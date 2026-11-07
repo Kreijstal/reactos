@@ -95,6 +95,7 @@
  * transitively but the include guard prevents redefinition.
  */
 #include <dispmprt.h>
+#include <acpiioct.h>
 #include <d3dkmthk.h>
 #include "d3dkmt.h"
 
@@ -264,14 +265,6 @@ typedef struct _DXGKARGCB_UNMAP_PHYSICAL_MEMORY
  */
 
 /*
- * DISPLAY_ADAPTER_HW_ID — UID passed to DxgkDdiSetPowerState to
- * target the adapter as a whole rather than a child display.
- */
-#ifndef DISPLAY_ADAPTER_HW_ID
-#define DISPLAY_ADAPTER_HW_ID  0xFFFEFFFFUL
-#endif
-
-/*
  * Minimum byte offset of the last required field.  We use this when
  * validating a miniport-supplied DriverInitDataSize: if the size is at
  * least this large the miniport has declared all WDDM 1.0 callbacks.
@@ -422,6 +415,7 @@ struct _DXGKRNL_ADAPTER
      */
     ULONG                       NumberOfVideoPresentSources;
     ULONG                       NumberOfChildren;
+    LINKED_DEVICE               LinkedDevice;
 
     /*
      * Child descriptor array, Pool-allocated with TAG_DXGK_RESOURCES.
@@ -505,6 +499,13 @@ struct _DXGKRNL_ADAPTER
      */
     PCM_RESOURCE_LIST           AllocatedResources;     /* raw (bus-relative)  */
     PCM_RESOURCE_LIST           TranslatedResources;    /* translated (system) */
+
+    /*
+     * DXGK_DEVICE_INFO.DeviceRegistryPath: the adapter's driver key,
+     * NUL-terminated (miniports copy it as a C string).  Built on the first
+     * DxgkCbGetDeviceInformation, freed in DxgkAdapterRemove.
+     */
+    UNICODE_STRING              DeviceRegistryPath;
 
     /*
      * Cached PCI bus/slot number for this adapter.
