@@ -22,6 +22,9 @@
 #include <float.h>
 #include <xmmintrin.h>
 
+/* Use the CRT import rather than pulling MinGW's duplicate _fpreset wrapper. */
+__declspec(dllimport) void __cdecl _fpreset(void);
+
 #ifndef __x86_64__
 #error fenv_compat is only needed for the x86_64 UCRT64 toolchain
 #endif

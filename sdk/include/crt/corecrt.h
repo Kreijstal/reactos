@@ -9,6 +9,11 @@
 
 #include <crtdefs.h>
 
+#ifndef _RSIZE_T_DEFINED
+#define _RSIZE_T_DEFINED
+typedef size_t rsize_t;
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
