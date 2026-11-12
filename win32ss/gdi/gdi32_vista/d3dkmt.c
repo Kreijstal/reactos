@@ -194,6 +194,30 @@ D3DKMTEmuOpenAdapter(
     return hAdapter;
 }
 
+/* Whether a WDDM adapter drives the primary display */
+static
+BOOLEAN
+D3DKMTEmuWddmPresent(VOID)
+{
+    D3DKMT_OPENADAPTERFROMHDC OpenFromHdc;
+    D3DKMT_CLOSEADAPTER Close;
+    BOOLEAN Present;
+
+    OpenFromHdc.hDc = CreateDCW(L"DISPLAY", NULL, NULL, NULL);
+    if (!OpenFromHdc.hDc)
+        return FALSE;
+
+    Present = NT_SUCCESS(NtGdiDdDDIOpenAdapterFromHdc(&OpenFromHdc));
+    if (Present)
+    {
+        Close.hAdapter = OpenFromHdc.hAdapter;
+        NtGdiDdDDICloseAdapter(&Close);
+    }
+
+    DeleteDC(OpenFromHdc.hDc);
+    return Present;
+}
+
 /* fake LUID */
 static
 VOID
@@ -205,10 +229,14 @@ D3DKMTEmuMakeLuid(
     AdapterLuid->LowPart = VidPnSourceId + 1;
 }
 
-/* Not just a syscall even in wine. */
+/*
+ * Emulated adapter for a display that no WDDM adapter drives (XDDM display
+ * drivers): wined3d needs an adapter for every GDI display.
+ */
+static
 NTSTATUS
-WINAPI
-D3DKMTOpenAdapterFromGdiDisplayName(_Inout_ D3DKMT_OPENADAPTERFROMGDIDISPLAYNAME* unnamedParam1)
+D3DKMTEmuOpenAdapterFromGdiDisplayName(
+    _Inout_ D3DKMT_OPENADAPTERFROMGDIDISPLAYNAME* Desc)
 {
     D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId = 0;
     DISPLAY_DEVICEW DisplayDevice;
@@ -216,17 +244,14 @@ D3DKMTOpenAdapterFromGdiDisplayName(_Inout_ D3DKMT_OPENADAPTERFROMGDIDISPLAYNAME
     LUID AdapterLuid;
     DWORD Index = 0;
 
-    if (!unnamedParam1)
-        return STATUS_INVALID_PARAMETER;
-
     /* Locate the GDI display device with this name to obtain its index, which
        doubles as the VidPN source ID */
     DisplayDevice.cb = sizeof(DisplayDevice);
     while (EnumDisplayDevicesW(NULL, Index, &DisplayDevice, 0))
     {
         if (wcsncmp(DisplayDevice.DeviceName,
-                    unnamedParam1->DeviceName,
-                    ARRAYSIZE(unnamedParam1->DeviceName)) == 0)
+                    Desc->DeviceName,
+                    ARRAYSIZE(Desc->DeviceName)) == 0)
         {
             VidPnSourceId = Index;
             break;
@@ -245,11 +270,46 @@ D3DKMTOpenAdapterFromGdiDisplayName(_Inout_ D3DKMT_OPENADAPTERFROMGDIDISPLAYNAME
     if (!hAdapter)
         return STATUS_INSUFFICIENT_RESOURCES;
 
-    unnamedParam1->hAdapter = hAdapter;
-    unnamedParam1->AdapterLuid = AdapterLuid;
-    unnamedParam1->VidPnSourceId = VidPnSourceId;
+    Desc->hAdapter = hAdapter;
+    Desc->AdapterLuid = AdapterLuid;
+    Desc->VidPnSourceId = VidPnSourceId;
 
     return STATUS_SUCCESS;
+}
+
+/*
+ * Not a syscall: like Windows, open a DC on the display and ask the kernel
+ * for the adapter behind it. Only when no WDDM adapter drives the display
+ * does the emulated adapter stand in.
+ */
+NTSTATUS
+WINAPI
+D3DKMTOpenAdapterFromGdiDisplayName(_Inout_ D3DKMT_OPENADAPTERFROMGDIDISPLAYNAME* unnamedParam1)
+{
+    D3DKMT_OPENADAPTERFROMHDC OpenFromHdc;
+    NTSTATUS Status;
+
+    if (!unnamedParam1)
+        return STATUS_INVALID_PARAMETER;
+
+    OpenFromHdc.hDc = CreateDCW(unnamedParam1->DeviceName, unnamedParam1->DeviceName, NULL, NULL);
+    if (!OpenFromHdc.hDc)
+        return STATUS_UNSUCCESSFUL;
+
+    Status = NtGdiDdDDIOpenAdapterFromHdc(&OpenFromHdc);
+    if (NT_SUCCESS(Status))
+    {
+        unnamedParam1->hAdapter = OpenFromHdc.hAdapter;
+        unnamedParam1->AdapterLuid = OpenFromHdc.AdapterLuid;
+        unnamedParam1->VidPnSourceId = OpenFromHdc.VidPnSourceId;
+    }
+    else
+    {
+        Status = D3DKMTEmuOpenAdapterFromGdiDisplayName(unnamedParam1);
+    }
+
+    DeleteDC(OpenFromHdc.hDc);
+    return Status;
 }
 
 NTSTATUS
@@ -260,11 +320,14 @@ D3DKMTOpenAdapterFromLuid(_Inout_ CONST D3DKMT_OPENADAPTERFROMLUID* unnamedParam
     D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId;
     D3DKMT_HANDLE hAdapter;
 
+    NTSTATUS Status;
+
     if (!unnamedParam1)
         return STATUS_INVALID_PARAMETER;
 
-    /* Recover the source ID for LUIDs we minted ourselves; anything else is a
-       caller-allocated LUID, for which the primary output is the best match. */
+    /* Recover the source ID for LUIDs we minted ourselves; anything else is
+       a kernel adapter, or a caller-allocated LUID when no WDDM adapter
+       exists, for which the primary output is the best match. */
     if (unnamedParam1->AdapterLuid.HighPart == 0x524f5300 &&
         unnamedParam1->AdapterLuid.LowPart > 0)
     {
@@ -272,6 +335,9 @@ D3DKMTOpenAdapterFromLuid(_Inout_ CONST D3DKMT_OPENADAPTERFROMLUID* unnamedParam
     }
     else
     {
+        Status = NtGdiDdDDIOpenAdapterFromLuid(Desc);
+        if (NT_SUCCESS(Status) || D3DKMTEmuWddmPresent())
+            return Status;
         VidPnSourceId = 0;
     }
 
@@ -294,13 +360,12 @@ D3DKMTCloseAdapter(_In_ const D3DKMT_CLOSEADAPTER* unnamedParam1)
     if (!unnamedParam1)
         return STATUS_INVALID_PARAMETER;
 
-    Status = NtGdiDdDDICloseAdapter(unnamedParam1);
-    if (Status != STATUS_PROCEDURE_NOT_FOUND)
-        return Status;
-
     Adapter = D3DKMTEmuGetAdapter(unnamedParam1->hAdapter);
     if (!Adapter)
-        return STATUS_INVALID_PARAMETER;
+    {
+        Status = NtGdiDdDDICloseAdapter(unnamedParam1);
+        return Status;
+    }
 
     InterlockedExchange(&Adapter->InUse, 0);
 
@@ -318,12 +383,11 @@ D3DKMTCreateDevice(_Inout_ D3DKMT_CREATEDEVICE* unnamedParam1)
     if (!unnamedParam1)
         return STATUS_INVALID_PARAMETER;
 
-    Status = NtGdiDdDDICreateDevice(unnamedParam1);
-    if (Status != STATUS_PROCEDURE_NOT_FOUND)
-        return Status;
-
     if (!D3DKMTEmuGetAdapter(unnamedParam1->hAdapter))
-        return STATUS_INVALID_PARAMETER;
+    {
+        Status = NtGdiDdDDICreateDevice(unnamedParam1);
+        return Status;
+    }
 
     hDevice = D3DKMTEmuAllocateSlot(D3DKMTEmuDeviceChunks,
                                     sizeof(D3DKMT_EMU_DEVICE),
@@ -355,13 +419,12 @@ D3DKMTDestroyDevice(_In_ const D3DKMT_DESTROYDEVICE* unnamedParam1)
     if (!unnamedParam1)
         return STATUS_INVALID_PARAMETER;
 
-    Status = NtGdiDdDDIDestroyDevice(unnamedParam1);
-    if (Status != STATUS_PROCEDURE_NOT_FOUND)
-        return Status;
-
     Device = D3DKMTEmuGetDevice(unnamedParam1->hDevice);
     if (!Device)
-        return STATUS_INVALID_PARAMETER;
+    {
+        Status = NtGdiDdDDIDestroyDevice(unnamedParam1);
+        return Status;
+    }
 
     InterlockedExchange(&Device->InUse, 0);
 
@@ -377,16 +440,15 @@ D3DKMTSetVidPnSourceOwner(_In_ const D3DKMT_SETVIDPNSOURCEOWNER* unnamedParam1)
     if (!unnamedParam1)
         return STATUS_INVALID_PARAMETER;
 
-    Status = NtGdiDdDDISetVidPnSourceOwner(unnamedParam1);
-    if (Status != STATUS_PROCEDURE_NOT_FOUND)
+    if (!D3DKMTEmuGetDevice(unnamedParam1->hDevice))
+    {
+        Status = NtGdiDdDDISetVidPnSourceOwner(unnamedParam1);
         return Status;
+    }
 
     /* A zero VidPnSourceCount releases ownership, which always succeeds. */
     if (unnamedParam1->VidPnSourceCount == 0)
         return STATUS_SUCCESS;
-
-    if (!D3DKMTEmuGetDevice(unnamedParam1->hDevice))
-        return STATUS_INVALID_PARAMETER;
 
     return STATUS_PROCEDURE_NOT_FOUND;
 }
@@ -397,6 +459,9 @@ D3DKMTCheckVidPnExclusiveOwnership(_In_ CONST D3DKMT_CHECKVIDPNEXCLUSIVEOWNERSHI
 {
     if (!unnamedParam1)
         return STATUS_INVALID_PARAMETER;
+
+    if (!D3DKMTEmuGetAdapter(unnamedParam1->hAdapter))
+        return NtGdiDdDDICheckVidPnExclusiveOwnership(unnamedParam1);
 
     return STATUS_PROCEDURE_NOT_FOUND;
 }
@@ -409,7 +474,7 @@ D3DKMTQueryVideoMemoryInfo(_Inout_ D3DKMT_QUERYVIDEOMEMORYINFO* unnamedParam1)
         return STATUS_INVALID_PARAMETER;
 
     if (!D3DKMTEmuGetAdapter(unnamedParam1->hAdapter))
-        return STATUS_INVALID_PARAMETER;
+        return NtGdiDdDDIQueryVideoMemoryInfo(unnamedParam1);
 
     return STATUS_PROCEDURE_NOT_FOUND;
 }
