@@ -251,6 +251,7 @@ typedef struct _INTERNAL_BCB
     ULONG PinCount;
     ERESOURCE_THREAD ResourceThreadId;
     CSHORT RefCount; /* (At offset 0x34 on WinNT4) */
+    BOOLEAN Dirty; /* CcSetDirtyPinnedData was called; pushed to Mm/VACB at unpin */
     LIST_ENTRY BcbEntry;
 } INTERNAL_BCB, *PINTERNAL_BCB;
 

@@ -47,6 +47,21 @@ target_compile_definitions(cclazywriterace_drv PRIVATE KMT_STANDALONE_DRIVER)
 add_rostests_file(TARGET cclazywriterace_drv)
 
 #
+# CcPinnedDirty
+#
+list(APPEND CCPINNEDDIRTY_DRV_SOURCE
+    ../kmtest_drv/kmtest_standalone.c
+    CcPinnedDirty_drv.c)
+
+add_library(ccpinneddirty_drv MODULE ${CCPINNEDDIRTY_DRV_SOURCE})
+set_module_type(ccpinneddirty_drv kernelmodedriver)
+target_link_libraries(ccpinneddirty_drv kmtest_printf ${PSEH_LIB})
+add_importlibs(ccpinneddirty_drv ntoskrnl hal)
+target_compile_definitions(ccpinneddirty_drv PRIVATE KMT_STANDALONE_DRIVER)
+#add_pch(ccpinneddirty_drv ../include/kmt_test.h)
+add_rostests_file(TARGET ccpinneddirty_drv)
+
+#
 # CcMapData
 #
 list(APPEND CCMAPDATA_DRV_SOURCE

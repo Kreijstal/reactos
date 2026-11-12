@@ -67,6 +67,43 @@ CcpFindBcb(
     return (Found ? Bcb : NULL);
 }
 
+/*
+ * Make the data a pinner modified eligible for write-behind.
+ *
+ * Callers of CcSetDirtyPinnedData may mark a BCB dirty BEFORE they modify the
+ * pinned buffer (fastfat's FatPrepareWriteVolumeFile pins the FAT and sets it
+ * "pre-dirty", then the caller writes the FAT entries).  Mm's segment dirty
+ * bit is the only record of what must be written (PTE dirty bits of the cache
+ * views are not consulted), and a flush clears it before writing.  Setting it
+ * at CcSetDirtyPinnedData time therefore lets a lazy write that runs between
+ * the mark and the modification write the OLD bytes and consume the mark: the
+ * modification is never written (lost FAT links -> lost clusters, file chains
+ * truncated on disk).  Windows never writes back a range while a BCB covering
+ * it is pinned; dirty pinned data becomes eligible when it is unpinned.  Do
+ * the same: CcSetDirtyPinnedData only records the BCB as dirty, and every
+ * unpin of a dirty BCB -- after which that pinner's modifications are
+ * complete -- marks the range dirty in Mm and puts the VACB on the dirty list.
+ */
+static
+VOID
+CcpMarkBcbDataDirty(
+    IN PINTERNAL_BCB Bcb)
+{
+    PROS_VACB Vacb = Bcb->Vacb;
+
+    if (!Bcb->Dirty)
+        return;
+
+    MmMakeSegmentDirty(Vacb->SharedCacheMap->FileObject->SectionObjectPointer,
+                       Bcb->PFCB.MappedFileOffset.QuadPart,
+                       Bcb->PFCB.MappedLength);
+
+    if (!Vacb->Dirty)
+    {
+        CcRosMarkDirtyVacb(Vacb);
+    }
+}
+
 static
 VOID
 CcpDereferenceBcb(
@@ -87,7 +124,7 @@ CcpDereferenceBcb(
         /*
          * Don't mark dirty, if it was dirty,
          * the VACB was already marked as such
-         * following the call to CcSetDirtyPinnedData
+         * when the BCB was unpinned (CcpMarkBcbDataDirty)
          */
         CcRosReleaseVacb(SharedCacheMap,
                          Bcb->Vacb,
@@ -583,19 +620,12 @@ CcSetDirtyPinnedData (
     IN PLARGE_INTEGER Lsn)
 {
     PINTERNAL_BCB iBcb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB);
-    PROS_VACB Vacb = iBcb->Vacb;
 
     CCTRACE(CC_API_DEBUG, "Bcb=%p Lsn=%p\n", Bcb, Lsn);
 
-    /* Tell Mm */
-    MmMakeSegmentDirty(Vacb->SharedCacheMap->FileObject->SectionObjectPointer,
-                       iBcb->PFCB.MappedFileOffset.QuadPart,
-                       iBcb->PFCB.MappedLength);
-
-    if (!Vacb->Dirty)
-    {
-        CcRosMarkDirtyVacb(Vacb);
-    }
+    /* The caller may not have modified the data yet: defer telling Mm and
+     * the lazy writer until it unpins (see CcpMarkBcbDataDirty). */
+    iBcb->Dirty = TRUE;
 }
 
 
@@ -624,6 +654,9 @@ CcUnpinDataForThread (
     PROS_SHARED_CACHE_MAP SharedCacheMap = iBcb->Vacb->SharedCacheMap;
 
     CCTRACE(CC_API_DEBUG, "Bcb=%p ResourceThreadId=%lu\n", Bcb, ResourceThreadId);
+
+    /* This pinner is done modifying the data: make it eligible for write */
+    CcpMarkBcbDataDirty(iBcb);
 
     if (iBcb->PinCount != 0)
     {
@@ -679,6 +712,10 @@ CcUnpinRepinnedBcb (
     SharedCacheMap = iBcb->Vacb->SharedCacheMap;
     IoStatus->Status = STATUS_SUCCESS;
 
+    /* Make the modifications eligible for write first, so a write-through
+     * flush below actually writes them */
+    CcpMarkBcbDataDirty(iBcb);
+
     if (WriteThrough)
     {
         CcFlushCache(iBcb->Vacb->SharedCacheMap->FileObject->SectionObjectPointer,
@@ -720,7 +757,7 @@ CcUnpinRepinnedBcb (
         /*
          * Don't mark dirty, if it was dirty,
          * the VACB was already marked as such
-         * following the call to CcSetDirtyPinnedData
+         * when the BCB was unpinned (CcpMarkBcbDataDirty)
          */
         CcRosReleaseVacb(iBcb->Vacb->SharedCacheMap,
                          iBcb->Vacb,

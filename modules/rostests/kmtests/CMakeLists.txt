@@ -232,6 +232,7 @@ list(APPEND KMTEST_SOURCE
     ntos_cc/CcLazyWriteRace_user.c
     ntos_cc/CcMapData_user.c
     ntos_cc/CcPinMappedData_user.c
+    ntos_cc/CcPinnedDirty_user.c
     ntos_cc/CcPinRead_user.c
     ntos_cc/CcSetFileSizes_user.c
     ntos_io/IoCreateFile_user.c
@@ -290,7 +291,8 @@ add_dependencies(kmtest_drivers
     poirp_drv
     tcpip_drv
     cccopyread_drv
-    ccmapdata_drv)
+    ccmapdata_drv
+    ccpinneddirty_drv)
 
 add_custom_target(kmtest_all)
 add_dependencies(kmtest_all kmtest_drivers kmtest)
