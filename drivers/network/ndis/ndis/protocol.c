@@ -417,64 +417,33 @@ proSendPacketToMiniport(PLOGICAL_ADAPTER Adapter, PNDIS_PACKET Packet)
    MiniDisplayPacket(Packet, "SEND");
 #endif
 
-   if(Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendPacketsHandler)
+   if (MiniIsSerialized(Adapter))
    {
-        if(Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE)
-        {
-            NDIS_DbgPrint(MAX_TRACE, ("Calling miniport's SendPackets handler\n"));
-            (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendPacketsHandler)(
-             Adapter->NdisMiniportBlock.MiniportAdapterContext, &Packet, 1);
-             NdisStatus = NDIS_STATUS_PENDING;
-        } else {
-            /* SendPackets is called at DISPATCH_LEVEL for all serialized miniports */
-            KeRaiseIrql(DISPATCH_LEVEL, &RaiseOldIrql);
-            {
-               NDIS_DbgPrint(MAX_TRACE, ("Calling miniport's SendPackets handler\n"));
-               (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendPacketsHandler)(
-                Adapter->NdisMiniportBlock.MiniportAdapterContext, &Packet, 1);
-            }
-            KeLowerIrql(RaiseOldIrql);
-
-            NdisStatus = NDIS_GET_PACKET_STATUS(Packet);
-            if (NdisStatus == NDIS_STATUS_RESOURCES) {
-                MiniQueueWorkItem(Adapter, NdisWorkItemSend, Packet, TRUE);
-                NdisStatus = NDIS_STATUS_PENDING;
-            }
-        }
-
-        if (NdisStatus != NDIS_STATUS_PENDING) {
-            MiniWorkItemComplete(Adapter, NdisWorkItemSend);
-        }
-
-        return NdisStatus;
-   } else {
-        if(Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE)
-        {
-            NDIS_DbgPrint(MAX_TRACE, ("Calling miniport's Send handler\n"));
-            NdisStatus = (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendHandler)(
-                          Adapter->NdisMiniportBlock.MiniportAdapterContext, Packet, Packet->Private.Flags);
-            NDIS_DbgPrint(MAX_TRACE, ("back from miniport's send handler\n"));
-        } else {
-            /* Send is called at DISPATCH_LEVEL for all serialized miniports */
-            KeRaiseIrql(DISPATCH_LEVEL, &RaiseOldIrql);
-            NDIS_DbgPrint(MAX_TRACE, ("Calling miniport's Send handler\n"));
-            NdisStatus = (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendHandler)(
-                          Adapter->NdisMiniportBlock.MiniportAdapterContext, Packet, Packet->Private.Flags);
-            NDIS_DbgPrint(MAX_TRACE, ("back from miniport's send handler\n"));
-            KeLowerIrql(RaiseOldIrql);
-
-            if (NdisStatus == NDIS_STATUS_RESOURCES) {
-                MiniQueueWorkItem(Adapter, NdisWorkItemSend, Packet, TRUE);
-                NdisStatus = NDIS_STATUS_PENDING;
-            }
-        }
-
-        if (NdisStatus != NDIS_STATUS_PENDING) {
-            MiniWorkItemComplete(Adapter, NdisWorkItemSend);
-        }
-
-        return NdisStatus;
+        /* Serialized miniports are called at DISPATCH_LEVEL, one call at a time */
+        KeRaiseIrql(DISPATCH_LEVEL, &RaiseOldIrql);
+        NdisStatus = MiniSendSerialized(Adapter, Packet, FALSE);
+        KeLowerIrql(RaiseOldIrql);
    }
+   else if(Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendPacketsHandler)
+   {
+        NDIS_DbgPrint(MAX_TRACE, ("Calling miniport's SendPackets handler\n"));
+        (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendPacketsHandler)(
+         Adapter->NdisMiniportBlock.MiniportAdapterContext, &Packet, 1);
+        NdisStatus = NDIS_STATUS_PENDING;
+   }
+   else
+   {
+        NDIS_DbgPrint(MAX_TRACE, ("Calling miniport's Send handler\n"));
+        NdisStatus = (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendHandler)(
+                      Adapter->NdisMiniportBlock.MiniportAdapterContext, Packet, Packet->Private.Flags);
+        NDIS_DbgPrint(MAX_TRACE, ("back from miniport's send handler\n"));
+   }
+
+   if (NdisStatus != NDIS_STATUS_PENDING) {
+       MiniWorkItemComplete(Adapter, NdisWorkItemSend);
+   }
+
+   return NdisStatus;
 #endif
 }
 
@@ -630,14 +599,14 @@ ProSendPackets(
        }
        else
        {
-          /* SendPackets is called at DISPATCH_LEVEL for all serialized miniports */
-          KeRaiseIrql(DISPATCH_LEVEL, &RaiseOldIrql);
-          (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendPacketsHandler)(
-           Adapter->NdisMiniportBlock.MiniportAdapterContext, PacketArray, NumberOfPackets);
-          KeLowerIrql(RaiseOldIrql);
+          /* Serialized: one packet at a time, never concurrently with the
+           * miniport's other send/interrupt handlers */
           for (i = 0; i < NumberOfPackets; i++)
           {
-             NdisStatus = NDIS_GET_PACKET_STATUS(PacketArray[i]);
+             PacketArray[i]->Reserved[1] = (ULONG_PTR)NdisBindingHandle;
+             KeRaiseIrql(DISPATCH_LEVEL, &RaiseOldIrql);
+             NdisStatus = MiniSendSerialized(Adapter, PacketArray[i], FALSE);
+             KeLowerIrql(RaiseOldIrql);
              if (NdisStatus != NDIS_STATUS_PENDING)
                  MiniSendComplete(Adapter, PacketArray[i], NdisStatus);
           }
@@ -657,16 +626,15 @@ ProSendPackets(
        }
        else
        {
-         /* Send is called at DISPATCH_LEVEL for all serialized miniports */
-         KeRaiseIrql(DISPATCH_LEVEL, &RaiseOldIrql);
          for (i = 0; i < NumberOfPackets; i++)
          {
-            NdisStatus = (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendHandler)(
-                           Adapter->NdisMiniportBlock.MiniportAdapterContext, PacketArray[i], PacketArray[i]->Private.Flags);
+            PacketArray[i]->Reserved[1] = (ULONG_PTR)NdisBindingHandle;
+            KeRaiseIrql(DISPATCH_LEVEL, &RaiseOldIrql);
+            NdisStatus = MiniSendSerialized(Adapter, PacketArray[i], FALSE);
+            KeLowerIrql(RaiseOldIrql);
             if (NdisStatus != NDIS_STATUS_PENDING)
                 MiniSendComplete(Adapter, PacketArray[i], NdisStatus);
          }
-         KeLowerIrql(RaiseOldIrql);
        }
      }
 }
