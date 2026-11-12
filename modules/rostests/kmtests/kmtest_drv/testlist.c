@@ -7,6 +7,7 @@
 #include <kmt_test.h>
 
 KMT_TESTFUNC Test_CddDisplay;
+KMT_TESTFUNC Test_InbvOwnership;
 KMT_TESTFUNC Test_CmSecurity;
 KMT_TESTFUNC Test_EtwProvider;
 KMT_TESTFUNC Test_Example;
@@ -149,6 +150,7 @@ KMT_TESTFUNC Test_UsbStorageRead;
 const KMT_TEST TestList[] =
 {
     { "CddDisplay",                         Test_CddDisplay },
+    { "InbvOwnership",                      Test_InbvOwnership },
     { "CmSecurity",                         Test_CmSecurity },
     { "ExAllocatePool2",                    Test_ExAllocatePool2 },
     { "ExCallback",                         Test_ExCallback },
