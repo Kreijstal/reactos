@@ -2163,7 +2163,9 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     ULONG DebugProcessHeapOnly = 0;
     PLDR_DATA_TABLE_ENTRY NtLdrEntry;
     PWCHAR Current;
+#ifdef _M_IX86
     ULONG ExecuteOptions = 0;
+#endif
     PVOID ViewBase;
 
     /* Set a NULL SEH Filter */
@@ -2861,7 +2863,12 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     /* Validate the Image for MP Usage */
     if (LdrpNumberOfProcessors > 1) LdrpValidateImageForMp(LdrpImageEntry);
 
-    /* Check NX options and set them */
+#ifdef _M_IX86
+    /*
+     * Check NX options and set them. Only x86 processes have a choice: native
+     * 64-bit processes always run with permanent DEP, which the kernel sets
+     * when it creates them, so like Windows' x64 ntdll do not ask for it.
+     */
     if (SharedUserData->NXSupportPolicy == NX_SUPPORT_POLICY_ALWAYSON)
     {
         ExecuteOptions = MEM_EXECUTE_OPTION_DISABLE |
@@ -2881,6 +2888,7 @@ LdrpInitializeProcess(IN PCONTEXT Context,
         DPRINT1("LDR: Could not set process execute flags 0x%x; status %x\n",
                 ExecuteOptions, Status);
     }
+#endif
 
     // FIXME: Should be done by Application Compatibility features,
     // by reading the registry, etc...
