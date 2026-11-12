@@ -211,7 +211,9 @@ HalpInitDma(VOID)
      */
     InitializeListHead(&HalpDmaAdapterList);
     KeInitializeSpinLock(&HalpDmaAdapterListLock);
-    KeInitializeEvent(&HalpDmaLock, NotificationEvent, TRUE);
+    /* An auto-reset event: a notification event never resets, so every
+     * waiter passed it and growths / adapter creation ran concurrently. */
+    KeInitializeEvent(&HalpDmaLock, SynchronizationEvent, TRUE);
     HalpMasterAdapter = HalpDmaAllocateMasterAdapter();
 
     /*
