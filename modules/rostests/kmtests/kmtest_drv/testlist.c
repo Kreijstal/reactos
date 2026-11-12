@@ -39,6 +39,7 @@ KMT_TESTFUNC Test_FatPerf;
 KMT_TESTFUNC Test_HalPerformanceCounter;
 #if defined(_M_IX86) || defined(_M_AMD64)
 KMT_TESTFUNC Test_HalPortIo;
+KMT_TESTFUNC Test_HalRealTimeClock;
 #endif
 KMT_TESTFUNC Test_HalSystemInfo;
 KMT_TESTFUNC Test_IoCreateFile;
@@ -180,6 +181,7 @@ const KMT_TEST TestList[] =
     { "HalPerformanceCounter",              Test_HalPerformanceCounter },
 #if defined(_M_IX86) || defined(_M_AMD64)
     { "HalPortIo",                          Test_HalPortIo },
+    { "HalRealTimeClock",                   Test_HalRealTimeClock },
 #endif
     { "HalSystemInfo",                      Test_HalSystemInfo },
     { "IoCreateFile",                       Test_IoCreateFile },
