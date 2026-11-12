@@ -20,6 +20,12 @@
  * sized for: a small request ahead takes a page of a large request's growth.
  * Once the pool has grown, every waiting request must be served all the same;
  * none may be left waiting for registers some other adapter will never free.
+ *
+ * The map register table the pool lives in has a fixed size, and every growth
+ * takes slots of it for good. Growing by one page for every one-register
+ * request that waits must not use the table up long before the pool reaches
+ * its size: a pool of small long-lived grants (a NIC's transmit ring) has to
+ * keep growing, or the next request waits for a free that may never come.
  */
 
 #include <kmt_test.h>
@@ -497,6 +503,141 @@ TestGrowthOutOfOrder(VOID)
     return Ok;
 }
 
+/*
+ * Hold one-register grants, one request at a time, until 12 MB of map
+ * buffers are held: three quarters of the 4096 entry map register table.
+ * Nobody frees anything, so every request the pool cannot serve waits for a
+ * growth. The grants are kept past the adapter channel
+ * (DeallocateObjectKeepRegisters), the way a NIC holds the registers of its
+ * transmit ring, so one adapter does for all of them.
+ *
+ * Every grant is followed by a contiguous page allocation of our own, in the
+ * range the map buffers come from, as other drivers' common buffers are on a
+ * running system: the next growth then does not continue the previous one
+ * physically, and the map register table spends a placeholder slot on it.
+ */
+#define CAPACITY_GRANTS 3072
+
+typedef struct _CAPACITY
+{
+    KEVENT Granted;
+    PVOID Base;
+} CAPACITY, *PCAPACITY;
+
+static PVOID CapacityBases[CAPACITY_GRANTS];
+static PVOID CapacitySpacers[CAPACITY_GRANTS];
+static CAPACITY Capacity;  /* the routine may still run after a failed test returns */
+
+static
+IO_ALLOCATION_ACTION
+NTAPI
+CapacityRoutine(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp,
+    _In_ PVOID MapRegisterBase,
+    _In_ PVOID Context)
+{
+    PCAPACITY Capacity = Context;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(Irp);
+
+    Capacity->Base = MapRegisterBase;
+    KeSetEvent(&Capacity->Granted, IO_NO_INCREMENT, FALSE);
+    return DeallocateObjectKeepRegisters;
+}
+
+static
+BOOLEAN
+TestGrowthCapacity(VOID)
+{
+    PDMA_ADAPTER Adapter;
+    PDEVICE_OBJECT DeviceObject;
+    LARGE_INTEGER Timeout;
+    NTSTATUS Status;
+    KIRQL OldIrql;
+    ULONG Held, i;
+    BOOLEAN Waiting = FALSE;
+
+    Adapter = GetAdapter(PAGE_SIZE / 2);
+    if (!Adapter)
+    {
+        skip(FALSE, "No adapter\n");
+        return TRUE;
+    }
+    Status = IoCreateDevice(KmtDriverObject, 0, NULL, FILE_DEVICE_UNKNOWN, 0, FALSE, &DeviceObject);
+    if (!NT_SUCCESS(Status))
+    {
+        skip(FALSE, "No device object\n");
+        Adapter->DmaOperations->PutDmaAdapter(Adapter);
+        return TRUE;
+    }
+    KeInitializeEvent(&Capacity.Granted, NotificationEvent, FALSE);
+
+    for (Held = 0; Held < CAPACITY_GRANTS; Held++)
+    {
+        KeClearEvent(&Capacity.Granted);
+        KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+        Status = Adapter->DmaOperations->AllocateAdapterChannel(Adapter, DeviceObject, 1,
+                                                                CapacityRoutine, &Capacity);
+        KeLowerIrql(OldIrql);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        Timeout.QuadPart = -10 * 1000 * 10000LL;    /* 10 s */
+        Status = KeWaitForSingleObject(&Capacity.Granted, Executive, KernelMode, FALSE, &Timeout);
+        if (Status != STATUS_SUCCESS)
+        {
+            Waiting = TRUE;
+            break;
+        }
+        CapacityBases[Held] = Capacity.Base;
+
+        {
+            PHYSICAL_ADDRESS Lowest, Highest, Boundary;
+
+            Lowest.QuadPart = 0x1000000;
+            Highest.QuadPart = 0xFFFFFFFF;
+            Boundary.QuadPart = 0;
+            CapacitySpacers[Held] = MmAllocateContiguousMemorySpecifyCache(PAGE_SIZE, Lowest, Highest,
+                                                                           Boundary, MmNonCached);
+        }
+    }
+    ok(Held == CAPACITY_GRANTS,
+       "Request %lu still waits for map registers with %lu pages held: the pool stopped growing\n",
+       Held + 1, Held);
+    trace("%lu one-register grants held\n", Held);
+
+    /* Give everything back; freeing serves the request that still waits */
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+    for (i = 0; i < Held; i++)
+        Adapter->DmaOperations->FreeMapRegisters(Adapter, CapacityBases[i], 1);
+    KeLowerIrql(OldIrql);
+    if (Waiting)
+    {
+        Timeout.QuadPart = -10 * 1000 * 10000LL;
+        Status = KeWaitForSingleObject(&Capacity.Granted, Executive, KernelMode, FALSE, &Timeout);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (Status != STATUS_SUCCESS)
+            return FALSE;   /* It would call back into a freed device object */
+        KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+        Adapter->DmaOperations->FreeMapRegisters(Adapter, Capacity.Base, 1);
+        KeLowerIrql(OldIrql);
+    }
+
+    for (i = 0; i < Held; i++)
+    {
+        if (CapacitySpacers[i])
+            MmFreeContiguousMemorySpecifyCache(CapacitySpacers[i], PAGE_SIZE, MmNonCached);
+        CapacitySpacers[i] = NULL;
+    }
+
+    IoDeleteDevice(DeviceObject);
+    Adapter->DmaOperations->PutDmaAdapter(Adapter);
+    return TRUE;
+}
+
 START_TEST(HalAdapterChannel)
 {
     PDMA_ADAPTER Shared;
@@ -620,7 +761,7 @@ START_TEST(HalAdapterChannel)
         trace("Leaking the adapters, %lu requests still wait\n", Pending);
         return;
     }
-    if (!TestGrowthOutOfOrder())
+    if (!TestGrowthOutOfOrder() || !TestGrowthCapacity())
     {
         /* Requests still queued would call back into freed objects */
         trace("Leaking the adapters, requests still wait\n");
