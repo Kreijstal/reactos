@@ -57,6 +57,7 @@ list(APPEND SOURCE
     TunnelCache.c
     UEFIFirmware.c
     UsbConcurrentDevices.c
+    UsbDiskQueue.c
     WideCharToMultiByte.c
     WriteFile.c
 )

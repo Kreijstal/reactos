@@ -337,6 +337,10 @@ USBSTOR_QueueNextRequest(
     IN PDEVICE_OBJECT DeviceObject);
 
 VOID
+USBSTOR_QueueStartListHead(
+    IN PDEVICE_OBJECT DeviceObject);
+
+VOID
 USBSTOR_QueueTerminateRequest(
     IN PDEVICE_OBJECT DeviceObject,
     IN PIRP Irp);

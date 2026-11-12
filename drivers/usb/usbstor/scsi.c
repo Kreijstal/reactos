@@ -241,12 +241,12 @@ USBSTOR_CSWCompletionRoutine(
 
         /*
          * Read ActiveSrb once.  It is written under IrpListLock by
-         * USBSTOR_QueueTerminateRequest and by USBSTOR_StartIo's reset-parking
-         * path, either of which can run while this completion is in flight, so
-         * re-reading it per statement can observe a different value each time.
+         * USBSTOR_QueueTerminateRequest, which can run while this completion
+         * is in flight, so re-reading it per statement can observe a different
+         * value each time.
          *
-         * A NULL here means the original request was terminated or parked
-         * underneath us.  That is NOT the "a sense request was sent" case the
+         * A NULL here means the original request was terminated underneath
+         * us.  That is NOT the "a sense request was sent" case the
          * test below is looking for -- it merely also satisfies
          * "Request != ActiveSrb", and the branch then dereferenced the NULL.
          * Observed on the ASUS X550DP as a 0xc0000005 write to
@@ -325,9 +325,12 @@ ResetRecovery:
     Request->SrbStatus = Context->WatchdogTimedOut ?
                          SRB_STATUS_TIMEOUT : SRB_STATUS_BUS_RESET;
 
-    USBSTOR_QueueTerminateRequest(PDODeviceExtension->LowerDeviceObject, Irp);
+    /* Raise DEVICE_RESETTING before ActiveSrb is released, so that no other
+     * request can be claimed and started into the reset; the reset work item
+     * restarts the waiting requests when it is done. */
     if (!Context->WatchdogTimedOut)
         USBSTOR_QueueResetDevice(FDODeviceExtension);
+    USBSTOR_QueueTerminateRequest(PDODeviceExtension->LowerDeviceObject, Irp);
 
     /*
      * Release the started packet before the IRP is completed up the stack.
@@ -426,9 +429,11 @@ USBSTOR_DataCompletionRoutine(
         Request->SrbStatus = Context->WatchdogTimedOut ?
                              SRB_STATUS_TIMEOUT : SRB_STATUS_BUS_RESET;
 
-        USBSTOR_QueueTerminateRequest(PDODeviceExtension->LowerDeviceObject, Irp);
+        /* DEVICE_RESETTING before ActiveSrb is released; see
+         * USBSTOR_CBWCompletionRoutine. */
         if (!Context->WatchdogTimedOut)
             USBSTOR_QueueResetDevice(FDODeviceExtension);
+        USBSTOR_QueueTerminateRequest(PDODeviceExtension->LowerDeviceObject, Irp);
 
         /* Release the started packet, as in USBSTOR_CSWCompletionRoutine. */
         USBSTOR_QueueNextRequest(PDODeviceExtension->LowerDeviceObject);
@@ -565,9 +570,12 @@ ResetRecovery:
     Request->SrbStatus = Context->WatchdogTimedOut ?
                          SRB_STATUS_TIMEOUT : SRB_STATUS_BUS_RESET;
 
-    USBSTOR_QueueTerminateRequest(PDODeviceExtension->LowerDeviceObject, Irp);
+    /* Raise DEVICE_RESETTING before ActiveSrb is released, so that no other
+     * request can be claimed and started into the reset; the reset work item
+     * restarts the waiting requests when it is done. */
     if (!Context->WatchdogTimedOut)
         USBSTOR_QueueResetDevice(FDODeviceExtension);
+    USBSTOR_QueueTerminateRequest(PDODeviceExtension->LowerDeviceObject, Irp);
 
     /* Release the started packet, as in USBSTOR_CSWCompletionRoutine. */
     USBSTOR_QueueNextRequest(PDODeviceExtension->LowerDeviceObject);
