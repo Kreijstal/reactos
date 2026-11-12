@@ -91,6 +91,9 @@ BOOL HCR_GetFolderAttributes(LPCITEMIDLIST pidlFolder, LPDWORD dwAttributes) DEC
 HRESULT SHELL32_AssocGetFSDirectoryDescription(PWSTR Buf, UINT cchBuf);
 HRESULT SHELL32_AssocGetFileDescription(PCWSTR Name, PWSTR Buf, UINT cchBuf);
 
+/* shellpath.c: special folder pidl cache, flushed by SHFlushSFCache */
+void SHELL_FlushSpecialFolderCache(void);
+
 DWORD WINAPI ParseFieldA(LPCSTR src, DWORD nField, LPSTR dst, DWORD len) DECLSPEC_HIDDEN;
 DWORD WINAPI ParseFieldW(LPCWSTR src, DWORD nField, LPWSTR dst, DWORD len) DECLSPEC_HIDDEN;
 

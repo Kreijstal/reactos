@@ -2870,11 +2870,13 @@ BOOL WINAPI LinkWindow_UnregisterClass(DWORD dwUnused)
  * Notifies the shell that a user-specified special folder location has changed.
  *
  * NOTES
- *   In Wine, the shell folder registry values are not cached, so this function
- *   has no effect.
+ *   Drops the per-process special folder pidl cache (see SHGetFolderLocation).
  */
 void WINAPI SHFlushSFCache(void)
 {
+#ifdef __REACTOS__
+    SHELL_FlushSpecialFolderCache();
+#endif
 }
 
 /*************************************************************************

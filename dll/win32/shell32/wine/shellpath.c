@@ -4442,6 +4442,66 @@ BOOL WINAPI SHGetSpecialFolderPathAW (
 	return SHGetSpecialFolderPathA (hwndOwner, szPath, nFolder, bCreate);
 }
 
+#ifdef __REACTOS__
+/* Per-process cache of special folder pidls, as Windows keeps one: resolving
+ * a folder means reading the registry and parsing its path level by level,
+ * and alias translation (SHParseDisplayName) asks for four of them on every
+ * parse. SHFlushSFCache drops it when a folder location changes. */
+static LPITEMIDLIST g_apidlSpecialFolders[2][CSIDL_FOLDER_MASK + 1];
+
+static LPITEMIDLIST *SHELL_SpecialFolderCacheSlot(int nFolder, HANDLE hToken)
+{
+    if (hToken || (nFolder & ~(CSIDL_FOLDER_MASK | CSIDL_FLAG_NO_ALIAS)))
+        return NULL; /* other users, CSIDL_FLAG_CREATE etc. are not cached */
+    return &g_apidlSpecialFolders[(nFolder & CSIDL_FLAG_NO_ALIAS) ? 1 : 0][nFolder & CSIDL_FOLDER_MASK];
+}
+
+void SHELL_FlushSpecialFolderCache(void)
+{
+    UINT i, j;
+    for (i = 0; i < 2; ++i)
+    {
+        for (j = 0; j <= CSIDL_FOLDER_MASK; ++j)
+        {
+            LPITEMIDLIST pidl = InterlockedExchangePointer((PVOID *)&g_apidlSpecialFolders[i][j], NULL);
+            ILFree(pidl);
+        }
+    }
+}
+
+static HRESULT SHGetFolderLocationUncached(HWND hwndOwner, int nFolder, HANDLE hToken, DWORD dwReserved, LPITEMIDLIST *ppidl);
+
+HRESULT WINAPI SHGetFolderLocation(
+	HWND hwndOwner,
+	int nFolder,
+	HANDLE hToken,
+	DWORD dwReserved,
+	LPITEMIDLIST *ppidl)
+{
+    LPITEMIDLIST *pSlot, pidlCached;
+    HRESULT hr;
+
+    if (!ppidl || dwReserved)
+        return E_INVALIDARG;
+
+    pSlot = SHELL_SpecialFolderCacheSlot(nFolder, hToken);
+    if (pSlot && (pidlCached = *pSlot) != NULL)
+    {
+        *ppidl = ILClone(pidlCached);
+        return *ppidl ? S_OK : E_OUTOFMEMORY;
+    }
+
+    hr = SHGetFolderLocationUncached(hwndOwner, nFolder, hToken, dwReserved, ppidl);
+    if (hr == S_OK && pSlot && *ppidl)
+    {
+        LPITEMIDLIST pidlNew = ILClone(*ppidl);
+        if (pidlNew && InterlockedCompareExchangePointer((PVOID *)pSlot, pidlNew, NULL) != NULL)
+            ILFree(pidlNew);
+    }
+    return hr;
+}
+#endif
+
 /*************************************************************************
  * SHGetFolderLocation [SHELL32.@]
  *
@@ -4464,7 +4524,11 @@ BOOL WINAPI SHGetSpecialFolderPathAW (
  *  Mostly forwards to SHGetFolderPathW, but a few values of nFolder return
  *  virtual folders that are handled here.
  */
+#ifdef __REACTOS__
+static HRESULT SHGetFolderLocationUncached(
+#else
 HRESULT WINAPI SHGetFolderLocation(
+#endif
 	HWND hwndOwner,
 	int nFolder,
 	HANDLE hToken,
