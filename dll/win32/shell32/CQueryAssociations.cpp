@@ -144,7 +144,20 @@ static HRESULT SHELL32_AssocGetExtensionDescription(PCWSTR DotExt, PWSTR Buf, UI
 
 EXTERN_C HRESULT SHELL32_AssocGetFileDescription(PCWSTR Name, PWSTR Buf, UINT cchBuf)
 {
-    return SHELL32_AssocGetExtensionDescription(PathFindExtensionW(Name), Buf, cchBuf);
+    /* The type name only depends on the file class: cache it per extension */
+    struct { HRESULT hr; WCHAR szName[MAX_PATH]; } Entry;
+    PCWSTR pszExt = PathFindExtensionW(Name);
+    if (!*pszExt)
+        return SHELL32_AssocGetExtensionDescription(pszExt, Buf, cchBuf);
+    if (!SHELL32_LookupFileClass(FILECLASS_TYPENAME, pszExt, &Entry, sizeof(Entry)))
+    {
+        Entry.szName[0] = UNICODE_NULL;
+        Entry.hr = SHELL32_AssocGetExtensionDescription(pszExt, Entry.szName, _countof(Entry.szName));
+        SHELL32_StoreFileClass(FILECLASS_TYPENAME, pszExt, &Entry, sizeof(Entry));
+    }
+    if (FAILED(Entry.hr))
+        return Entry.hr;
+    return StringCchCopyW(Buf, cchBuf, Entry.szName);
 }
 
 struct ClassesRegKey : CQueryAssociations::RegKeyRef

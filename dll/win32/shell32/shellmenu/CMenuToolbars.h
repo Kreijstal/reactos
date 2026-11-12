@@ -179,6 +179,12 @@ public:
     HRESULT SetShellFolder(IShellFolder *psf, LPCITEMIDLIST pidlFolder, HKEY hKey, DWORD dwFlags);
     HRESULT GetShellFolder(DWORD *pdwFlags, LPITEMIDLIST *ppidl, REFIID riid, void **ppv);
 
+private:
+    static void CALLBACK s_IconCallback(LPCITEMIDLIST pidl, LPVOID pvData, LPVOID pvHint, INT iIconIndex, INT iOpenIconIndex);
+    static INT GetFolderPlaceholderIcon();
+
+public:
+
     virtual HRESULT FillToolbar(BOOL clearFirst=FALSE) override;
 
 protected:

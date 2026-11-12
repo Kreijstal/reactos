@@ -204,6 +204,8 @@ public:
 
     HRESULT AdjustForTheme(BOOL bFlatStyle);
 
+    IShellTaskScheduler * GetScheduler();
+
     BOOL UseBigIcons()
     {
         return m_useBigIcons;

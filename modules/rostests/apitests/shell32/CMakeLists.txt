@@ -58,8 +58,10 @@ list(APPEND SOURCE
     ShellState.cpp
     SHGetAttributesFromDataObject.cpp
     SHGetUserDisplayName.cpp
+    SHMapIDListToImageListIndexAsync.cpp
     SHLimitInputEdit.cpp
     SHSetUnreadMailCountW.cpp
+    SystemImageList.cpp
     StrRStr.cpp
     menu.cpp
     shelltest.cpp)

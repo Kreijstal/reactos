@@ -1063,6 +1063,11 @@ HRESULT CMenuBand::_CancelCurrentPopup()
     return S_FALSE;
 }
 
+IShellTaskScheduler * CMenuBand::GetScheduler()
+{
+    return m_focusManager ? m_focusManager->GetScheduler() : NULL;
+}
+
 HRESULT CMenuBand::_OnPopupSubMenu(IShellMenu * childShellMenu, POINTL * pAt, RECTL * pExclude, BOOL keyInitiated)
 {
     HRESULT hr = 0;

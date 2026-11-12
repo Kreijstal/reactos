@@ -18,7 +18,8 @@ class CFSFolder :
     public IPersistFolder3,
     public IContextMenuCB,
     public IShellFolderViewCB,
-    public IItemNameLimits
+    public IItemNameLimits,
+    public IShellIcon
 {
     private:
         const CLSID *m_pclsid;
@@ -103,6 +104,9 @@ class CFSFolder :
             return S_OK;
         }
 
+        // IShellIcon
+        STDMETHOD(GetIconOf)(PCUITEMID_CHILD pidl, UINT flags, int *pIconIndex) override;
+
     DECLARE_REGISTRY_RESOURCEID(IDR_SHELLFSFOLDER)
     DECLARE_NOT_AGGREGATABLE(CFSFolder)
 
@@ -117,6 +121,7 @@ class CFSFolder :
         COM_INTERFACE_ENTRY_IID(IID_IPersist, IPersist)
         COM_INTERFACE_ENTRY_IID(IID_IShellFolderViewCB, IShellFolderViewCB)
         COM_INTERFACE_ENTRY_IID(IID_IItemNameLimits, IItemNameLimits)
+        COM_INTERFACE_ENTRY_IID(IID_IShellIcon, IShellIcon)
     END_COM_MAP()
 
     protected:

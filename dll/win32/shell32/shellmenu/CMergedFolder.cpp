@@ -50,7 +50,17 @@ private:
     UINT m_hDsaIndex;
     UINT m_hDsaCount;
 
+    /* The list is rebuilt by an enumeration on one thread while a menu's
+     * background icon task looks items up in it on another */
+    CRITICAL_SECTION m_Lock;
+
+    HRESULT BeginLocked(HWND hwndOwner, SHCONTF flags);
+    HRESULT NextLocked(ULONG celt, LPITEMIDLIST *rgelt, ULONG *pceltFetched);
+
 public:
+    void Lock() { EnterCriticalSection(&m_Lock); }
+    void Unlock() { LeaveCriticalSection(&m_Lock); }
+
     CEnumMergedFolder();
     virtual ~CEnumMergedFolder();
 
@@ -89,11 +99,13 @@ CEnumMergedFolder::CEnumMergedFolder() :
     m_hDsaIndex(0),
     m_hDsaCount(0)
 {
+    InitializeCriticalSection(&m_Lock);
 }
 
 CEnumMergedFolder::~CEnumMergedFolder()
 {
     DSA_DestroyCallback(m_hDsa, s_DsaDeleteCallback, this);
+    DeleteCriticalSection(&m_Lock);
 }
 
 int  CEnumMergedFolder::DsaDeleteCallback(LocalPidlInfo * info)
@@ -122,6 +134,16 @@ HRESULT CEnumMergedFolder::SetSources(IShellFolder * userLocal, IShellFolder * a
 }
 
 HRESULT CEnumMergedFolder::Begin(HWND hwndOwner, SHCONTF flags)
+{
+    HRESULT hr;
+
+    Lock();
+    hr = BeginLocked(hwndOwner, flags);
+    Unlock();
+    return hr;
+}
+
+HRESULT CEnumMergedFolder::BeginLocked(HWND hwndOwner, SHCONTF flags)
 {
     HRESULT hr;
     LPITEMIDLIST pidl = NULL;
@@ -329,6 +351,19 @@ HRESULT STDMETHODCALLTYPE CEnumMergedFolder::Next(
     LPITEMIDLIST *rgelt,
     ULONG *pceltFetched)
 {
+    HRESULT hr;
+
+    Lock();
+    hr = NextLocked(celt, rgelt, pceltFetched);
+    Unlock();
+    return hr;
+}
+
+HRESULT CEnumMergedFolder::NextLocked(
+    ULONG celt,
+    LPITEMIDLIST *rgelt,
+    ULONG *pceltFetched)
+{
     if (pceltFetched)
         *pceltFetched = 0;
 
@@ -400,6 +435,15 @@ CMergedFolder::~CMergedFolder()
 }
 
 // IAugmentedShellFolder2
+/* Holds the merged list while an item found in it is used */
+class CMergedListLock
+{
+    CEnumMergedFolder *m_Enum;
+public:
+    CMergedListLock(CEnumMergedFolder *pEnum) : m_Enum(pEnum) { m_Enum->Lock(); }
+    ~CMergedListLock() { m_Enum->Unlock(); }
+};
+
 HRESULT STDMETHODCALLTYPE CMergedFolder::AddNameSpace(LPGUID lpGuid, IShellFolder * psf, LPCITEMIDLIST pcidl, ULONG dwUnknown)
 {
     if (lpGuid)
@@ -462,6 +506,7 @@ HRESULT STDMETHODCALLTYPE CMergedFolder::ParseDisplayName(
     LPITEMIDLIST *ppidl,
     ULONG *pdwAttributes)
 {
+    CMergedListLock listLock(m_EnumSource);
     HRESULT hr;
     LocalPidlInfo info;
 
@@ -511,6 +556,7 @@ HRESULT STDMETHODCALLTYPE CMergedFolder::BindToObject(
     REFIID riid,
     void **ppvOut)
 {
+    CMergedListLock listLock(m_EnumSource);
     LocalPidlInfo info;
     HRESULT hr;
 
@@ -592,6 +638,7 @@ HRESULT STDMETHODCALLTYPE CMergedFolder::GetAttributesOf(
     PCUITEMID_CHILD_ARRAY apidl,
     SFGAOF *rgfInOut)
 {
+    CMergedListLock listLock(m_EnumSource);
     LocalPidlInfo info;
     HRESULT hr;
 
@@ -626,6 +673,7 @@ HRESULT STDMETHODCALLTYPE CMergedFolder::GetUIObjectOf(
     UINT *prgfInOut,
     void **ppvOut)
 {
+    CMergedListLock listLock(m_EnumSource);
     LocalPidlInfo info;
     HRESULT hr;
 
@@ -662,6 +710,7 @@ HRESULT STDMETHODCALLTYPE CMergedFolder::GetDisplayNameOf(
     SHGDNF uFlags,
     STRRET *lpName)
 {
+    CMergedListLock listLock(m_EnumSource);
     LocalPidlInfo info;
     HRESULT hr;
 
@@ -748,6 +797,7 @@ HRESULT STDMETHODCALLTYPE CMergedFolder::GetDetailsEx(
     const SHCOLUMNID *pscid,
     VARIANT *pv)
 {
+    CMergedListLock listLock(m_EnumSource);
     LocalPidlInfo info;
     HRESULT hr;
 
@@ -773,6 +823,7 @@ HRESULT STDMETHODCALLTYPE CMergedFolder::GetDetailsOf(
     UINT iColumn,
     SHELLDETAILS *psd)
 {
+    CMergedListLock listLock(m_EnumSource);
     LocalPidlInfo info;
     HRESULT hr;
 
@@ -807,6 +858,22 @@ HRESULT STDMETHODCALLTYPE CMergedFolder::QueryNameSpace2(ULONG, QUERYNAMESPACEIN
 {
     UNIMPLEMENTED;
     return E_NOTIMPL;
+}
+
+/* The icon the folder the item comes from has for it without extracting one */
+HRESULT STDMETHODCALLTYPE CMergedFolder::GetIconOf(PCUITEMID_CHILD pidl, UINT flags, int *pIconIndex)
+{
+    CMergedListLock listLock(m_EnumSource);
+    CComPtr<IShellIcon> psi;
+    LocalPidlInfo info;
+    HRESULT hr;
+
+    hr = m_EnumSource->FindPidlInList(NULL, pidl, &info);
+    if (FAILED(hr))
+        return S_FALSE;
+    if (FAILED(info.parent->QueryInterface(IID_PPV_ARG(IShellIcon, &psi))))
+        return S_FALSE;
+    return psi->GetIconOf(info.pidl, flags, pIconIndex);
 }
 
 extern "C"

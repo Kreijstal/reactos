@@ -117,6 +117,19 @@ CMenuFocusManager * CMenuFocusManager::AcquireManager()
     return obj;
 }
 
+IShellTaskScheduler * CMenuFocusManager::GetScheduler()
+{
+    if (!m_scheduler)
+    {
+        if (FAILED(CoCreateInstance(CLSID_ShellTaskScheduler, NULL, CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARG(IShellTaskScheduler, &m_scheduler))))
+        {
+            m_scheduler = NULL;
+        }
+    }
+    return m_scheduler;
+}
+
 // Releases a previously acquired manager, and deletes it if the refcount reaches 0
 void CMenuFocusManager::ReleaseManager(CMenuFocusManager * obj)
 {
