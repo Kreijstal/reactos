@@ -1207,8 +1207,15 @@ IntEngMaskBlt(
         rcDest = *prclDest;
     }
 
-    /* Check if the target surface is device managed */
-    if (psoDest->iType != STYPE_BITMAP)
+    /*
+     * Blend on a temporary copy when the target is device managed, or when
+     * its driver hooked DrvBitBlt (e.g. cdd, which presents every rectangle
+     * GDI draws).  The result then reaches the target through the driver,
+     * as the anti-aliased glyphs of text would through DrvTextOut on
+     * Windows; drawn straight into the bits the driver never learns of it.
+     */
+    if (psoDest->iType != STYPE_BITMAP ||
+        (CONTAINING_RECORD(psoDest, SURFACE, SurfObj)->flags & HOOK_BITBLT))
     {
         rcTemp.left = 0;
         rcTemp.top = 0;
@@ -1251,7 +1258,22 @@ IntEngMaskBlt(
                                 pptlBrushOrg);
         }
 
-        if (ret)
+        if (ret && psoDest->iType == STYPE_BITMAP)
+        {
+            /* Copy the result back through the driver's DrvBitBlt */
+            ret = IntEngBitBlt(psoDest,
+                               &psurfTemp->SurfObj,
+                               NULL,
+                               pco,
+                               NULL,
+                               &rcDest,
+                               (PPOINTL)&rcTemp,
+                               NULL,
+                               NULL,
+                               NULL,
+                               ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
+        }
+        else if (ret)
         {
             /* Copy the result back to the dest surface */
             ret = EngCopyBits(psoDest,
