@@ -66,12 +66,19 @@ MiniportSend(
 
     if (Adapter->TxFull)
     {
+        /* Full means every descriptor still carries an unacknowledged packet.
+         * (NDIS serializes MiniportSend against MiniportHandleInterrupt;
+         * otherwise an ack racing the TDT write leaves TxFull set on an
+         * empty ring, and with no transmit left to interrupt, forever.) */
+        ASSERT(Adapter->CurrentTxDesc == Adapter->LastTxDesc);
+        ASSERT(Adapter->TransmitPackets[Adapter->LastTxDesc] != NULL);
         NDIS_DbgPrint(MIN_TRACE, ("All TX descriptors are full\n"));
         return NDIS_STATUS_RESOURCES;
     }
 
     TransmitLength = sgList->Elements[0].Length;
     TransmitBuffer = sgList->Elements[0].Address;
+    ASSERT(Adapter->TransmitPackets[Adapter->CurrentTxDesc] == NULL);
     Adapter->TransmitPackets[Adapter->CurrentTxDesc] = Packet;
 
     Status = NICTransmitPacket(Adapter, TransmitBuffer, TransmitLength);
