@@ -3,6 +3,7 @@ list(APPEND SOURCE
     ../include/msgtrace.c
     button.c
     imagelist.c
+    ImageListThreads.c
     propsheet.c
     testlist.c
     toolbar.c
@@ -12,7 +13,7 @@ add_executable(comctl32_apitest
     ${SOURCE}
     comctl32_apitest.rc)
 
-target_link_libraries(comctl32_apitest wine)
+target_link_libraries(comctl32_apitest wine uuid)
 set_module_type(comctl32_apitest win32cui)
 add_importlibs(comctl32_apitest uxtheme comctl32 user32 gdi32 version msvcrt kernel32 ntdll)
 add_rostests_file(TARGET comctl32_apitest)
