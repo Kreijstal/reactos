@@ -12,6 +12,7 @@ extern void func_SetupDiDeviceProperty(void);
 extern void func_SetupDiGetActualModelsSection(void);
 extern void func_SetupDiInstallClassExA(void);
 extern void func_SetupInstallServicesFromInfSectionEx(void);
+extern void func_StorageControllers(void);
 extern void func_SwDevice(void);
 
 const struct test winetest_testlist[] =
@@ -26,6 +27,7 @@ const struct test winetest_testlist[] =
     { "SetupDiGetActualModelsSection", func_SetupDiGetActualModelsSection },
     { "SetupDiInstallClassExA", func_SetupDiInstallClassExA },
     { "SetupInstallServicesFromInfSectionEx", func_SetupInstallServicesFromInfSectionEx },
+    { "StorageControllers", func_StorageControllers },
     { "SwDevice", func_SwDevice },
     { 0, 0 }
 };
