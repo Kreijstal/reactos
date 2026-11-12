@@ -214,8 +214,18 @@ MountMgrTargetDeviceNotification(IN PVOID NotificationStructure,
     DeviceExtension = DeviceInformation->DeviceExtension;
     Notification = NotificationStructure;
 
-    /* The notification have to be unregistered already (in device interface change handler) */
-    ASSERT(!IsEqualGUID(&Notification->Event, &GUID_TARGET_DEVICE_REMOVE_COMPLETE));
+    /*
+     * The volume is gone. Device interface removal is delivered
+     * asynchronously and may come later (or after an arrival of the same
+     * name): handle the removal now, like Windows does. It frees
+     * DeviceInformation (and unregisters this notification), so it must
+     * not be touched afterwards.
+     */
+    if (IsEqualGUID(&Notification->Event, &GUID_TARGET_DEVICE_REMOVE_COMPLETE))
+    {
+        MountMgrMountedDeviceRemoval(DeviceExtension, &DeviceInformation->SymbolicName);
+        return STATUS_SUCCESS;
+    }
 
     /* It it's to signal that a volume has been mounted
      * Verify if a database sync is required and execute it
