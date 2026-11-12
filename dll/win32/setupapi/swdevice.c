@@ -21,9 +21,6 @@
 #include <initguid.h>
 #include <devpkey.h>
 
-#define NDEBUG
-#include <debug.h>
-
 #define SW_DEVICE_MAGIC 0x53774456 /* "SwDV" */
 
 typedef struct _SW_DEVICE

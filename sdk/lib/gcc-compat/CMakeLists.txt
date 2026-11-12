@@ -38,3 +38,31 @@ if(ARCH STREQUAL "amd64")
     add_library(fenv_compat fenv_compat.c)
     add_dependencies(fenv_compat xdk)
 endif()
+
+if(ARCH STREQUAL "i386" AND _winpthread_syms MATCHES " U _?fegetenv")
+    # Keep MinGW's C99 implementation, but use ReactOS's CRT reset routine.
+    # CRT_fp*.o bundles its default environment with a conflicting _fpreset.
+    execute_process(COMMAND ${CMAKE_AR} t "${LIBMINGWEX_LOCATION}"
+        OUTPUT_VARIABLE _mingwex_members RESULT_VARIABLE _mingwex_status)
+    if(NOT _mingwex_status EQUAL 0)
+        message(FATAL_ERROR "Could not read MinGW's C99 archive")
+    endif()
+    string(REPLACE "\r" "" _mingwex_members "${_mingwex_members}")
+    string(REPLACE "\n" ";" _mingwex_members "${_mingwex_members}")
+    list(FILTER _mingwex_members INCLUDE REGEX "(^|-)CRT_fp(4|8|10)[.]o$")
+    if(NOT _mingwex_members)
+        message(FATAL_ERROR "MinGW's C99 archive has no recognized CRT reset member")
+    endif()
+    add_library(mingw_fpreset_compat OBJECT mingw_fpreset_compat.c)
+    set(_reactos_mingwex "${CMAKE_CURRENT_BINARY_DIR}/libmingwex-reactos.a")
+    add_custom_command(OUTPUT "${_reactos_mingwex}"
+        COMMAND ${CMAKE_COMMAND} -E copy "${LIBMINGWEX_LOCATION}" "${_reactos_mingwex}"
+        COMMAND ${CMAKE_AR} d "${_reactos_mingwex}" ${_mingwex_members}
+        COMMAND ${CMAKE_AR} rs "${_reactos_mingwex}" $<TARGET_OBJECTS:mingw_fpreset_compat>
+        DEPENDS "${LIBMINGWEX_LOCATION}" mingw_fpreset_compat $<TARGET_OBJECTS:mingw_fpreset_compat>
+        COMMENT "Using ReactOS CRT defaults with the MinGW32 C99 library"
+        VERBATIM)
+    add_custom_target(mingwex-reactos DEPENDS "${_reactos_mingwex}")
+    set_target_properties(libmingwex PROPERTIES IMPORTED_LOCATION "${_reactos_mingwex}")
+    add_dependencies(libmingwex mingwex-reactos)
+endif()
