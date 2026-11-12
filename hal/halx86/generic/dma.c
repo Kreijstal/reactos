@@ -844,16 +844,6 @@ HalGetAdapter(IN PDEVICE_DESCRIPTION DeviceDescription,
          */
         MapRegisters = BYTES_TO_PAGES(MaximumLength) + 1;
         if (MapRegisters > 16) MapRegisters = 16;
-
-        /* INSTRUMENTATION: report the map-register clamp for busmaster adapters */
-        DPRINT1("HALDMA-ADP: MaxLen=0x%lx Master=%u SG=%u Dma64=%u Iface=%u -> MapRegisters=%lu%s\n",
-                MaximumLength,
-                DeviceDescription->Master,
-                DeviceDescription->ScatterGather,
-                DeviceDescription->Dma64BitAddresses,
-                DeviceDescription->InterfaceType,
-                MapRegisters,
-                ((BYTES_TO_PAGES(MaximumLength) + 1) > 16) ? " (CLAMPED@16)" : "");
     }
 
     /*
@@ -2157,12 +2147,6 @@ IoFreeMapRegisters(IN PADAPTER_OBJECT AdapterObject,
     KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
 }
 
-/* --- INSTRUMENTATION: ASUS USB-read DMA corruption hunt (temporary) --- */
-static LONG HalpDbgHiReadEvents = 0;   /* device-reads bouncing a >4GB run */
-static LONG HalpDbgReadFlushes = 0;    /* per-run read flushes seen */
-static LONG HalpDbgOverrunEvents = 0;  /* map-register array overruns caught */
-/* --- end instrumentation --- */
-
 /**
  * @name HalpMapTransferChunkLength
  *
@@ -2433,24 +2417,12 @@ IoFlushAdapterBuffers(IN PADAPTER_OBJECT AdapterObject,
                               CurrentVa,
                               Length,
                               FALSE);
-
-            /* INSTRUMENTATION: does the SW_SG (whole-buffer) path handle reads? */
-            {
-                static LONG DbgSgReads = 0;
-                LONG n = InterlockedIncrement(&DbgSgReads);
-                if (n <= 8 || (n % 512) == 0)
-                    DPRINT1("HALDMA-RDSG[%d]: SW_SG whole-buffer read VA=%p len=0x%lx\n",
-                            n, CurrentVa, Length);
-            }
         }
         else
         {
             ULONG_PTR ChunkVa = (ULONG_PTR)CurrentVa;
             ULONG Remaining = Length;
             ULONG MapRegister = 0;
-            /* INSTRUMENTATION tallies for this transfer */
-            ULONG DbgRuns = 0, DbgBounced = 0, DbgHi = 0;
-            ULONGLONG DbgMaxPA = 0;
 
             /*
              * IoMapTransfer decides for every physically contiguous run of the
@@ -2502,17 +2474,9 @@ IoFlushAdapterBuffers(IN PADAPTER_OBJECT AdapterObject,
 
                 PhysicalAddress = HalpMdlPhysicalAddress(Mdl, (PVOID)ChunkVa);
 
-                DbgRuns++;
                 if ((PhysicalAddress.QuadPart + ChunkLength) >
                     HighestAcceptableAddress.QuadPart)
                 {
-                    DbgBounced++;
-                    if (PhysicalAddress.QuadPart >= 0x100000000ULL)
-                    {
-                        DbgHi++;
-                        if (PhysicalAddress.QuadPart > DbgMaxPA) DbgMaxPA = PhysicalAddress.QuadPart;
-                    }
-
                     HalpCopyBufferMap(Mdl,
                                       RealMapRegisterBase + MapRegister,
                                       (PVOID)ChunkVa,
@@ -2525,17 +2489,6 @@ IoFlushAdapterBuffers(IN PADAPTER_OBJECT AdapterObject,
                 MapRegister += BYTES_TO_PAGES(BYTE_OFFSET(ChunkVa) + ChunkLength);
                 ChunkVa += ChunkLength;
                 Remaining -= ChunkLength;
-            }
-
-            /* INSTRUMENTATION: high-PA bounces, rate-limited */
-            InterlockedIncrement(&HalpDbgReadFlushes);
-            if (DbgHi > 0)
-            {
-                LONG nh = InterlockedIncrement(&HalpDbgHiReadEvents);
-                if (nh <= 16 || (nh % 256) == 0)
-                    DPRINT1("HALDMA-RDHI[%d]: VA=%p len=0x%lx runs=%lu bounced=%lu hi(>4G)=%lu maxPA=0x%I64x limit=0x%I64x\n",
-                            nh, CurrentVa, Length, DbgRuns, DbgBounced, DbgHi,
-                            DbgMaxPA, HighestAcceptableAddress.QuadPart);
             }
         }
     }
@@ -2740,9 +2693,8 @@ IoMapTransfer(IN PADAPTER_OBJECT AdapterObject,
             if (!((ULONG_PTR)MapRegisterBase & MAP_BASE_SW_SG) &&
                 (RealMapRegisterBase[Counter].VirtualAddress == NULL))
             {
-                InterlockedIncrement(&HalpDbgOverrunEvents);
-                DPRINT1("HALDMA-OVR(map): Counter=%lu grant=%lu Base=%p has no buffer  <== unbacked map register\n",
-                        Counter, AdapterObject->NumberOfMapRegisters, RealMapRegisterBase);
+                DPRINT1("IoMapTransfer: map register %lu of the grant at %p has no buffer\n",
+                        Counter, RealMapRegisterBase);
                 ASSERT(FALSE);
                 *Length = 0;
                 PhysicalAddress.QuadPart = 0;
