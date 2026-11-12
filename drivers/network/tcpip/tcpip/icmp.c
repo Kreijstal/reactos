@@ -397,7 +397,9 @@ DispEchoRequest(
     ((PICMP_HEADER)Buffer)->Seq = InterlockedIncrement16(&IcmpSequence);
     memcpy(Buffer + sizeof(ICMP_HEADER), (PUCHAR)Request + Request->DataOffset, Request->DataSize);
     ((PICMP_HEADER)Buffer)->Checksum = IPv4Checksum(Buffer, RequestSize, 0);
-    SavedTtl = Request->Ttl;
+    /* Without options (IcmpSendEcho(..., RequestOptions = NULL, ...)) the
+     * echo goes out with the default TTL: Ttl is zero then */
+    SavedTtl = Request->HasOptions ? Request->Ttl : 128;
 
     RtlZeroMemory(Irp->AssociatedIrp.SystemBuffer, OutputBufferLength);
 
