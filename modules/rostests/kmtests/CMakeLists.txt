@@ -179,7 +179,8 @@ if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
         kmtest_drv/vm_detect.S)
     list(APPEND KMTEST_DRV_SOURCE
         ${KMTEST_DRV_ASM}
-        hal/HalPortIo.c)
+        hal/HalPortIo.c
+        hal/HalRealTimeClock.c)
 endif()
 
 add_library(kmtest_drv MODULE ${KMTEST_DRV_SOURCE})

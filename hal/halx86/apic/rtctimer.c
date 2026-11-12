@@ -172,8 +172,14 @@ HalpClockInterruptHandler(IN PKTRAP_FRAME TrapFrame)
         return;
     }
 
-    /* Read register C, so that the next interrupt can happen */
+    /* Read register C, so that the next interrupt can happen. The CMOS
+     * index/data port pair is shared with every other CMOS user, which may
+     * be in the middle of an access on another processor: take the CMOS
+     * lock like Windows (HalpRtcAcknowledgeInterrupt reads it through the
+     * locked CMOS accessor). */
+    HalpAcquireCmosSpinLock();
     HalpReadCmos(RTC_REGISTER_C);
+    HalpReleaseCmosSpinLock();
 
     /* Save increment */
     LastIncrement = HalpCurrentTimeIncrement;
