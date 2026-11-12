@@ -2127,8 +2127,17 @@ HalpRemainingMapRegisters(IN PADAPTER_OBJECT AdapterObject,
     ULONG Limit = MAXULONG;
     ULONG Offset;
 
-    /* Bound by the grant, when one is on record. */
-    if (AdapterObject->NumberOfMapRegisters != 0)
+    /*
+     * Bound by the grant, when one is on record -- but only for a slave
+     * adapter, which owns one channel and so one grant at a time.  A bus
+     * master can hold several HalAllocateAdapterChannel grants at once
+     * (usbport keeps one per outstanding transfer on a single adapter), and
+     * AdapterObject->NumberOfMapRegisters is whichever was granted last: a
+     * 16-register transfer flushed after a 1-register one was granted was cut
+     * off after one page, leaving the rest of its data in the map buffers.
+     * The master table bound below still keeps every access in range.
+     */
+    if (!AdapterObject->MasterDevice && AdapterObject->NumberOfMapRegisters != 0)
     {
         if (MapRegister >= AdapterObject->NumberOfMapRegisters) return 0;
         Limit = AdapterObject->NumberOfMapRegisters - MapRegister;
