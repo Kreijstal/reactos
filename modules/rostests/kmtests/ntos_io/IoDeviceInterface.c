@@ -247,6 +247,118 @@ Test_IoRegisterPlugPlayNotification(VOID)
     }
 }
 
+/* Device interface change notifications are delivered asynchronously,
+ * as Windows queues them to the PnP event queue (PnpSetDeviceClassChange):
+ * never from inside IoSetDeviceInterfaceState, whose caller may hold locks
+ * the notification callbacks need. */
+static const GUID GUID_KMTEST_ASYNC_INTERFACE = {0x5c2a8e1bL, 0x7d4f, 0x4c3e, {0x9a, 0x51, 0x6e, 0x0b, 0x1d, 0x2f, 0x83, 0x47}};
+static const GUID GUID_DISK_INTERFACE = {0x53f56307L, 0xb6bf, 0x11d0, {0x94, 0xf2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b}};
+static const GUID GUID_INTERFACE_ARRIVAL = {0xcb3a4004L, 0x46f0, 0x11d0, {0xb0, 0x8f, 0x00, 0x60, 0x97, 0x13, 0x05, 0x3f}};
+static const GUID GUID_INTERFACE_REMOVAL = {0xcb3a4005L, 0x46f0, 0x11d0, {0xb0, 0x8f, 0x00, 0x60, 0x97, 0x13, 0x05, 0x3f}};
+
+static KEVENT AsyncNotificationEvent;
+static PETHREAD AsyncNotificationThread;
+static GUID AsyncNotificationGuid;
+
+static DRIVER_NOTIFICATION_CALLBACK_ROUTINE AsyncNotificationCallback;
+static
+NTSTATUS
+NTAPI
+AsyncNotificationCallback(
+    _In_ PVOID NotificationStructure,
+    _Inout_opt_ PVOID Context)
+{
+    PDEVICE_INTERFACE_CHANGE_NOTIFICATION Notification = NotificationStructure;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    if (IsEqualGUID(&Notification->InterfaceClassGuid, &GUID_KMTEST_ASYNC_INTERFACE))
+    {
+        AsyncNotificationThread = PsGetCurrentThread();
+        AsyncNotificationGuid = Notification->Event;
+        KeSetEvent(&AsyncNotificationEvent, IO_NO_INCREMENT, FALSE);
+    }
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+Test_InterfaceChangeIsAsynchronous(VOID)
+{
+    NTSTATUS Status;
+    PZZWSTR SymbolicLinkList;
+    UNICODE_STRING DiskName, InterfaceName;
+    PFILE_OBJECT FileObject;
+    PDEVICE_OBJECT DeviceObject, Pdo;
+    PVOID NotificationEntry;
+    LARGE_INTEGER Timeout;
+
+    Status = IoGetDeviceInterfaces(&GUID_DISK_INTERFACE, NULL, 0, &SymbolicLinkList);
+    if (skip(NT_SUCCESS(Status) && SymbolicLinkList[0] != UNICODE_NULL, "No disk interface: 0x%lx\n", Status))
+    {
+        if (NT_SUCCESS(Status))
+            ExFreePool(SymbolicLinkList);
+        return;
+    }
+
+    /* Register a test interface on the first disk's PDO */
+    RtlInitUnicodeString(&DiskName, SymbolicLinkList);
+    Status = IoGetDeviceObjectPointer(&DiskName, FILE_READ_ATTRIBUTES, &FileObject, &DeviceObject);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ExFreePool(SymbolicLinkList);
+    if (skip(NT_SUCCESS(Status), "Cannot open the disk\n"))
+        return;
+    Pdo = IoGetDeviceAttachmentBaseRef(DeviceObject);
+    ObDereferenceObject(FileObject);
+
+    Status = IoRegisterDeviceInterface(Pdo, &GUID_KMTEST_ASYNC_INTERFACE, NULL, &InterfaceName);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (skip(NT_SUCCESS(Status), "Cannot register the interface\n"))
+    {
+        ObDereferenceObject(Pdo);
+        return;
+    }
+
+    KeInitializeEvent(&AsyncNotificationEvent, NotificationEvent, FALSE);
+    Status = IoRegisterPlugPlayNotification(EventCategoryDeviceInterfaceChange,
+                                            0,
+                                            (PVOID)&GUID_KMTEST_ASYNC_INTERFACE,
+                                            KmtDriverObject,
+                                            AsyncNotificationCallback,
+                                            NULL,
+                                            &NotificationEntry);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!skip(NT_SUCCESS(Status), "PlugPlayNotification not registered\n"))
+    {
+        Timeout.QuadPart = -5 * 1000 * 1000 * 10LL;
+
+        AsyncNotificationThread = NULL;
+        Status = IoSetDeviceInterfaceState(&InterfaceName, TRUE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Status = KeWaitForSingleObject(&AsyncNotificationEvent, Executive, KernelMode, FALSE, &Timeout);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok(AsyncNotificationThread != NULL && AsyncNotificationThread != PsGetCurrentThread(),
+           "Arrival delivered in the thread that enabled the interface\n");
+        ok(IsEqualGUID(&AsyncNotificationGuid, &GUID_INTERFACE_ARRIVAL), "Not an arrival\n");
+
+        KeClearEvent(&AsyncNotificationEvent);
+        AsyncNotificationThread = NULL;
+        Status = IoSetDeviceInterfaceState(&InterfaceName, FALSE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Status = KeWaitForSingleObject(&AsyncNotificationEvent, Executive, KernelMode, FALSE, &Timeout);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok(AsyncNotificationThread != NULL && AsyncNotificationThread != PsGetCurrentThread(),
+           "Removal delivered in the thread that disabled the interface\n");
+        ok(IsEqualGUID(&AsyncNotificationGuid, &GUID_INTERFACE_REMOVAL), "Not a removal\n");
+
+        Status = IoUnregisterPlugPlayNotification(NotificationEntry);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+    }
+
+    RtlFreeUnicodeString(&InterfaceName);
+    ObDereferenceObject(Pdo);
+}
+
 START_TEST(IoDeviceInterface)
 {
     size_t n;
@@ -259,4 +371,5 @@ START_TEST(IoDeviceInterface)
     Test_IoOpenDeviceInterfaceRegistryKey(NULL);
     Test_IoSetDeviceInterfaceState(NULL);
     Test_IoRegisterPlugPlayNotification();
+    Test_InterfaceChangeIsAsynchronous();
 }

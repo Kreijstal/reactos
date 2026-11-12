@@ -26,6 +26,30 @@ LIST_ENTRY PiNotifyHwProfileListHead;
 _Guarded_by_(PiNotifyDeviceInterfaceLock)
 LIST_ENTRY PiNotifyDeviceInterfaceListHead;
 
+/*
+ * Device interface changes waiting to be delivered. Like Windows
+ * (PnpSetDeviceClassChange inserts them in the PnP event queue), they are
+ * delivered asynchronously, in order, by one worker at a time: never in the
+ * thread that called IoSetDeviceInterfaceState, which may hold locks that a
+ * notification callback needs (a file system forwarding a removal IRP to the
+ * volume while holding its Vcb, with MountMgr's callback waiting for a
+ * MountMgr thread that is opening that volume).
+ */
+typedef struct _PI_DEVICE_INTERFACE_CHANGE
+{
+    LIST_ENTRY ListEntry;
+    GUID Event;
+    GUID InterfaceClassGuid;
+    UNICODE_STRING SymbolicLinkName;
+} PI_DEVICE_INTERFACE_CHANGE, *PPI_DEVICE_INTERFACE_CHANGE;
+
+static KSPIN_LOCK PiDeviceInterfaceChangeQueueLock;
+_Guarded_by_(PiDeviceInterfaceChangeQueueLock)
+static LIST_ENTRY PiDeviceInterfaceChangeQueue;
+_Guarded_by_(PiDeviceInterfaceChangeQueueLock)
+static BOOLEAN PiDeviceInterfaceChangeWorkerActive;
+static WORK_QUEUE_ITEM PiDeviceInterfaceChangeWorkItem;
+
 /* TYPES *********************************************************************/
 
 typedef struct _PNP_NOTIFY_ENTRY
@@ -59,6 +83,8 @@ PiInitializeNotifications(VOID)
     KeInitializeGuardedMutex(&PiNotifyDeviceInterfaceLock);
     InitializeListHead(&PiNotifyHwProfileListHead);
     InitializeListHead(&PiNotifyDeviceInterfaceListHead);
+    KeInitializeSpinLock(&PiDeviceInterfaceChangeQueueLock);
+    InitializeListHead(&PiDeviceInterfaceChangeQueue);
 }
 
 static
@@ -151,6 +177,80 @@ PiProcessSingleNotification(
 /**
  * @brief      Delivers the event to all drivers subscribed to
  *             EventCategoryDeviceInterfaceChange
+ */
+static
+CODE_SEG("PAGE")
+VOID
+PiDeliverDeviceInterfaceChange(
+    _In_ PPI_DEVICE_INTERFACE_CHANGE Change)
+{
+    DEVICE_INTERFACE_CHANGE_NOTIFICATION notifyStruct;
+
+    PAGED_CODE();
+
+    notifyStruct = (DEVICE_INTERFACE_CHANGE_NOTIFICATION) {
+        .Version = 1,
+        .Size = sizeof(DEVICE_INTERFACE_CHANGE_NOTIFICATION),
+        .Event = Change->Event,
+        .InterfaceClassGuid = Change->InterfaceClassGuid,
+        .SymbolicLinkName = &Change->SymbolicLinkName
+    };
+
+    DPRINT("Delivering a DeviceInterfaceChange PnP event\n");
+
+    KeAcquireGuardedMutex(&PiNotifyDeviceInterfaceLock);
+
+    PLIST_ENTRY entry = PiNotifyDeviceInterfaceListHead.Flink;
+    while (entry != &PiNotifyDeviceInterfaceListHead)
+    {
+        PPNP_NOTIFY_ENTRY nEntry = CONTAINING_RECORD(entry, PNP_NOTIFY_ENTRY, PnpNotifyList);
+
+        if (!IsEqualGUID(&notifyStruct.InterfaceClassGuid, &nEntry->Guid))
+        {
+            entry = entry->Flink;
+            continue;
+        }
+
+        PiProcessSingleNotification(nEntry, &notifyStruct, &PiNotifyDeviceInterfaceLock, &entry);
+    }
+
+    KeReleaseGuardedMutex(&PiNotifyDeviceInterfaceLock);
+}
+
+static WORKER_THREAD_ROUTINE PiDeviceInterfaceChangeWorker;
+
+static
+VOID
+NTAPI
+PiDeviceInterfaceChangeWorker(
+    _In_ PVOID Context)
+{
+    PPI_DEVICE_INTERFACE_CHANGE Change;
+    KIRQL OldIrql;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    for (;;)
+    {
+        KeAcquireSpinLock(&PiDeviceInterfaceChangeQueueLock, &OldIrql);
+        if (IsListEmpty(&PiDeviceInterfaceChangeQueue))
+        {
+            PiDeviceInterfaceChangeWorkerActive = FALSE;
+            KeReleaseSpinLock(&PiDeviceInterfaceChangeQueueLock, OldIrql);
+            break;
+        }
+        Change = CONTAINING_RECORD(RemoveHeadList(&PiDeviceInterfaceChangeQueue),
+                                   PI_DEVICE_INTERFACE_CHANGE, ListEntry);
+        KeReleaseSpinLock(&PiDeviceInterfaceChangeQueueLock, OldIrql);
+
+        PiDeliverDeviceInterfaceChange(Change);
+        ExFreePoolWithTag(Change, TAG_PNP_NOTIFY);
+    }
+}
+
+/**
+ * @brief      Queues the event for all drivers subscribed to
+ *             EventCategoryDeviceInterfaceChange
  *
  * @param[in]  Event               The PnP event GUID
  * @param[in]  InterfaceClassGuid  The GUID of an interface class
@@ -163,45 +263,41 @@ PiNotifyDeviceInterfaceChange(
     _In_ LPCGUID InterfaceClassGuid,
     _In_ PUNICODE_STRING SymbolicLinkName)
 {
+    PPI_DEVICE_INTERFACE_CHANGE Change;
+    BOOLEAN StartWorker;
+    KIRQL OldIrql;
+
     PAGED_CODE();
 
-    PDEVICE_INTERFACE_CHANGE_NOTIFICATION notifyStruct;
-    notifyStruct = ExAllocatePoolWithTag(PagedPool, sizeof(*notifyStruct), TAG_PNP_NOTIFY);
-    if (!notifyStruct)
+    /* The name is the caller's: keep a copy for the delivery */
+    Change = ExAllocatePoolWithTag(NonPagedPool,
+                                   sizeof(*Change) + SymbolicLinkName->Length + sizeof(UNICODE_NULL),
+                                   TAG_PNP_NOTIFY);
+    if (!Change)
     {
         return;
     }
 
-    *notifyStruct = (DEVICE_INTERFACE_CHANGE_NOTIFICATION) {
-        .Version = 1,
-        .Size = sizeof(DEVICE_INTERFACE_CHANGE_NOTIFICATION),
-        .Event = *Event,
-        .InterfaceClassGuid = *InterfaceClassGuid,
-        .SymbolicLinkName = SymbolicLinkName
-    };
+    Change->Event = *Event;
+    Change->InterfaceClassGuid = *InterfaceClassGuid;
+    Change->SymbolicLinkName.Buffer = (PWCHAR)(Change + 1);
+    Change->SymbolicLinkName.Length = SymbolicLinkName->Length;
+    Change->SymbolicLinkName.MaximumLength = SymbolicLinkName->Length + sizeof(UNICODE_NULL);
+    RtlCopyMemory(Change->SymbolicLinkName.Buffer, SymbolicLinkName->Buffer, SymbolicLinkName->Length);
+    Change->SymbolicLinkName.Buffer[SymbolicLinkName->Length / sizeof(WCHAR)] = UNICODE_NULL;
 
-    DPRINT("Delivering a DeviceInterfaceChange PnP event\n");
+    KeAcquireSpinLock(&PiDeviceInterfaceChangeQueueLock, &OldIrql);
+    InsertTailList(&PiDeviceInterfaceChangeQueue, &Change->ListEntry);
+    StartWorker = !PiDeviceInterfaceChangeWorkerActive;
+    PiDeviceInterfaceChangeWorkerActive = TRUE;
+    KeReleaseSpinLock(&PiDeviceInterfaceChangeQueueLock, OldIrql);
 
-    KeAcquireGuardedMutex(&PiNotifyDeviceInterfaceLock);
-
-    PLIST_ENTRY entry = PiNotifyDeviceInterfaceListHead.Flink;
-    while (entry != &PiNotifyDeviceInterfaceListHead)
+    if (StartWorker)
     {
-        PPNP_NOTIFY_ENTRY nEntry = CONTAINING_RECORD(entry, PNP_NOTIFY_ENTRY, PnpNotifyList);
-
-        if (!IsEqualGUID(&notifyStruct->InterfaceClassGuid, &nEntry->Guid))
-        {
-            entry = entry->Flink;
-            continue;
-        }
-
-        PiProcessSingleNotification(nEntry, notifyStruct, &PiNotifyDeviceInterfaceLock, &entry);
+        ExInitializeWorkItem(&PiDeviceInterfaceChangeWorkItem, PiDeviceInterfaceChangeWorker, NULL);
+        ExQueueWorkItem(&PiDeviceInterfaceChangeWorkItem, DelayedWorkQueue);
     }
-
-    KeReleaseGuardedMutex(&PiNotifyDeviceInterfaceLock);
-    ExFreePoolWithTag(notifyStruct, TAG_PNP_NOTIFY);
 }
-
 
 /**
  * @brief      Delivers the event to all drivers subscribed to
