@@ -814,9 +814,15 @@ if(_nm_executable)
             COMMAND ${_nm_executable} ${LIBWINPTHREAD_LOCATION}
             OUTPUT_VARIABLE _winpthread_syms
             ERROR_QUIET)
-        if(_winpthread_syms MATCHES " U fegetenv")
-            message(STATUS "libwinpthread needs fegetenv/fesetenv shim (MSYS2/ucrt64 toolchain)")
-            target_link_libraries(libwinpthread INTERFACE fenv_compat)
+        if(_winpthread_syms MATCHES " U _?fegetenv")
+            if(ARCH STREQUAL "i386")
+                # MSVCRT-based MinGW supplies the C99 fenv routines statically.
+                message(STATUS "libwinpthread needs MinGW32 C99 floating-point routines")
+                target_link_libraries(libwinpthread INTERFACE libmingwex)
+            else()
+                message(STATUS "libwinpthread needs fegetenv/fesetenv shim (MSYS2/ucrt64 toolchain)")
+                target_link_libraries(libwinpthread INTERFACE fenv_compat)
+            endif()
         endif()
     endif()
 endif()
