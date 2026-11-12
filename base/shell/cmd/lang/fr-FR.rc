@@ -340,15 +340,13 @@ RMDIR [/S] [/Q] [lecteur:]chemin\nRD [/S] [/Q] [lecteur:]chemin\n\
   /Q    N'interroge pas l'utilisateur.\n"
     STRING_RMDIR_HELP2 "Le répertoire n'est pas vide!\n"
     STRING_REN_HELP1 "Renomme un(des) fichier(s)/répertoire(s)\n\
-RENAME [/E /N /P /Q /S /T] ancien_nom ... nouveau_nom\n\
-REN [/E /N /P /Q /S /T] ancien_nom ... nouveau_nom\n\n\
+RENAME [/E /N /P /S] ancien_nom ... nouveau_nom\n\
+REN [/E /N /P /S] ancien_nom ... nouveau_nom\n\n\
   /E    Pas de messages d'erreur.\n\
   /N    Rien.\n\
   /P    Demande de confirmation avant de renommer chaque fichier.\n\
         (Non implémenté!)\n\
-  /Q    Silencieux.\n\
-  /S    Renommer les sous-répertoires.\n\
-  /T    Affiche le nombre total de fichiers renommés.\n\n\
+  /S    Renommer les sous-répertoires.\n\n\
 Vous ne pouvez indiquez un autre lecteur/chemin pour la destination.\n\
 Utiliser la commande MOVE dans ce but."
     STRING_REN_HELP2 "    %lu fichier renommé\n"
@@ -491,7 +489,7 @@ titre         titre de la fenêtre"
     STRING_MD_ERROR2 "Le chemin vers le nouveau répertoire n'existe pas.\n"
     STRING_MOVE_ERROR1 "[OK]\n"
     STRING_MOVE_ERROR2 "[Erreur]\n"
-    STRING_REN_ERROR "MoveFile() a échoué. Erreur : %lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "Heure invalide.\n"
     STRING_TYPE_ERROR "Option invalide '/%s'\n"
     STRING_WINDOW_ERROR "Fenêtre introuvable\n"

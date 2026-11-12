@@ -322,15 +322,13 @@ RMDIR [/S] [/Q] [enhet:]mapp\nRD [/S] [/Q] [enhet:]mapp\n\
   /Q    Inte spør før sletting.\n"
     STRING_RMDIR_HELP2 "mappn är inte tom!\n"
     STRING_REN_HELP1 "Ändra namn på fil/mapp eller filer/mappar.\n\n\
-ENDRE NAVN [/E /N /P /Q /S /T] gammelt_namn ... nytt_namn\n\
-REN [/E /N /P /Q /S /T] gammelt_namn ... nytt_namn\n\n\
+ENDRE NAVN [/E /N /P /S] gammelt_namn ... nytt_namn\n\
+REN [/E /N /P /S] gammelt_namn ... nytt_namn\n\n\
   /E    Inget felmeddelande.\n\
   /N    Ingenting.\n\
   /P    Frågar om godkännande för ändring av namn på varje fil.\n\
         (Inte implementerat!)\n\
-  /Q    Tyst.\n\
-  /S    Ändra namn på undermapp.\n\
-  /T    Visa totalt antal ändrade filer.\n\n\
+  /S    Ändra namn på undermapp.\n\n\
 NB; du kan inte ange en ny destinasjon for filen/mappen. Bruk\n\
 MOVE kommando for det formålet.\n"
     STRING_REN_HELP2 "    %lu fil ändrade namn\n"
@@ -472,7 +470,7 @@ tittel        ny tittel\n"
     STRING_MD_ERROR2 "Stien till den nye mappen exsisterar inte.\n"
     STRING_MOVE_ERROR1 "[OK]\n"
     STRING_MOVE_ERROR2 "[Fel]\n"
-    STRING_REN_ERROR "MoveFile() mislyckades. Fel: %lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "Ogiltig tid.\n"
     STRING_TYPE_ERROR "Ogiltigt alternativ '/%s'\n"
     STRING_WINDOW_ERROR "Fönstret hittades inte\n"

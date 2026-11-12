@@ -323,15 +323,13 @@ RMDIR [/S] [/Q] [drive:]path\nRD [/S] [/Q] [drive:]path\n\
   /Q    Doesn't prompt for user.\n"
     STRING_RMDIR_HELP2 "Directory is not empty!\n"
     STRING_REN_HELP1 "Renames a file/directory or files/directories.\n\n\
-RENAME [/E /N /P /Q /S /T] old_name ... new_name\n\
-REN [/E /N /P /Q /S /T] old_name ... new_name\n\n\
+RENAME [/E /N /P /S] old_name ... new_name\n\
+REN [/E /N /P /S] old_name ... new_name\n\n\
   /E    No error messages.\n\
   /N    Nothing.\n\
   /P    Prompts for confirmation before renaming each file.\n\
         (Not implemented yet!)\n\
-  /Q    Quiet.\n\
-  /S    Rename subdirectories.\n\
-  /T    Display total number of renamed files.\n\n\
+  /S    Rename subdirectories.\n\n\
 Note that you cannot specify a new drive or path for your destination. Use\n\
 the MOVE command for that purpose.\n"
     STRING_REN_HELP2 "    %lu file renamed\n"
@@ -474,7 +472,7 @@ title         new title\n"
     STRING_MD_ERROR2 "The path to the new folder does not exist.\n"
     STRING_MOVE_ERROR1 "[OK]\n"
     STRING_MOVE_ERROR2 "[Error]\n"
-    STRING_REN_ERROR "MoveFile() failed. Error: %lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "Invalid time.\n"
     STRING_TYPE_ERROR "Invalid option '/%s'\n"
     STRING_WINDOW_ERROR "Window not found\n"

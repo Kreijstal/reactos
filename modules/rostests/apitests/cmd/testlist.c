@@ -8,6 +8,7 @@ extern void func_exit(void);
 extern void func_fc(void);
 extern void func_pushd(void);
 extern void func_quote(void);
+extern void func_ren(void);
 
 const struct test winetest_testlist[] =
 {
@@ -18,5 +19,6 @@ const struct test winetest_testlist[] =
     { "fc", func_fc },
     { "pushd", func_pushd },
     { "quote", func_quote },
+    { "ren", func_ren },
     { 0, 0 }
 };

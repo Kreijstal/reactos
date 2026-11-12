@@ -322,15 +322,13 @@ RMDIR [/S] [/Q] [stasjon:]mappe\nRD [/S] [/Q] [stasjon:]mappe\n\
   /Q    Ikke spør før sletting.\n"
     STRING_RMDIR_HELP2 "Mappen er ikke tom!\n"
     STRING_REN_HELP1 "Endre navn på fil/mappe eller filer/mapper.\n\n\
-ENDRE NAVN [/E /N /P /Q /S /T] gammelt_navn ... nytt_navn\n\
-REN [/E /N /P /Q /S /T] gammelt_navn ... nytt_navn\n\n\
+ENDRE NAVN [/E /N /P /S] gammelt_navn ... nytt_navn\n\
+REN [/E /N /P /S] gammelt_navn ... nytt_navn\n\n\
   /E    Ingen feilmeldinger.\n\
   /N    Ingenting.\n\
   /P    spørsmål om godkjenning før endring av navn på hver fil.\n\
         (Ikke implementert enda!)\n\
-  /Q    Stille.\n\
-  /S    Endre navn på undermappe.\n\
-  /T    Vis totalt antall endrede filer.\n\n\
+  /S    Endre navn på undermappe.\n\n\
 NB; du kan ikke spesifisere en ny destinasjon for filen/mappen. Bruk\n\
 MOVE kommando for det formålet.\n"
     STRING_REN_HELP2 "    %lu fil endret navn\n"
@@ -472,7 +470,7 @@ tittel        ny tittel\n"
     STRING_MD_ERROR2 "Stien til den nye mappen eksisterer ikke.\n"
     STRING_MOVE_ERROR1 "[OK]\n"
     STRING_MOVE_ERROR2 "[Feil]\n"
-    STRING_REN_ERROR "MoveFile() mislykkes. Feil: %lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "Ugyldig tid.\n"
     STRING_TYPE_ERROR "Ugyldig alternativ '/%s'\n"
     STRING_WINDOW_ERROR "Vinduet ble ikke funnet\n"

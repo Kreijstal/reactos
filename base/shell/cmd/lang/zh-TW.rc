@@ -314,15 +314,13 @@ RMDIR [/S] [/Q] [磁碟機:]路徑\nRD [/S] [/Q] [磁碟機:]路徑\n\
   /Q    刪除時不要提示。\n"
     STRING_RMDIR_HELP2 "目錄不是空的!\n"
     STRING_REN_HELP1 "重新命名一個或者多個檔案或資料夾。\n\n\
-RENAME [/E /N /P /Q /S /T] 舊名稱 ... 新名稱\n\
-REN [/E /N /P /Q /S /T] 舊名稱 ... 新名稱\n\n\
+RENAME [/E /N /P /S] 舊名稱 ... 新名稱\n\
+REN [/E /N /P /S] 舊名稱 ... 新名稱\n\n\
   /E    不顯示錯誤訊息。\n\
   /N    不做任何處理。\n\
   /P    在重新命名每個檔案前請求確認。\n\
           (尚未實現!)\n\
-  /Q    安靜模式。\n\
-  /S    重新命名子目錄。\n\
-  /T    顯示被重新命名檔案的總數。\n\n\
+  /S    重新命名子目錄。\n\n\
 記住您不能在目的地裡指定新的磁碟機或路徑。使用 MOVE 命令來達成這個目的。\n"
     STRING_REN_HELP2 "    已重新命名 %lu 個檔案\n"
     STRING_REN_HELP3 "    已重新命名 %lu 個檔案\n"
@@ -458,7 +456,7 @@ RESTORE       恢復視窗\n\
     STRING_MD_ERROR2 "新資料夾的路徑不存在。\n"
     STRING_MOVE_ERROR1 "[成功]\n"
     STRING_MOVE_ERROR2 "[錯誤]\n"
-    STRING_REN_ERROR "MoveFile() 失敗。錯誤碼：%lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "無效的時間。\n"
     STRING_TYPE_ERROR "無效的選項 '/%s'\n"
     STRING_WINDOW_ERROR "找不到視窗\n"

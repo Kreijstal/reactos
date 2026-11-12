@@ -318,14 +318,12 @@ RMDIR [/S] [/Q] [meghajtó:]elérési_út\nRD [/S] [/Q] [meghajtó:]elérési_ú
   /Q    Nem kérdez a felhasználótól.\n"
     STRING_RMDIR_HELP2 "A mappa nem üres!\n"
     STRING_REN_HELP1 "Átnevez egy fájlt/mappát vagy fájlokat/mappákat.\n\n\
-RENAME [/E /N /P /Q /S /T] régi_név ... új_név\n\
-REN [/E /N /P /Q /S /T] régi_név ... új_név\n\n\
+RENAME [/E /N /P /S] régi_név ... új_név\n\
+REN [/E /N /P /S] régi_név ... új_név\n\n\
   /E    Hibaüzenetek elrejtése.\n\
   /N    Ne csináljon semmit.\n\
   /P    Minden állománynál rákérdez. (Még nem működik!)\n\
-  /Q    Csendes működés.\n\
-  /S    Almappákat is átnevez.\n\
-  /T    Kiírja az összes átnevezett fájlok számát.\n\n\
+  /S    Almappákat is átnevez.\n\n\
 Célnak nem lehet megadni új meghajtót vagy mappát.\n\
 Ha mégis ezt szeretné, használja a MOVE parancsot."
     STRING_REN_HELP2 "    %lu állomány átnevezve\n"
@@ -468,7 +466,7 @@ title         új cím\n"
     STRING_MD_ERROR2 "Az útvonal az új mappához nem létezik.\n"
     STRING_MOVE_ERROR1 "[OK]\n"
     STRING_MOVE_ERROR2 "[HIBA]\n"
-    STRING_REN_ERROR "MoveFile() sikertelen. Hiba: %lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "Érvénytelen idő.\n"
     STRING_TYPE_ERROR "Érvénytelen opció '/%s'\n"
     STRING_WINDOW_ERROR "Az ablak nem található\n"
