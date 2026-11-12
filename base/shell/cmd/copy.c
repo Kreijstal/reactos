@@ -879,7 +879,10 @@ INT cmd_copy(LPTSTR param)
     if (arg != NULL)
         freep(arg);
 
-    return 0;
+    /* A file that failed to copy (destination not writable, disk full...)
+     * fails the command, as on Windows: && and || must see it, not only
+     * %ERRORLEVEL% */
+    return nErrorLevel;
 }
 
 #endif /* INCLUDE_CMD_COPY */
