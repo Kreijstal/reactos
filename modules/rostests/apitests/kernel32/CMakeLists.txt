@@ -52,6 +52,7 @@ list(APPEND SOURCE
     SuspendThread.c
     SystemFirmware.c
     TerminateProcess.c
+    Toolhelp.c
     TunnelCache.c
     UEFIFirmware.c
     WideCharToMultiByte.c

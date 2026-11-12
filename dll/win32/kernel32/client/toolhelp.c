@@ -486,7 +486,7 @@ TH32CreateSnapshotSectionInitialize(DWORD dwFlags,
  */
 BOOL
 WINAPI
-Heap32First(LPHEAPENTRY32 lphe, DWORD th32ProcessID, DWORD th32HeapID)
+Heap32First(LPHEAPENTRY32 lphe, DWORD th32ProcessID, ULONG_PTR th32HeapID)
 {
   PRTL_DEBUG_INFORMATION DebugInfo;
   PRTL_HEAP_INFORMATION Heap;
@@ -1277,7 +1277,7 @@ CreateToolhelp32Snapshot(DWORD dwFlags, DWORD th32ProcessID)
   if(!NT_SUCCESS(Status))
   {
     BaseSetLastNTError(Status);
-    return NULL;
+    return INVALID_HANDLE_VALUE;
   }
 
   /*
@@ -1301,7 +1301,7 @@ CreateToolhelp32Snapshot(DWORD dwFlags, DWORD th32ProcessID)
   if(!NT_SUCCESS(Status))
   {
     BaseSetLastNTError(Status);
-    return NULL;
+    return INVALID_HANDLE_VALUE;
   }
 
   return hSnapShotSection;
