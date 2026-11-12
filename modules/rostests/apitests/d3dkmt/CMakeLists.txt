@@ -31,6 +31,7 @@ list(APPEND SOURCE
     d3dkmt_presentext.c
     d3dkmt_misc.c
     d3dkmt_parity.c
+    d3dkmt_softgpu.c
     vidmm_test.c
     present_test.c
     dwm_test.c
