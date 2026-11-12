@@ -196,7 +196,8 @@ TestCompressedFile(
     if (NT_SUCCESS(Status))
     {
         ok_eq_uint(Compression.CompressionFormat, COMPRESSION_FORMAT_LZNT1);
-        ok_eq_uint(Compression.CompressionUnitShift, 16);
+        /* A compression unit is 16 clusters */
+        ok_eq_uint(Compression.CompressionUnitShift, ClusterShift + 4);
         ok_eq_uint(Compression.ChunkShift, 12);
         ok_eq_uint(Compression.ClusterShift, ClusterShift);
         /* Three of six units compress (two text, one zero), two do not. */
