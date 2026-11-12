@@ -2028,16 +2028,12 @@ IoFreeMapRegisters(IN PADAPTER_OBJECT AdapterObject,
                 /* fall through */
 
             case DeallocateObject:
-                if (AdapterObject->NumberOfMapRegisters)
-                {
-                    KeAcquireSpinLock(&MasterAdapter->SpinLock, &OldIrql);
-                    RtlClearBits(MasterAdapter->MapRegisters,
-                                 (ULONG)(AdapterObject->MapRegisterBase -
-                                         MasterAdapter->MapRegisterBase),
-                                 AdapterObject->NumberOfMapRegisters);
-                    KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
-                }
-
+                /*
+                 * IoFreeAdapterChannel frees AdapterObject->NumberOfMapRegisters
+                 * itself.  Clearing them here as well freed the grant twice: a
+                 * second RtlClearBits after another adapter had been given the
+                 * same bits left two transfers sharing the bounce pages.
+                 */
                 IoFreeAdapterChannel(AdapterObject);
                 break;
 
