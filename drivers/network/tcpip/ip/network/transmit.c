@@ -56,7 +56,13 @@ NTSTATUS IPSendFragment(
     TI_DbgPrint(MAX_TRACE, ("Called. NdisPacket (0x%X)  NCE (0x%X).\n", NdisPacket, NCE));
 
     TI_DbgPrint(MAX_TRACE, ("NCE->State = %d.\n", NCE->State));
-    return NBQueuePacket(NCE, NdisPacket, IPSendComplete, IFC);
+
+    /* NBQueuePacket returns a BOOLEAN, not a status: when it cannot queue
+     * the fragment, IPSendComplete will never be called for it */
+    if (!NBQueuePacket(NCE, NdisPacket, IPSendComplete, IFC))
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    return STATUS_SUCCESS;
 }
 
 BOOLEAN PrepareNextFragment(
@@ -188,7 +194,9 @@ NTSTATUS SendFragments(
     IFC->Position     = 0;
     IFC->BytesLeft    = IPPacket->TotalSize - IPPacket->HeaderSize;
     IFC->Data         = (PVOID)((ULONG_PTR)IFC->Header + IPPacket->HeaderSize);
-    KeInitializeEvent(&IFC->Event, NotificationEvent, FALSE);
+    /* Signalled once per fragment: each wait below consumes it, so the
+     * shared fragment buffer is never refilled while still queued */
+    KeInitializeEvent(&IFC->Event, SynchronizationEvent, FALSE);
 
     TI_DbgPrint(MID_TRACE,("Copying header from %x to %x (%d)\n",
 			   IPPacket->Header, IFC->Header,
