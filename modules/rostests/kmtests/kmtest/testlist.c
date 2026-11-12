@@ -11,6 +11,7 @@ KMT_TESTFUNC Test_CcCopyWrite;
 KMT_TESTFUNC Test_CcLazyWriteRace;
 KMT_TESTFUNC Test_CcMapData;
 KMT_TESTFUNC Test_CcPinMappedData;
+KMT_TESTFUNC Test_CcPinnedDirty;
 KMT_TESTFUNC Test_CcPinRead;
 KMT_TESTFUNC Test_CcSetFileSizes;
 KMT_TESTFUNC Test_Cng;
@@ -77,6 +78,7 @@ const KMT_TEST TestList[] =
     { "-CcLazyWriteRace",              Test_CcLazyWriteRace }, // Reproduces ASSERT(Vacb->Dirty) lazy-writer/CcFlushCache race; bugchecks on a buggy kernel
     { "-CcMapData",                    Test_CcMapData },
     { "-CcPinMappedData",              Test_CcPinMappedData },
+    { "CcPinnedDirty",                 Test_CcPinnedDirty },
     { "-CcPinRead",                    Test_CcPinRead },
     { "-CcSetFileSizes",               Test_CcSetFileSizes },
     { "Cng",                          Test_Cng },
