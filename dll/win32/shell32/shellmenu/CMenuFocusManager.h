@@ -49,6 +49,9 @@ private:
 public:
     static CMenuFocusManager * AcquireManager();
 
+    /* The background task scheduler the menus of this thread share */
+    IShellTaskScheduler * GetScheduler();
+
     static void ReleaseManager(CMenuFocusManager * obj);
 
 private:
@@ -56,6 +59,7 @@ private:
     static LRESULT CALLBACK s_GetMsgHook(INT nCode, WPARAM wParam, LPARAM lParam);
 
 private:
+    CComPtr<IShellTaskScheduler> m_scheduler;
     StackEntry * m_current;
     StackEntry * m_parent;
     StackEntry * m_menuBar;

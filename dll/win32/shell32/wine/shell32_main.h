@@ -58,6 +58,7 @@ BOOL SIC_Initialize(void);
 void SIC_Destroy(void) DECLSPEC_HIDDEN;
 BOOL PidlToSicIndex (IShellFolder * sh, LPCITEMIDLIST pidl, BOOL bBigIcon, UINT uFlags, int * pIndex) DECLSPEC_HIDDEN;
 INT SIC_GetIconIndex (LPCWSTR sSourceFile, INT dwSourceIndex, DWORD dwFlags ) DECLSPEC_HIDDEN;
+INT SIC_LookupIconIndex(LPCWSTR sSourceFile, INT dwSourceIndex, DWORD dwFlags) DECLSPEC_HIDDEN;
 extern INT ShellLargeIconSize;
 extern INT ShellSmallIconSize;
 extern INT ShellIconBPP;
@@ -93,6 +94,12 @@ HRESULT SHELL32_AssocGetFileDescription(PCWSTR Name, PWSTR Buf, UINT cchBuf);
 
 /* shellpath.c: special folder pidl cache, flushed by SHFlushSFCache */
 void SHELL_FlushSpecialFolderCache(void);
+
+/* fileclass.cpp: per-extension cache of file class registry lookups */
+enum { FILECLASS_CLSID = 1, FILECLASS_TYPENAME, FILECLASS_DEFAULTICON };
+BOOL SHELL32_LookupFileClass(UINT Kind, PCWSTR pszExt, PVOID pData, UINT cbData);
+void SHELL32_StoreFileClass(UINT Kind, PCWSTR pszExt, LPCVOID pData, UINT cbData);
+void SHELL32_FileClassesChanged(void);
 
 DWORD WINAPI ParseFieldA(LPCSTR src, DWORD nField, LPSTR dst, DWORD len) DECLSPEC_HIDDEN;
 DWORD WINAPI ParseFieldW(LPCWSTR src, DWORD nField, LPWSTR dst, DWORD len) DECLSPEC_HIDDEN;

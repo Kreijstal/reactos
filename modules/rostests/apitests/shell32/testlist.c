@@ -56,11 +56,13 @@ extern void func_ShellState(void);
 extern void func_SHGetAttributesFromDataObject(void);
 extern void func_SHGetComputerDisplayNameW(void);
 extern void func_SHGetFileInfo(void);
+extern void func_SystemImageList(void);
 extern void func_SHGetNewLinkInfo(void);
 extern void func_SHGetUnreadMailCountW(void);
 extern void func_SHGetUserDisplayName(void);
 extern void func_SHIsBadInterfacePtr(void);
 extern void func_SHLimitInputEdit(void);
+extern void func_SHMapIDListToImageListIndexAsync(void);
 extern void func_SHParseDisplayName(void);
 extern void func_SHShouldShowWizards(void);
 extern void func_SHSimpleIDListFromPath(void);
@@ -124,11 +126,13 @@ const struct test winetest_testlist[] =
     { "SHGetAttributesFromDataObject", func_SHGetAttributesFromDataObject },
     { "SHGetComputerDisplayNameW", func_SHGetComputerDisplayNameW },
     { "SHGetFileInfo", func_SHGetFileInfo },
+    { "SystemImageList", func_SystemImageList },
     { "SHGetNewLinkInfo", func_SHGetNewLinkInfo },
     { "SHGetUnreadMailCountW", func_SHGetUnreadMailCountW },
     { "SHGetUserDisplayName", func_SHGetUserDisplayName },
     { "SHIsBadInterfacePtr", func_SHIsBadInterfacePtr },
     { "SHLimitInputEdit", func_SHLimitInputEdit },
+    { "SHMapIDListToImageListIndexAsync", func_SHMapIDListToImageListIndexAsync },
     { "SHParseDisplayName", func_SHParseDisplayName },
     { "SHShouldShowWizards", func_SHShouldShowWizards },
     { "SHSimpleIDListFromPath", func_SHSimpleIDListFromPath },

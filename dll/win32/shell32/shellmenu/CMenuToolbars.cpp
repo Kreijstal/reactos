@@ -1428,11 +1428,21 @@ HRESULT CMenuSFToolbar::FillToolbar(BOOL clearFirst)
             continue;
         }
 
-        INT index = SHMapPIDLToSystemImageListIndex(m_shellFolder, item, NULL);
         BOOL isPureFolder = GetFolderItemBaseType(m_shellFolder, item) == SFGAO_FOLDER; // Don't expand .cab/.zip
 
         // Fetch next item already, so we know if the current one is the last
         i++;
+
+        /* Like Windows' menus, show what the icon cache has at once, and a
+         * generic icon for the rest until a background task extracts theirs */
+        INT index;
+        hr = SHMapIDListToImageListIndexAsync(m_menuBand->GetScheduler(), m_shellFolder, item, 0,
+                                              s_IconCallback, GetToolbar(), (PVOID)(INT_PTR)i, &index, NULL);
+        if (hr == E_PENDING)
+            index = isPureFolder ? GetFolderPlaceholderIcon() : 0;
+        else if (FAILED(hr))
+            index = SHMapPIDLToSystemImageListIndex(m_shellFolder, item, NULL);
+        hr = S_OK;
 
         AddButton(i, MenuString, isPureFolder, index, reinterpret_cast<DWORD_PTR>(item), i >= DPA_GetPtrCount(dpaSort));
 
@@ -1441,6 +1451,33 @@ HRESULT CMenuSFToolbar::FillToolbar(BOOL clearFirst)
 
     DPA_Destroy(dpaSort);
     return hr;
+}
+
+/* A background icon task found the icon of a button: on the scheduler's
+ * thread, so the toolbar is told by message */
+void CALLBACK CMenuSFToolbar::s_IconCallback(LPCITEMIDLIST pidl, LPVOID pvData, LPVOID pvHint, INT iIconIndex, INT iOpenIconIndex)
+{
+    HWND hwnd = (HWND)pvData;
+
+    if (iIconIndex != -1 && ::IsWindow(hwnd))
+        ::SendMessageW(hwnd, TB_CHANGEBITMAP, (WPARAM)pvHint, MAKELPARAM(iIconIndex, 0));
+}
+
+/* Ordinal 72, exported by name on every version (unlike Shell_GetCachedImageIndexW) */
+EXTERN_C INT WINAPI Shell_GetCachedImageIndex(LPCWSTR szPath, INT nIndex, UINT bSimulateDoc);
+
+/* The generic folder icon, for a folder whose own icon is on its way */
+INT CMenuSFToolbar::GetFolderPlaceholderIcon()
+{
+    static INT s_index = -1;
+
+    if (s_index == -1)
+    {
+        WCHAR szShell32[MAX_PATH];
+        if (GetModuleFileNameW(GetModuleHandleW(L"shell32.dll"), szShell32, _countof(szShell32)))
+            s_index = Shell_GetCachedImageIndex(szShell32, -IDI_SHELL_FOLDER, 0);
+    }
+    return (s_index != -1) ? s_index : 0;
 }
 
 HRESULT CMenuSFToolbar::InternalGetTooltip(INT iItem, INT index, DWORD_PTR dwData, LPWSTR pszText, INT cchTextMax)

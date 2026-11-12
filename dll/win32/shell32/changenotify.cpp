@@ -677,6 +677,10 @@ SHChangeNotify(LONG wEventId, UINT uFlags, LPCVOID dwItem1, LPCVOID dwItem2)
 {
     TRACE("(0x%08x,0x%08x,%p,%p)\n", wEventId, uFlags, dwItem1, dwItem2);
 
+    /* File associations changed: every process drops its file class cache */
+    if (wEventId & SHCNE_ASSOCCHANGED)
+        SHELL32_FileClassesChanged();
+
     if (!GetNotificationServer(FALSE))
         return;
 

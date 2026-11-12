@@ -40,6 +40,7 @@ list(APPEND SOURCE
     CExtractIcon.cpp
     CRecycleBinCleaner.cpp
     folders.cpp
+    fileclass.cpp
     iconcache.cpp
     propsheet.cpp
     shell32.cpp

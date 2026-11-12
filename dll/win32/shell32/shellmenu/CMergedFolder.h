@@ -51,6 +51,7 @@ class CMergedFolder :
     public IShellFolder2,
     public IPersistFolder2,
     public IItemNameLimits,
+    public IShellIcon,
     public IAugmentedShellFolder3     // -- undocumented
     //public IShellService,              // DEPRECATED IE4 interface: https://learn.microsoft.com/en-us/windows/win32/api/shdeprecated/nn-shdeprecated-ishellservice
     //public ITranslateShellChangeNotify,// -- undocumented
@@ -79,6 +80,9 @@ public:
     DECLARE_NOT_AGGREGATABLE(CMergedFolder)
     DECLARE_PROTECT_FINAL_CONSTRUCT()
 
+    // *** IShellIcon methods ***
+    STDMETHOD(GetIconOf)(PCUITEMID_CHILD pidl, UINT flags, int *pIconIndex) override;
+
     BEGIN_COM_MAP(CMergedFolder)
         COM_INTERFACE_ENTRY2_IID(IID_IShellFolder, IShellFolder, IShellFolder2)
         COM_INTERFACE_ENTRY_IID(IID_IShellFolder2,   IShellFolder2)
@@ -86,6 +90,7 @@ public:
         COM_INTERFACE_ENTRY_IID(IID_IPersistFolder,  IPersistFolder)
         COM_INTERFACE_ENTRY_IID(IID_IPersistFolder2, IPersistFolder2)
         COM_INTERFACE_ENTRY_IID(IID_IItemNameLimits, IItemNameLimits)
+        COM_INTERFACE_ENTRY_IID(IID_IShellIcon, IShellIcon)
         COM_INTERFACE_ENTRY_IID(IID_IAugmentedShellFolder,  IAugmentedShellFolder)
         COM_INTERFACE_ENTRY_IID(IID_IAugmentedShellFolder2, IAugmentedShellFolder2)
         COM_INTERFACE_ENTRY_IID(IID_IAugmentedShellFolder3, IAugmentedShellFolder3)

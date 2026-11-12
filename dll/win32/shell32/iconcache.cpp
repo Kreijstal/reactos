@@ -110,6 +110,17 @@ static INT CALLBACK SIC_CompareEntries( LPVOID p1, LPVOID p2, LPARAM lparam)
     return _wcsicmp(e1->sSourceFile,e2->sSourceFile);
 }
 
+/* The cache key of an icon file: its full path. "*" is not a file but the
+ * GIL_NOTFILENAME marker for "the index is a system image list index", so it
+ * must not be made relative to the current directory. */
+static void SIC_GetKeyPath(LPCWSTR sSourceFile, LPWSTR path, UINT cchPath)
+{
+    if (sSourceFile[0] == L'*' && !sSourceFile[1])
+        StringCchCopyW(path, cchPath, sSourceFile);
+    else if (!GetFullPathNameW(sSourceFile, cchPath, path, NULL))
+        StringCchCopyW(path, cchPath, sSourceFile);
+}
+
 /* declare SIC_LoadOverlayIcon() */
 static int SIC_LoadOverlayIcon(int icon_idx);
 
@@ -362,7 +373,7 @@ static INT SIC_IconAppend (LPCWSTR sSourceFile, INT dwSourceIndex, HICON hSmallI
 
     lpsice = (LPSIC_ENTRY) SHAlloc (sizeof (SIC_ENTRY));
 
-    GetFullPathNameW(sSourceFile, MAX_PATH, path, NULL);
+    SIC_GetKeyPath(sSourceFile, path, _countof(path));
     lpsice->sSourceFile = (LPWSTR)HeapAlloc( GetProcessHeap(), 0, (wcslen(path)+1)*sizeof(WCHAR) );
     wcscpy( lpsice->sSourceFile, path );
 
@@ -370,6 +381,18 @@ static INT SIC_IconAppend (LPCWSTR sSourceFile, INT dwSourceIndex, HICON hSmallI
     lpsice->dwFlags = dwFlags;
 
     EnterCriticalSection(&SHELL32_SicCS);
+
+    /* Icons are loaded outside the lock (SIC_GetIconIndex): another thread
+     * may have added the same one meanwhile */
+    index = DPA_Search(sic_hdpa, lpsice, 0, SIC_CompareEntries, 0, DPAS_SORTED);
+    if (index != -1)
+    {
+        ret = ((LPSIC_ENTRY)DPA_GetPtr(sic_hdpa, index))->dwListIndex;
+        LeaveCriticalSection(&SHELL32_SicCS);
+        HeapFree(GetProcessHeap(), 0, lpsice->sSourceFile);
+        SHFree(lpsice);
+        return ret;
+    }
 
     indexDPA = DPA_Search (sic_hdpa, lpsice, 0, SIC_CompareEntries, 0, DPAS_SORTED|DPAS_INSERTAFTER);
     indexDPA = DPA_InsertPtr(sic_hdpa, indexDPA, lpsice);
@@ -417,15 +440,9 @@ leave:
  * NOTES
  *  gets small/big icon by number from a file
  */
-static INT SIC_LoadIcon (LPCWSTR sSourceFile, INT dwSourceIndex, DWORD dwFlags)
+static INT SIC_AddIcons(LPCWSTR sSourceFile, INT dwSourceIndex, HICON hiconLarge, HICON hiconSmall, DWORD dwFlags)
 {
-    HICON hiconLarge = NULL, hiconSmall = NULL;
     UINT ret;
-
-    PrivateExtractIconsW(sSourceFile, dwSourceIndex, ShellLargeIconSize, ShellLargeIconSize,
-                         &hiconLarge, NULL, 1, LR_COPYFROMRESOURCE);
-    PrivateExtractIconsW(sSourceFile, dwSourceIndex, ShellSmallIconSize, ShellSmallIconSize,
-                         &hiconSmall, NULL, 1, LR_COPYFROMRESOURCE);
 
     if (!hiconLarge || !hiconSmall)
     {
@@ -460,6 +477,46 @@ static INT SIC_LoadIcon (LPCWSTR sSourceFile, INT dwSourceIndex, DWORD dwFlags)
     DestroyIcon(hiconSmall);
     return ret;
 }
+
+static INT SIC_LoadIcon (LPCWSTR sSourceFile, INT dwSourceIndex, DWORD dwFlags)
+{
+    HICON hiconLarge = NULL, hiconSmall = NULL;
+
+    PrivateExtractIconsW(sSourceFile, dwSourceIndex, ShellLargeIconSize, ShellLargeIconSize,
+                         &hiconLarge, NULL, 1, LR_COPYFROMRESOURCE);
+    PrivateExtractIconsW(sSourceFile, dwSourceIndex, ShellSmallIconSize, ShellSmallIconSize,
+                         &hiconSmall, NULL, 1, LR_COPYFROMRESOURCE);
+
+    return SIC_AddIcons(sSourceFile, dwSourceIndex, hiconLarge, hiconSmall, dwFlags);
+}
+
+/* GIL_NOTFILENAME + "*": iListIndex already is a system image list index.
+ * Plain icons are used as they are; the shortcut variant (overlay baked in,
+ * see SIC_OverlayShortcutImage) is made once and cached under the "*" key. */
+static INT SIC_GetIconIndexForListIndex(INT iListIndex, DWORD dwFlags)
+{
+    SIC_ENTRY sice;
+    INT index, ret;
+
+    if (!(dwFlags & GIL_FORSHORTCUT))
+        return iListIndex;
+
+    sice.sSourceFile = const_cast<LPWSTR>(L"*");
+    sice.dwSourceIndex = iListIndex;
+    sice.dwFlags = dwFlags;
+
+    EnterCriticalSection(&SHELL32_SicCS);
+    index = DPA_Search(sic_hdpa, &sice, 0, SIC_CompareEntries, 0, DPAS_SORTED);
+    if (index != INVALID_INDEX)
+        ret = ((LPSIC_ENTRY)DPA_GetPtr(sic_hdpa, index))->dwListIndex;
+    else
+        ret = SIC_AddIcons(L"*", iListIndex,
+                           ImageList_GetIcon(ShellBigIconList, iListIndex, ILD_NORMAL),
+                           ImageList_GetIcon(ShellSmallIconList, iListIndex, ILD_NORMAL),
+                           dwFlags);
+    LeaveCriticalSection(&SHELL32_SicCS);
+    return ret;
+}
 /*****************************************************************************
  * SIC_GetIconIndex            [internal]
  *
@@ -471,15 +528,14 @@ static INT SIC_LoadIcon (LPCWSTR sSourceFile, INT dwSourceIndex, DWORD dwFlags)
  *  look in the cache for a proper icon. if not available the icon is taken
  *  from the file and cached
  */
-INT SIC_GetIconIndex (LPCWSTR sSourceFile, INT dwSourceIndex, DWORD dwFlags )
+/* The cached icon only, INVALID_INDEX when it has not been loaded yet */
+INT SIC_LookupIconIndex(LPCWSTR sSourceFile, INT dwSourceIndex, DWORD dwFlags)
 {
     SIC_ENTRY sice;
-    INT ret, index = INVALID_INDEX;
+    INT ret = INVALID_INDEX, index;
     WCHAR path[MAX_PATH];
 
-    TRACE("%s %i\n", debugstr_w(sSourceFile), dwSourceIndex);
-
-    GetFullPathNameW(sSourceFile, MAX_PATH, path, NULL);
+    SIC_GetKeyPath(sSourceFile, path, _countof(path));
     sice.sSourceFile = path;
     sice.dwSourceIndex = dwSourceIndex;
     sice.dwFlags = dwFlags;
@@ -488,25 +544,27 @@ INT SIC_GetIconIndex (LPCWSTR sSourceFile, INT dwSourceIndex, DWORD dwFlags )
         SIC_Initialize();
 
     EnterCriticalSection(&SHELL32_SicCS);
-
-    if (NULL != DPA_GetPtr (sic_hdpa, 0))
-    {
-      /* search linear from position 0*/
-      index = DPA_Search (sic_hdpa, &sice, 0, SIC_CompareEntries, 0, DPAS_SORTED);
-    }
-
-    if ( INVALID_INDEX == index )
-    {
-          ret = SIC_LoadIcon (sSourceFile, dwSourceIndex, dwFlags);
-    }
-    else
-    {
-      TRACE("-- found\n");
-      ret = ((LPSIC_ENTRY)DPA_GetPtr(sic_hdpa, index))->dwListIndex;
-    }
-
+    index = DPA_Search(sic_hdpa, &sice, 0, SIC_CompareEntries, 0, DPAS_SORTED);
+    if (index != INVALID_INDEX)
+        ret = ((LPSIC_ENTRY)DPA_GetPtr(sic_hdpa, index))->dwListIndex;
     LeaveCriticalSection(&SHELL32_SicCS);
     return ret;
+}
+
+INT SIC_GetIconIndex (LPCWSTR sSourceFile, INT dwSourceIndex, DWORD dwFlags )
+{
+    INT ret;
+
+    TRACE("%s %i\n", debugstr_w(sSourceFile), dwSourceIndex);
+
+    ret = SIC_LookupIconIndex(sSourceFile, dwSourceIndex, dwFlags);
+    if (ret != INVALID_INDEX)
+        return ret;
+
+    /* Not under the lock: reading icons from a file takes a while, and a
+     * background icon task must not hold up the threads that find theirs
+     * in the cache */
+    return SIC_LoadIcon(sSourceFile, dwSourceIndex, dwFlags);
 }
 
 /*****************************************************************************
@@ -724,19 +782,40 @@ BOOL PidlToSicIndex (
     INT        iSourceIndex;        /* index or resID(negated) in this file */
     BOOL        ret = FALSE;
     UINT        dwFlags = 0;
-    int        iShortcutDefaultIndex = INVALID_INDEX;
 
     TRACE("sf=%p pidl=%p %s\n", sh, pidl, bBigIcon?"Big":"Small");
 
+    *pIndex = INVALID_INDEX;
+
     if (!sic_hdpa)
         SIC_Initialize();
+
+    /* Like Windows, ask the folder first: IShellIcon answers without an extractor */
+    CComPtr<IShellIcon> psi;
+    if (SUCCEEDED(sh->QueryInterface(IID_PPV_ARG(IShellIcon, &psi))) &&
+        psi->GetIconOf(pidl, uFlags, pIndex) == S_OK)
+    {
+        return TRUE;
+    }
+    *pIndex = INVALID_INDEX;
 
     if (SUCCEEDED (sh->GetUIObjectOf(0, 1, &pidl, IID_NULL_PPV_ARG(IExtractIconW, &ei))))
     {
       if (SUCCEEDED(ei->GetIconLocation(uFlags &~ GIL_FORSHORTCUT, szIconFile, MAX_PATH, &iSourceIndex, &dwFlags)))
       {
-        *pIndex = SIC_GetIconIndex(szIconFile, iSourceIndex, uFlags);
+        if ((dwFlags & GIL_NOTFILENAME) && szIconFile[0] == L'*' && !szIconFile[1])
+            *pIndex = SIC_GetIconIndexForListIndex(iSourceIndex, uFlags);
+        else
+            *pIndex = SIC_GetIconIndex(szIconFile, iSourceIndex, uFlags);
         ret = TRUE;
+
+        /* The icon could not be extracted (e.g. an executable without icons):
+         * use the extractor's default icon, as Windows does */
+        if (*pIndex == INVALID_INDEX &&
+            ei->GetIconLocation((uFlags & ~GIL_FORSHORTCUT) | GIL_DEFAULTICON, szIconFile, MAX_PATH, &iSourceIndex, &dwFlags) == S_OK)
+        {
+            *pIndex = SIC_GetIconIndex(szIconFile, iSourceIndex, uFlags);
+        }
       }
     }
 
@@ -748,10 +827,7 @@ BOOL PidlToSicIndex (
       }
       else
       {
-        if (INVALID_INDEX == iShortcutDefaultIndex)
-        {
-          iShortcutDefaultIndex = SIC_LoadIcon(swShell32Name, 0, GIL_FORSHORTCUT);
-        }
+        INT iShortcutDefaultIndex = SIC_GetIconIndex(swShell32Name, 0, GIL_FORSHORTCUT);
         *pIndex = (INVALID_INDEX != iShortcutDefaultIndex ? iShortcutDefaultIndex : 0);
       }
     }
@@ -793,17 +869,197 @@ int WINAPI SHMapPIDLToSystemImageListIndex(
     return Index;
 }
 
+/* The scheduler task SHMapIDListToImageListIndexAsync adds */
+static const GUID TOID_ShellGetIconTask =
+    { 0xb3378dde, 0x7dca, 0x4259, { 0xb1, 0x36, 0x43, 0xd4, 0x64, 0x00, 0x91, 0x52 } };
+
+/* The system image list index of pidl's icon when it costs no reading of
+ * files: what IShellIcon answers, or an icon the cache already holds.
+ * E_PENDING when it has to be extracted. */
+static HRESULT
+SHELL_MapIDListCached(IShellFolder *psf, LPCITEMIDLIST pidl, UINT uFlags, int *pIndex)
+{
+    CComPtr<IShellIcon> psi;
+    CComPtr<IExtractIconW> pei;
+    WCHAR szIconFile[MAX_PATH];
+    INT iSourceIndex;
+    UINT dwFlags = 0;
+    HRESULT hr;
+
+    *pIndex = INVALID_INDEX;
+    if (SUCCEEDED(psf->QueryInterface(IID_PPV_ARG(IShellIcon, &psi))))
+    {
+        hr = psi->GetIconOf(pidl, uFlags | GIL_ASYNC, pIndex);
+        if (hr == S_OK && *pIndex != INVALID_INDEX)
+            return S_OK;
+        *pIndex = INVALID_INDEX;
+        /* Only the extractor knows it */
+        if (hr == E_PENDING)
+            return E_PENDING;
+    }
+
+    hr = psf->GetUIObjectOf(NULL, 1, &pidl, IID_NULL_PPV_ARG(IExtractIconW, &pei));
+    if (FAILED(hr))
+        return E_PENDING;
+    /* GIL_ASYNC: an extractor that would have to read the item says E_PENDING */
+    hr = pei->GetIconLocation((uFlags & ~GIL_FORSHORTCUT) | GIL_ASYNC, szIconFile, _countof(szIconFile),
+                              &iSourceIndex, &dwFlags);
+    if (hr != S_OK)
+        return E_PENDING;
+    if ((dwFlags & GIL_NOTFILENAME) && szIconFile[0] == L'*' && !szIconFile[1])
+    {
+        if (!(uFlags & GIL_FORSHORTCUT))
+        {
+            *pIndex = iSourceIndex;
+            return S_OK;
+        }
+        *pIndex = SIC_LookupIconIndex(L"*", iSourceIndex, uFlags);
+    }
+    else
+    {
+        *pIndex = SIC_LookupIconIndex(szIconFile, iSourceIndex, uFlags);
+    }
+    return (*pIndex != INVALID_INDEX) ? S_OK : E_PENDING;
+}
+
+/* Finds an icon on the scheduler's thread, then reports it */
+class CGetIconTask :
+    public CComObjectRootEx<CComMultiThreadModelNoCS>,
+    public IRunnableTask
+{
+    CComPtr<IShellFolder> m_psf;
+    LPITEMIDLIST m_pidl;
+    UINT m_uFlags;
+    BOOL m_bOpenIcon;
+    PFNASYNCICONTASKBALLBACK m_pfn;
+    void *m_pvData;
+    void *m_pvHint;
+    LONG m_State;
+
+public:
+    CGetIconTask() : m_pidl(NULL), m_uFlags(0), m_bOpenIcon(FALSE), m_pfn(NULL), m_pvData(NULL),
+                     m_pvHint(NULL), m_State(IRTIR_TASK_NOT_RUNNING)
+    {
+    }
+
+    ~CGetIconTask()
+    {
+        ILFree(m_pidl);
+    }
+
+    HRESULT Initialize(IShellFolder *psf, LPCITEMIDLIST pidl, UINT uFlags, BOOL bOpenIcon,
+                       PFNASYNCICONTASKBALLBACK pfn, void *pvData, void *pvHint)
+    {
+        m_pidl = ILClone(pidl);
+        if (!m_pidl)
+            return E_OUTOFMEMORY;
+        m_psf = psf;
+        m_uFlags = uFlags;
+        m_bOpenIcon = bOpenIcon;
+        m_pfn = pfn;
+        m_pvData = pvData;
+        m_pvHint = pvHint;
+        return S_OK;
+    }
+
+    // *** IRunnableTask methods ***
+    STDMETHOD(Run)() override
+    {
+        INT iIndex = INVALID_INDEX, iOpenIndex = INVALID_INDEX;
+
+        if (InterlockedCompareExchange(&m_State, IRTIR_TASK_RUNNING, IRTIR_TASK_NOT_RUNNING) !=
+            IRTIR_TASK_NOT_RUNNING)
+        {
+            return E_FAIL;
+        }
+        if (!PidlToSicIndex(m_psf, m_pidl, FALSE, m_uFlags, &iIndex))
+            iIndex = INVALID_INDEX;
+        if (m_bOpenIcon && !PidlToSicIndex(m_psf, m_pidl, FALSE, m_uFlags | GIL_OPENICON, &iOpenIndex))
+            iOpenIndex = INVALID_INDEX;
+        m_pfn(m_pidl, m_pvData, m_pvHint, iIndex, iOpenIndex);
+        InterlockedExchange(&m_State, IRTIR_TASK_FINISHED);
+        return S_OK;
+    }
+
+    STDMETHOD(Kill)(BOOL fWait) override
+    {
+        /* Not started yet: it never reports */
+        InterlockedCompareExchange(&m_State, IRTIR_TASK_FINISHED, IRTIR_TASK_NOT_RUNNING);
+        return S_OK;
+    }
+
+    STDMETHOD(Suspend)() override
+    {
+        return E_NOTIMPL;
+    }
+
+    STDMETHOD(Resume)() override
+    {
+        return E_NOTIMPL;
+    }
+
+    STDMETHOD_(ULONG, IsRunning)() override
+    {
+        return m_State;
+    }
+
+    DECLARE_NOT_AGGREGATABLE(CGetIconTask)
+    DECLARE_PROTECT_FINAL_CONSTRUCT()
+
+    BEGIN_COM_MAP(CGetIconTask)
+        COM_INTERFACE_ENTRY_IID(IID_IRunnableTask, IRunnableTask)
+    END_COM_MAP()
+};
+
 /*************************************************************************
  * SHMapIDListToImageListIndexAsync  [SHELL32.148]
+ *
+ * The system image list indexes of pidl's icon (and open icon): S_OK with
+ * them when they are known without reading the item, otherwise E_PENDING:
+ * a task added to pts finds them and calls pfn with them.  Without pts or
+ * pfn, E_FAIL then.
  */
 EXTERN_C HRESULT WINAPI SHMapIDListToImageListIndexAsync(IShellTaskScheduler *pts, IShellFolder *psf,
                                                 LPCITEMIDLIST pidl, UINT flags,
                                                 PFNASYNCICONTASKBALLBACK pfn, void *pvData, void *pvHint,
                                                 int *piIndex, int *piIndexSel)
 {
-    FIXME("(%p, %p, %p, 0x%08x, %p, %p, %p, %p, %p)\n",
-            pts, psf, pidl, flags, pfn, pvData, pvHint, piIndex, piIndexSel);
-    return E_FAIL;
+    CComObject<CGetIconTask> *pTask;
+    CComPtr<IRunnableTask> pRunnable;
+    INT iIndex, iIndexSel;
+    HRESULT hr, hrSel = S_OK;
+
+    TRACE("(%p, %p, %p, 0x%08x, %p, %p, %p, %p, %p)\n",
+          pts, psf, pidl, flags, pfn, pvData, pvHint, piIndex, piIndexSel);
+
+    if (!psf || !pidl)
+        return E_INVALIDARG;
+
+    if (SHELL_IsShortcut(pidl))
+        flags |= GIL_FORSHORTCUT;
+
+    hr = SHELL_MapIDListCached(psf, pidl, flags, &iIndex);
+    if (piIndex)
+        *piIndex = iIndex;
+    if (piIndexSel)
+    {
+        hrSel = SHELL_MapIDListCached(psf, pidl, flags | GIL_OPENICON, &iIndexSel);
+        *piIndexSel = iIndexSel;
+    }
+    if (hr == S_OK && hrSel == S_OK)
+        return S_OK;
+
+    if (!pts || !pfn)
+        return E_FAIL;
+
+    hr = CComObject<CGetIconTask>::CreateInstance(&pTask);
+    if (FAILED(hr))
+        return hr;
+    pRunnable = pTask;
+    hr = pTask->Initialize(psf, pidl, flags, piIndexSel != NULL, pfn, pvData, pvHint);
+    if (SUCCEEDED(hr))
+        hr = pts->AddTask(pRunnable, TOID_ShellGetIconTask, 0, ITSAT_DEFAULT_PRIORITY);
+    return SUCCEEDED(hr) ? E_PENDING : hr;
 }
 
 /*************************************************************************

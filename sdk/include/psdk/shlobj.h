@@ -2827,6 +2827,11 @@ DECLARE_INTERFACE_(IDockingWindowSite, IOleWindow)
 #endif
 
 typedef void (CALLBACK *PFNASYNCICONTASKBALLBACK)(LPCITEMIDLIST pidl, LPVOID pvData, LPVOID pvHint, INT iIconIndex, INT iOpenIconIndex);
+#ifdef __IShellTaskScheduler_FWD_DEFINED__
+HRESULT WINAPI SHMapIDListToImageListIndexAsync(IShellTaskScheduler *pts, IShellFolder *psf, LPCITEMIDLIST pidl, UINT flags,
+                                                PFNASYNCICONTASKBALLBACK pfn, LPVOID pvData, LPVOID pvHint,
+                                                int *piIndex, int *piIndexSel);
+#endif
 
 #define ISFB_MASK_STATE       0x00000001
 #define ISFB_MASK_IDLIST      0x00000010

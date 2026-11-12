@@ -388,7 +388,28 @@ static LPCWSTR ExtensionFromPidl(PCUIDLIST_RELATIVE pidl, LPWSTR Buf, UINT cchMa
     return pExtension;
 }
 
+static HRESULT GetCLSIDForFileTypeFromExtensionUncached(LPCWSTR pExtension, LPCWSTR KeyName, CLSID* pclsid);
+
+/* The answer only depends on the file class, so it is cached per extension and key */
 static HRESULT GetCLSIDForFileTypeFromExtension(LPCWSTR pExtension, LPCWSTR KeyName, CLSID* pclsid)
+{
+    struct { HRESULT hr; CLSID clsid; } Entry;
+    WCHAR szKey[MAX_PATH];
+    if (FAILED(StringCchPrintfW(szKey, _countof(szKey), L"%s|%s", pExtension, KeyName)))
+        return GetCLSIDForFileTypeFromExtensionUncached(pExtension, KeyName, pclsid);
+
+    if (!SHELL32_LookupFileClass(FILECLASS_CLSID, szKey, &Entry, sizeof(Entry)))
+    {
+        ZeroMemory(&Entry, sizeof(Entry));
+        Entry.hr = GetCLSIDForFileTypeFromExtensionUncached(pExtension, KeyName, &Entry.clsid);
+        SHELL32_StoreFileClass(FILECLASS_CLSID, szKey, &Entry, sizeof(Entry));
+    }
+    if (Entry.hr == S_OK)
+        *pclsid = Entry.clsid;
+    return Entry.hr;
+}
+
+static HRESULT GetCLSIDForFileTypeFromExtensionUncached(LPCWSTR pExtension, LPCWSTR KeyName, CLSID* pclsid)
 {
     HKEY hkeyProgId = OpenKeyFromFileType(pExtension, KeyName);
     if (!hkeyProgId)
@@ -575,6 +596,44 @@ Quit:
     return getDefaultIconLocation(szIconFile, cchMax, piIndex, uFlags);
 }
 
+/* DefaultIcon of a file type ("%1" when the icon is in the file itself) */
+static BOOL getDefaultIconForFileType(LPCWSTR pExtension, LPWSTR pszFile, INT *piIndex)
+{
+    WCHAR wTemp[MAX_PATH];
+    HKEY hkey = pExtension ? OpenKeyFromFileType(pExtension, L"DefaultIcon") : NULL;
+    if (!hkey && pExtension)
+    {
+        DWORD dwSize = sizeof(wTemp);
+        if (RegGetValueW(HKEY_CLASSES_ROOT, pExtension, L"PerceivedType", RRF_RT_REG_SZ, NULL,
+                         wTemp, &dwSize) == ERROR_SUCCESS)
+        {
+            WCHAR szSubKey[MAX_PATH];
+            StringCchPrintfW(szSubKey, _countof(szSubKey),
+                             L"SystemFileAssociations\\%s\\DefaultIcon", wTemp);
+            RegOpenKeyExW(HKEY_CLASSES_ROOT, szSubKey, 0, KEY_READ, &hkey);
+        }
+    }
+    if (!hkey)
+        return FALSE;
+
+    BOOL bFound = FALSE;
+    DWORD dwSize = sizeof(wTemp);
+    if (!SHQueryValueExW(hkey, NULL, NULL, NULL, wTemp, &dwSize))
+    {
+        WCHAR sNum[5];
+        if (ParseFieldW(wTemp, 2, sNum, 5))
+            *piIndex = _wtoi(sNum);
+        else
+            *piIndex = 0; /* sometimes the icon number is missing */
+        ParseFieldW(wTemp, 1, wTemp, MAX_PATH);
+        PathUnquoteSpacesW(wTemp);
+        StringCchCopyW(pszFile, MAX_PATH, wTemp);
+        bFound = TRUE;
+    }
+    RegCloseKey(hkey);
+    return bFound;
+}
+
 HRESULT CFSExtractIcon_CreateInstance(IShellFolder * psf, LPCITEMIDLIST pidl, REFIID iid, LPVOID * ppvOut)
 {
     CComPtr<IDefaultExtractIconInit> initIcon;
@@ -626,45 +685,33 @@ HRESULT CFSExtractIcon_CreateInstance(IShellFolder * psf, LPCITEMIDLIST pidl, RE
     {
         WCHAR extbuf[256];
         LPCWSTR pExtension = ExtensionFromPidl(pidl, extbuf, _countof(extbuf));
-        HKEY hkey = pExtension ? OpenKeyFromFileType(pExtension, L"DefaultIcon") : NULL;
-        if (!hkey)
+
+        /* The DefaultIcon of a file class is cached per extension */
+        struct { BOOL bFound; INT iIndex; WCHAR szFile[MAX_PATH]; } Entry;
+        if (!pExtension || !SHELL32_LookupFileClass(FILECLASS_DEFAULTICON, pExtension, &Entry, sizeof(Entry)))
         {
-            DWORD dwSize = sizeof(wTemp);
-            if (RegGetValueW(HKEY_CLASSES_ROOT, pExtension, L"PerceivedType", RRF_RT_REG_SZ, NULL,
-                             wTemp, &dwSize) == ERROR_SUCCESS)
-            {
-                WCHAR szSubKey[MAX_PATH];
-                StringCchPrintfW(szSubKey, _countof(szSubKey),
-                                 L"SystemFileAssociations\\%s\\DefaultIcon", wTemp);
-                RegOpenKeyExW(HKEY_CLASSES_ROOT, szSubKey, 0, KEY_READ, &hkey);
-            }
+            ZeroMemory(&Entry, sizeof(Entry));
+            Entry.bFound = getDefaultIconForFileType(pExtension, Entry.szFile, &Entry.iIndex);
+            if (pExtension)
+                SHELL32_StoreFileClass(FILECLASS_DEFAULTICON, pExtension, &Entry, sizeof(Entry));
         }
 
-        DWORD dwSize = sizeof(wTemp);
-        if (hkey && !SHQueryValueExW(hkey, NULL, NULL, NULL, wTemp, &dwSize))
+        if (Entry.bFound)
         {
-            WCHAR sNum[5];
-            if (ParseFieldW (wTemp, 2, sNum, 5))
-                icon_idx = _wtoi(sNum);
-            else
-                icon_idx = 0; /* sometimes the icon number is missing */
-            ParseFieldW (wTemp, 1, wTemp, MAX_PATH);
-            PathUnquoteSpacesW(wTemp);
+            StringCchCopyW(wTemp, _countof(wTemp), Entry.szFile);
+            icon_idx = Entry.iIndex;
 
             if (!wcscmp(L"%1", wTemp)) /* icon is in the file */
             {
+                /* Like Windows, do not open the file here to see whether it has
+                 * icons: the system image list is keyed by (path, index), so a
+                 * cached icon costs no file access. If extraction fails, the
+                 * caller asks again with GIL_DEFAULTICON. */
                 ILGetDisplayNameExW(psf, pidl, wTemp, ILGDN_FORPARSING);
                 icon_idx = 0;
 
-                INT ret = PrivateExtractIconsW(wTemp, 0, 0, 0, NULL, NULL, 0, 0);
-                if (ret <= 0)
-                {
-                    StringCbCopyW(wTemp, sizeof(wTemp), swShell32Name);
-                    if (lstrcmpiW(pExtension, L".exe") == 0 || lstrcmpiW(pExtension, L".scr") == 0)
-                        icon_idx = -IDI_SHELL_EXE;
-                    else
-                        icon_idx = -IDI_SHELL_FILE;
-                }
+                BOOL bExe = lstrcmpiW(pExtension, L".exe") == 0 || lstrcmpiW(pExtension, L".scr") == 0;
+                initIcon->SetDefaultIcon(swShell32Name, bExe ? -IDI_SHELL_EXE : -IDI_SHELL_FILE);
             }
 
             initIcon->SetNormalIcon(wTemp, icon_idx);
@@ -673,12 +720,39 @@ HRESULT CFSExtractIcon_CreateInstance(IShellFolder * psf, LPCITEMIDLIST pidl, RE
         {
             initIcon->SetNormalIcon(swShell32Name, 0);
         }
-
-        if (hkey)
-            RegCloseKey(hkey);
     }
 
     return initIcon->QueryInterface(iid, ppvOut);
+}
+
+/**************************************************************************
+ * CFSFolder::GetIconOf (IShellIcon)
+ *
+ * The fast path SHMapPIDLToSystemImageListIndex takes before it creates an
+ * IExtractIcon: a plain directory (neither system nor read-only, so it has no
+ * desktop.ini to customize it) always shows the generic folder icon, so its
+ * system image list index needs no per-item extractor, path or file access.
+ * Everything else returns S_FALSE and goes through IExtractIcon.
+ */
+HRESULT WINAPI CFSFolder::GetIconOf(PCUITEMID_CHILD pidl, UINT flags, int *pIconIndex)
+{
+    if (!pidl || !pIconIndex)
+        return E_INVALIDARG;
+
+    /* GIL_ASYNC: the icon is on its way; it needs an extractor, which may
+     * read the item (SHMapIDListToImageListIndexAsync) */
+    if (!_ILIsPidlSimple(pidl) || !_ILIsFolder(pidl) || _ILIsValue(pidl))
+        return (flags & GIL_ASYNC) ? E_PENDING : S_FALSE;
+
+    DWORD dwFileAttrs = _ILGetFileAttributes(pidl, NULL, 0);
+    if (dwFileAttrs & (FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_READONLY))
+        return (flags & GIL_ASYNC) ? E_PENDING : S_FALSE;
+
+    WCHAR szIconFile[MAX_PATH];
+    int iIndex;
+    getDefaultIconLocation(szIconFile, _countof(szIconFile), &iIndex, flags & GIL_OPENICON);
+    *pIconIndex = SIC_GetIconIndex(szIconFile, iIndex, flags & GIL_FORSHORTCUT);
+    return (*pIconIndex == -1) ? S_FALSE : S_OK;
 }
 
 /*
@@ -720,20 +794,9 @@ private:
             if (!strcmpW(FindData.cFileName, L".") || !strcmpW(FindData.cFileName, L".."))
                 return S_OK;
 
-            // Does this directory need special handling?
-            if ((FindData.dwFileAttributes & (FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_READONLY)) != 0)
-            {
-                WCHAR Tmp[MAX_PATH];
-                CLSID clsidFolder;
-
-                PathCombineW(Tmp, sParentDir, FindData.cFileName);
-
-                hr = SHELL32_GetCLSIDForDirectory(Tmp, L"CLSID", &clsidFolder);
-                if (SUCCEEDED(hr))
-                {
-                    ERR("Got CLSID override for '%S'\n", Tmp);
-                }
-            }
+            // A system or read-only directory may carry a desktop.ini CLSID,
+            // but that is read when the folder is bound (BindToObject) or its
+            // icon is asked for, not for every directory while enumerating.
         }
         else
         {
@@ -970,6 +1033,12 @@ static HRESULT SHELL32_GetCLSIDForDirectory(LPCWSTR pwszDir, LPCWSTR KeyName, CL
     return E_FAIL;
 }
 
+static BOOL SHELL32_IsRemoteDrive(LPCWSTR pszPath)
+{
+    WCHAR szRoot[4] = { pszPath[0], L':', L'\\', UNICODE_NULL };
+    return GetDriveTypeW(szRoot) == DRIVE_REMOTE;
+}
+
 HRESULT SHELL32_GetFSItemAttributes(IShellFolder * psf, LPCITEMIDLIST pidl, LPDWORD pdwAttributes)
 {
     DWORD dwFileAttributes, dwShellAttributes;
@@ -1089,7 +1158,58 @@ HRESULT SHELL32_GetFSItemAttributes(IShellFolder * psf, LPCITEMIDLIST pidl, LPDW
             dwShellAttributes |= SFGAO_LINK;
     }
 
-    if (SFGAO_HASSUBFOLDER & *pdwAttributes)
+    if ((SFGAO_HASSUBFOLDER & *pdwAttributes) && (dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        /* A real directory. Like Windows, look for the first subdirectory the
+         * default enumeration would show instead of binding to the child and
+         * enumerating (and building pidls for) all of it only to Skip(1).
+         * Network folders are assumed to have subfolders: the tree finds out
+         * when it expands them, and nobody waits for a round trip per item. */
+        STRRET strret;
+        LPWSTR path;
+        if (SUCCEEDED(psf->GetDisplayNameOf(pidl, SHGDN_FORPARSING, &strret)) &&
+            SUCCEEDED(StrRetToStrW(&strret, pidl, &path)))
+        {
+            WCHAR szPattern[MAX_PATH];
+            if (PathIsUNCW(path) || (PathGetDriveNumberW(path) >= 0 && SHELL32_IsRemoteDrive(path)))
+            {
+                dwShellAttributes |= SFGAO_HASSUBFOLDER;
+            }
+            else if (PathCombineW(szPattern, path, L"*"))
+            {
+                WIN32_FIND_DATAW fd;
+                HANDLE hFind = FindFirstFileExW(szPattern, FindExInfoStandard, &fd,
+                                                FindExSearchLimitToDirectories, NULL, 0);
+                if (hFind != INVALID_HANDLE_VALUE)
+                {
+                    SHCONTF shcf = 0;
+                    do
+                    {
+                        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+                            !wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L".."))
+                        {
+                            continue;
+                        }
+                        if (fd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN)
+                        {
+                            /* Same rule as CFileSysEnum with the default view flags */
+                            if (!shcf)
+                                shcf = SHELL_GetDefaultFolderEnumSHCONTF();
+                            if (!(shcf & SHCONTF_INCLUDEHIDDEN))
+                                continue;
+                            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_SYSTEM) && !(shcf & SHCONTF_INCLUDESUPERHIDDEN))
+                                continue;
+                        }
+                        dwShellAttributes |= SFGAO_HASSUBFOLDER;
+                        break;
+                    } while (FindNextFileW(hFind, &fd));
+                    FindClose(hFind);
+                }
+            }
+            SHFree(path);
+        }
+    }
+    else if (SFGAO_HASSUBFOLDER & *pdwAttributes)
     {
         CComPtr<IShellFolder> psf2;
         if (SUCCEEDED(psf->BindToObject(pidl, 0, IID_PPV_ARG(IShellFolder, &psf2))))
