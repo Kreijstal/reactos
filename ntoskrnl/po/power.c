@@ -941,6 +941,11 @@ PopQueryBatteryStateCached(
         Now - PopBatteryQueryTime >= MaxAge)
     {
         Status = PopQueryBatteryState(&PopCachedBatteryState);
+        if (!NT_SUCCESS(Status))
+        {
+            /* Report a real query only, not each replay of the cached failure */
+            DPRINT1("Failed to query battery state: Status: 0x%08X\n", Status);
+        }
         PopCachedBatteryStatus = Status;
         PopBatteryQueryTime = KeQueryInterruptTime();
         PopBatteryQueryValid = TRUE;
@@ -1013,10 +1018,7 @@ NtPowerInformation(IN POWER_INFORMATION_LEVEL PowerInformationLevel,
                 /* Open the battery driver and query the battery state */
                 Status = PopQueryBatteryStateCached(&BatteryState);
                 if (!NT_SUCCESS(Status))
-                {
-                    DPRINT1("Failed to query battery state: Status: 0x%08X\n", Status);
                     return Status;
-                }
             }
             else
             {
