@@ -45,7 +45,6 @@ static
 NTSTATUS
 NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
 {
-    PARTITION_INFORMATION_EX PartitionInfo;
     DISK_GEOMETRY DiskGeometry;
     ULONG ClusterSize, Size, k;
     PBOOT_SECTOR BootSector;
@@ -67,29 +66,9 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
         return Status;
     }
 
-    if (DiskGeometry.MediaType == FixedMedia)
-    {
-        /* We have found a hard disk. The partition entry is only a hint:
-         * the boot sector below decides whether this is NTFS. Use the _EX
-         * query, since IOCTL_DISK_GET_PARTITION_INFO fails on anything but
-         * MBR, and only reject an MBR partition of a non-IFS type. A GPT
-         * partition has a type GUID, not a type byte, to compare against. */
-        Size = sizeof(PARTITION_INFORMATION_EX);
-        Status = NtfsDeviceIoControl(DeviceToMount,
-                                     IOCTL_DISK_GET_PARTITION_INFO_EX,
-                                     NULL,
-                                     0,
-                                     &PartitionInfo,
-                                     &Size,
-                                     TRUE);
-        if (NT_SUCCESS(Status) &&
-            PartitionInfo.PartitionStyle == PARTITION_STYLE_MBR &&
-            PartitionInfo.Mbr.PartitionType != PARTITION_IFS)
-        {
-            DPRINT1("Invalid partition type 0x%02x\n", PartitionInfo.Mbr.PartitionType);
-            return STATUS_UNRECOGNIZED_VOLUME;
-        }
-    }
+    /* Like Windows' NTFS, recognize the volume by its boot sector alone: the
+     * partition type is not consulted (a volume just formatted, or one in a
+     * partition of another type, is still NTFS) */
 
     DPRINT("BytesPerSector: %lu\n", DiskGeometry.BytesPerSector);
     BootSector = ExAllocatePoolWithTag(NonPagedPool,
