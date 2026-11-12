@@ -1757,6 +1757,7 @@ static struct _RAW_SIZE_IMAGE_FILE
 C_ASSERT(FIELD_OFFSET(struct _RAW_SIZE_IMAGE_FILE, text_data) == 0x400);
 C_ASSERT(FIELD_OFFSET(struct _RAW_SIZE_IMAGE_FILE, data_data) == 0x1600);
 C_ASSERT(FIELD_OFFSET(struct _RAW_SIZE_IMAGE_FILE, rsrc_data) == 0x2800);
+C_ASSERT(sizeof(struct _RAW_SIZE_IMAGE_FILE) == 0x2c00);
 
 // CORE-17284
 static
@@ -1773,7 +1774,9 @@ Test_RawSize(ULONG TestNumber)
     SIZE_T ViewSize;
     ULONG Written;
     ULONG Length;
+    ULONG FileSize;
     BOOL Success;
+    IMAGE_SECTION_HEADER BssHeader, RsrcHeader;
 
     Length = GetTempPathW(MAX_PATH, TempPath);
     ok(Length != 0, "GetTempPathW failed with %lu\n", GetLastError());
@@ -1791,6 +1794,9 @@ Test_RawSize(ULONG TestNumber)
         skip("Failed to create temp file %ls, error %lu\n", FileName, GetLastError());
         return;
     }
+    BssHeader = RawSizeImageFile.bss_header;
+    RsrcHeader = RawSizeImageFile.rsrc_header;
+    FileSize = sizeof(RawSizeImageFile);
     RawSizeImageFile.nthdrs.OptionalHeader.ImageBase = 0xe400000;
     if (TestNumber == 1)
     {
@@ -1806,14 +1812,26 @@ Test_RawSize(ULONG TestNumber)
          * This should cause failure to load the file */
         RawSizeImageFile.rsrc_header.SizeOfRawData = (ULONG)-0x200;
     }
+    else if (TestNumber == 3 || TestNumber == 4)
+    {
+        /* Give the last section raw data that ends exactly at the end of
+         * the file (3), then cut the file short so that it doesn't (4).
+         * A truncated image must fail to load, not map zeroes. */
+        RawSizeImageFile.bss_header.PointerToRawData = 0x2a00;
+        RawSizeImageFile.bss_header.SizeOfRawData = 0x200;
+        if (TestNumber == 4)
+            FileSize -= 0x100;
+    }
 
     Success = WriteFile(Handle,
                         &RawSizeImageFile,
-                        sizeof(RawSizeImageFile),
+                        FileSize,
                         &Written,
                         NULL);
     ok(Success == TRUE, "WriteFile failed with %lu\n", GetLastError());
-    ok(Written == sizeof(RawSizeImageFile), "WriteFile wrote %lu bytes\n", Written);
+    ok(Written == FileSize, "WriteFile wrote %lu bytes\n", Written);
+    RawSizeImageFile.bss_header = BssHeader;
+    RawSizeImageFile.rsrc_header = RsrcHeader;
 
     Status = NtCreateSection(&SectionHandle,
                              SECTION_ALL_ACCESS,
@@ -1827,12 +1845,22 @@ Test_RawSize(ULONG TestNumber)
         /* overflow in SizeOfRawData */
         ok_ntstatus(Status, STATUS_INVALID_IMAGE_FORMAT);
     }
+    else if (TestNumber == 4)
+    {
+        /* the raw data of the last section is past the end of the file */
+        ok_ntstatus(Status, STATUS_INVALID_IMAGE_FORMAT);
+    }
     else
     {
         ok_ntstatus(Status, STATUS_SUCCESS);
     }
 
-    if (NT_SUCCESS(Status))
+    if (NT_SUCCESS(Status) && TestNumber >= 3)
+    {
+        Status = NtClose(SectionHandle);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+    }
+    else if (NT_SUCCESS(Status))
     {
         /* Map the section with  */
         BaseAddress = NULL;
@@ -2060,6 +2088,146 @@ Test_Truncate(VOID)
     ok(Success == TRUE, "DeleteFileW failed with %lu\n", GetLastError());
 }
 
+/* Truncating or overwriting an image file is allowed once nothing uses the
+ * image section any more (Windows: MmCanFileBeTruncated purges the cached
+ * image section with MmFlushImageSection(MmFlushForWrite)). */
+static void
+Test_ImageTruncate(VOID)
+{
+    WCHAR TempPath[MAX_PATH];
+    WCHAR FileName[MAX_PATH];
+    WCHAR CmdLine[MAX_PATH * 2];
+    WCHAR SysDir[MAX_PATH];
+    NTSTATUS Status;
+    HANDLE Handle, SectionHandle;
+    DWORD Written, Error, ExitCode;
+    BOOL Success;
+    ULONG Length;
+    STARTUPINFOW StartupInfo = { sizeof(StartupInfo) };
+    PROCESS_INFORMATION ProcessInfo;
+
+    Length = GetTempPathW(MAX_PATH, TempPath);
+    ok(Length != 0, "GetTempPathW failed with %lu\n", GetLastError());
+    Length = GetTempFileNameW(TempPath, L"nta", 0, FileName);
+    ok(Length != 0, "GetTempFileNameW failed with %lu\n", GetLastError());
+
+    /* 1. A closed image section must not keep the file from being truncated */
+    Handle = CreateFileW(FileName, FILE_ALL_ACCESS, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (Handle == INVALID_HANDLE_VALUE)
+    {
+        skip("Failed to create temp file %ls, error %lu\n", FileName, GetLastError());
+        return;
+    }
+    Success = WriteFile(Handle, &RawSizeImageFile, sizeof(RawSizeImageFile), &Written, NULL);
+    ok(Success == TRUE, "WriteFile failed with %lu\n", GetLastError());
+
+    Status = NtCreateSection(&SectionHandle, SECTION_ALL_ACCESS, NULL, NULL,
+                             PAGE_EXECUTE_READWRITE, SEC_IMAGE, Handle);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        /* While the section is open, the file can't be truncated */
+        SetFilePointer(Handle, 0, NULL, FILE_BEGIN);
+        Success = SetEndOfFile(Handle);
+        Error = GetLastError();
+        ok(Success == FALSE, "SetEndOfFile succeeded with an open image section\n");
+        ok(Error == ERROR_USER_MAPPED_FILE, "SetEndOfFile error %lu\n", Error);
+        NtClose(SectionHandle);
+
+        /* Now nothing uses it any more */
+        SetFilePointer(Handle, 0x200, NULL, FILE_BEGIN);
+        Success = SetEndOfFile(Handle);
+        ok(Success == TRUE, "SetEndOfFile failed with %lu after the image section was closed\n", GetLastError());
+    }
+    CloseHandle(Handle);
+    Success = DeleteFileW(FileName);
+    ok(Success == TRUE, "DeleteFileW failed with %lu\n", GetLastError());
+
+    GetSystemDirectoryW(SysDir, MAX_PATH);
+    StringCbCopyW(CmdLine, sizeof(CmdLine), SysDir);
+    StringCbCatW(CmdLine, sizeof(CmdLine), L"\\cmd.exe");
+
+    /* 2. Pages of a mapped and touched image stay cached after the last view
+     * and section are gone; that must not block truncation either. */
+    Handle = CreateFileW(FileName, GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         NULL, CREATE_ALWAYS, 0, NULL);
+    ok(Handle != INVALID_HANDLE_VALUE, "CreateFileW failed with %lu\n", GetLastError());
+    if (Handle != INVALID_HANDLE_VALUE)
+    {
+        HANDLE Source = CreateFileW(CmdLine, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        static BYTE Buffer[0x10000];
+        DWORD Read;
+        PVOID BaseAddress = NULL;
+        SIZE_T ViewSize = 0;
+        LARGE_INTEGER SectionOffset = { { 0 } };
+
+        ok(Source != INVALID_HANDLE_VALUE, "CreateFileW(%ls) failed with %lu\n", CmdLine, GetLastError());
+        while (ReadFile(Source, Buffer, sizeof(Buffer), &Read, NULL) && Read)
+            WriteFile(Handle, Buffer, Read, &Written, NULL);
+        CloseHandle(Source);
+
+        Status = NtCreateSection(&SectionHandle, SECTION_ALL_ACCESS, NULL, NULL,
+                                 PAGE_EXECUTE_READWRITE, SEC_IMAGE, Handle);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            Status = NtMapViewOfSection(SectionHandle, NtCurrentProcess(), &BaseAddress, 0, 0,
+                                        &SectionOffset, &ViewSize, ViewShare, 0, PAGE_READWRITE);
+            ok(NT_SUCCESS(Status), "NtMapViewOfSection failed with 0x%lx\n", Status);
+            if (NT_SUCCESS(Status))
+            {
+                volatile BYTE Sum = 0;
+                SIZE_T Offset;
+                for (Offset = 0; Offset < ViewSize; Offset += PAGE_SIZE)
+                    Sum += ((PBYTE)BaseAddress)[Offset];
+                NtUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
+            }
+            NtClose(SectionHandle);
+
+            SetFilePointer(Handle, 0, NULL, FILE_BEGIN);
+            Success = SetEndOfFile(Handle);
+            ok(Success == TRUE, "SetEndOfFile failed with %lu after the image was unmapped\n", GetLastError());
+        }
+        CloseHandle(Handle);
+    }
+    Success = DeleteFileW(FileName);
+    ok(Success == TRUE, "DeleteFileW failed with %lu\n", GetLastError());
+
+    /* 3. An exe whose process has exited can be overwritten and deleted */
+    Success = CopyFileW(CmdLine, FileName, FALSE);
+    ok(Success == TRUE, "CopyFileW(%ls) failed with %lu\n", CmdLine, GetLastError());
+    if (!Success)
+        return;
+    /* the copy may have inherited the read-only attribute of the source */
+    Success = SetFileAttributesW(FileName, FILE_ATTRIBUTE_NORMAL);
+    ok(Success == TRUE, "SetFileAttributesW failed with %lu\n", GetLastError());
+
+    StringCbPrintfW(CmdLine, sizeof(CmdLine), L"\"%s\" /c exit 7", FileName);
+    Success = CreateProcessW(FileName, CmdLine, NULL, NULL, FALSE, 0, NULL, NULL,
+                             &StartupInfo, &ProcessInfo);
+    ok(Success == TRUE, "CreateProcessW failed with %lu\n", GetLastError());
+    if (Success)
+    {
+        ok(WaitForSingleObject(ProcessInfo.hProcess, 30000) == WAIT_OBJECT_0, "process did not exit\n");
+        GetExitCodeProcess(ProcessInfo.hProcess, &ExitCode);
+        ok(ExitCode == 7, "ExitCode %lu\n", ExitCode);
+        CloseHandle(ProcessInfo.hThread);
+        CloseHandle(ProcessInfo.hProcess);
+    }
+
+    Handle = CreateFileW(FileName, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    ok(Handle != INVALID_HANDLE_VALUE, "Overwriting the exited exe failed with %lu\n", GetLastError());
+    if (Handle != INVALID_HANDLE_VALUE)
+    {
+        Success = WriteFile(Handle, "MZ", 2, &Written, NULL);
+        ok(Success == TRUE, "WriteFile failed with %lu\n", GetLastError());
+        CloseHandle(Handle);
+    }
+    Success = DeleteFileW(FileName);
+    ok(Success == TRUE, "DeleteFileW failed with %lu\n", GetLastError());
+}
+
 START_TEST(NtMapViewOfSection)
 {
     Test_PageFileSection();
@@ -2069,7 +2237,10 @@ START_TEST(NtMapViewOfSection)
     Test_SectionContents(TRUE);
     Test_RawSize(0);
     Test_RawSize(1);
+    Test_RawSize(3);
+    Test_RawSize(4);
     Test_RawSize(2);
     Test_EmptyFile();
     Test_Truncate();
+    Test_ImageTruncate();
 }

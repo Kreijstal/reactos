@@ -241,6 +241,11 @@ typedef struct _MM_IMAGE_SECTION_OBJECT
     ULONG SegFlags;
 
     SECTION_IMAGE_INFORMATION ImageInformation;
+    /* How much address space the image takes (SizeOfImage, then the extent
+     * of its segments); ImageInformation.ImageFileSize is the file's size */
+    ULONG ImageSize;
+    /* Mapped as one flat subsection (section alignment below PAGE_SIZE) */
+    BOOLEAN MappedFlat;
     PVOID BasedAddress;
     ULONG NrSegments;
     PMM_SECTION_SEGMENT Segments;
