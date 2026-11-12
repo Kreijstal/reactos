@@ -127,6 +127,16 @@ typedef struct _PARTITION_EXTENSION
 
 CODE_SEG("PAGE")
 NTSTATUS
+PartitionDeleteSymlink(
+    _In_ PPARTITION_EXTENSION PartExt);
+
+CODE_SEG("PAGE")
+NTSTATUS
+VolumeDeleteMountPoints(
+    _In_ PPARTITION_EXTENSION PartExt);
+
+CODE_SEG("PAGE")
+NTSTATUS
 PartitionCreateDevice(
     _In_ PDEVICE_OBJECT FDObject,
     _In_ PPARTITION_INFORMATION_EX PartitionEntry,
