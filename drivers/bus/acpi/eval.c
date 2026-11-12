@@ -521,8 +521,9 @@ EvalCreateParametersList(
             ParamList->Count = ComplexBuffer->ArgumentCount;
             if (ParamList->Count == 0)
             {
-                DPRINT1("No arguments\n");
-                return STATUS_ACPI_INCORRECT_ARGUMENT_COUNT;
+                /* No arguments; Bus_EvalMethod checks this against the method */
+                ParamList->Pointer = NULL;
+                break;
             }
 
             Status = RtlULongMult(ParamList->Count, sizeof(*Arg), &ArgumentsSize);
@@ -707,6 +708,34 @@ EvalEvaluateObject(
 }
 
 /**
+ * @brief Tells whether the named object is a control method declaring parameters.
+ */
+static
+BOOLEAN
+EvalMethodTakesArguments(
+    _In_ ACPI_HANDLE AcpiHandle,
+    _In_ PACPI_EVAL_INPUT_BUFFER EvalInputBuffer)
+{
+    CHAR MethodName[ACPI_OBJECT_NAME_LENGTH];
+    ACPI_HANDLE MethodHandle;
+    ACPI_DEVICE_INFO *Info;
+    BOOLEAN TakesArguments;
+
+    RtlCopyMemory(MethodName, EvalInputBuffer->MethodName, ACPI_OBJECT_NAME_LENGTH - 1);
+    MethodName[ACPI_OBJECT_NAME_LENGTH - 1] = ANSI_NULL;
+
+    /* A missing object is reported by the evaluation itself */
+    if (ACPI_FAILURE(AcpiGetHandle(AcpiHandle, MethodName, &MethodHandle)))
+        return FALSE;
+    if (ACPI_FAILURE(AcpiGetObjectInfo(MethodHandle, &Info)))
+        return FALSE;
+
+    TakesArguments = (Info->Type == ACPI_TYPE_METHOD && Info->ParamCount != 0);
+    ACPI_FREE(Info);
+    return TakesArguments;
+}
+
+/**
  * @brief Writes the results from the evaluation into the output IRP buffer.
  */
 static
@@ -805,6 +834,17 @@ Bus_EvalMethod(
     Status = EvalCreateParametersList(Irp, IoStack, EvalInputBuffer, &ParamList);
     if (!NT_SUCCESS(Status))
         return Status;
+
+    /*
+     * A complex buffer may carry no arguments at all (e.g. _DOD from a display
+     * miniport); that is only wrong for a method that declares parameters.
+     */
+    if (EvalInputBuffer->Signature == ACPI_EVAL_INPUT_BUFFER_COMPLEX_SIGNATURE &&
+        ParamList.Count == 0 &&
+        EvalMethodTakesArguments(AcpiHandle, EvalInputBuffer))
+    {
+        return STATUS_ACPI_INCORRECT_ARGUMENT_COUNT;
+    }
 
     AcpiStatus = EvalEvaluateObject(AcpiHandle, EvalInputBuffer, &ParamList, &ReturnBuffer);
 
