@@ -682,6 +682,13 @@ struct _DXGKRNL_ADAPTER
     PVOID                       VidSchContext;       /* PVIDSCH_CONTEXT */
 
     /*
+     * Kernel system (paging) and GDI devices/contexts plus the GPU
+     * shadow->primary present state (kmpresent.c).  NULL unless the
+     * miniport is full WDDM and the contexts were created.
+     */
+    PVOID                       KmPresent;           /* PDXGK_KM_PRESENT */
+
+    /*
      * GUID_DISPLAY_DEVICE_ARRIVAL device interface.
      * Registered in DxgkpAddDevice, enabled in DxgkAdapterStart,
      * disabled and freed in DxgkAdapterRemove.
@@ -1605,6 +1612,72 @@ DxgkCbQueryMonitorInterface(
     _In_  HANDLE                               hAdapter,
     _In_  UINT                                 MonitorInterfaceVersion,
     _Out_ PVOID*                               ppMonitorInterface);
+
+/* Boot-time shared primary of a full WDDM miniport (vidpn.c). */
+NTSTATUS
+DxgkEnsureBootPrimary(
+    _In_  PDXGKRNL_ADAPTER     Adapter,
+    _Out_ PDXGKVMM_ALLOCATION *OutAllocation);
+
+NTSTATUS
+DxgkScanoutBootPrimary(
+    _In_ PDXGKRNL_ADAPTER Adapter);
+
+/*
+ * GPU-addressable kernel buffer (DMA or paging buffer) placed by VidMm in
+ * one segment of a segment set, or in contiguous system memory when the
+ * set is empty (vidmm.c).
+ */
+typedef struct _DXGKVMM_KERNEL_BUFFER
+{
+    PVOID               CpuVa;          /* kernel VA, write-combined        */
+    SIZE_T              Size;
+    UINT                SegmentId;      /* 0: contiguous system memory      */
+    PHYSICAL_ADDRESS    GpuAddress;     /* segment address (or system PA)   */
+    PDXGKVMM_ALLOCATION Placement;      /* segment range, NULL for seg 0    */
+    PMDL                Mdl;            /* aperture backing pages           */
+    BOOLEAN             ApertureMapped;
+} DXGKVMM_KERNEL_BUFFER, *PDXGKVMM_KERNEL_BUFFER;
+
+NTSTATUS
+DxgkVidMmAllocateKernelBuffer(
+    _In_  PDXGKRNL_ADAPTER       Adapter,
+    _In_  UINT                   SegmentSet,
+    _In_  SIZE_T                 Size,
+    _Out_ PDXGKVMM_KERNEL_BUFFER Buffer);
+
+VOID
+DxgkVidMmFreeKernelBuffer(
+    _In_    PDXGKRNL_ADAPTER       Adapter,
+    _Inout_ PDXGKVMM_KERNEL_BUFFER Buffer);
+
+/*
+ * Kernel system/GDI devices and contexts, paging submission and the GPU
+ * shadow->primary Blt (kmpresent.c).
+ */
+VOID
+DxgkKmPresentInitialize(
+    _In_ PDXGKRNL_ADAPTER Adapter);
+
+/* GDI device/context and present surfaces; before the primary goes away. */
+VOID
+DxgkKmPresentTeardown(
+    _In_ PDXGKRNL_ADAPTER Adapter);
+
+/* System (paging) device/context; after the last paging operation. */
+VOID
+DxgkKmPagingTeardown(
+    _In_ PDXGKRNL_ADAPTER Adapter);
+
+NTSTATUS
+DxgkKmExecutePagingOperation(
+    _In_    PDXGKRNL_ADAPTER           Adapter,
+    _Inout_ PDXGKARG_BUILDPAGINGBUFFER BuildArgs);
+
+NTSTATUS
+DxgkKmPresentShadow(
+    _In_ PDXGKRNL_ADAPTER Adapter,
+    _In_ const RECT      *DirtyRect);
 
 /*
  * D3DKMT stubs.

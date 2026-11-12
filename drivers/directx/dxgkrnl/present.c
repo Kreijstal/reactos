@@ -209,10 +209,9 @@ DxgkpOpenPresentAllocation(
     OpenArgs.NumAllocations = 1;
     OpenArgs.pOpenAllocation = &OpenInfo;
     OpenArgs.pPrivateDriverData = NULL;
-    OpenArgs.PrivateDriverDataSize = 0;
-    OpenArgs.hResource = (Allocation->Resource != NULL) ?
-                         Allocation->Resource->MiniportHandle : NULL;
-    OpenArgs.ReadOnly = ReadOnly;
+    OpenArgs.PrivateDriverSize = 0;
+    OpenArgs.Flags.Value = 0;
+    OpenArgs.Flags.ReadOnly = ReadOnly ? 1 : 0;
 
     Status = DXGK_CB_FULL(Adapter, DxgkDdiOpenAllocation)(
                  Device->hMiniportDevice,
@@ -293,7 +292,7 @@ DxgkpProgramSharedPrimaryScanout(
     SetSourceAddress.VidPnSourceId = VidPnSourceId;
     SetSourceAddress.hAllocation = Allocation->MiniportHandle;
     SetSourceAddress.PrimaryAddress = PrimaryAddress;
-    SetSourceAddress.SegmentId = Allocation->SegmentId;
+    SetSourceAddress.PrimarySegment = Allocation->SegmentId;
     SetSourceAddress.Flags.FlipImmediate = 1;
 
     TraceSeq = InterlockedIncrement(&g_SharedPrimaryScanoutTraceCount);
@@ -753,7 +752,6 @@ DxgkpExecuteFullPresent(
 {
     DXGKARG_PRESENT PresentArgs;
     DXGK_ALLOCATIONLIST PresentAllocationList[DXGK_PRESENT_DESTINATION_INDEX + 1];
-    D3DDDI_ALLOCATIONLIST SubmitAllocationList[DXGK_PRESENT_DESTINATION_INDEX + 1];
     D3DDDI_PATCHLOCATIONLIST PatchLocationList[DXGK_PRESENT_DESTINATION_INDEX];
     RECT DstSubRect;
     HANDLE SourceDeviceSpecificHandle = NULL;
@@ -790,7 +788,6 @@ DxgkpExecuteFullPresent(
 
     RtlZeroMemory(&PresentArgs, sizeof(PresentArgs));
     RtlZeroMemory(PresentAllocationList, sizeof(PresentAllocationList));
-    RtlZeroMemory(SubmitAllocationList, sizeof(SubmitAllocationList));
 
     Device = DxgkLookupDeviceByHandle(Entry->hDevice, NULL);
     if (Device == NULL)
@@ -863,9 +860,6 @@ DxgkpExecuteFullPresent(
 
         PresentAllocationList[DXGK_PRESENT_SOURCE_INDEX].hDeviceSpecificAllocation =
             SourceDeviceSpecificHandle;
-        SubmitAllocationList[DXGK_PRESENT_SOURCE_INDEX].hAllocation = Entry->hSource;
-        SubmitAllocationList[DXGK_PRESENT_SOURCE_INDEX].hDeviceSpecificAllocation =
-            (D3DKMT_HANDLE)(ULONG_PTR)SourceDeviceSpecificHandle;
     }
 
     if (Entry->hDestination != 0)
@@ -898,12 +892,6 @@ DxgkpExecuteFullPresent(
         PresentAllocationList[DXGK_PRESENT_DESTINATION_INDEX].hDeviceSpecificAllocation =
             DestinationDeviceSpecificHandle;
         PresentAllocationList[DXGK_PRESENT_DESTINATION_INDEX].WriteOperation = 1;
-
-        SubmitAllocationList[DXGK_PRESENT_DESTINATION_INDEX].hAllocation =
-            Entry->hDestination;
-        SubmitAllocationList[DXGK_PRESENT_DESTINATION_INDEX].hDeviceSpecificAllocation =
-            (D3DKMT_HANDLE)(ULONG_PTR)DestinationDeviceSpecificHandle;
-        SubmitAllocationList[DXGK_PRESENT_DESTINATION_INDEX].WriteOperation = 1;
     }
 
     TraceSeq = InterlockedIncrement(&g_PresentOpenTraceCount);
@@ -1018,20 +1006,24 @@ DxgkpExecuteFullPresent(
         if (Entry->Type == DxgkPresentTypeFlip)
             SubmitFlags.Flip = 1;
 
-        SubmitArgs.pDmaBuffer = DmaBuffer;
+        /*
+         * The DMA buffer is nonpaged pool tracked below by fence id; it is
+         * not yet GPU-addressable, so DmaBufferSegmentId and
+         * DmaBufferPhysicalAddress stay zero.
+         */
+        SubmitArgs.hContext = MiniportPresentContext;
         SubmitArgs.DmaBufferSize = DXGK_PRESENT_IMMEDIATE_DMA_BYTES;
-        SubmitArgs.pDmaBufferPrivateData = &DmaBufferPrivateData;
-        SubmitArgs.DmaBufferPrivateDataSize = sizeof(DmaBufferPrivateData);
         SubmitArgs.DmaBufferSubmissionStartOffset = 0;
         SubmitArgs.DmaBufferSubmissionEndOffset = DmaBytesUsed;
-        SubmitArgs.pAllocationList = SubmitAllocationList;
-        SubmitArgs.AllocationListSize = RTL_NUMBER_OF(SubmitAllocationList);
+        SubmitArgs.pDmaBufferPrivateData = &DmaBufferPrivateData;
+        SubmitArgs.DmaBufferPrivateDataSize = sizeof(DmaBufferPrivateData);
+        SubmitArgs.DmaBufferPrivateDataSubmissionEndOffset = sizeof(DmaBufferPrivateData);
         SubmitArgs.SubmissionFenceId = SubmissionFenceId;
         SubmitArgs.VidPnSourceId = Entry->VidPnSourceId;
-        SubmitArgs.NodeOrdinal = 0;
+        SubmitArgs.FlipInterval = Entry->FlipInterval;
+        SubmitArgs.Flags = SubmitFlags;
         SubmitArgs.EngineOrdinal = 0;
-        SubmitArgs.hContext = MiniportPresentContext;
-        SubmitArgs.Flags = SubmitFlags.Value;
+        SubmitArgs.NodeOrdinal = 0;
 
         Status = DXGK_CB_FULL(Adapter, DxgkDdiSubmitCommand)(
                      Adapter->MiniportDeviceContext,

@@ -223,6 +223,13 @@ SoftGpuDdiSubmitCommand(
 
     Start100ns = SoftGpuTraceNow100ns();
 
+    /*
+     * The "GPU" is the CPU: run the DMA buffer now, then report the fence
+     * from the completion DPC.  A faulting buffer still retires its fence
+     * (the commands are dropped), as a GPU that skips a bad packet would.
+     */
+    SoftGpuExecuteDmaBuffer(Device, SubmitCommand);
+
     /* Store the fence ID under FenceLock. */
     KeAcquireSpinLock(&Device->FenceLock, &OldIrql);
     Device->CurrentFence = SubmitCommand->SubmissionFenceId;
@@ -407,11 +414,34 @@ SoftGpuDdiPatch(
     _In_ PVOID                   MiniportDeviceContext,
     _In_ CONST DXGKARG_PATCH    *Patch)
 {
+    UINT i;
+
     UNREFERENCED_PARAMETER(MiniportDeviceContext);
 
     if (Patch == NULL)
         return STATUS_INVALID_PARAMETER;
 
+    /* Each location receives its allocation's segment address (a VRAM offset). */
+    for (i = Patch->PatchLocationListSubmissionStart;
+         i < Patch->PatchLocationListSubmissionStart + Patch->PatchLocationListSubmissionLength;
+         i++)
+    {
+        const D3DDDI_PATCHLOCATIONLIST *Location = &Patch->pPatchLocationList[i];
+        const DXGK_ALLOCATIONLIST *Allocation;
+
+        if (Location->AllocationIndex >= Patch->AllocationListSize ||
+            Location->PatchOffset + sizeof(ULONGLONG) > Patch->DmaBufferSize)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        Allocation = &Patch->pAllocationList[Location->AllocationIndex];
+        if (Allocation->SegmentId == 0)
+            continue;   /* not resident: the packet keeps a 0 address */
+
+        *(ULONGLONG UNALIGNED *)((PUCHAR)Patch->pDmaBuffer + Location->PatchOffset) =
+            (ULONGLONG)Allocation->PhysicalAddress.QuadPart + Location->AllocationOffset;
+    }
     return STATUS_SUCCESS;
 }
 
@@ -542,10 +572,10 @@ SoftGpuDdiCreateContext(
     _Inout_ PDXGKARG_CREATECONTEXT  CreateContext)
 {
     PSOFTGPU_CONTEXT Ctx;
+    PSOFTGPU_DEVICE Adapter = SoftGpuDeviceFromHandle(MiniportDeviceContext);
 
-    UNREFERENCED_PARAMETER(MiniportDeviceContext);
-
-    if (CreateContext == NULL)
+    /* The first argument is the hDevice our CreateDevice returned. */
+    if (CreateContext == NULL || Adapter == NULL)
         return STATUS_INVALID_PARAMETER;
 
     if (CreateContext->NodeOrdinal != 0)
@@ -567,6 +597,7 @@ SoftGpuDdiCreateContext(
     Ctx->Magic          = SOFTGPU_CONTEXT_MAGIC;
     Ctx->NodeOrdinal    = CreateContext->NodeOrdinal;
     Ctx->EngineAffinity = CreateContext->EngineAffinity;
+    Ctx->Adapter        = Adapter;
 
     /*
      * Fill in DMA buffer geometry for the UMD via DXGK_CONTEXTINFO.

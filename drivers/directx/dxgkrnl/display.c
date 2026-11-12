@@ -152,8 +152,6 @@ static volatile LONG g_PresentDirtyTraceCount = 0;
 static volatile LONG g_PresentDispatchBusy = 0;
 static BOOLEAN g_PresentDirtyRectValid = FALSE;
 static RECTL g_PresentDirtyRect;
-static volatile LONGLONG g_LastDirtyNotify100ns = 0;
-static volatile LONGLONG g_LastPresentSubmit100ns = 0;
 
 /*
  * Timestamp (100ns) of the last IOCTL_VIDEO_DXGK_COMPOSITION_BEGIN.  The present
@@ -519,6 +517,61 @@ DxgkDisplayCommitVidPn(
             DXGKRNL_TRACE("DxgkpCommitVidPnToMiniport: pinned target mode id=%u "
                           "(%ux%u)\n", TgtSet->PinnedModeId,
                           TargetWidth, TargetHeight);
+
+            /*
+             * Like Windows, re-run the cofunctional enumeration with the
+             * freshly pinned target as the pivot: that is when the miniport
+             * fills the source mode set with modes cofunctional with the
+             * target (AMD's atikmdag only does it then).
+             */
+            if (!ForceDodPresentOnlyPath &&
+                !SkipDodVidPnNegotiation &&
+                DXGK_CB(Adapter, DxgkDdiEnumVidPnCofuncModality) != NULL)
+            {
+                DXGKARG_ENUMVIDPNCOFUNCMODALITY PivotArgs;
+                NTSTATUS PivotStatus;
+
+                RtlZeroMemory(&PivotArgs, sizeof(PivotArgs));
+                PivotArgs.hConstrainingVidPn = (D3DKMDT_HVIDPN)VidPn;
+                PivotArgs.EnumPivotType = D3DKMDT_EPT_VIDPNTARGET;
+                PivotArgs.EnumPivot.VidPnTargetId = TgtSet->TargetId;
+
+                _SEH2_TRY
+                {
+                    PivotStatus = DXGK_CB(Adapter, DxgkDdiEnumVidPnCofuncModality)(
+                                      Adapter->MiniportDeviceContext,
+                                      &PivotArgs);
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    PivotStatus = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+
+                DXGKRNL_TRACE("DxgkpCommitVidPnToMiniport: target-pivot "
+                              "EnumCofuncModality(target %u) returned 0x%08lX\n",
+                              TgtSet->TargetId, PivotStatus);
+            }
+
+            if (VidPn->SourceModeSets[0] != NULL)
+            {
+                PDXGKP_VIDPN_SOURCE_MODESET Src = VidPn->SourceModeSets[0];
+                UINT LastW = 0, LastH = 0;
+
+                DXGKRNL_TRACE("DxgkpCommitVidPnToMiniport: %u source modes after pivot, "
+                              "path0 scaling=%d\n", (UINT)Src->NumModes,
+                              VidPn->NumPaths ? (int)VidPn->Paths[0].ContentTransformation.Scaling : -1);
+                for (i = 0; i < Src->NumModes; i++)
+                {
+                    UINT W = (UINT)Src->Modes[i].Format.Graphics.PrimSurfSize.cx;
+                    UINT H = (UINT)Src->Modes[i].Format.Graphics.PrimSurfSize.cy;
+                    if (W == LastW && H == LastH)
+                        continue;
+                    LastW = W; LastH = H;
+                    DXGKRNL_TRACE("  source[%u] id=%u %ux%u fmt=%d\n", i, Src->Modes[i].Id,
+                                  W, H, (int)Src->Modes[i].Format.Graphics.PixelFormat);
+                }
+            }
         }
 
         /*
@@ -632,8 +685,53 @@ DxgkDisplayCommitVidPn(
             VidPn->SourceModeSets[0] != NULL)
         {
             PDXGKP_VIDPN_SOURCE_MODESET SrcSet = VidPn->SourceModeSets[0];
+            BOOLEAN SourceMatchesTarget = FALSE;
 
-            for (i = 0; i < SrcSet->NumModes; i++)
+            /* Windows commits a source the size of the pinned target (the
+             * monitor's native mode).  Miniports such as AMD's atikmdag
+             * reject a source/target size mismatch in CommitVidPn, so only
+             * fall back to the POST size when no source mode fits the
+             * target. */
+            for (i = 0; TargetWidth != 0 && i < SrcSet->NumModes; i++)
+            {
+                if ((UINT)SrcSet->Modes[i].Format.Graphics.PrimSurfSize.cx == TargetWidth &&
+                    (UINT)SrcSet->Modes[i].Format.Graphics.PrimSurfSize.cy == TargetHeight)
+                {
+                    SourceMatchesTarget = TRUE;
+                    break;
+                }
+            }
+
+            /* No source the size of the target (AMD offers 1360x768 for a
+             * 1366x768 panel): like Windows, take the largest source that
+             * fits inside the target and let the path scale/center it. */
+            if (!SourceMatchesTarget && TargetWidth != 0)
+            {
+                UINT BestArea = 0;
+
+                for (i = 0; i < SrcSet->NumModes; i++)
+                {
+                    UINT W = (UINT)SrcSet->Modes[i].Format.Graphics.PrimSurfSize.cx;
+                    UINT H = (UINT)SrcSet->Modes[i].Format.Graphics.PrimSurfSize.cy;
+
+                    if (W <= TargetWidth && H <= TargetHeight && W * H > BestArea)
+                    {
+                        BestArea = W * H;
+                        DesiredWidth = W;
+                        DesiredHeight = H;
+                    }
+                }
+
+                if (BestArea > Adapter->PostDisplayWidth * Adapter->PostDisplayHeight)
+                {
+                    SourceMatchesTarget = TRUE;
+                    DXGKRNL_WARN("DxgkpCommitVidPnToMiniport: no %ux%u source; "
+                                 "committing largest fitting source %ux%u\n",
+                                 TargetWidth, TargetHeight, DesiredWidth, DesiredHeight);
+                }
+            }
+
+            for (i = 0; !SourceMatchesTarget && i < SrcSet->NumModes; i++)
             {
                 if ((UINT)SrcSet->Modes[i].Format.Graphics.PrimSurfSize.cx ==
                         Adapter->PostDisplayWidth &&
@@ -659,7 +757,7 @@ DxgkDisplayCommitVidPn(
                              DesiredHeight);
             }
 
-            if (!PreferPostSourceMode &&
+            if (!PreferPostSourceMode && !SourceMatchesTarget &&
                 (TargetWidth != Adapter->PostDisplayWidth ||
                  TargetHeight != Adapter->PostDisplayHeight))
             {
@@ -852,6 +950,11 @@ DxgkDisplayCommitVidPn(
     Adapter->VidPnCommitted = TRUE;
     /* CommittedWidth/Height were set during mode pinning above. */
 
+    /* Full WDDM miniport: the scanout stays on the linear firmware surface
+     * until kmpresent.c has filled the shared primary with a GPU Blt (AMD
+     * lays the primary out 1D-tiled, so the CPU never writes it); it then
+     * switches the source to the primary itself (DxgkScanoutBootPrimary). */
+
     DXGKRNL_TRACE("DxgkpCommitVidPnToMiniport: mode-set complete (%ux%u)\n",
                   Adapter->CommittedWidth, Adapter->CommittedHeight);
     return STATUS_SUCCESS;
@@ -941,16 +1044,14 @@ DxgkpBlitShadowToGop(
                       (SIZE_T)BytesPerRow);
     }
 
-    InterlockedExchange64(&g_LastPresentSubmit100ns,
-                          (LONGLONG)DxgkpDisplayTraceNow100ns());
     return STATUS_SUCCESS;
 }
 
 /* ========================================================================
- * DxgkpPresentShadowFb
+ * DxgkpPresentShadowFbInternal
  *
- * Calls DxgkDdiPresentDisplayOnly to push the shadow framebuffer contents
- * to the GPU.  This is how pixels actually appear on screen for DOD
+ * Presents the dirty rectangle of the shadow framebuffer: DxgkDdiPresent
+ * DisplayOnly for DOD miniports, the GPU Blt for full WDDM ones.  This is how pixels actually appear on screen for DOD
  * (Display Only Driver) miniports.  When the miniport has no such DDI we
  * fall back to DxgkpBlitShadowToGop (direct copy to the firmware GOP).
  *
@@ -959,7 +1060,7 @@ DxgkpBlitShadowToGop(
 static NTSTATUS
 DxgkpPresentShadowFbInternal(
     _In_ PDXGKRNL_ADAPTER Adapter,
-    _In_opt_ const RECT *DirtyRectOpt,
+    _In_ const RECT *DirtyRectIn,
     _In_ PCSTR TraceReason)
 {
     typedef NTSTATUS (APIENTRY *PFN_PRESENT_DISPLAY_ONLY)(
@@ -1023,43 +1124,45 @@ DxgkpPresentShadowFbInternal(
         }
     }
 
-    if (DirtyRectOpt != NULL)
+    /* Only the dirty rectangle is presented; nothing left after clipping
+     * means nothing to present. */
+    DirtyRect = *DirtyRectIn;
+    if (DirtyRect.left < 0)
+        DirtyRect.left = 0;
+    if (DirtyRect.top < 0)
+        DirtyRect.top = 0;
+    if (DirtyRect.right > (LONG)Adapter->CommittedWidth)
+        DirtyRect.right = (LONG)Adapter->CommittedWidth;
+    if (DirtyRect.bottom > (LONG)Adapter->CommittedHeight)
+        DirtyRect.bottom = (LONG)Adapter->CommittedHeight;
+    if (DirtyRect.left >= DirtyRect.right ||
+        DirtyRect.top >= DirtyRect.bottom)
     {
-        DirtyRect = *DirtyRectOpt;
+        return STATUS_SUCCESS;
+    }
 
-        if (DirtyRect.left < 0)
-            DirtyRect.left = 0;
-        if (DirtyRect.top < 0)
-            DirtyRect.top = 0;
-        if (DirtyRect.right > (LONG)Adapter->CommittedWidth)
-            DirtyRect.right = (LONG)Adapter->CommittedWidth;
-        if (DirtyRect.bottom > (LONG)Adapter->CommittedHeight)
-            DirtyRect.bottom = (LONG)Adapter->CommittedHeight;
+    /*
+     * Full WDDM miniport: GPU Blt of the shadow to the shared primary
+     * (kmpresent.c).  Without it, or once it failed, copy the shadow
+     * framebuffer straight to the firmware GOP ourselves; after a fresh
+     * failure the whole surface, since a Blt may have reached that memory.
+     */
+    if (PfnPresent == NULL)
+    {
+        NTSTATUS GpuStatus = DxgkKmPresentShadow(Adapter, &DirtyRect);
+        if (NT_SUCCESS(GpuStatus))
+            return GpuStatus;
 
-        if (DirtyRect.left >= DirtyRect.right ||
-            DirtyRect.top >= DirtyRect.bottom)
+        if (GpuStatus != STATUS_NOT_SUPPORTED)
         {
             DirtyRect.left   = 0;
             DirtyRect.top    = 0;
             DirtyRect.right  = (LONG)Adapter->CommittedWidth;
             DirtyRect.bottom = (LONG)Adapter->CommittedHeight;
         }
-    }
-    else
-    {
-        /* Periodic fallback: push the whole surface. */
-        DirtyRect.left   = 0;
-        DirtyRect.top    = 0;
-        DirtyRect.right  = (LONG)Adapter->CommittedWidth;
-        DirtyRect.bottom = (LONG)Adapter->CommittedHeight;
-    }
 
-    /*
-     * No miniport present DDI (software/WDDM 1.0 miniport): copy the shadow
-     * framebuffer straight to the firmware GOP ourselves.
-     */
-    if (PfnPresent == NULL)
         return DxgkpBlitShadowToGop(Adapter, &DirtyRect);
+    }
 
     ASSERT(Adapter->ShadowFbPitch != 0);
     ShadowPitch = (LONG)(Adapter->ShadowFbPitch != 0 ?
@@ -1103,17 +1206,8 @@ DxgkpPresentShadowFbInternal(
                           Adapter->CommittedHeight,
                           PresentArgs.Pitch);
         }
-        InterlockedExchange64(&g_LastPresentSubmit100ns,
-                              (LONGLONG)DxgkpDisplayTraceNow100ns());
         return PresentStatus;
     }
-}
-
-static NTSTATUS
-DxgkpPresentShadowFb(
-    _In_ PDXGKRNL_ADAPTER Adapter)
-{
-    return DxgkpPresentShadowFbInternal(Adapter, NULL, "timer");
 }
 
 static VOID
@@ -1249,6 +1343,7 @@ DxgkpPresentWorkItemRoutineEx(
     PDXGKRNL_ADAPTER Adapter = (PDXGKRNL_ADAPTER)Context;
     RECTL DirtyRect;
     BOOLEAN HasDirty = FALSE;
+    BOOLEAN Deferred = FALSE;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -1289,11 +1384,20 @@ DxgkpPresentWorkItemRoutineEx(
             }
         }
 
+        /*
+         * Present only what changed, as Windows' CDD does: nothing dirty,
+         * nothing presented. A present the GPU path could not take yet
+         * (STATUS_PENDING: the previous Blt is still in flight) keeps its
+         * rectangle dirty for the next timer tick.
+         */
         HasDirty = DxgkpConsumeDirtyRect(Adapter, &DirtyRect);
-        if (HasDirty)
-            DxgkpPresentShadowFbInternal(Adapter, (const RECT *)&DirtyRect, "dirty");
-        else
-            DxgkpPresentShadowFb(Adapter);
+        if (HasDirty &&
+            DxgkpPresentShadowFbInternal(Adapter, (const RECT *)&DirtyRect,
+                                         "dirty") == STATUS_PENDING)
+        {
+            DxgkpRecordDirtyRect(Adapter, &DirtyRect);
+            Deferred = TRUE;
+        }
     }
 
     /* The periodic present timer owns dispatch pacing. */
@@ -1303,9 +1407,10 @@ DxgkpPresentWorkItemRoutineEx(
      * Re-check: a new dirty rect may have arrived while we were busy
      * presenting the previous one.  Re-queue immediately so we don't
      * wait for the next 15 ms timer tick — this eliminates dropped
-     * frames during heavy GUI activity.
+     * frames during heavy GUI activity.  A deferred present waits for the
+     * tick instead of spinning on the Blt in flight.
      */
-    if (Adapter != NULL && Adapter->PresentTimerActive &&
+    if (!Deferred && Adapter != NULL && Adapter->PresentTimerActive &&
         DxgkpHasPendingDirtyRect(Adapter))
     {
         if (InterlockedCompareExchange(&g_PresentDispatchBusy, 1, 0) == 0)
@@ -1326,8 +1431,6 @@ DxgkpPresentTimerDpc(
 {
     PDXGKRNL_ADAPTER Adapter = (PDXGKRNL_ADAPTER)DeferredContext;
     LONG TimerSeq;
-    BOOLEAN HasDirty;
-    ULONGLONG Now100ns;
 
     UNREFERENCED_PARAMETER(Dpc);
     UNREFERENCED_PARAMETER(SystemArgument1);
@@ -1339,78 +1442,25 @@ DxgkpPresentTimerDpc(
         return;
 
     TimerSeq = InterlockedIncrement(&g_PresentTimerTraceCount);
-    Now100ns = DxgkpDisplayTraceNow100ns();
-    HasDirty = DxgkpHasPendingDirtyRect(Adapter);
 
-    if (HasDirty)
-    {
-        if (InterlockedCompareExchange(&g_PresentDispatchBusy, 1, 0) == 0)
-        {
-            if (TimerSeq <= DXGK_PRESENT_TRACE_LOG_LIMIT)
-            {
-                DXGKRNL_TRACE("DxgkpPresentTimerDpc: seq=%ld queueing dirty present work item\n",
-                              TimerSeq);
-            }
-
-            if (!DxgkpQueuePresentWorkItem(Adapter))
-                InterlockedExchange(&g_PresentDispatchBusy, 0);
-        }
-        else if (TimerSeq <= DXGK_PRESENT_TRACE_LOG_LIMIT)
-        {
-            DXGKRNL_TRACE("DxgkpPresentTimerDpc: seq=%ld skipping tick while present worker is busy\n",
-                          TimerSeq);
-        }
+    /* No periodic full-screen refresh: only dirty rectangles are presented. */
+    if (!DxgkpHasPendingDirtyRect(Adapter))
         return;
-    }
-
-    if ((ULONGLONG)InterlockedCompareExchange64(&g_LastDirtyNotify100ns, 0, 0) != 0)
-    {
-        ULONGLONG LastDirty100ns = (ULONGLONG)InterlockedCompareExchange64(&g_LastDirtyNotify100ns, 0, 0);
-
-        if (Now100ns > LastDirty100ns &&
-            (Now100ns - LastDirty100ns) < (50ULL * 10000ULL))
-        {
-            if (TimerSeq <= DXGK_PRESENT_TRACE_LOG_LIMIT)
-            {
-                DXGKRNL_TRACE("DxgkpPresentTimerDpc: seq=%ld skipping fallback due to recent dirty activity\n",
-                              TimerSeq);
-            }
-            return;
-        }
-    }
-
-    if ((ULONGLONG)InterlockedCompareExchange64(&g_LastPresentSubmit100ns, 0, 0) != 0)
-    {
-        ULONGLONG LastPresent100ns = (ULONGLONG)InterlockedCompareExchange64(&g_LastPresentSubmit100ns, 0, 0);
-
-        if (Now100ns > LastPresent100ns &&
-            (Now100ns - LastPresent100ns) < (30ULL * 10000ULL))
-        {
-            if (TimerSeq <= DXGK_PRESENT_TRACE_LOG_LIMIT)
-            {
-                DXGKRNL_TRACE("DxgkpPresentTimerDpc: seq=%ld skipping fallback due to recent present\n",
-                              TimerSeq);
-            }
-            return;
-        }
-    }
 
     if (InterlockedCompareExchange(&g_PresentDispatchBusy, 1, 0) == 0)
     {
         if (TimerSeq <= DXGK_PRESENT_TRACE_LOG_LIMIT)
         {
-            DXGKRNL_TRACE("DxgkpPresentTimerDpc: seq=%ld queueing work item "
-                          "(periodic present active)\n", TimerSeq);
+            DXGKRNL_TRACE("DxgkpPresentTimerDpc: seq=%ld queueing dirty present work item\n",
+                          TimerSeq);
         }
 
         if (!DxgkpQueuePresentWorkItem(Adapter))
-        {
             InterlockedExchange(&g_PresentDispatchBusy, 0);
-        }
     }
     else if (TimerSeq <= DXGK_PRESENT_TRACE_LOG_LIMIT)
     {
-        DXGKRNL_TRACE("DxgkpPresentTimerDpc: seq=%ld skipping fallback while present worker is busy\n",
+        DXGKRNL_TRACE("DxgkpPresentTimerDpc: seq=%ld skipping tick while present worker is busy\n",
                       TimerSeq);
     }
 }
@@ -1435,8 +1485,6 @@ DxgkpStartPresentTimer(
 
     KeInitializeSpinLock(&Adapter->PresentLock);
     g_PresentDirtyRectValid = FALSE;
-    InterlockedExchange64(&g_LastDirtyNotify100ns, 0);
-    InterlockedExchange64(&g_LastPresentSubmit100ns, 0);
     InterlockedExchange(&g_PresentDispatchBusy, 0);
 
     KeInitializeTimer(&Adapter->PresentTimer);
@@ -1484,8 +1532,6 @@ DxgkpStopPresentTimer(
         }
 
         g_PresentDirtyRectValid = FALSE;
-        InterlockedExchange64(&g_LastDirtyNotify100ns, 0);
-        InterlockedExchange64(&g_LastPresentSubmit100ns, 0);
         DXGKRNL_TRACE("DxgkpStopPresentTimer: stopped\n");
     }
 }
@@ -1502,6 +1548,36 @@ DxgkpStopPresentTimer(
  * color-pointer cap plus both pointer DDIs enables the bridge.  Otherwise
  * the IOCTLs keep failing and cdd falls back to the GDI software cursor.
  * ====================================================================== */
+
+/*
+ * OutputDataSize of DXGKQAITYPE_DRIVERCAPS: the DXGK_DRIVERCAPS size of the
+ * miniport's interface version, as Windows' dxgkrnl passes it (WDDM 2.0
+ * 0x240, WDDM 1.3 0x228, Win8 0x220, Win7 0x210, Vista 0x150).
+ */
+static UINT
+DxgkpDriverCapsSize(
+    _In_ ULONG Version)
+{
+    ULONG Size;
+
+#ifdef _WIN64
+    C_ASSERT(sizeof(DXGK_DRIVERCAPS) >= 0x240);
+#endif
+
+    if (Version >= 0x5011)
+        Size = 0x240;
+    else if (Version >= 0x4000)
+        Size = 0x228;
+    else if (Version >= 0x3000)
+        Size = 0x220;
+    else if (Version >= 0x2001)
+        Size = 0x210;
+    else
+        Size = 0x150;
+
+    /* The sizes above are the 64-bit ones; never exceed our buffer */
+    return min(Size, (ULONG)sizeof(DXGK_DRIVERCAPS));
+}
 
 static BOOLEAN
 DxgkpPointerBridgeSupported(
@@ -1535,7 +1611,8 @@ DxgkpPointerBridgeSupported(
     RtlZeroMemory(&QueryArgs, sizeof(QueryArgs));
     QueryArgs.Type = DXGKQAITYPE_DRIVERCAPS;
     QueryArgs.pOutputData = &Caps;
-    QueryArgs.OutputDataSize = sizeof(Caps);
+    QueryArgs.OutputDataSize =
+        DxgkpDriverCapsSize(Adapter->MiniportContext->InitData.s.Version);
 
     _SEH2_TRY
     {
@@ -1552,7 +1629,7 @@ DxgkpPointerBridgeSupported(
         Caps.MaxPointerWidth == 0 ||
         Caps.MaxPointerHeight == 0)
     {
-        DXGKRNL_TRACE("DxgkpPointerBridgeSupported: no hardware pointer "
+        DXGKRNL_WARN("DxgkpPointerBridgeSupported: no hardware pointer "
                       "(status=0x%08lX color=%u %ux%u)\n",
                       Status, Caps.PointerCaps.Color,
                       Caps.MaxPointerWidth, Caps.MaxPointerHeight);
@@ -1563,7 +1640,7 @@ DxgkpPointerBridgeSupported(
     Adapter->PointerMaxHeight = Caps.MaxPointerHeight;
     Adapter->PointerHwSupported = TRUE;
 
-    DXGKRNL_TRACE("DxgkpPointerBridgeSupported: hardware pointer %lux%lu\n",
+    DXGKRNL_WARN("DxgkpPointerBridgeSupported: hardware pointer %lux%lu\n",
                   Adapter->PointerMaxWidth, Adapter->PointerMaxHeight);
     return TRUE;
 }
@@ -2077,7 +2154,6 @@ DxgkpDisplayDispatch(
             }
 
             DxgkpRecordDirtyRect(g_DisplayAdapter, DirtyRect);
-            InterlockedExchange64(&g_LastDirtyNotify100ns, (LONGLONG)DxgkpDisplayTraceNow100ns());
 
             /*
              * Drive the present NOW — this IOCTL is the display driver's

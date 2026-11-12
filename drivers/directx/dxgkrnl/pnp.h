@@ -83,6 +83,14 @@ DRIVER_DISPATCH DxgkpMiniportPowerDispatch;
  * ------------------------------------------------------------------------- */
 
 /*
+ * DxgkpQueryChildDescriptors
+ *   Call DxgkDdiQueryChildRelations and store Adapter->ChildDescriptors.
+ */
+NTSTATUS
+DxgkpQueryChildDescriptors(
+    _In_ PDXGKRNL_ADAPTER Adapter);
+
+/*
  * DxgkpQueryBusRelations
  *   Build DEVICE_RELATIONS for BusRelations by calling
  *   DxgkDdiQueryChildRelations on the miniport, creating child PDOs

@@ -33,6 +33,8 @@ list(APPEND SOURCE
     softgpu.c
     vidpn.c
     dma.c
+    render.c
+    escape.c
     wddm2.c)
 
 add_library(softgpu MODULE

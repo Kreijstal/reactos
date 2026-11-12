@@ -281,18 +281,51 @@ typedef enum _DXGK_INTERRUPT_TYPE
  */
 typedef enum _DXGK_QUERYADAPTERINFOTYPE
 {
-    DXGKQAITYPE_UMDRIVERPRIVATE             =  0,
-    DXGKQAITYPE_DRIVERCAPS                  =  1,
-    DXGKQAITYPE_QUERYSEGMENT                =  2,
-    DXGKQAITYPE_ALLOCATIONGROUP             =  3,
-    DXGKQAITYPE_QUERYSEGMENT3               =  8,   /* Win7+ */
-    DXGKQAITYPE_NUMMOTIONVECTORPRECISIONS   =  9,
-    DXGKQAITYPE_NODEMETADATA                = 12,   /* Win8+ */
-    DXGKQAITYPE_QUERYSEGMENT4               = 16,   /* WDDM2.0+ */
-    DXGKQAITYPE_PHYSICALADAPTERCOUNT        = 17,
-    DXGKQAITYPE_PHYSICALADAPTERCAPS         = 18,
-    DXGKQAITYPE_DISPLAY_DRIVERCAPS_EXTENSION = 19,
-    DXGKQAITYPE_DISPLAYID_DESCRIPTOR       = 20,
+    DXGKQAITYPE_UMDRIVERPRIVATE             = 0,
+    DXGKQAITYPE_DRIVERCAPS                  = 1,
+    DXGKQAITYPE_QUERYSEGMENT                = 2,
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7)
+    DXGKQAITYPE_RESERVED                    = 3,
+    DXGKQAITYPE_QUERYSEGMENT2               = 4,
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
+    DXGKQAITYPE_QUERYSEGMENT3               = 5,
+    DXGKQAITYPE_NUMPOWERCOMPONENTS          = 6,
+    DXGKQAITYPE_POWERCOMPONENTINFO          = 7,
+    DXGKQAITYPE_PREFERREDGPUNODE            = 8,
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM1_3)
+    DXGKQAITYPE_POWERCOMPONENTPSTATEINFO    = 9,
+    DXGKQAITYPE_HISTORYBUFFERPRECISION      = 10,
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+    DXGKQAITYPE_QUERYSEGMENT4               = 11,
+    DXGKQAITYPE_SEGMENTMEMORYSTATE          = 12,
+    DXGKQAITYPE_GPUMMUCAPS                  = 13,
+    DXGKQAITYPE_PAGETABLELEVELDESC          = 14,
+    DXGKQAITYPE_PHYSICALADAPTERCAPS         = 15,
+    DXGKQAITYPE_DISPLAY_DRIVERCAPS_EXTENSION = 16,
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_2)
+    DXGKQAITYPE_INTEGRATED_DISPLAY_DESCRIPTOR = 17,
+    DXGKQAITYPE_UEFIFRAMEBUFFERRANGES       = 18,
+    DXGKQAITYPE_QUERYCOLORIMETRYOVERRIDES   = 19,
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_3)
+    DXGKQAITYPE_DISPLAYID_DESCRIPTOR        = 20,
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_4)
+    DXGKQAITYPE_FRAMEBUFFERSAVESIZE         = 21,
+    DXGKQAITYPE_HARDWARERESERVEDRANGES      = 22,
+    DXGKQAITYPE_INTEGRATED_DISPLAY_DESCRIPTOR2 = 23,
+    DXGKQAITYPE_NODEPERFDATA                = 24,
+    DXGKQAITYPE_ADAPTERPERFDATA             = 25,
+    DXGKQAITYPE_ADAPTERPERFDATA_CAPS        = 26,
+    DXGKQAITYPE_GPUVERSION                  = 27,
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_5)
+    DXGKQAITYPE_DEVICE_TYPE_CAPS            = 28,
+#endif
 } DXGK_QUERYADAPTERINFOTYPE;
 
 
@@ -331,107 +364,364 @@ typedef struct _DXGK_POINTERFLAGS
 
 
 /* =========================================================================
- * DXGK_PRESENTCAPS  -  hardware present/flip capabilities
+ * DXGK_DRIVERCAPS and its member types (WDK d3dkmddi.h layout)
  * =========================================================================
  */
-typedef struct _DXGK_PRESENTCAPS
+typedef struct _DXGK_GAMMARAMPCAPS
 {
     union
     {
         struct
         {
-            UINT    NoScreenToScreenBlt             : 1;
-            UINT    NoOverlapScreenBlt              : 1;
-            UINT    SupportKernelModeCommandBuffer  : 1;
-            UINT    NoSameBitmapAlphaBlend          : 1;
-            UINT    NoSameBitmapStretchBlt          : 1;
-            UINT    NoSameBitmapTransparentBlt      : 1;
-            UINT    DriverSupportedPointerCursors   : 2;
-            UINT    MaxQueuedFlipOnVSync             : 3;
-            UINT    FlipOnVSyncWithNoWait            : 1;
-            UINT    Reserved                        : 20;
+            UINT    Gamma_Rgb256x3x16   : 1;
+            UINT    Reserved            : 31;
         };
-        UINT    Value;
+        UINT        Value;
     };
-} DXGK_PRESENTCAPS, *PDXGK_PRESENTCAPS;
+} DXGK_GAMMARAMPCAPS;
 
-typedef union _DXGK_FLIPCAPS
+typedef struct _DXGK_COLORTRANSFORMCAPS
+{
+    union
+    {
+        struct
+        {
+            UINT    Gamma_Rgb256x3x16               : 1;
+            UINT    Gamma_Dxgi1                     : 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_3)
+            UINT    Transform_3x4Matrix             : 1;
+            UINT    Transform_3x4Matrix_WideColor   : 1;
+            UINT    Transform_3x4Matrix_HighColor   : 1;
+            UINT    Reserved                        : 27;
+#else
+            UINT    Reserved                        : 30;
+#endif
+        };
+        UINT        Value;
+    };
+} DXGK_COLORTRANSFORMCAPS;
+
+#define DXGK_TEXTURE_SIZE_SHIFT 11
+
+typedef struct _DXGK_PRESENTATIONCAPS
+{
+    union
+    {
+        struct
+        {
+            UINT    NoScreenToScreenBlt                 : 1;
+            UINT    NoOverlapScreenBlt                  : 1;
+            UINT    SupportKernelModeCommandBuffer      : 1;
+            UINT    NoSameBitmapAlphaBlend              : 1;
+            UINT    NoSameBitmapStretchBlt              : 1;
+            UINT    NoSameBitmapTransparentBlt          : 1;
+            UINT    NoSameBitmapOverlappedAlphaBlend    : 1;
+            UINT    NoSameBitmapOverlappedStretchBlt    : 1;
+            UINT    DriverSupportsCddDwmInterop         : 1;
+            UINT    Reserved0                           : 1;
+            UINT    AlignmentShift                      : 4;
+            UINT    MaxTextureWidthShift                : 3;
+            UINT    MaxTextureHeightShift               : 3;
+            UINT    SupportAllBltRops                   : 1;
+            UINT    SupportMirrorStretchBlt             : 1;
+            UINT    SupportMonoStretchBltModes          : 1;
+            UINT    StagingRectStartPitchAligned        : 1;
+            UINT    NoSameBitmapBitBlt                  : 1;
+            UINT    NoSameBitmapOverlappedBitBlt        : 1;
+            UINT    Reserved1                           : 1;
+            UINT    NoTempSurfaceForClearTypeBlend      : 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
+            UINT    SupportSoftwareDeviceBitmaps        : 1;
+            UINT    NoCacheCoherentApertureMemory       : 1;
+            UINT    SupportLinearHeap                   : 1;
+            UINT    Reserved                            : 1;
+#else
+            UINT    Reserved                            : 4;
+#endif
+        };
+        UINT        Value;
+    };
+} DXGK_PRESENTATIONCAPS;
+
+typedef struct _DXGK_FLIPCAPS
+{
+    union
+    {
+        struct
+        {
+            UINT    FlipOnVSyncWithNoWait   : 1;
+            UINT    FlipOnVSyncMmIo         : 1;
+            UINT    FlipInterval            : 1;
+            UINT    FlipImmediateMmIo       : 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM1_3)
+            UINT    FlipIndependent         : 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+            UINT    DdiPresentForIFlip      : 1;
+            UINT    FlipImmediateOnHSync    : 1;
+            UINT    Reserved                : 25;
+#else
+            UINT    Reserved                : 27;
+#endif
+#else
+            UINT    Reserved                : 28;
+#endif
+        };
+        UINT        Value;
+    };
+} DXGK_FLIPCAPS;
+
+typedef struct _DXGK_VIDSCHCAPS
+{
+    union
+    {
+        struct
+        {
+            UINT    MultiEngineAware        : 1;
+            UINT    VSyncPowerSaveAware     : 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
+            UINT    PreemptionAware         : 1;
+            UINT    NoDmaPatching           : 1;
+            UINT    CancelCommandAware      : 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+            UINT    No64BitAtomics          : 1;
+            UINT    LowIrqlPreemptCommand   : 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_3)
+            UINT    HwQueuePacketCap        : 4;
+            UINT    Reserved                : 21;
+#else
+            UINT    Reserved                : 25;
+#endif
+#else
+            UINT    Reserved                : 27;
+#endif
+#else
+            UINT    Reserved                : 30;
+#endif
+        };
+        UINT        Value;
+    };
+} DXGK_VIDSCHCAPS;
+
+typedef struct _DXGK_VIDMMCAPS
+{
+    union
+    {
+        struct
+        {
+            UINT    OutOfOrderLock              : 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7)
+            UINT    DedicatedPagingEngine       : 1;
+            UINT    PagingEngineCanSwizzle      : 1;
+            UINT    SectionBackedPrimary        : 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM1_3)
+            UINT    CrossAdapterResource        : 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+            UINT    VirtualAddressingSupported  : 1;
+            UINT    GpuMmuSupported             : 1;
+            UINT    IoMmuSupported              : 1;
+            UINT    ReplicateGdiContent         : 1;
+            UINT    NonCpuVisiblePrimary        : 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_2)
+            UINT    ParavirtualizationSupported : 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_4)
+            UINT    IoMmuSecureModeSupported    : 1;
+            UINT    DisableSelfRefreshVRAMInS3  : 1;
+            UINT    Reserved                    : 19;
+#else
+            UINT    Reserved                    : 21;
+#endif
+#else
+            UINT    Reserved                    : 22;
+#endif
+#else
+            UINT    Reserved                    : 27;
+#endif
+#else
+            UINT    Reserved                    : 28;
+#endif
+#else
+            UINT    Reserved                    : 31;
+#endif
+        };
+        UINT        Value;
+    };
+    UINT            PagingNode;
+} DXGK_VIDMMCAPS;
+
+#define DXGK_MAX_ASYMETRICAL_PROCESSING_NODES 64
+
+typedef struct _DXGK_GPUENGINETOPOLOGY
+{
+    UINT    NbAsymetricProcessingNodes;
+    UINT    Reserved[DXGK_MAX_ASYMETRICAL_PROCESSING_NODES];
+} DXGK_GPUENGINETOPOLOGY;
+
+typedef struct _DXGK_VIRTUALADDRESSCAPS_DEPRECATED
+{
+    union
+    {
+        struct
+        {
+            UINT    PrivilegedMemorySupported   : 1;
+            UINT    ReadOnlyMemorySupported     : 1;
+            UINT    Reserved                    : 30;
+        };
+        UINT        Value;
+    };
+    UINT    VirtualAddressBitCount;
+    UINT    PageTableCoverageBitCount;
+    UINT    PageDirectoryEntrySize;
+    UINT    PageDirectorySegment;
+    UINT    PageTableSegment;
+    UINT    IdealGPUPageSize;
+} DXGK_VIRTUALADDRESSCAPS_DEPRECATED;
+
+typedef struct _DXGK_DMABUFFERCAPS_DEPRECATED
 {
     struct
     {
-        UINT FlipOnVSyncMmIo : 1;
-        UINT Reserved        : 31;
-    };
-    UINT Value;
-} DXGK_FLIPCAPS, *PDXGK_FLIPCAPS;
-
-typedef union _DXGK_SCHEDULINGCAPS
-{
+        UINT    Size;
+        UINT    PrivateDriverDataSize;
+        UINT    SegmentId;
+        UINT    Reserved1;
+        UINT    Reserved[16];
+    } PresentDmaBuffer;
     struct
     {
-        UINT MultiEngineAware : 1;
-        UINT PreemptionAware  : 1;
-        UINT Reserved         : 30;
-    };
-    UINT Value;
-} DXGK_SCHEDULINGCAPS, *PDXGK_SCHEDULINGCAPS;
+        UINT    Size;
+        UINT    PrivateDriverDataSize;
+        UINT    SegmentId;
+        UINT    Reserved1;
+        UINT    Reserved[16];
+    } PagingDmaBuffer;
+} DXGK_DMABUFFERCAPS_DEPRECATED;
 
-typedef union _DXGK_MEMORYMANAGEMENTCAPS
+typedef enum _DXGK_WDDMVERSION
 {
-    struct
-    {
-        UINT SectionBackedPrimary : 1;
-        UINT Reserved             : 31;
-    };
-    UINT Value;
-} DXGK_MEMORYMANAGEMENTCAPS, *PDXGK_MEMORYMANAGEMENTCAPS;
+    DXGKDDI_WDDMv1      = 0x1000,
+    DXGKDDI_WDDMv1_2    = 0x1200,
+    DXGKDDI_WDDMv1_3    = 0x1300,
+    DXGKDDI_WDDMv2      = 0x2000,
+    DXGKDDI_WDDMv2_1    = 0x2100,
+    DXGKDDI_WDDMv2_2    = 0x2200,
+    DXGKDDI_WDDMv2_3    = 0x2300,
+    DXGKDDI_WDDMv2_4    = 0x2400,
+    DXGKDDI_WDDMv2_5    = 0x2500,
+    DXGKDDI_WDDMv2_6    = 0x2600,
+} DXGK_WDDMVERSION;
 
-typedef union _DXGK_GPUENGINETOPOLOGY
-{
-    struct
-    {
-        UINT NbAsymetricProcessingNodes : 8;
-        UINT Reserved                   : 24;
-    };
-    UINT Value;
-} DXGK_GPUENGINETOPOLOGY, *PDXGK_GPUENGINETOPOLOGY;
-
-
-/* =========================================================================
+/*
  * DXGK_DRIVERCAPS
  *
  * Capability record returned by
- * DxgkDdiQueryAdapterInfo(DXGKQAITYPE_DRIVERCAPS).
- * =========================================================================
+ * DxgkDdiQueryAdapterInfo(DXGKQAITYPE_DRIVERCAPS). The miniport fills it
+ * up to the size of its own interface version, so every member before the
+ * one it knows about must sit at the WDK offset.
  */
 typedef struct _DXGK_DRIVERCAPS
 {
     PHYSICAL_ADDRESS        HighestAcceptableAddress;
+    UINT                    MaxAllocationListSlotId;
+    SIZE_T                  ApertureSegmentCommitLimit;
     UINT                    MaxPointerWidth;
     UINT                    MaxPointerHeight;
     DXGK_POINTERFLAGS       PointerCaps;
-    UINT                    MaxAllocationListSlotId;
-    SIZE_T                  ApertureSegmentCommitLimit;
-    UINT                    MaxInterruptPriority;
     UINT                    InterruptMessageNumber;
-    DXGK_FLIPCAPS           FlipCaps;
-    UINT                    MaxQueuedFlipOnVSync;
-    DXGK_PRESENTCAPS        PresentationCaps;
+    UINT                    NumberOfSwizzlingRanges;
     UINT                    MaxOverlays;
-    UINT                    GammaRampCaps;
-    DXGK_SCHEDULINGCAPS     SchedulingCaps;
-    DXGK_MEMORYMANAGEMENTCAPS MemoryManagementCaps;
+    union
+    {
+        DXGK_GAMMARAMPCAPS      GammaRampCaps;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_2)
+        DXGK_COLORTRANSFORMCAPS ColorTransformCaps;
+#endif
+    };
+    DXGK_PRESENTATIONCAPS   PresentationCaps;
+    UINT                    MaxQueuedFlipOnVSync;
+    DXGK_FLIPCAPS           FlipCaps;
+    DXGK_VIDSCHCAPS         SchedulingCaps;
+    DXGK_VIDMMCAPS          MemoryManagementCaps;
     DXGK_GPUENGINETOPOLOGY  GpuEngineTopology;
 #if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7)
-    UINT                    WDDMVersion;
-    UINT                    PreemptionCaps;
-    UINT                    SupportNonVGA;
-    UINT                    SupportSmoothRotation;
-    UINT                    SupportPerEngineTDR;
-    UINT                    SupportDirectFlip;
-    UINT                    SupportMultiPlaneOverlay;
+    DXGK_WDDMVERSION        WDDMVersion;
+    DXGK_VIRTUALADDRESSCAPS_DEPRECATED Reserved;
+    DXGK_DMABUFFERCAPS_DEPRECATED      Reserved1;
 #endif
-} DXGK_DRIVERCAPS, *PDXGK_DRIVERCAPS;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
+    D3DKMDT_PREEMPTION_CAPS PreemptionCaps;
+    BOOLEAN                 SupportNonVGA;
+    BOOLEAN                 SupportSmoothRotation;
+    BOOLEAN                 SupportPerEngineTDR;
+    BOOLEAN                 SupportDirectFlip;
+    BOOLEAN                 SupportMultiPlaneOverlay;
+    BOOLEAN                 SupportRuntimePowerManagement;
+    BOOLEAN                 SupportSurpriseRemovalInHibernation;
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM1_3)
+    BOOLEAN                 HybridDiscrete;
+    UINT                    MaxOverlayPlanes;
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+    BOOLEAN                 HybridIntegrated;
+    D3DGPU_VIRTUAL_ADDRESS  InternalGpuVirtualAddressRangeStart;
+    D3DGPU_VIRTUAL_ADDRESS  InternalGpuVirtualAddressRangeEnd;
+    BOOLEAN                 SupportSurpriseRemoval;
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_1)
+    BOOLEAN                 SupportMultiPlaneOverlayImmediateFlip;
+    BOOLEAN                 CursorScaledWithMultiPlaneOverlayPlane0;
+    BOOLEAN                 HybridAcpiChainingRequired;
+    UINT                    MaxQueuedMultiPlaneOverlayFlipVSync;
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_4)
+    union
+    {
+        struct
+        {
+            UINT    SupportContextlessPresent   : 1;
+            UINT    Detachable                  : 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_5)
+            UINT    VirtualGpuOnly              : 1;
+            UINT    Reserved                    : 29;
+#else
+            UINT    Reserved                    : 30;
+#endif
+        };
+        UINT        Value;
+    } MiscCaps;
+#endif
+} DXGK_DRIVERCAPS;
+
+C_ASSERT(sizeof(DXGK_PRESENTATIONCAPS) == 4);
+C_ASSERT(sizeof(DXGK_FLIPCAPS) == 4);
+C_ASSERT(sizeof(DXGK_VIDSCHCAPS) == 4);
+C_ASSERT(sizeof(DXGK_VIDMMCAPS) == 8);
+C_ASSERT(sizeof(DXGK_GPUENGINETOPOLOGY) == 0x104);
+C_ASSERT(sizeof(DXGK_VIRTUALADDRESSCAPS_DEPRECATED) == 0x1C);
+C_ASSERT(sizeof(DXGK_DMABUFFERCAPS_DEPRECATED) == 0xA0);
+#ifdef _WIN64
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, MaxAllocationListSlotId) == 0x08);
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, ApertureSegmentCommitLimit) == 0x10);
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, MaxPointerWidth) == 0x18);
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, PointerCaps) == 0x20);
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, GammaRampCaps) == 0x30);
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, PresentationCaps) == 0x34);
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, FlipCaps) == 0x3C);
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, SchedulingCaps) == 0x40);
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, MemoryManagementCaps) == 0x44);
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, GpuEngineTopology) == 0x4C);
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, WDDMVersion) == 0x150);
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, Reserved1) == 0x170);
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, PreemptionCaps) == 0x210);
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, SupportSurpriseRemovalInHibernation) == 0x21E);
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, MaxOverlayPlanes) == 0x220);
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, InternalGpuVirtualAddressRangeStart) == 0x228);
+C_ASSERT(FIELD_OFFSET(DXGK_DRIVERCAPS, SupportSurpriseRemoval) == 0x238);
+#endif
+#endif
 
 
 /* =========================================================================
@@ -451,14 +741,28 @@ typedef struct _DXGK_SEGMENTFLAGS
             UINT    CacheCoherent                       : 1;
             UINT    PitchAlignment                      : 1;
             UINT    PopulatedFromSystemMemory           : 1;
-#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7)
             UINT    PreservedDuringStandby              : 1;
             UINT    PreservedDuringHibernate            : 1;
             UINT    PartiallyPreservedDuringHibernate   : 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
             UINT    DirectFlip                          : 1;
-            UINT    Reserved                            : 21;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+            UINT    Use64KBPages                        : 1;
+            UINT    ReservedSysMem                      : 1;
+            UINT    SupportsCpuHostAperture             : 1;
+            UINT    SupportsCachedCpuHostAperture       : 1;
+            UINT    ApplicationTarget                   : 1;
+            UINT    VprSupported                        : 1;
+            UINT    VprPreservedDuringStandby           : 1;
+            UINT    EncryptedPagingSupported            : 1;
+            UINT    LocalBudgetGroup                    : 1;
+            UINT    NonLocalBudgetGroup                 : 1;
+            UINT    Reserved                            : 11;
 #else
-            UINT    Reserved                            : 25;
+            UINT    Reserved                            : 21;
+#endif
+#else
+            UINT    Reserved                            : 22;
 #endif
         };
         UINT    Value;
@@ -484,7 +788,31 @@ typedef struct _DXGK_SEGMENTDESCRIPTOR
     DXGK_SEGMENTFLAGS   Flags;
 } DXGK_SEGMENTDESCRIPTOR, *PDXGK_SEGMENTDESCRIPTOR;
 
-typedef DXGK_SEGMENTDESCRIPTOR DXGK_SEGMENTDESCRIPTOR3, *PDXGK_SEGMENTDESCRIPTOR3;
+/* DXGKQAITYPE_QUERYSEGMENT3 (Windows 8+): Flags moved to the front. */
+typedef struct _DXGK_SEGMENTDESCRIPTOR3
+{
+    DXGK_SEGMENTFLAGS   Flags;
+    PHYSICAL_ADDRESS    BaseAddress;
+    PHYSICAL_ADDRESS    CpuTranslatedAddress;
+    SIZE_T              Size;
+    UINT                NbOfBanks;
+    SIZE_T             *pBankRangeTable;
+    SIZE_T              CommitLimit;
+    SIZE_T              SystemMemoryEndAddress;
+    SIZE_T              Reserved;
+} DXGK_SEGMENTDESCRIPTOR3, *PDXGK_SEGMENTDESCRIPTOR3;
+
+#ifdef _WIN64
+C_ASSERT(FIELD_OFFSET(DXGK_SEGMENTDESCRIPTOR, Size) == 0x10);
+C_ASSERT(FIELD_OFFSET(DXGK_SEGMENTDESCRIPTOR, CommitLimit) == 0x28);
+C_ASSERT(FIELD_OFFSET(DXGK_SEGMENTDESCRIPTOR, Flags) == 0x30);
+C_ASSERT(sizeof(DXGK_SEGMENTDESCRIPTOR) == 0x38);
+C_ASSERT(FIELD_OFFSET(DXGK_SEGMENTDESCRIPTOR3, BaseAddress) == 0x08);
+C_ASSERT(FIELD_OFFSET(DXGK_SEGMENTDESCRIPTOR3, Size) == 0x18);
+C_ASSERT(FIELD_OFFSET(DXGK_SEGMENTDESCRIPTOR3, CommitLimit) == 0x30);
+C_ASSERT(FIELD_OFFSET(DXGK_SEGMENTDESCRIPTOR3, SystemMemoryEndAddress) == 0x38);
+C_ASSERT(sizeof(DXGK_SEGMENTDESCRIPTOR3) == 0x48);
+#endif
 
 
 /* =========================================================================
@@ -500,11 +828,28 @@ typedef struct _DXGK_QUERYSEGMENTOUT
     UINT                        NbSegment;
     DXGK_SEGMENTDESCRIPTOR     *pSegmentDescriptor;
     UINT                        PagingBufferSegmentId;
-    SIZE_T                      PagingBufferSize;
+    UINT                        PagingBufferSize;
     UINT                        PagingBufferPrivateDataSize;
 } DXGK_QUERYSEGMENTOUT, *PDXGK_QUERYSEGMENTOUT;
 
-typedef DXGK_QUERYSEGMENTOUT DXGK_QUERYSEGMENTOUT3, *PDXGK_QUERYSEGMENTOUT3;
+#ifdef _WIN64
+C_ASSERT(FIELD_OFFSET(DXGK_QUERYSEGMENTOUT, PagingBufferSize) == 0x14);
+C_ASSERT(sizeof(DXGK_QUERYSEGMENTOUT) == 0x20);
+#endif
+
+typedef struct _DXGK_QUERYSEGMENTOUT3
+{
+    UINT                        NbSegment;
+    DXGK_SEGMENTDESCRIPTOR3    *pSegmentDescriptor;
+    UINT                        PagingBufferSegmentId;
+    UINT                        PagingBufferSize;
+    UINT                        PagingBufferPrivateDataSize;
+} DXGK_QUERYSEGMENTOUT3, *PDXGK_QUERYSEGMENTOUT3;
+
+#ifdef _WIN64
+C_ASSERT(FIELD_OFFSET(DXGK_QUERYSEGMENTOUT3, PagingBufferSize) == 0x14);
+C_ASSERT(sizeof(DXGK_QUERYSEGMENTOUT3) == 0x20);
+#endif
 
 
 /* =========================================================================
@@ -565,10 +910,10 @@ typedef struct _DXGK_CREATEDEVICEFLAGS
     {
         struct
         {
-            UINT    LegacyMode           : 1;
-            UINT    RequestVSync         : 1;
-            UINT    DisableGpuTimeout    : 1;
-            UINT    Reserved             : 29;
+            UINT    SystemDevice            : 1;
+            UINT    GdiDevice               : 1;
+            UINT    Reserved                : 29;
+            UINT    DXGK_DEVICE_RESERVED0   : 1;
         };
         UINT    Value;
     };
@@ -577,9 +922,26 @@ typedef struct _DXGK_CREATEDEVICEFLAGS
 typedef struct _DXGKARG_CREATEDEVICE
 {
     HANDLE                  hDevice;    /* in/out: dxgkrnl handle; miniport private context */
-    DXGK_CREATEDEVICEFLAGS  Flags;
-    PVOID                   pInfo;      /* out: optional miniport init info                  */
+    union
+    {
+        DXGK_CREATEDEVICEFLAGS  Flags;  /* in: device creation flags                         */
+        PVOID                   pInfo;  /* out: DXGK_DEVICEINFO (obsolete, WDDM 1.0 only)    */
+    };
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+    ULONG                   Pasid;
+    HANDLE                  hKmdProcess;
+#endif
 } DXGKARG_CREATEDEVICE, *PDXGKARG_CREATEDEVICE;
+
+#ifdef _WIN64
+C_ASSERT(FIELD_OFFSET(DXGKARG_CREATEDEVICE, Flags) == 0x8);
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+C_ASSERT(FIELD_OFFSET(DXGKARG_CREATEDEVICE, hKmdProcess) == 0x18);
+C_ASSERT(sizeof(DXGKARG_CREATEDEVICE) == 0x20);
+#else
+C_ASSERT(sizeof(DXGKARG_CREATEDEVICE) == 0x10);
+#endif
+#endif
 
 
 /* =========================================================================
@@ -661,7 +1023,7 @@ typedef enum _DXGK_STANDARDALLOCATIONTYPE
     DXGK_STDALLOCATION_SHAREDPRIMARYSURFACE = 1,
     DXGK_STDALLOCATION_SHADOWSURFACE        = 2,
     DXGK_STDALLOCATION_STAGINGSURFACE       = 3,
-    DXGK_STDALLOCATION_GDISURFACE           = 7,
+    DXGK_STDALLOCATION_GDISURFACE           = 4,
 } DXGK_STANDARDALLOCATIONTYPE;
 
 typedef struct _DXGK_SHAREDPRIMARYSURFACEDATA
@@ -689,21 +1051,22 @@ typedef struct _DXGK_STAGINGSURFACEDATA
     UINT    Pitch;  /* out */
 } DXGK_STAGINGSURFACEDATA, *PDXGK_STAGINGSURFACEDATA;
 
+/* WDK layout (the miniport reads and writes it): the surface-data union
+ * comes right after the type, then the two private-data buffers. */
 typedef struct _DXGKARG_GETSTANDARDALLOCATIONDRIVERDATA
 {
     DXGK_STANDARDALLOCATIONTYPE    StandardAllocationType;
+    union
+    {
+        D3DKMDT_SHAREDPRIMARYSURFACEDATA *pCreateSharedPrimarySurfaceData;
+        D3DKMDT_SHADOWSURFACEDATA       *pCreateShadowSurfaceData;
+        D3DKMDT_STAGINGSURFACEDATA      *pCreateStagingSurfaceData;
+        D3DKMDT_GDISURFACEDATA          *pCreateGdiSurfaceData;
+    };
     PVOID                           pAllocationPrivateDriverData;
     UINT                            AllocationPrivateDriverDataSize;
     PVOID                           pResourcePrivateDriverData;
     UINT                            ResourcePrivateDriverDataSize;
-    union
-    {
-        PVOID                           pStandardAllocationDriverData;
-        D3DKMDT_SHAREDPRIMARYSURFACEDATA *pCreateSharedPrimarySurfaceData;
-        D3DKMDT_SHADOWSURFACEDATA       *pCreateShadowSurfaceData;
-        D3DKMDT_STAGINGSURFACEDATA      *pCreateStagingSurfaceData;
-    };
-    UINT                            StandardAllocationDriverDataSize;
 } DXGKARG_GETSTANDARDALLOCATIONDRIVERDATA, *PDXGKARG_GETSTANDARDALLOCATIONDRIVERDATA;
 
 
@@ -719,15 +1082,41 @@ typedef struct _DXGK_OPENALLOCATIONINFO
     HANDLE      hDeviceSpecificAllocation;  /* out */
 } DXGK_OPENALLOCATIONINFO, *PDXGK_OPENALLOCATIONINFO;
 
+typedef struct _DXGK_OPENALLOCATIONFLAGS
+{
+    union
+    {
+        struct
+        {
+            UINT Create   : 1;
+            UINT ReadOnly : 1;
+            UINT Reserved : 30;
+        };
+        UINT Value;
+    };
+} DXGK_OPENALLOCATIONFLAGS;
+
 typedef struct _DXGKARG_OPENALLOCATION
 {
     UINT                        NumAllocations;
     DXGK_OPENALLOCATIONINFO    *pOpenAllocation;
-    CONST VOID                 *pPrivateDriverData;
-    UINT                        PrivateDriverDataSize;
-    HANDLE                      hResource;
-    BOOLEAN                     ReadOnly;
+    VOID                       *pPrivateDriverData;
+    UINT                        PrivateDriverSize;
+    DXGK_OPENALLOCATIONFLAGS    Flags;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
+    UINT                        SubresourceIndex;
+    SIZE_T                      SubresourceOffset;
+    UINT                        Pitch;
+#endif
 } DXGKARG_OPENALLOCATION, *PDXGKARG_OPENALLOCATION;
+
+#ifdef _WIN64
+C_ASSERT(FIELD_OFFSET(DXGKARG_OPENALLOCATION, PrivateDriverSize) == 0x18);
+C_ASSERT(FIELD_OFFSET(DXGKARG_OPENALLOCATION, Flags) == 0x1C);
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
+C_ASSERT(sizeof(DXGKARG_OPENALLOCATION) == 0x38);
+#endif
+#endif
 
 typedef struct _DXGKARG_CLOSEALLOCATION
 {
@@ -741,50 +1130,104 @@ typedef struct _DXGKARG_CLOSEALLOCATION
 
 
 /* =========================================================================
+ * DXGK_ALLOCATIONLIST
+ * =========================================================================
+ */
+typedef struct _DXGK_ALLOCATIONLIST
+{
+    HANDLE hDeviceSpecificAllocation;
+    union
+    {
+        struct
+        {
+            UINT WriteOperation : 1;
+            UINT SegmentId      : 5;
+            UINT Reserved       : 26;
+        };
+        UINT Value;
+    };
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+    union
+    {
+        PHYSICAL_ADDRESS        PhysicalAddress;
+        D3DGPU_VIRTUAL_ADDRESS  VirtualAddress;
+    };
+#else
+    PHYSICAL_ADDRESS            PhysicalAddress;
+#endif
+} DXGK_ALLOCATIONLIST, *PDXGK_ALLOCATIONLIST;
+typedef D3DDDI_PATCHLOCATIONLIST DXGK_PATCHLOCATIONLIST, *PDXGK_PATCHLOCATIONLIST;
+
+#ifdef _WIN64
+C_ASSERT(sizeof(DXGK_ALLOCATIONLIST) == 0x18);
+#endif
+C_ASSERT(sizeof(D3DDDI_ALLOCATIONLIST) == 0x8);
+
+
+/* =========================================================================
  * DXGKARG_PATCH
  * =========================================================================
  */
+typedef struct _DXGK_PATCHFLAGS
+{
+    union
+    {
+        struct
+        {
+            UINT Paging            : 1;
+            UINT Present           : 1;
+            UINT RedirectedPresent : 1;
+            UINT NullRendering     : 1;
+            UINT Reserved          : 28;
+        };
+        UINT Value;
+    };
+} DXGK_PATCHFLAGS;
+
 typedef struct _DXGKARG_PATCH
 {
-    HANDLE                              hDevice;
-    HANDLE                              hDmaBuffer;
-    PVOID                               pDmaBuffer;
+    union
+    {
+        HANDLE                          hDevice;
+        HANDLE                          hContext;
+    };
+    UINT                                DmaBufferSegmentId;
+    PHYSICAL_ADDRESS                    DmaBufferPhysicalAddress;
+    VOID                               *pDmaBuffer;
     UINT                                DmaBufferSize;
-    PVOID                               pDmaBufferPrivateData;
+    UINT                                DmaBufferSubmissionStartOffset;
+    UINT                                DmaBufferSubmissionEndOffset;
+    VOID                               *pDmaBufferPrivateData;
     UINT                                DmaBufferPrivateDataSize;
-    CONST D3DDDI_ALLOCATIONLIST        *pAllocationList;
+    UINT                                DmaBufferPrivateDataSubmissionStartOffset;
+    UINT                                DmaBufferPrivateDataSubmissionEndOffset;
+    CONST DXGK_ALLOCATIONLIST          *pAllocationList;
     UINT                                AllocationListSize;
     CONST D3DDDI_PATCHLOCATIONLIST     *pPatchLocationList;
     UINT                                PatchLocationListSize;
     UINT                                PatchLocationListSubmissionStart;
     UINT                                PatchLocationListSubmissionLength;
     UINT                                SubmissionFenceId;
-    UINT                                Flags;
+    DXGK_PATCHFLAGS                     Flags;
+    UINT                                EngineOrdinal;
 } DXGKARG_PATCH, *PDXGKARG_PATCH;
+
+/* WDK x64 layout (atikmdag's DxgkDdiPatch only forwards the pointer). */
+#ifdef _WIN64
+C_ASSERT(FIELD_OFFSET(DXGKARG_PATCH, DmaBufferPhysicalAddress) == 0x10);
+C_ASSERT(FIELD_OFFSET(DXGKARG_PATCH, pDmaBuffer) == 0x18);
+C_ASSERT(FIELD_OFFSET(DXGKARG_PATCH, pDmaBufferPrivateData) == 0x30);
+C_ASSERT(FIELD_OFFSET(DXGKARG_PATCH, pAllocationList) == 0x48);
+C_ASSERT(FIELD_OFFSET(DXGKARG_PATCH, pPatchLocationList) == 0x58);
+C_ASSERT(FIELD_OFFSET(DXGKARG_PATCH, SubmissionFenceId) == 0x6C);
+C_ASSERT(sizeof(DXGKARG_PATCH) == 0x78);
+#endif
 
 
 /* =========================================================================
  * DXGKARG_SUBMITCOMMAND
  * =========================================================================
  */
-typedef struct _DXGKARG_SUBMITCOMMAND
-{
-    PVOID                               pDmaBuffer;
-    UINT                                DmaBufferSize;
-    PVOID                               pDmaBufferPrivateData;
-    UINT                                DmaBufferPrivateDataSize;
-    UINT                                DmaBufferSubmissionStartOffset;
-    UINT                                DmaBufferSubmissionEndOffset;
-    CONST D3DDDI_ALLOCATIONLIST        *pAllocationList;
-    UINT                                AllocationListSize;
-    UINT                                SubmissionFenceId;
-    UINT                                VidPnSourceId;
-    UINT                                NodeOrdinal;
-    UINT                                EngineOrdinal;
-    HANDLE                              hContext;
-    UINT                                Flags;
-} DXGKARG_SUBMITCOMMAND, *PDXGKARG_SUBMITCOMMAND;
-
 typedef struct _DXGK_SUBMITCOMMANDFLAGS
 {
     union
@@ -800,15 +1243,56 @@ typedef struct _DXGK_SUBMITCOMMANDFLAGS
             UINT ContextSwitch        : 1;
             UINT Resubmission         : 1;
             UINT VirtualMachineData   : 1;
-#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
             UINT Reserved             : 23;
-#else
-            UINT Reserved             : 23;
-#endif
         };
         UINT Value;
     };
 } DXGK_SUBMITCOMMANDFLAGS, *PDXGK_SUBMITCOMMANDFLAGS;
+
+typedef struct _DXGKARG_SUBMITCOMMAND
+{
+    union
+    {
+        HANDLE                          hDevice;
+        HANDLE                          hContext;
+    };
+    UINT                                DmaBufferSegmentId;
+    PHYSICAL_ADDRESS                    DmaBufferPhysicalAddress;
+    UINT                                DmaBufferSize;
+    UINT                                DmaBufferSubmissionStartOffset;
+    UINT                                DmaBufferSubmissionEndOffset;
+    VOID                               *pDmaBufferPrivateData;
+    UINT                                DmaBufferPrivateDataSize;
+    UINT                                DmaBufferPrivateDataSubmissionStartOffset;
+    UINT                                DmaBufferPrivateDataSubmissionEndOffset;
+    UINT                                SubmissionFenceId;
+    D3DDDI_VIDEO_PRESENT_SOURCE_ID      VidPnSourceId;
+    D3DDDI_FLIPINTERVAL_TYPE            FlipInterval;
+    DXGK_SUBMITCOMMANDFLAGS             Flags;
+    UINT                                EngineOrdinal;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7)
+    D3DGPU_VIRTUAL_ADDRESS              DmaBufferVirtualAddress;
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
+    UINT                                NodeOrdinal;
+#endif
+} DXGKARG_SUBMITCOMMAND, *PDXGKARG_SUBMITCOMMAND;
+
+/*
+ * WDK x64 layout.  Confirmed from atikmdag's DxgkDdiSubmitCommand
+ * (RVA 0x17fe0): hContext at 0x00, SubmissionFenceId at 0x3C,
+ * Flags at 0x48 (tests ContextSwitch, bit 6) and NodeOrdinal at 0x58.
+ */
+#ifdef _WIN64
+C_ASSERT(FIELD_OFFSET(DXGKARG_SUBMITCOMMAND, DmaBufferPhysicalAddress) == 0x10);
+C_ASSERT(FIELD_OFFSET(DXGKARG_SUBMITCOMMAND, pDmaBufferPrivateData) == 0x28);
+C_ASSERT(FIELD_OFFSET(DXGKARG_SUBMITCOMMAND, SubmissionFenceId) == 0x3C);
+C_ASSERT(FIELD_OFFSET(DXGKARG_SUBMITCOMMAND, Flags) == 0x48);
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
+C_ASSERT(FIELD_OFFSET(DXGKARG_SUBMITCOMMAND, NodeOrdinal) == 0x58);
+C_ASSERT(sizeof(DXGKARG_SUBMITCOMMAND) == 0x60);
+#endif
+#endif
 
 
 /* =========================================================================
@@ -839,140 +1323,222 @@ typedef enum _DXGK_BUILDPAGINGBUFFER_OPERATION
 {
     DXGK_OPERATION_TRANSFER                 = 0,
     DXGK_OPERATION_FILL                     = 1,
-    DXGK_OPERATION_DISCARD_CONTENT         = 2,
+    DXGK_OPERATION_DISCARD_CONTENT          = 2,
     DXGK_OPERATION_READ_PHYSICAL            = 3,
     DXGK_OPERATION_WRITE_PHYSICAL           = 4,
-    DXGK_OPERATION_MAP_APERTURE             = 5,
-    DXGK_OPERATION_UNMAP_APERTURE           = 6,
+    DXGK_OPERATION_MAP_APERTURE_SEGMENT     = 5,
+    DXGK_OPERATION_UNMAP_APERTURE_SEGMENT   = 6,
     DXGK_OPERATION_SPECIAL_LOCK_TRANSFER    = 7,
-    DXGK_OPERATION_VIRTUAL_TRANSFER         = 9,
-    DXGK_OPERATION_VIRTUAL_FILL             = 10,
-    DXGK_OPERATION_NOTIFY_RESIDENCY         = 11,
+    DXGK_OPERATION_VIRTUAL_TRANSFER         = 8,
+    DXGK_OPERATION_VIRTUAL_FILL             = 9,
+    DXGK_OPERATION_INIT_CONTEXT_RESOURCE    = 10,
+    DXGK_OPERATION_UPDATE_PAGE_TABLE        = 11,
+    DXGK_OPERATION_FLUSH_TLB                = 12,
+    DXGK_OPERATION_UPDATE_CONTEXT_ALLOCATION = 13,
+    DXGK_OPERATION_COPY_PAGE_TABLE_ENTRIES  = 14,
+    DXGK_OPERATION_NOTIFY_RESIDENCY         = 15,
+    DXGK_OPERATION_SIGNAL_MONITORED_FENCE   = 16,
 } DXGK_BUILDPAGINGBUFFER_OPERATION;
 
-#ifndef DXGK_OPERATION_MAP_APERTURE_SEGMENT
-#define DXGK_OPERATION_MAP_APERTURE_SEGMENT DXGK_OPERATION_MAP_APERTURE
-#endif
-
-#ifndef DXGK_OPERATION_UNMAP_APERTURE_SEGMENT
-#define DXGK_OPERATION_UNMAP_APERTURE_SEGMENT DXGK_OPERATION_UNMAP_APERTURE
-#endif
-
-typedef struct _DXGK_BUILDPAGINGBUFFER_TRANSFER
+typedef struct _DXGK_TRANSFERFLAGS
 {
-    struct
-    {
-        HANDLE          hAllocation;
-        UINT            SegmentId;
-        union
-        {
-            LARGE_INTEGER   SegmentAddress;
-            MDL            *pMdl;
-        };
-    } Source;
-    struct
-    {
-        HANDLE          hAllocation;
-        UINT            SegmentId;
-        union
-        {
-            LARGE_INTEGER   SegmentAddress;
-            MDL            *pMdl;
-        };
-    } Destination;
-    struct
-    {
-        UINT    Swizzling                : 1;
-        UINT    SpecialLockedTmpSysMem  : 1;
-        UINT    Reserved                : 30;
-    } Flags;
-    SIZE_T          TransferSize;
-    UINT            MultipassOffset;
-} DXGK_BUILDPAGINGBUFFER_TRANSFER;
-
-typedef struct _DXGK_BUILDPAGINGBUFFER_FILL
-{
-    HANDLE          hAllocation;
-    UINT            SegmentId;
-    LARGE_INTEGER   SegmentAddress;
-    SIZE_T          FillSize;
-    UINT            FillPattern;
-    UINT            MultipassOffset;
-} DXGK_BUILDPAGINGBUFFER_FILL;
-
-typedef struct _DXGK_BUILDPAGINGBUFFER_DISCARD_CONTENT
-{
-    HANDLE          hAllocation;
-    UINT            SegmentId;
-    LARGE_INTEGER   SegmentAddress;
-} DXGK_BUILDPAGINGBUFFER_DISCARD_CONTENT;
-
-typedef struct _DXGK_BUILDPAGINGBUFFER_MAP_APERTURE
-{
-    HANDLE          hAllocation;
-    UINT            SegmentId;
-    SIZE_T          OffsetInPages;
-    SIZE_T          NumberOfPages;
-    MDL            *pMdl;
-    SIZE_T          MdlOffset;
-    UINT            Flags;
-} DXGK_BUILDPAGINGBUFFER_MAP_APERTURE;
-
-typedef struct _DXGK_BUILDPAGINGBUFFER_UNMAP_APERTURE
-{
-    HANDLE          hAllocation;
-    UINT            SegmentId;
-    SIZE_T          OffsetInPages;
-    SIZE_T          NumberOfPages;
-    UINT            Flags;
-} DXGK_BUILDPAGINGBUFFER_UNMAP_APERTURE;
-
-typedef struct _DXGKARG_BUILDPAGINGBUFFER
-{
-    PVOID                                   pDmaBuffer;
-    UINT                                    DmaSize;
-    PVOID                                   pDmaBufferPrivateData;
-    UINT                                    DmaBufferPrivateDataSize;
-    UINT                                    DmaBufferPrivateDataCurrentOffset;
-    DXGK_BUILDPAGINGBUFFER_OPERATION        Operation;
-    UINT                                    MultipassOffset;
-    union
-    {
-        DXGK_BUILDPAGINGBUFFER_TRANSFER         Transfer;
-        DXGK_BUILDPAGINGBUFFER_FILL             Fill;
-        DXGK_BUILDPAGINGBUFFER_DISCARD_CONTENT  DiscardContent;
-        DXGK_BUILDPAGINGBUFFER_MAP_APERTURE     MapAperture;
-        DXGK_BUILDPAGINGBUFFER_MAP_APERTURE     MapApertureSegment;
-        DXGK_BUILDPAGINGBUFFER_UNMAP_APERTURE   UnmapAperture;
-        DXGK_BUILDPAGINGBUFFER_UNMAP_APERTURE   UnmapApertureSegment;
-        BYTE                                    Reserved[0x40];
-    };
-} DXGKARG_BUILDPAGINGBUFFER, *PDXGKARG_BUILDPAGINGBUFFER;
-
-typedef struct _DXGK_ALLOCATIONLIST
-{
-    HANDLE hDeviceSpecificAllocation;
     union
     {
         struct
         {
-            UINT WriteOperation : 1;
-            UINT SegmentId      : 5;
-            UINT Reserved       : 26;
+            UINT Swizzle          : 1;
+            UINT Unswizzle        : 1;
+            UINT AllocationIsIdle : 1;
+            UINT TransferStart    : 1;
+            UINT TransferEnd      : 1;
+            UINT Reserved         : 27;
         };
         UINT Value;
     };
-#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+} DXGK_TRANSFERFLAGS;
+
+typedef struct _DXGK_DISCARDCONTENTFLAGS
+{
     union
     {
-        PHYSICAL_ADDRESS        PhysicalAddress;
-        D3DGPU_VIRTUAL_ADDRESS  VirtualAddress;
+        struct
+        {
+            UINT AllocationIsIdle : 1;
+            UINT Reserved         : 31;
+        };
+        UINT Value;
     };
-#else
-    PHYSICAL_ADDRESS            PhysicalAddress;
+} DXGK_DISCARDCONTENTFLAGS;
+
+typedef struct _DXGK_MAPAPERTUREFLAGS
+{
+    union
+    {
+        struct
+        {
+            UINT CacheCoherent : 1;
+            UINT Reserved      : 31;
+        };
+        UINT Value;
+    };
+} DXGK_MAPAPERTUREFLAGS;
+
+typedef struct _DXGKARG_BUILDPAGINGBUFFER
+{
+    VOID                                   *pDmaBuffer;
+    UINT                                    DmaSize;
+    VOID                                   *pDmaBufferPrivateData;
+    UINT                                    DmaBufferPrivateDataSize;
+    DXGK_BUILDPAGINGBUFFER_OPERATION        Operation;
+    UINT                                    MultipassOffset;
+    union
+    {
+        struct
+        {
+            HANDLE  hAllocation;
+            UINT    TransferOffset;
+            SIZE_T  TransferSize;
+            struct
+            {
+                UINT SegmentId;
+                union
+                {
+                    LARGE_INTEGER SegmentAddress;
+                    MDL *pMdl;
+                };
+            } Source;
+            struct
+            {
+                UINT SegmentId;
+                union
+                {
+                    LARGE_INTEGER SegmentAddress;
+                    MDL *pMdl;
+                };
+            } Destination;
+            DXGK_TRANSFERFLAGS Flags;
+            UINT    MdlOffset;
+        } Transfer;
+
+        struct
+        {
+            HANDLE  hAllocation;
+            SIZE_T  FillSize;
+            UINT    FillPattern;
+            struct
+            {
+                UINT SegmentId;
+                LARGE_INTEGER SegmentAddress;
+            } Destination;
+        } Fill;
+
+        struct
+        {
+            HANDLE  hAllocation;
+            DXGK_DISCARDCONTENTFLAGS Flags;
+            UINT    SegmentId;
+            PHYSICAL_ADDRESS SegmentAddress;
+        } DiscardContent;
+
+        struct
+        {
+            UINT    SegmentId;
+            PHYSICAL_ADDRESS PhysicalAddress;
+        } ReadPhysical;
+
+        struct
+        {
+            UINT    SegmentId;
+            PHYSICAL_ADDRESS PhysicalAddress;
+        } WritePhysical;
+
+        struct
+        {
+            HANDLE  hDevice;
+            HANDLE  hAllocation;
+            UINT    SegmentId;
+            SIZE_T  OffsetInPages;
+            SIZE_T  NumberOfPages;
+            PMDL    pMdl;
+            DXGK_MAPAPERTUREFLAGS Flags;
+            ULONG   MdlOffset;
+        } MapApertureSegment;
+
+        struct
+        {
+            HANDLE  hDevice;
+            HANDLE  hAllocation;
+            UINT    SegmentId;
+            SIZE_T  OffsetInPages;
+            SIZE_T  NumberOfPages;
+            PHYSICAL_ADDRESS DummyPage;
+        } UnmapApertureSegment;
+
+        struct
+        {
+            HANDLE  hAllocation;
+            UINT    TransferOffset;
+            SIZE_T  TransferSize;
+            struct
+            {
+                UINT SegmentId;
+                union
+                {
+                    LARGE_INTEGER SegmentAddress;
+                    MDL *pMdl;
+                };
+            } Source;
+            struct
+            {
+                UINT SegmentId;
+                union
+                {
+                    LARGE_INTEGER SegmentAddress;
+                    MDL *pMdl;
+                };
+            } Destination;
+            DXGK_TRANSFERFLAGS Flags;
+            UINT    SwizzlingRangeId;
+            UINT    SwizzlingRangeData;
+        } SpecialLockTransfer;
+
+        struct
+        {
+            UINT    Reserved[64];
+        } Reserved;
+    };
+    HANDLE                                  hSystemContext;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+    D3DGPU_VIRTUAL_ADDRESS                  DmaBufferGpuVirtualAddress;
+    UINT                                    DmaBufferWriteOffset;
 #endif
-} DXGK_ALLOCATIONLIST, *PDXGK_ALLOCATIONLIST;
-typedef D3DDDI_PATCHLOCATIONLIST DXGK_PATCHLOCATIONLIST, *PDXGK_PATCHLOCATIONLIST;
+} DXGKARG_BUILDPAGINGBUFFER, *PDXGKARG_BUILDPAGINGBUFFER;
+
+/*
+ * WDK x64 layout.  Confirmed from atikmdag's DxgkDdiBuildPagingBuffer
+ * (RVA 0x13f10): pDmaBuffer/DmaSize/pDmaBufferPrivateData/
+ * DmaBufferPrivateDataSize at 0x00/0x08/0x10/0x18, Operation at 0x1C
+ * (jump-table index), MultipassOffset at 0x20, Transfer.* from 0x28
+ * (Flags at 0x60) and hSystemContext at 0x128.  The WDDM 2.x and
+ * InitContextResource union members are omitted; Reserved keeps the
+ * union at its WDK size.
+ */
+#ifdef _WIN64
+C_ASSERT(FIELD_OFFSET(DXGKARG_BUILDPAGINGBUFFER, Operation) == 0x1C);
+C_ASSERT(FIELD_OFFSET(DXGKARG_BUILDPAGINGBUFFER, MultipassOffset) == 0x20);
+C_ASSERT(FIELD_OFFSET(DXGKARG_BUILDPAGINGBUFFER, Transfer.TransferSize) == 0x38);
+C_ASSERT(FIELD_OFFSET(DXGKARG_BUILDPAGINGBUFFER, Transfer.Source.SegmentAddress) == 0x48);
+C_ASSERT(FIELD_OFFSET(DXGKARG_BUILDPAGINGBUFFER, Transfer.Destination.SegmentAddress) == 0x58);
+C_ASSERT(FIELD_OFFSET(DXGKARG_BUILDPAGINGBUFFER, Transfer.Flags) == 0x60);
+C_ASSERT(FIELD_OFFSET(DXGKARG_BUILDPAGINGBUFFER, Fill.Destination.SegmentAddress) == 0x48);
+C_ASSERT(FIELD_OFFSET(DXGKARG_BUILDPAGINGBUFFER, MapApertureSegment.pMdl) == 0x50);
+C_ASSERT(FIELD_OFFSET(DXGKARG_BUILDPAGINGBUFFER, UnmapApertureSegment.DummyPage) == 0x50);
+C_ASSERT(FIELD_OFFSET(DXGKARG_BUILDPAGINGBUFFER, hSystemContext) == 0x128);
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+C_ASSERT(sizeof(DXGKARG_BUILDPAGINGBUFFER) == 0x140);
+#endif
+#endif
+
 
 
 /* =========================================================================
@@ -1167,15 +1733,19 @@ typedef struct _DXGK_SETVIDPNSOURCEADDRESS_FLAGS
     };
 } DXGK_SETVIDPNSOURCEADDRESS_FLAGS, *PDXGK_SETVIDPNSOURCEADDRESS_FLAGS;
 
+/* WDK layout: the miniport reads PrimarySegment/PrimaryAddress/hAllocation
+ * at fixed offsets (AMD's atikmdag dereferenced PrimaryAddress as the
+ * allocation handle under the old invented layout). */
 typedef struct _DXGKARG_SETVIDPNSOURCEADDRESS
 {
-    D3DDDI_VIDEO_PRESENT_SOURCE_ID  VidPnSourceId;
-    HANDLE                          hAllocation;
-    LARGE_INTEGER                   PrimaryAddress;
-    UINT                            SegmentId;
+    D3DDDI_VIDEO_PRESENT_SOURCE_ID   VidPnSourceId;
+    UINT                             PrimarySegment;
+    PHYSICAL_ADDRESS                 PrimaryAddress;
+    HANDLE                           hAllocation;
+    UINT                             ContextCount;
+    HANDLE                           Context[1+D3DDDI_MAX_BROADCAST_CONTEXT];
     DXGK_SETVIDPNSOURCEADDRESS_FLAGS Flags;
-    HANDLE                          hContext;
-    UINT                            Duration;
+    UINT                             Duration;
 } DXGKARG_SETVIDPNSOURCEADDRESS, *PDXGKARG_SETVIDPNSOURCEADDRESS;
 
 
@@ -1323,7 +1893,11 @@ typedef struct _DXGK_CONTEXTINFO
             UINT    Reserved            : 24;
         };
         UINT    Value;
-    } Flags;
+    } Flags;                            /* WDK: Reserved (WIN7+)               */
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+    UINT    Caps;                       /* DXGK_CONTEXTINFO_CAPS               */
+    ULONG   PagingCompanionNodeId;
+#endif
 } DXGK_CONTEXTINFO, *PDXGK_CONTEXTINFO;
 
 #ifndef DXGK_ALLOCATION_LIST_SIZE_GDICONTEXT
@@ -1356,6 +1930,14 @@ typedef struct _DXGKARG_CREATECONTEXT
      */
     DXGK_CONTEXTINFO            ContextInfo;
 } DXGKARG_CREATECONTEXT, *PDXGKARG_CREATECONTEXT;
+
+#ifdef _WIN64
+C_ASSERT(FIELD_OFFSET(DXGKARG_CREATECONTEXT, Flags) == 0x10);
+C_ASSERT(FIELD_OFFSET(DXGKARG_CREATECONTEXT, pPrivateDriverData) == 0x18);
+C_ASSERT(FIELD_OFFSET(DXGKARG_CREATECONTEXT, ContextInfo) == 0x24);
+C_ASSERT(FIELD_OFFSET(DXGKARG_CREATECONTEXT, ContextInfo.DmaBufferSegmentSet) == 0x28);
+C_ASSERT(FIELD_OFFSET(DXGKARG_CREATECONTEXT, ContextInfo.PatchLocationListSize) == 0x34);
+#endif
 
 
 /* =========================================================================
@@ -1420,20 +2002,42 @@ typedef struct _DXGKARG_PRESENT
     RECT                        SrcRect;
     UINT                        SubRectCnt;
     CONST RECT                 *pDstSubRects;
+    D3DDDI_FLIPINTERVAL_TYPE    FlipInterval;
     DXGK_PRESENTFLAGS           Flags;
     UINT                        DmaBufferSegmentId;
     PHYSICAL_ADDRESS            DmaBufferPhysicalAddress;
-    union
-    {
-        UINT                    Reserved;
-        D3DGPU_VIRTUAL_ADDRESS  DmaBufferGpuVirtualAddress;
-    };
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM1_3)
+    UINT                        Reserved;
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+    D3DGPU_VIRTUAL_ADDRESS      DmaBufferGpuVirtualAddress;
     UINT                        NumSrcAllocations;
     UINT                        NumDstAllocations;
     UINT                        PrivateDriverDataSize;
     PVOID                       pPrivateDriverData;
-    D3DDDI_FLIPINTERVAL_TYPE    FlipInterval;
+#endif
 } DXGKARG_PRESENT, *PDXGKARG_PRESENT;
+
+/*
+ * WDK x64 layout.  Confirmed from atikmdag's DxgkDdiPresent worker
+ * (RVA 0x127f0): DmaSize..MultipassOffset at 0x08-0x34, Color at 0x38,
+ * DstRect at 0x3C, SrcRect at 0x4C, SubRectCnt at 0x5C, pDstSubRects at
+ * 0x60, FlipInterval at 0x68, Flags at 0x6C, DmaBufferSegmentId at 0x70 and
+ * DmaBufferPhysicalAddress at 0x78.
+ */
+#ifdef _WIN64
+C_ASSERT(FIELD_OFFSET(DXGKARG_PRESENT, Color) == 0x38);
+C_ASSERT(FIELD_OFFSET(DXGKARG_PRESENT, SubRectCnt) == 0x5C);
+C_ASSERT(FIELD_OFFSET(DXGKARG_PRESENT, pDstSubRects) == 0x60);
+C_ASSERT(FIELD_OFFSET(DXGKARG_PRESENT, FlipInterval) == 0x68);
+C_ASSERT(FIELD_OFFSET(DXGKARG_PRESENT, Flags) == 0x6C);
+C_ASSERT(FIELD_OFFSET(DXGKARG_PRESENT, DmaBufferSegmentId) == 0x70);
+C_ASSERT(FIELD_OFFSET(DXGKARG_PRESENT, DmaBufferPhysicalAddress) == 0x78);
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+C_ASSERT(FIELD_OFFSET(DXGKARG_PRESENT, DmaBufferGpuVirtualAddress) == 0x88);
+C_ASSERT(sizeof(DXGKARG_PRESENT) == 0xA8);
+#endif
+#endif
 
 typedef struct _DXGKARG_RENDER
 {
@@ -1568,73 +2172,191 @@ typedef struct _DXGKARG_QUERYPHYSICALADAPTERINFO
  * Describes the GPU event passed to DxgkCbNotifyInterrupt.
  * =========================================================================
  */
-typedef struct _DXGKARGCB_NOTIFY_INTERRUPT_DATA
+typedef enum _DXGK_PRESENT_DISPLAY_ONLY_PROGRESS_ID
 {
-    ULONG   InterruptType;  /* DXGK_INTERRUPT_* constant */
+    DXGK_PRESENT_DISPLAYONLY_PROGRESS_ID_COMPLETE   = 0,
+    DXGK_PRESENT_DISPLAYONLY_PROGRESS_ID_FAILED     = 1,
+} DXGK_PRESENT_DISPLAY_ONLY_PROGRESS_ID;
+
+typedef struct _DXGKARGCB_PRESENT_DISPLAYONLY_PROGRESS
+{
+    D3DDDI_VIDEO_PRESENT_SOURCE_ID          VidPnSourceId;
+    DXGK_PRESENT_DISPLAY_ONLY_PROGRESS_ID   ProgressId;
+} DXGKARGCB_PRESENT_DISPLAYONLY_PROGRESS, *PDXGKARGCB_PRESENT_DISPLAYONLY_PROGRESS;
+
+typedef struct _DXGKCB_NOTIFY_INTERRUPT_DATA_FLAGS
+{
     union
     {
-        /* DXGK_INTERRUPT_DMA_COMPLETED */
+        struct
+        {
+            UINT    ValidPhysicalAdapterMask    : 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_2)
+            UINT    HsyncFlipCompletion         : 1;
+            UINT    Reserved                    : 30;
+#else
+            UINT    Reserved                    : 31;
+#endif
+        };
+        UINT        Value;
+    };
+} DXGKCB_NOTIFY_INTERRUPT_DATA_FLAGS;
+
+typedef struct _DXGKARGCB_NOTIFY_INTERRUPT_DATA
+{
+    DXGK_INTERRUPT_TYPE InterruptType;
+    union
+    {
         struct
         {
             UINT    SubmissionFenceId;
-            ULONG   NodeOrdinal;
-            ULONG   EngineOrdinal;
+            UINT    NodeOrdinal;
+            UINT    EngineOrdinal;
         } DmaCompleted;
-
-        /* DXGK_INTERRUPT_DMA_PREEMPTED */
         struct
         {
             UINT    PreemptionFenceId;
             UINT    LastCompletedFenceId;
-            ULONG   NodeOrdinal;
-            ULONG   EngineOrdinal;
+            UINT    NodeOrdinal;
+            UINT    EngineOrdinal;
         } DmaPreempted;
-
-        /* DXGK_INTERRUPT_DMA_FAULTED */
         struct
         {
             UINT        FaultedFenceId;
             NTSTATUS    Status;
-            ULONG       NodeOrdinal;
-            ULONG       EngineOrdinal;
-        } DmaPageFaulted;
-
-        /* DXGK_INTERRUPT_CRTC_VSYNC */
+            UINT        NodeOrdinal;
+            UINT        EngineOrdinal;
+        } DmaFaulted;
         struct
         {
-            D3DDDI_VIDEO_PRESENT_SOURCE_ID  VidPnSourceId;
-            union
-            {
-                PHYSICAL_ADDRESS            FlipToPhysicalAddress;
-                PHYSICAL_ADDRESS            PhysicalAddress;
-            };
-            UINT                            FlipToSegmentId;
-            union
-            {
-                UINT                        FlipPresentId;
-                UINT                        VidPnTargetId;
-            };
-            UINT                            FlipEntryCount;
+            D3DDDI_VIDEO_PRESENT_TARGET_ID  VidPnTargetId;
+            PHYSICAL_ADDRESS                PhysicalAddress;
+            UINT                            PhysicalAdapterMask;
         } CrtcVsync;
-
-        /* DXGK_INTERRUPT_DISPLAYONLY_VSYNC */
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
         struct
         {
-            D3DDDI_VIDEO_PRESENT_SOURCE_ID  VidPnSourceId;
+            D3DDDI_VIDEO_PRESENT_TARGET_ID  VidPnTargetId;
         } DisplayOnlyVsync;
-
-        /* DXGK_INTERRUPT_DISPLAYONLY_PRESENT_PROGRESS */
         struct
         {
-            D3DDDI_VIDEO_PRESENT_SOURCE_ID  VidPnSourceId;
-            UINT                            ProgressId;
-        } DisplayOnlyPresentProgress;
-
-        /* Reserved for future expansion; miniport must zero before use. */
-        ULONG   Reserved[6];
+            D3DDDI_VIDEO_PRESENT_TARGET_ID              VidPnTargetId;
+            UINT                                        PhysicalAdapterMask;
+            UINT                                        MultiPlaneOverlayVsyncInfoCount;
+            struct _DXGK_MULTIPLANE_OVERLAY_VSYNC_INFO *pMultiPlaneOverlayVsyncInfo;
+        } CrtcVsyncWithMultiPlaneOverlay;
+        DXGKARGCB_PRESENT_DISPLAYONLY_PROGRESS DisplayOnlyPresentProgress;
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM1_3)
+        struct
+        {
+            D3DDDI_VIDEO_PRESENT_TARGET_ID  VidPnTargetId;
+            DXGK_MIRACAST_CHUNK_INFO        ChunkInfo;
+            PVOID                           pPrivateDriverData;
+            UINT                            PrivateDataDriverSize;
+            NTSTATUS                        Status;
+        } MiracastEncodeChunkCompleted;
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+        struct
+        {
+            UINT                        FaultedFenceId;
+            UINT64                      FaultedPrimitiveAPISequenceNumber;
+            DXGK_RENDER_PIPELINE_STAGE  FaultedPipelineStage;
+            UINT                        FaultedBindTableEntry;
+            DXGK_PAGE_FAULT_FLAGS       PageFaultFlags;
+            D3DGPU_VIRTUAL_ADDRESS      FaultedVirtualAddress;
+            UINT                        NodeOrdinal;
+            UINT                        EngineOrdinal;
+            UINT                        PageTableLevel;
+            DXGK_FAULT_ERROR_CODE       FaultErrorCode;
+            HANDLE                      FaultedProcessHandle;
+        } DmaPageFaulted;
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_1)
+        struct
+        {
+            D3DDDI_VIDEO_PRESENT_TARGET_ID               VidPnTargetId;
+            UINT                                         PhysicalAdapterMask;
+            UINT                                         MultiPlaneOverlayVsyncInfoCount;
+            struct _DXGK_MULTIPLANE_OVERLAY_VSYNC_INFO2 *pMultiPlaneOverlayVsyncInfo;
+            ULONGLONG                                    GpuFrequency;
+            ULONGLONG                                    GpuClockCounter;
+        } CrtcVsyncWithMultiPlaneOverlay2;
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_2)
+        struct
+        {
+            UINT    NodeOrdinal;
+            UINT    EngineOrdinal;
+        } MonitoredFenceSignaled;
+        struct
+        {
+            UINT    NodeOrdinal;
+            UINT    EngineOrdinal;
+            UINT64  ContextSwitchFence;
+        } HwContextListSwitchCompleted;
+        struct
+        {
+            UINT64                      FaultedFenceId;
+            D3DGPU_VIRTUAL_ADDRESS      FaultedVirtualAddress;
+            UINT64                      FaultedPrimitiveAPISequenceNumber;
+            union
+            {
+                HANDLE                  FaultedHwQueue;
+                HANDLE                  FaultedHwContext;
+                HANDLE                  FaultedProcessHandle;
+            };
+            UINT                        NodeOrdinal;
+            UINT                        EngineOrdinal;
+            DXGK_RENDER_PIPELINE_STAGE  FaultedPipelineStage;
+            UINT                        FaultedBindTableEntry;
+            DXGK_PAGE_FAULT_FLAGS       PageFaultFlags;
+            UINT                        PageTableLevel;
+            DXGK_FAULT_ERROR_CODE       FaultErrorCode;
+        } HwQueuePageFaulted;
+        struct
+        {
+            D3DDDI_VIDEO_PRESENT_TARGET_ID  VidPnTargetId;
+            UINT                            NotificationID;
+        } PeriodicMonitoredFenceSignaled;
+#endif
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_4)
+        struct
+        {
+            UINT    NodeOrdinal;
+            UINT    EngineOrdinal;
+        } SchedulingLogInterrupt;
+        struct
+        {
+            UINT    NodeOrdinal;
+            UINT    EngineOrdinal;
+        } GpuEngineTimeout;
+        struct
+        {
+            HANDLE  hContext;
+            UINT64  ContextSuspendFence;
+        } SuspendContextCompleted;
+#endif
+        struct
+        {
+            UINT    Reserved[16];
+        } Reserved;
     };
-    ULONG   Flags;  /* reserved; must be zero */
+    DXGKCB_NOTIFY_INTERRUPT_DATA_FLAGS Flags;
 } DXGKARGCB_NOTIFY_INTERRUPT_DATA, *PDXGKARGCB_NOTIFY_INTERRUPT_DATA;
+
+#ifdef _WIN64
+C_ASSERT(FIELD_OFFSET(DXGKARGCB_NOTIFY_INTERRUPT_DATA, DmaCompleted) == 0x08);
+C_ASSERT(FIELD_OFFSET(DXGKARGCB_NOTIFY_INTERRUPT_DATA, CrtcVsync.PhysicalAddress) == 0x10);
+C_ASSERT(FIELD_OFFSET(DXGKARGCB_NOTIFY_INTERRUPT_DATA, CrtcVsync.PhysicalAdapterMask) == 0x18);
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM2_0)
+C_ASSERT(FIELD_OFFSET(DXGKARGCB_NOTIFY_INTERRUPT_DATA, DmaPageFaulted.FaultedVirtualAddress) == 0x28);
+C_ASSERT(FIELD_OFFSET(DXGKARGCB_NOTIFY_INTERRUPT_DATA, DmaPageFaulted.FaultedProcessHandle) == 0x40);
+#endif
+C_ASSERT(FIELD_OFFSET(DXGKARGCB_NOTIFY_INTERRUPT_DATA, Flags) == 0x48);
+C_ASSERT(sizeof(DXGKARGCB_NOTIFY_INTERRUPT_DATA) == 0x50);
+#endif
 
 
 /*
@@ -1688,25 +2410,6 @@ typedef struct _DXGKARG_DESTROYOVERLAY
     HANDLE  hOverlay;
 } DXGKARG_DESTROYOVERLAY, *PDXGKARG_DESTROYOVERLAY;
 
-
-/* =========================================================================
- * DXGK_PRESENT_DISPLAYONLY_PROGRESS_ID constants
- * =========================================================================
- */
-#define DXGK_PRESENT_DISPLAYONLY_PROGRESS_ID_COMPLETE   0
-#define DXGK_PRESENT_DISPLAYONLY_PROGRESS_ID_FAILED     1
-
-
-/* =========================================================================
- * WDDM version constants (WDDMVersion field of DXGK_DRIVERCAPS)
- * =========================================================================
- */
-#ifndef DXGKDDI_WDDMv1
-#define DXGKDDI_WDDMv1      0x1000
-#define DXGKDDI_WDDMv1_2    0x1200
-#define DXGKDDI_WDDMv1_3    0x1300
-#define DXGKDDI_WDDMv2_0    0x2000
-#endif
 
 /* =========================================================================
  * DXGK_DISPLAY_DRIVERCAPS_EXTENSION

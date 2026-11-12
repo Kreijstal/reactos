@@ -617,8 +617,14 @@ DxgkVidMmInitializeAdapter(
 {
     NTSTATUS                        Status;
     DXGKARG_QUERYADAPTERINFO        QueryInfo;
-    DXGK_QUERYSEGMENTOUT            SegOut;
-    PDXGK_SEGMENTDESCRIPTOR         DescArray;
+    union
+    {
+        DXGK_QUERYSEGMENTOUT        V1;
+        DXGK_QUERYSEGMENTOUT3       V3;
+    } SegOut;
+    PVOID                           DescArray;
+    SIZE_T                          DescSize;
+    BOOLEAN                         V3;
     PDXGKRNL_SEGMENT                Segments;
     ULONG                           SegmentCount;
     ULONG                           i;
@@ -658,17 +664,23 @@ DxgkVidMmInitializeAdapter(
      * DXGKQAITYPE_QUERYSEGMENT takes no input data; pInputData is NULL.
      * pSegmentDescriptor == NULL tells the miniport to write only NbSegment.
      * ----------------------------------------------------------------------- */
+    /*
+     * The two output layouts share NbSegment/pSegmentDescriptor/paging
+     * buffer fields; only the descriptor differs (DXGK_SEGMENTDESCRIPTOR3
+     * puts Flags first and adds SystemMemoryEndAddress).
+     */
+    C_ASSERT(FIELD_OFFSET(DXGK_QUERYSEGMENTOUT, PagingBufferPrivateDataSize) ==
+             FIELD_OFFSET(DXGK_QUERYSEGMENTOUT3, PagingBufferPrivateDataSize));
     RtlZeroMemory(&SegOut, sizeof(SegOut));
-    SegOut.pSegmentDescriptor = NULL;
-    SegOut.NbSegment          = 0;
 
     RtlZeroMemory(&QueryInfo, sizeof(QueryInfo));
     /*
-     * WDDM 2.0+ drivers (version >= 0x4000) implement QUERYSEGMENT3,
-     * not the original QUERYSEGMENT.  Try QUERYSEGMENT3 first for
-     * modern drivers, then fall back to QUERYSEGMENT for legacy ones.
+     * DXGKQAITYPE_QUERYSEGMENT3 exists from DXGKDDI_INTERFACE_VERSION_WIN8
+     * on; older miniports only know DXGKQAITYPE_QUERYSEGMENT.  Fall back to
+     * the original query if a newer miniport refuses the v3 one.
      */
-    QueryInfo.Type           = (Adapter->MiniportContext->InitData.s.Version >= 0x4000)
+    QueryInfo.Type           = (Adapter->MiniportContext->InitData.s.Version >=
+                                DXGKDDI_INTERFACE_VERSION_WIN8)
                                 ? DXGKQAITYPE_QUERYSEGMENT3
                                 : DXGKQAITYPE_QUERYSEGMENT;
     QueryInfo.pInputData     = NULL;
@@ -709,7 +721,8 @@ DxgkVidMmInitializeAdapter(
         }
     }
 
-    SegmentCount = SegOut.NbSegment;
+    V3 = (QueryInfo.Type == DXGKQAITYPE_QUERYSEGMENT3);
+    SegmentCount = SegOut.V1.NbSegment;
 
     if (SegmentCount == 0 || SegmentCount > VIDMM_MAX_SEGMENTS)
     {
@@ -724,10 +737,9 @@ DxgkVidMmInitializeAdapter(
     /* -----------------------------------------------------------------------
      * Step 2: Allocate the miniport descriptor array for the fill pass.
      * ----------------------------------------------------------------------- */
-    DescArray = (PDXGK_SEGMENTDESCRIPTOR)ExAllocatePoolWithTag(
-                    NonPagedPool,
-                    SegmentCount * sizeof(DXGK_SEGMENTDESCRIPTOR),
-                    TAG_VIDMM_SEGMENT);
+    DescSize = SegmentCount * (V3 ? sizeof(DXGK_SEGMENTDESCRIPTOR3)
+                                  : sizeof(DXGK_SEGMENTDESCRIPTOR));
+    DescArray = ExAllocatePoolWithTag(NonPagedPool, DescSize, TAG_VIDMM_SEGMENT);
 
     if (DescArray == NULL)
     {
@@ -736,13 +748,16 @@ DxgkVidMmInitializeAdapter(
         return STATUS_NO_MEMORY;
     }
 
-    RtlZeroMemory(DescArray, SegmentCount * sizeof(DXGK_SEGMENTDESCRIPTOR));
+    RtlZeroMemory(DescArray, DescSize);
 
     /* -----------------------------------------------------------------------
      * Step 3: Fill pass — miniport writes segment descriptors.
      * ----------------------------------------------------------------------- */
-    SegOut.NbSegment          = SegmentCount;
-    SegOut.pSegmentDescriptor = DescArray;
+    SegOut.V1.NbSegment = SegmentCount;
+    if (V3)
+        SegOut.V3.pSegmentDescriptor = (PDXGK_SEGMENTDESCRIPTOR3)DescArray;
+    else
+        SegOut.V1.pSegmentDescriptor = (PDXGK_SEGMENTDESCRIPTOR)DescArray;
 
     Status = Adapter->MiniportContext->InitData.s.DxgkDdiQueryAdapterInfo(
                  Adapter->MiniportDeviceContext,
@@ -780,15 +795,33 @@ DxgkVidMmInitializeAdapter(
     for (i = 0; i < SegmentCount; i++)
     {
         PDXGKRNL_SEGMENT        Seg  = &Segments[i];
-        PDXGK_SEGMENTDESCRIPTOR Desc = &DescArray[i];
+        SIZE_T                  CommitLimit;
 
         /* Segment IDs are 1-based per WDDM convention. */
         Seg->SegmentId    = i + 1;
-        Seg->Size         = (ULONGLONG)Desc->Size;
         Seg->UsedSize     = 0;
-        Seg->BaseAddress  = Desc->BaseAddress;
-        Seg->CpuBase      = NULL;   /* mapped lazily on first CPU access */
-        Seg->Flags        = Desc->Flags;
+        if (V3)
+        {
+            const DXGK_SEGMENTDESCRIPTOR3 *Desc =
+                &((PDXGK_SEGMENTDESCRIPTOR3)DescArray)[i];
+
+            Seg->Size                 = (ULONGLONG)Desc->Size;
+            Seg->BaseAddress          = Desc->BaseAddress;
+            Seg->CpuTranslatedAddress = Desc->CpuTranslatedAddress;
+            Seg->Flags                = Desc->Flags;
+            CommitLimit               = Desc->CommitLimit;
+        }
+        else
+        {
+            const DXGK_SEGMENTDESCRIPTOR *Desc =
+                &((PDXGK_SEGMENTDESCRIPTOR)DescArray)[i];
+
+            Seg->Size                 = (ULONGLONG)Desc->Size;
+            Seg->BaseAddress          = Desc->BaseAddress;
+            Seg->CpuTranslatedAddress = Desc->CpuTranslatedAddress;
+            Seg->Flags                = Desc->Flags;
+            CommitLimit               = Desc->CommitLimit;
+        }
 
         InitializeListHead(&Seg->AllocationList);
         ExInitializeFastMutex(&Seg->Lock);
@@ -800,20 +833,32 @@ DxgkVidMmInitializeAdapter(
          */
         if (i == 0)
         {
-            Seg->PagingBufferSegmentId = SegOut.PagingBufferSegmentId;
-            Seg->PagingBufferSize      = (SegOut.PagingBufferSize != 0)
-                                         ? SegOut.PagingBufferSize
+            Seg->PagingBufferSegmentId = SegOut.V1.PagingBufferSegmentId;
+            Seg->PagingBufferSize      = (SegOut.V1.PagingBufferSize != 0)
+                                         ? SegOut.V1.PagingBufferSize
                                          : VIDMM_PAGING_BUFFER_SIZE_DEFAULT;
+            Seg->PagingBufferPrivateDataSize = SegOut.V1.PagingBufferPrivateDataSize;
         }
 
-        DPRINT("DxgkVidMmInitializeAdapter: seg[%lu] id=%lu "
-               "size=0x%I64x base=0x%I64x flags=0x%lx %s\n",
-               i, Seg->SegmentId,
-               Seg->Size,
-               Seg->BaseAddress.QuadPart,
-               Seg->Flags,
-               VidMmSegmentIsAperture(Seg) ? "APERTURE" : "VRAM");
+        /* Logged once per adapter start: everything GPU-side keys off it. */
+        DXGKRNL_WARN("VidMm: seg %lu gpu=0x%I64x cpu=0x%I64x size=0x%I64x "
+                     "commit=0x%Ix flags=0x%x%s%s\n",
+                     Seg->SegmentId,
+                     Seg->BaseAddress.QuadPart,
+                     Seg->CpuTranslatedAddress.QuadPart,
+                     Seg->Size,
+                     CommitLimit,
+                     Seg->Flags.Value,
+                     VidMmSegmentIsAperture(Seg) ? " APERTURE" : "",
+                     VidMmSegmentIsCpuVisible(Seg) ? " CPUVISIBLE" : "");
     }
+
+    DXGKRNL_WARN("VidMm: %lu segments (QAI type %d) paging buffer seg=%u "
+                 "size=0x%x priv=0x%x\n",
+                 SegmentCount, (int)QueryInfo.Type,
+                 SegOut.V1.PagingBufferSegmentId,
+                 SegOut.V1.PagingBufferSize,
+                 SegOut.V1.PagingBufferPrivateDataSize);
 
     /* -----------------------------------------------------------------------
      * Step 6: Publish the segment table to the adapter.
@@ -866,13 +911,6 @@ DxgkVidMmTeardownAdapter(
                     "allocations at teardown!\n", Seg->SegmentId);
         }
 
-        if (Seg->CpuBase != NULL)
-        {
-            MmUnmapIoSpace(Seg->CpuBase, (SIZE_T)Seg->Size);
-            Seg->CpuBase = NULL;
-            DPRINT("DxgkVidMmTeardownAdapter: unmapped CPU VA for segment %lu\n",
-                   Seg->SegmentId);
-        }
     }
 
     ExFreePoolWithTag(Adapter->Segments, TAG_VIDMM_SEGMENT);
@@ -1078,6 +1116,21 @@ DxgkVidMmCreateAllocation(
         PDXGKRNL_SEGMENT Segments = ADAPTER_SEGMENTS(Adapter);
         ULONG PreferredIds[5];
         ULONG NumPreferred = 0;
+        ULONG SupportedSet;
+
+        /*
+         * Bit (SegmentId - 1) of a segment set names a segment the miniport
+         * can use for the allocation.  Never place outside of it: the GPU
+         * cannot reach the allocation there.  Prefer segments usable for
+         * both reads and writes.
+         */
+        SupportedSet = AllocInfo->SupportedReadSegmentSet &
+                       AllocInfo->SupportedWriteSegmentSet;
+        if (SupportedSet == 0)
+        {
+            SupportedSet = AllocInfo->SupportedReadSegmentSet |
+                           AllocInfo->SupportedWriteSegmentSet;
+        }
 
         /* Extract up to 5 preferred segment IDs from AllocInfo. */
         if (AllocInfo->PreferredSegment.SegmentId0 != 0)
@@ -1129,6 +1182,13 @@ DxgkVidMmCreateAllocation(
             }
             if (AlreadyTried)
                 continue;
+
+            if (SupportedSet != 0 &&
+                (Seg->SegmentId > 32 ||
+                 !(SupportedSet & (1UL << (Seg->SegmentId - 1)))))
+            {
+                continue;
+            }
 
             Status = DxgkVidMmTryPlaceInSegment(Seg, Alloc);
 
@@ -2335,49 +2395,79 @@ DxgkVidMmMakeResident(
 /* CPU MAPPING ****************************************************************/
 
 /*
- * VidMmMapSegmentCpu
+ * VidMmMapAllocationIoSpace
  *
- * Lazily establishes a kernel-mode CPU mapping for a VRAM segment.
- * Uses MmWriteCombined caching which is optimal for GPU framebuffer access
- * on x86: write-combining coalesces multiple CPU stores into single large
- * PCIe write transactions, avoiding the per-store penalty of uncached mode.
- *
- * Called only for non-aperture, CPU-visible segments.
+ * Maps a resident allocation of a CPU-visible memory segment through the
+ * segment's CPU window (DXGK_SEGMENTDESCRIPTOR.CpuTranslatedAddress), not
+ * through its GPU BaseAddress: on AMD APUs the GPU base is the MC address
+ * 0xF00000000, which is no CPU physical address at all.  Only the
+ * allocation's own range is mapped (a whole segment can be hundreds of MB).
+ * MmWriteCombined: coalesced BAR writes, the usual framebuffer choice.
  */
 static NTSTATUS
-VidMmMapSegmentCpu(
-    _In_ PDXGKRNL_SEGMENT Segment)
+VidMmMapAllocationIoSpace(
+    _In_ PDXGKRNL_SEGMENT    Segment,
+    _In_ PDXGKVMM_ALLOCATION Allocation)
 {
-    ASSERT(Segment != NULL);
+    PHYSICAL_ADDRESS CpuPhysical;
+
     ASSERT(!VidMmSegmentIsAperture(Segment));
     ASSERT(VidMmSegmentIsCpuVisible(Segment));
-    ASSERT(Segment->Size > 0);
-    ASSERT(Segment->BaseAddress.QuadPart != 0);
+    ASSERT(Allocation->CpuAddress == NULL);
 
-    if (Segment->CpuBase != NULL)
-        return STATUS_SUCCESS;  /* Already mapped (lazy init guard). */
-
-    Segment->CpuBase = MmMapIoSpace(
-                           Segment->BaseAddress,
-                           (SIZE_T)Segment->Size,
-                           MmWriteCombined);
-
-    if (Segment->CpuBase == NULL)
+    if (Segment->CpuTranslatedAddress.QuadPart == 0 ||
+        Allocation->SegmentOffset + Allocation->Size > Segment->Size)
     {
-        DPRINT1("VidMmMapSegmentCpu: MmMapIoSpace failed for seg %lu "
-                "(PA=0x%I64x size=0x%I64x)\n",
-                Segment->SegmentId,
-                Segment->BaseAddress.QuadPart,
-                Segment->Size);
-        return STATUS_NO_MEMORY;
+        DPRINT1("VidMmMapAllocationIoSpace: seg %lu has no CPU window "
+                "(cpu=0x%I64x offset=0x%I64x size=0x%Ix)\n",
+                Segment->SegmentId, Segment->CpuTranslatedAddress.QuadPart,
+                Allocation->SegmentOffset, Allocation->Size);
+        return STATUS_INVALID_PARAMETER;
     }
 
-    DPRINT("VidMmMapSegmentCpu: seg %lu CPU VA=%p "
-           "PA=0x%I64x size=0x%I64x\n",
-           Segment->SegmentId, Segment->CpuBase,
-           Segment->BaseAddress.QuadPart, Segment->Size);
+    CpuPhysical.QuadPart = Segment->CpuTranslatedAddress.QuadPart +
+                           (LONGLONG)Allocation->SegmentOffset;
+    Allocation->CpuAddress = MmMapIoSpace(CpuPhysical,
+                                          Allocation->Size,
+                                          MmWriteCombined);
+    if (Allocation->CpuAddress == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
 
+    Allocation->CpuAddressIsIoSpace = TRUE;
     return STATUS_SUCCESS;
+}
+
+/*
+ * DxgkpVidMmPagingOperation
+ *
+ * Runs one DxgkDdiBuildPagingBuffer operation.  Windows always builds
+ * paging operations on the adapter's system (paging) context and submits
+ * whatever commands the miniport emits; kmpresent.c owns that context.
+ * Miniports such as AMD's atikmdag dereference hSystemContext
+ * unconditionally, so the context-less direct call is only kept for
+ * adapters on which the system context could not be created (logged once).
+ */
+static NTSTATUS
+DxgkpVidMmPagingOperation(
+    _In_    PDXGKRNL_ADAPTER           Adapter,
+    _Inout_ PDXGKARG_BUILDPAGINGBUFFER BuildArgs)
+{
+    static LONG s_LegacyLogged = 0;
+    NTSTATUS Status;
+
+    Status = DxgkKmExecutePagingOperation(Adapter, BuildArgs);
+    if (Status != STATUS_DEVICE_NOT_READY)
+        return Status;
+
+    if (InterlockedCompareExchange(&s_LegacyLogged, 1, 0) == 0)
+    {
+        DXGKRNL_WARN("VidMm: paging op %d without a system context "
+                     "(hSystemContext NULL)\n", (int)BuildArgs->Operation);
+    }
+
+    return Adapter->MiniportContext->InitData.s.DxgkDdiBuildPagingBuffer(
+        Adapter->MiniportDeviceContext,
+        BuildArgs);
 }
 
 static VOID
@@ -2411,9 +2501,7 @@ DxgkpVidMmReleaseApertureMapping(
             ADDRESS_AND_SIZE_TO_SPAN_PAGES(Allocation->SystemMemory,
                                            Allocation->Size);
 
-        Adapter->MiniportContext->InitData.s.DxgkDdiBuildPagingBuffer(
-            Adapter->MiniportDeviceContext,
-            &BuildArgs);
+        DxgkpVidMmPagingOperation(Adapter, &BuildArgs);
     }
 
     if (Allocation->ApertureMdl != NULL)
@@ -2493,14 +2581,22 @@ DxgkVidMmEnsureAllocationApertureMapped(
     BuildArgs.MapApertureSegment.NumberOfPages = NumberOfPages;
     BuildArgs.MapApertureSegment.pMdl = Mdl;
     BuildArgs.MapApertureSegment.MdlOffset = 0;
+    /*
+     * The backing is cached nonpaged pool, and the CPU writes it through a
+     * cached mapping. Like VidMm, map it snooped: CacheCoherent tells the
+     * miniport to set the GART snoop bit so the GPU sees the CPU's cached
+     * writes. Without it the GPU read stale RAM under dirty cache lines
+     * (64-byte streaks of old pixels in presented rects). Cached backing is
+     * only valid in a cache-coherent aperture segment.
+     */
+    NT_ASSERT(Segment->Flags.CacheCoherent);
+    BuildArgs.MapApertureSegment.Flags.CacheCoherent = Segment->Flags.CacheCoherent;
 
     DXGKRNL_VERBOSE("EnsureApertureMapped: calling BuildPagingBuffer MAP_APERTURE "
                     "hAlloc=%p SegId=%u Pages=%Iu\n",
                     Allocation->MiniportHandle, Allocation->SegmentId, NumberOfPages);
 
-    Status = Adapter->MiniportContext->InitData.s.DxgkDdiBuildPagingBuffer(
-        Adapter->MiniportDeviceContext,
-        &BuildArgs);
+    Status = DxgkpVidMmPagingOperation(Adapter, &BuildArgs);
 
     DXGKRNL_VERBOSE("EnsureApertureMapped: BuildPagingBuffer returned 0x%08lX\n", Status);
 
@@ -2513,6 +2609,251 @@ DxgkVidMmEnsureAllocationApertureMapped(
     Allocation->ApertureMdl = Mdl;
     Allocation->ApertureMapped = TRUE;
     return STATUS_SUCCESS;
+}
+
+/*
+ * DxgkpVidMmPlaceKernelBuffer
+ *
+ * Reserves Size bytes in Segment for a kernel buffer.  The placement is a
+ * driver-less VidMm allocation (no miniport handle), so it is accounted for
+ * in the segment like any other resident allocation.
+ */
+static NTSTATUS
+DxgkpVidMmPlaceKernelBuffer(
+    _In_  PDXGKRNL_ADAPTER      Adapter,
+    _In_  PDXGKRNL_SEGMENT      Segment,
+    _In_  SIZE_T                Size,
+    _Out_ PDXGKVMM_ALLOCATION  *OutPlacement)
+{
+    PDXGKVMM_ALLOCATION Placement;
+    NTSTATUS Status;
+
+    *OutPlacement = NULL;
+
+    Placement = ExAllocatePoolZero(NonPagedPool,
+                                   sizeof(DXGKVMM_ALLOCATION),
+                                   TAG_VIDMM_ALLOC);
+    if (Placement == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Placement->Adapter    = Adapter;
+    Placement->Size       = Size;
+    Placement->Alignment  = PAGE_SIZE;
+    Placement->CpuVisible = TRUE;
+    ExInitializeFastMutex(&Placement->UserModeLock);
+    InitializeListHead(&Placement->SegmentEntry);
+    InitializeListHead(&Placement->DeviceEntry);
+    InitializeListHead(&Placement->GlobalAllocationEntry);
+
+    Status = DxgkVidMmTryPlaceInSegment(Segment, Placement);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(Placement, TAG_VIDMM_ALLOC);
+        return Status;
+    }
+
+    Placement->Magic = DXGKVMM_ALLOCATION_MAGIC;
+    *OutPlacement = Placement;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * DxgkVidMmAllocateKernelBuffer
+ *
+ * Allocates a GPU-addressable kernel buffer (DMA or paging buffer) from a
+ * segment set, as VidMm does for DXGK_CONTEXTINFO.DmaBufferSegmentSet and
+ * DXGK_QUERYSEGMENTOUT.PagingBufferSegmentId:
+ *   - a CPU-visible memory segment is preferred: no paging is needed, the
+ *     CPU writes through the segment's BAR window;
+ *   - an aperture segment gets fresh pages mapped with
+ *     MAP_APERTURE_SEGMENT (hAllocation NULL, as for any DMA buffer);
+ *   - an empty set means contiguous system memory, addressed by its
+ *     physical address with DmaBufferSegmentId 0.
+ * The CPU view is write-combined in every case, so nothing the CPU wrote
+ * is left in a cache the GPU might not snoop.
+ */
+NTSTATUS
+DxgkVidMmAllocateKernelBuffer(
+    _In_  PDXGKRNL_ADAPTER       Adapter,
+    _In_  UINT                   SegmentSet,
+    _In_  SIZE_T                 Size,
+    _Out_ PDXGKVMM_KERNEL_BUFFER Buffer)
+{
+    PDXGKRNL_SEGMENT Segments;
+    PHYSICAL_ADDRESS Low, High, Boundary;
+    ULONG Pass, i;
+    NTSTATUS Status = STATUS_NO_MEMORY;
+
+    PAGED_CODE();
+
+    RtlZeroMemory(Buffer, sizeof(*Buffer));
+    Size = ALIGN_UP_BY(Size, PAGE_SIZE);
+    if (Size == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    if (SegmentSet == 0)
+    {
+        Low.QuadPart = 0;
+        High.QuadPart = (LONGLONG)-1;
+        Boundary.QuadPart = 0;
+        Buffer->CpuVa = MmAllocateContiguousMemorySpecifyCache(Size, Low, High,
+                                                               Boundary,
+                                                               MmWriteCombined);
+        if (Buffer->CpuVa == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        RtlZeroMemory(Buffer->CpuVa, Size);
+        Buffer->Size = Size;
+        Buffer->GpuAddress = MmGetPhysicalAddress(Buffer->CpuVa);
+        return STATUS_SUCCESS;
+    }
+
+    if (Adapter->Segments == NULL)
+        return STATUS_INVALID_DEVICE_STATE;
+
+    Segments = ADAPTER_SEGMENTS(Adapter);
+
+    /* Pass 0: CPU-visible memory segments; pass 1: aperture segments. */
+    for (Pass = 0; Pass < 2; Pass++)
+    {
+        for (i = 0; i < Adapter->SegmentCount && i < 32; i++)
+        {
+            PDXGKRNL_SEGMENT Segment = &Segments[i];
+            PDXGKVMM_ALLOCATION Placement;
+
+            if (!(SegmentSet & (1UL << i)))
+                continue;
+
+            if (Pass == 0 &&
+                (VidMmSegmentIsAperture(Segment) ||
+                 !VidMmSegmentIsCpuVisible(Segment)))
+            {
+                continue;
+            }
+
+            if (Pass == 1 && !VidMmSegmentIsAperture(Segment))
+                continue;
+
+            Status = DxgkpVidMmPlaceKernelBuffer(Adapter, Segment, Size, &Placement);
+            if (!NT_SUCCESS(Status))
+                continue;
+
+            Buffer->Placement  = Placement;
+            Buffer->Size       = Size;
+            Buffer->SegmentId  = Segment->SegmentId;
+            Buffer->GpuAddress = Placement->PhysicalAddress;
+
+            if (Pass == 0)
+            {
+                Status = VidMmMapAllocationIoSpace(Segment, Placement);
+                if (NT_SUCCESS(Status))
+                {
+                    Buffer->CpuVa = Placement->CpuAddress;
+                    RtlZeroMemory(Buffer->CpuVa, Size);
+                    return STATUS_SUCCESS;
+                }
+            }
+            else
+            {
+                DXGKARG_BUILDPAGINGBUFFER BuildArgs;
+
+                Low.QuadPart = 0;
+                High.QuadPart = (LONGLONG)-1;
+                Boundary.QuadPart = 0;
+                Buffer->Mdl = MmAllocatePagesForMdlEx(Low, High, Boundary, Size,
+                                                      MmWriteCombined, 0);
+                if (Buffer->Mdl != NULL &&
+                    MmGetMdlByteCount(Buffer->Mdl) >= Size)
+                {
+                    Buffer->CpuVa = MmMapLockedPagesSpecifyCache(Buffer->Mdl,
+                                                                 KernelMode,
+                                                                 MmWriteCombined,
+                                                                 NULL,
+                                                                 FALSE,
+                                                                 NormalPagePriority);
+                }
+
+                if (Buffer->CpuVa == NULL)
+                {
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                }
+                else
+                {
+                    RtlZeroMemory(Buffer->CpuVa, Size);
+
+                    RtlZeroMemory(&BuildArgs, sizeof(BuildArgs));
+                    BuildArgs.Operation = DXGK_OPERATION_MAP_APERTURE_SEGMENT;
+                    BuildArgs.MapApertureSegment.hAllocation = NULL;
+                    BuildArgs.MapApertureSegment.SegmentId = Segment->SegmentId;
+                    BuildArgs.MapApertureSegment.OffsetInPages =
+                        (SIZE_T)(Placement->SegmentOffset >> PAGE_SHIFT);
+                    BuildArgs.MapApertureSegment.NumberOfPages = Size >> PAGE_SHIFT;
+                    BuildArgs.MapApertureSegment.pMdl = Buffer->Mdl;
+                    BuildArgs.MapApertureSegment.MdlOffset = 0;
+
+                    Status = DxgkKmExecutePagingOperation(Adapter, &BuildArgs);
+                    if (NT_SUCCESS(Status))
+                    {
+                        Buffer->ApertureMapped = TRUE;
+                        return STATUS_SUCCESS;
+                    }
+                }
+            }
+
+            /* This segment did not work out; undo and try the next one. */
+            DxgkVidMmFreeKernelBuffer(Adapter, Buffer);
+        }
+    }
+
+    return Status;
+}
+
+VOID
+DxgkVidMmFreeKernelBuffer(
+    _In_    PDXGKRNL_ADAPTER       Adapter,
+    _Inout_ PDXGKVMM_KERNEL_BUFFER Buffer)
+{
+    PAGED_CODE();
+
+    if (Buffer->ApertureMapped)
+    {
+        DXGKARG_BUILDPAGINGBUFFER BuildArgs;
+
+        RtlZeroMemory(&BuildArgs, sizeof(BuildArgs));
+        BuildArgs.Operation = DXGK_OPERATION_UNMAP_APERTURE_SEGMENT;
+        BuildArgs.UnmapApertureSegment.hAllocation = NULL;
+        BuildArgs.UnmapApertureSegment.SegmentId = Buffer->SegmentId;
+        BuildArgs.UnmapApertureSegment.OffsetInPages =
+            (SIZE_T)(Buffer->Placement->SegmentOffset >> PAGE_SHIFT);
+        BuildArgs.UnmapApertureSegment.NumberOfPages = Buffer->Size >> PAGE_SHIFT;
+        DxgkKmExecutePagingOperation(Adapter, &BuildArgs);
+    }
+
+    if (Buffer->Mdl != NULL)
+    {
+        if (Buffer->CpuVa != NULL)
+            MmUnmapLockedPages(Buffer->CpuVa, Buffer->Mdl);
+        MmFreePagesFromMdl(Buffer->Mdl);
+        ExFreePool(Buffer->Mdl);
+    }
+    else if (Buffer->Placement != NULL)
+    {
+        DxgkVidMmUnmapAllocationCpu(Buffer->Placement);
+    }
+    else if (Buffer->CpuVa != NULL)
+    {
+        MmFreeContiguousMemorySpecifyCache(Buffer->CpuVa, Buffer->Size,
+                                           MmWriteCombined);
+    }
+
+    if (Buffer->Placement != NULL)
+    {
+        DxgkpVidMmReleaseSegmentPlacement(Buffer->Placement);
+        Buffer->Placement->Magic = 0;
+        ExFreePoolWithTag(Buffer->Placement, TAG_VIDMM_ALLOC);
+    }
+
+    RtlZeroMemory(Buffer, sizeof(*Buffer));
 }
 
 LARGE_INTEGER
@@ -2626,11 +2967,21 @@ DxgkpVidMmBuildAllocationUserMdl(
             return STATUS_SUCCESS;
         }
 
-        if (!VidMmSegmentIsCpuVisible(Segment))
+        if (!VidMmSegmentIsCpuVisible(Segment) ||
+            Segment->CpuTranslatedAddress.QuadPart == 0)
+        {
             return STATUS_INVALID_PARAMETER;
+        }
+
+        /* PhysicalAddress is the GPU segment address; map the CPU window. */
+        PhysicalAddress.QuadPart = Segment->CpuTranslatedAddress.QuadPart +
+                                   (LONGLONG)Allocation->SegmentOffset;
+    }
+    else
+    {
+        PhysicalAddress = Allocation->PhysicalAddress;
     }
 
-    PhysicalAddress = Allocation->PhysicalAddress;
     if (PhysicalAddress.QuadPart == 0)
         return STATUS_INVALID_PARAMETER;
 
@@ -2866,24 +3217,9 @@ DxgkVidMmMapAllocationCpu(
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Establish segment CPU mapping lazily. */
-    Status = VidMmMapSegmentCpu(Segment);
-
+    Status = VidMmMapAllocationIoSpace(Segment, Allocation);
     if (!NT_SUCCESS(Status))
         return Status;
-
-    ASSERT(Segment->CpuBase != NULL);
-    ASSERT(Allocation->SegmentOffset < Segment->Size);
-
-    /*
-     * Return a pointer into the segment mapping at the allocation's offset.
-     *
-     * Cast through ULONG_PTR (not ULONG) to guarantee 64-bit pointer
-     * arithmetic on amd64: (PVOID + ULONGLONG) is not directly portable,
-     * but (ULONG_PTR) + (ULONG_PTR) is well-defined.
-     */
-    Allocation->CpuAddress = (PVOID)((ULONG_PTR)Segment->CpuBase
-                                     + (ULONG_PTR)Allocation->SegmentOffset);
 
     *OutVa = Allocation->CpuAddress;
 
@@ -2899,12 +3235,9 @@ DxgkVidMmMapAllocationCpu(
 /*
  * DxgkVidMmUnmapAllocationCpu
  *
- * Clears the per-allocation CPU mapping pointer.  The segment-level
- * MmMapIoSpace mapping is shared and is released only at adapter teardown
- * via DxgkVidMmTeardownAdapter.
- *
- * For system-memory backed allocations CpuAddress points into SystemMemory;
- * we just clear the pointer — the memory itself survives until
+ * Releases the per-allocation CPU mapping.  A memory-segment mapping is the
+ * allocation's own MmMapIoSpace view; for system-memory backed allocations
+ * CpuAddress points into SystemMemory, which survives until
  * DxgkVidMmDestroyAllocation frees it.
  */
 VOID
@@ -2914,6 +3247,10 @@ DxgkVidMmUnmapAllocationCpu(
     DPRINT("DxgkVidMmUnmapAllocationCpu: Alloc=%p CpuAddr=%p\n",
            Allocation, Allocation->CpuAddress);
 
+    if (Allocation->CpuAddressIsIoSpace && Allocation->CpuAddress != NULL)
+        MmUnmapIoSpace(Allocation->CpuAddress, Allocation->Size);
+
+    Allocation->CpuAddressIsIoSpace = FALSE;
     Allocation->CpuAddress = NULL;
 }
 

@@ -37,9 +37,7 @@
  * dxgkrnl (PHYSICAL_ADDRESS, etc.).  d3dkmddi.h transitively includes
  * d3dkmdt.h -> d3dukmdt.h, so a single include suffices.
  */
-#define _D3DKMDDI_H_
 #include <d3dkmddi.h>
-#undef _D3DKMDDI_H_
 
 /*
  * ReactOS debug macros (DPRINT, DPRINT1, ASSERT, etc.).

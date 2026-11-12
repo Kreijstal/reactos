@@ -171,6 +171,12 @@ typedef struct _DXGKP_VIDPN
     ULONG                           NumSources;
     ULONG                           NumTargets;
 
+    /* VidPN target IDs.  In WDDM a target ID is the ChildUid of a
+     * TypeVideoOutput child from DxgkDdiQueryChildRelations, not an index;
+     * TargetIds[i] is the ID whose mode sets live at index i.  Connected
+     * outputs come first, so index 0 is the primary display. */
+    D3DDDI_VIDEO_PRESENT_TARGET_ID  TargetIds[DXGKP_MAX_TARGETS];
+
     /* ---- Topology ---- */
 
     /* Array of present paths.  Entries [0..NumPaths-1] are valid. */

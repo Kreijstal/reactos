@@ -126,6 +126,30 @@ typedef struct _SOFTGPU_DEVICE
     PHYSICAL_ADDRESS    FrameBufferPhys;
     SIZE_T              FrameBufferSize;
 
+    /*
+     * Display memory of the QEMU/Bochs standard VGA (PCI 1234:1111 BAR0),
+     * when the adapter has one.  softgpu is then a real (CPU-executed) GPU:
+     * its memory segment is VRAM above the boot framebuffer, DMA buffers
+     * are executed by SubmitCommand and SetVidPnSourceAddress moves the
+     * Bochs DISPI scanout.  Without VRAM it stays a null GPU over the
+     * system-memory slab above.
+     *
+     * GPU addresses are byte offsets into VRAM; the segment starts at
+     * SegmentBase (past the boot framebuffer the firmware path still uses).
+     */
+    BOOLEAN             HasVram;
+    PHYSICAL_ADDRESS    VramPhys;
+    SIZE_T              VramSize;
+    PUCHAR              VramVa;
+    SIZE_T              SegmentBase;
+
+    /* DxgkDdiPresent(Blt) statistics (SOFTGPU_ESCAPE_PRESENT_STATS) */
+    volatile LONG       BltCount;
+    volatile LONG       FullBltCount;
+    RECT                LastBltBounds;
+    ULONG               LastBltDstWidth;
+    ULONG               LastBltDstHeight;
+
     /* Currently committed display mode */
     ULONG               Width;
     ULONG               Height;
@@ -178,7 +202,47 @@ typedef struct _SOFTGPU_ALLOC
     ULONG           Height;         /* surface height in pixels (if 2D)     */
     ULONG           Pitch;          /* stride in bytes                      */
     D3DDDIFORMAT    Format;         /* surface pixel format                 */
+    ULONG           StandardType;   /* DXGK_STANDARDALLOCATIONTYPE or 0     */
 } SOFTGPU_ALLOC, *PSOFTGPU_ALLOC;
+
+/*
+ * Allocation private driver data: what GetStandardAllocationDriverData
+ * hands dxgkrnl and CreateAllocation reads back.
+ */
+#define SOFTGPU_ALLOC_PRIVATE_MAGIC 0x56504753UL    /* 'SGPV' */
+
+typedef struct _SOFTGPU_ALLOC_PRIVATE
+{
+    ULONG           Magic;
+    ULONG           StandardType;
+    ULONG           Width;
+    ULONG           Height;
+    ULONG           Pitch;
+    D3DDDIFORMAT    Format;
+} SOFTGPU_ALLOC_PRIVATE, *PSOFTGPU_ALLOC_PRIVATE;
+
+/*
+ * DMA buffer command stream executed by SubmitCommand.  Addresses are GPU
+ * (VRAM offset) addresses written by DxgkDdiPatch.
+ */
+#define SOFTGPU_CMD_BLT         0x544C4253UL    /* 'SBLT' */
+
+typedef struct _SOFTGPU_CMD_BLT_PACKET
+{
+    ULONG       Opcode;
+    ULONG       Size;           /* whole packet, rects included */
+    ULONGLONG   SrcAddress;     /* patched: source allocation   */
+    ULONGLONG   DstAddress;     /* patched: destination         */
+    ULONG       SrcPitch;
+    ULONG       DstPitch;
+    ULONG       SrcSize;
+    ULONG       DstSize;
+    LONG        SrcDx;          /* SrcRect.left - DstRect.left  */
+    LONG        SrcDy;          /* SrcRect.top  - DstRect.top   */
+    ULONG       NumRects;
+    ULONG       Reserved;
+    RECT        Rects[ANYSIZE_ARRAY];   /* destination coordinates */
+} SOFTGPU_CMD_BLT_PACKET, *PSOFTGPU_CMD_BLT_PACKET;
 
 
 /* =========================================================================
@@ -190,10 +254,35 @@ typedef struct _SOFTGPU_ALLOC
 
 typedef struct _SOFTGPU_CONTEXT
 {
-    ULONG   Magic;
-    ULONG   NodeOrdinal;
-    ULONG   EngineAffinity;
+    ULONG           Magic;
+    ULONG           NodeOrdinal;
+    ULONG           EngineAffinity;
+    PSOFTGPU_DEVICE Adapter;
 } SOFTGPU_CONTEXT, *PSOFTGPU_CONTEXT;
+
+/*
+ * SOFTGPU_MDEVICE — the miniport device handle DxgkDdiCreateDevice returns
+ * (DXGKARG_CREATEDEVICE.hDevice out); CreateContext/OpenAllocation get it.
+ */
+#define SOFTGPU_MDEVICE_MAGIC   0x56444753UL    /* 'SGDV' */
+
+typedef struct _SOFTGPU_MDEVICE
+{
+    ULONG           Magic;
+    PSOFTGPU_DEVICE Adapter;
+} SOFTGPU_MDEVICE, *PSOFTGPU_MDEVICE;
+
+FORCEINLINE
+PSOFTGPU_DEVICE
+SoftGpuDeviceFromHandle(
+    _In_opt_ HANDLE hDevice)
+{
+    PSOFTGPU_MDEVICE MDevice = (PSOFTGPU_MDEVICE)hDevice;
+
+    if (MDevice == NULL || MDevice->Magic != SOFTGPU_MDEVICE_MAGIC)
+        return NULL;
+    return MDevice->Adapter;
+}
 
 #define SOFTGPU_CONTEXT_MAGIC   0x43504753UL    /* 'SGPC' */
 
@@ -401,6 +490,65 @@ APIENTRY
 SoftGpuDdiGetScanLine(
     _In_    PVOID                 MiniportDeviceContext,
     _Inout_ PDXGKARG_GETSCANLINE  GetScanLine);
+
+VOID
+SoftGpuDescribeSegment(
+    _In_  PSOFTGPU_DEVICE          Device,
+    _Out_ PDXGK_SEGMENTDESCRIPTOR3 Desc);
+
+/* render.c */
+NTSTATUS
+SoftGpuVramInitialize(
+    _Inout_ PSOFTGPU_DEVICE Device,
+    _In_    PDXGK_INTERFACE DxgkInterface,
+    _In_    ULONG           PostWidth,
+    _In_    ULONG           PostHeight,
+    _In_    ULONG           PostPitch);
+
+VOID
+SoftGpuVramTeardown(
+    _Inout_ PSOFTGPU_DEVICE Device);
+
+NTSTATUS
+SoftGpuExecuteDmaBuffer(
+    _In_ PSOFTGPU_DEVICE              Device,
+    _In_ CONST DXGKARG_SUBMITCOMMAND *SubmitCommand);
+
+NTSTATUS
+SoftGpuDisplayScanout(
+    _In_ PSOFTGPU_DEVICE Device,
+    _In_ ULONGLONG       GpuAddress,
+    _In_ ULONG           Pitch);
+
+NTSTATUS
+APIENTRY
+SoftGpuDdiEscape(
+    _In_ CONST HANDLE           hAdapter,
+    _In_ CONST DXGKARG_ESCAPE  *Escape);
+
+NTSTATUS
+APIENTRY
+SoftGpuDdiPresent(
+    _In_    CONST HANDLE      hContext,
+    _Inout_ PDXGKARG_PRESENT  pPresent);
+
+NTSTATUS
+APIENTRY
+SoftGpuDdiGetStandardAllocationDriverData(
+    _In_    CONST HANDLE                             hAdapter,
+    _Inout_ PDXGKARG_GETSTANDARDALLOCATIONDRIVERDATA pStandardAllocationDriverData);
+
+NTSTATUS
+APIENTRY
+SoftGpuDdiOpenAllocation(
+    _In_ CONST HANDLE                   hDevice,
+    _In_ CONST DXGKARG_OPENALLOCATION  *pOpenAllocation);
+
+NTSTATUS
+APIENTRY
+SoftGpuDdiCloseAllocation(
+    _In_ CONST HANDLE                    hDevice,
+    _In_ CONST DXGKARG_CLOSEALLOCATION  *pCloseAllocation);
 
 NTSTATUS
 APIENTRY

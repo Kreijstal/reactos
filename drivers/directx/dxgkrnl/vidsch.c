@@ -259,22 +259,23 @@ VidSchpKickEngine(
 
     /*
      * Build the DXGKARG_SUBMITCOMMAND for the miniport.
-     * The miniport reads the DMA buffer and programs the GPU to execute it.
+     * The miniport programs the GPU to execute the DMA buffer.  The DMA
+     * buffer is plain nonpaged pool kept in the packet (DmaBufferVa) and
+     * is not yet GPU-addressable, so DmaBufferSegmentId and
+     * DmaBufferPhysicalAddress stay zero.
      */
     RtlZeroMemory(&SubmitArgs, sizeof(SubmitArgs));
-    SubmitArgs.pDmaBuffer                    = Packet->DmaBufferVa;
+    SubmitArgs.hContext                      = (HANDLE)Packet->Context;
     SubmitArgs.DmaBufferSize                 = Packet->DmaBufferSize;
-    SubmitArgs.pDmaBufferPrivateData         = Packet->DriverPrivateData;
-    SubmitArgs.DmaBufferPrivateDataSize      = Packet->DriverPrivateDataSize;
     SubmitArgs.DmaBufferSubmissionStartOffset = 0;
     SubmitArgs.DmaBufferSubmissionEndOffset   = Packet->DmaBufferSize;
-    SubmitArgs.pAllocationList               = (CONST D3DDDI_ALLOCATIONLIST *)Packet->AllocationList;
-    SubmitArgs.AllocationListSize             = Packet->AllocationListSize;
+    SubmitArgs.pDmaBufferPrivateData         = Packet->DriverPrivateData;
+    SubmitArgs.DmaBufferPrivateDataSize      = Packet->DriverPrivateDataSize;
+    SubmitArgs.DmaBufferPrivateDataSubmissionEndOffset = Packet->DriverPrivateDataSize;
     SubmitArgs.SubmissionFenceId             = Packet->SubmissionFenceId;
-    SubmitArgs.NodeOrdinal                   = Packet->NodeOrdinal;
+    SubmitArgs.Flags.Present                 = Packet->IsPresent ? 1 : 0;
     SubmitArgs.EngineOrdinal                 = Packet->EngineOrdinal;
-    SubmitArgs.hContext                      = (HANDLE)Packet->Context;
-    SubmitArgs.Flags                         = Packet->IsPresent ? 1 : 0;
+    SubmitArgs.NodeOrdinal                   = Packet->NodeOrdinal;
 
     /*
      * Call the miniport's DxgkDdiSubmitCommand.

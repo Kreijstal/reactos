@@ -252,13 +252,98 @@ DxgkpDeleteChildPdo(
  *
  * IRQL: PASSIVE_LEVEL
  */
+/*
+ * DxgkpQueryChildDescriptors
+ *
+ * Ask the miniport for its children (DxgkDdiQueryChildRelations) and keep
+ * the descriptors in Adapter->ChildDescriptors.  Windows does this right
+ * after DxgkDdiStartDevice, before it builds a VidPN: VidPN target IDs are
+ * the ChildUids reported here.
+ */
+NTSTATUS
+DxgkpQueryChildDescriptors(
+    _In_ PDXGKRNL_ADAPTER Adapter)
+{
+    PDXGK_CHILD_DESCRIPTOR ChildRelations;
+    ULONG                  ChildRelationsSize;
+    ULONG                  i;
+    NTSTATUS               Status;
+
+    PAGED_CODE();
+
+    if (Adapter->NumberOfChildren == 0 ||
+        Adapter->MiniportContext->InitData.s.DxgkDdiQueryChildRelations == NULL)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    /*
+     * Allocate the child descriptor array.  The WDDM contract requires
+     * (NumberOfChildren + 1) entries: the miniport fills entries [0..N-1]
+     * and leaves entry [N] zeroed as a sentinel.
+     */
+    ChildRelationsSize = (Adapter->NumberOfChildren + 1) *
+                         sizeof(DXGK_CHILD_DESCRIPTOR);
+
+    ChildRelations = (PDXGK_CHILD_DESCRIPTOR)ExAllocatePoolWithTag(
+                         PagedPool,
+                         ChildRelationsSize,
+                         TAG_DXGK_RESOURCES);
+    if (ChildRelations == NULL)
+    {
+        DXGKRNL_ERR("DxgkpQueryChildDescriptors: failed to allocate "
+                     "child descriptor array (%lu bytes)\n",
+                     ChildRelationsSize);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlZeroMemory(ChildRelations, ChildRelationsSize);
+
+    /*
+     * Call DxgkDdiQueryChildRelations.  The miniport fills in each
+     * DXGK_CHILD_DESCRIPTOR element with the child type, capabilities,
+     * and ChildUid.
+     */
+    Status = Adapter->MiniportContext->InitData.s.DxgkDdiQueryChildRelations(
+                 Adapter->MiniportDeviceContext,
+                 ChildRelations,
+                 ChildRelationsSize);
+
+    if (!NT_SUCCESS(Status))
+    {
+        DXGKRNL_ERR("DxgkpQueryChildDescriptors: DxgkDdiQueryChildRelations "
+                     "failed 0x%08lX\n", Status);
+        ExFreePoolWithTag(ChildRelations, TAG_DXGK_RESOURCES);
+        return Status;
+    }
+
+    for (i = 0; i < Adapter->NumberOfChildren; i++)
+    {
+        PULONG Raw = (PULONG)&ChildRelations[i];
+        DXGKRNL_TRACE("DxgkpQueryChildDescriptors: raw child[%lu] %08lx %08lx %08lx "
+                      "%08lx %08lx %08lx %08lx\n", i, Raw[0], Raw[1], Raw[2],
+                      Raw[3], Raw[4], Raw[5], Raw[6]);
+    }
+
+    /*
+     * Save the child descriptors in the adapter for later use by
+     * DxgkDdiQueryChildStatus and EDID queries.
+     */
+    if (Adapter->ChildDescriptors != NULL)
+    {
+        ExFreePoolWithTag(Adapter->ChildDescriptors, TAG_DXGK_RESOURCES);
+    }
+    Adapter->ChildDescriptors = ChildRelations;
+
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS
 DxgkpQueryBusRelations(
     _In_  PDXGKRNL_ADAPTER  Adapter,
     _Out_ PDEVICE_RELATIONS *Relations)
 {
     PDXGK_CHILD_DESCRIPTOR     ChildRelations = NULL;
-    ULONG                      ChildRelationsSize;
     ULONG                      i;
     KIRQL                      OldIrql;
     NTSTATUS                   Status;
@@ -289,55 +374,10 @@ DxgkpQueryBusRelations(
         return STATUS_SUCCESS;
     }
 
-    /*
-     * Allocate the child descriptor array.  The WDDM contract requires
-     * (NumberOfChildren + 1) entries: the miniport fills entries [0..N-1]
-     * and leaves entry [N] zeroed as a sentinel.
-     */
-    ChildRelationsSize = (Adapter->NumberOfChildren + 1) *
-                         sizeof(DXGK_CHILD_DESCRIPTOR);
-
-    ChildRelations = (PDXGK_CHILD_DESCRIPTOR)ExAllocatePoolWithTag(
-                         PagedPool,
-                         ChildRelationsSize,
-                         TAG_DXGK_RESOURCES);
-    if (ChildRelations == NULL)
-    {
-        DXGKRNL_ERR("DxgkpQueryBusRelations: failed to allocate "
-                     "child descriptor array (%lu bytes)\n",
-                     ChildRelationsSize);
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    RtlZeroMemory(ChildRelations, ChildRelationsSize);
-
-    /*
-     * Call DxgkDdiQueryChildRelations.  The miniport fills in each
-     * DXGK_CHILD_DESCRIPTOR element with the child type, capabilities,
-     * and ChildUid.
-     */
-    Status = Adapter->MiniportContext->InitData.s.DxgkDdiQueryChildRelations(
-                 Adapter->MiniportDeviceContext,
-                 ChildRelations,
-                 ChildRelationsSize);
-
+    Status = DxgkpQueryChildDescriptors(Adapter);
     if (!NT_SUCCESS(Status))
-    {
-        DXGKRNL_ERR("DxgkpQueryBusRelations: DxgkDdiQueryChildRelations "
-                     "failed 0x%08lX\n", Status);
-        ExFreePoolWithTag(ChildRelations, TAG_DXGK_RESOURCES);
         return Status;
-    }
-
-    /*
-     * Save the child descriptors in the adapter for later use by
-     * DxgkDdiQueryChildStatus and EDID queries.
-     */
-    if (Adapter->ChildDescriptors != NULL)
-    {
-        ExFreePoolWithTag(Adapter->ChildDescriptors, TAG_DXGK_RESOURCES);
-    }
-    Adapter->ChildDescriptors = ChildRelations;
+    ChildRelations = Adapter->ChildDescriptors;
 
     /*
      * Walk the descriptor array and create PDOs for each valid child.

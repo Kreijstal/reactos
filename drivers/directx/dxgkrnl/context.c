@@ -510,11 +510,11 @@ DxgkCreateDevice(
     RtlZeroMemory(&CreateDeviceArg, sizeof(CreateDeviceArg));
     CreateDeviceArg.hDevice             = (HANDLE)Device; /* raw pointer as token */
     /*
-     * D3DKMT_CREATEDEVICEFLAGS (no .Value union) → DXGK_CREATEDEVICEFLAGS (.Value union).
-     * Copy the two defined bits explicitly.
+     * D3DKMT_CREATEDEVICEFLAGS (LegacyMode, RequestVSync) are runtime-only.
+     * DXGK_CREATEDEVICEFLAGS carries SystemDevice/GdiDevice, which only the
+     * kernel sets for its own devices (kmpresent.c); a user device has none.
      */
-    CreateDeviceArg.Flags.LegacyMode    = pCreateDevice->Flags.LegacyMode;
-    CreateDeviceArg.Flags.RequestVSync  = pCreateDevice->Flags.RequestVSync;
+    CreateDeviceArg.Flags.Value         = 0;
 
     if (Adapter->MiniportContext->InitData.s.DxgkDdiCreateDevice != NULL)
     {

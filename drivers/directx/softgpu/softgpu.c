@@ -69,10 +69,9 @@ static const DXGK_DRIVERCAPS SOFTGPU_DRIVER_CAPS =
     /* PointerCaps.Value = 0: no hardware cursor */
     .MaxAllocationListSlotId    = 255,
     .ApertureSegmentCommitLimit = SOFTGPU_FB_SIZE,
-    .MaxInterruptPriority       = 0,
     /* PresentationCaps.Value = 0 */
     .MaxOverlays                = 0,
-    .GammaRampCaps              = 0,
+    .GammaRampCaps.Value        = 0,
     .SchedulingCaps.Value       = 0,
     .MemoryManagementCaps.Value = 0,
     .GpuEngineTopology.NbAsymetricProcessingNodes = 1,
@@ -166,6 +165,13 @@ DriverEntry(
     InitData.DxgkDdiCreateDevice                    = SoftGpuDdiCreateDevice;
     InitData.DxgkDdiDestroyDevice                   = SoftGpuDdiDestroyDevice;
     InitData.DxgkDdiCreateContext                   = SoftGpuDdiCreateContext;
+
+    /* --- Present / standard allocations (render.c) ----------------------- */
+    InitData.DxgkDdiGetStandardAllocationDriverData = SoftGpuDdiGetStandardAllocationDriverData;
+    InitData.DxgkDdiOpenAllocation                  = SoftGpuDdiOpenAllocation;
+    InitData.DxgkDdiCloseAllocation                 = SoftGpuDdiCloseAllocation;
+    InitData.DxgkDdiPresent                         = SoftGpuDdiPresent;
+    InitData.DxgkDdiEscape                          = SoftGpuDdiEscape;
     InitData.DxgkDdiDestroyContext                  = SoftGpuDdiDestroyContext;
 
     /* --- Interrupt control ----------------------------------------------- */
@@ -374,6 +380,15 @@ SoftGpuDdiStartDevice(
 
         Device->Width  = PostDisplayInfo.Width;
         Device->Height = PostDisplayInfo.Height;
+
+        /* With display memory (Bochs VGA BAR0) softgpu is a real GPU. */
+        if (!NT_SUCCESS(SoftGpuVramInitialize(Device, DxgkInterface,
+                                              PostDisplayInfo.Width,
+                                              PostDisplayInfo.Height,
+                                              PostDisplayInfo.Pitch)))
+        {
+            DPRINT1("SOFTGPU: no Bochs VRAM; null GPU over the system slab\n");
+        }
     }
 
     /* Save the dxgkrnl callback vtable for later use by the DPC. */
@@ -423,6 +438,7 @@ SoftGpuDdiStopDevice(
      * KeRemoveQueueDpc returns FALSE if the DPC was not in the queue.
      */
     KeRemoveQueueDpc(&Device->DpcObject);
+    SoftGpuVramTeardown(Device);
 
     return STATUS_SUCCESS;
 }
@@ -488,6 +504,37 @@ SoftGpuDdiRemoveDevice(
  *
  * IRQL: PASSIVE_LEVEL
  */
+/*
+ * The one segment softgpu reports.  With VRAM: display memory above the
+ * boot framebuffer, a CPU-visible memory segment whose GPU addresses are
+ * VRAM offsets.  The null GPU reports its system-memory slab as an aperture.
+ */
+VOID
+SoftGpuDescribeSegment(
+    _In_  PSOFTGPU_DEVICE          Device,
+    _Out_ PDXGK_SEGMENTDESCRIPTOR3 Desc)
+{
+    RtlZeroMemory(Desc, sizeof(*Desc));
+    if (Device->HasVram)
+    {
+        Desc->BaseAddress.QuadPart = (LONGLONG)Device->SegmentBase;
+        Desc->CpuTranslatedAddress.QuadPart =
+            Device->VramPhys.QuadPart + (LONGLONG)Device->SegmentBase;
+        Desc->Size = Device->VramSize - Device->SegmentBase;
+        Desc->Flags.CpuVisible = 1;
+    }
+    else
+    {
+        Desc->BaseAddress = Device->FrameBufferPhys;
+        Desc->CpuTranslatedAddress = Device->FrameBufferPhys;
+        Desc->Size = Device->FrameBufferSize;
+        Desc->Flags.Aperture = 1;
+        Desc->Flags.CpuVisible = 1;
+        Desc->Flags.PopulatedFromSystemMemory = 1;
+    }
+    Desc->CommitLimit = Desc->Size;
+}
+
 NTSTATUS
 APIENTRY
 SoftGpuDdiQueryAdapterInfo(
@@ -545,69 +592,62 @@ SoftGpuDdiQueryAdapterInfo(
         return STATUS_SUCCESS;
 
     case DXGKQAITYPE_QUERYSEGMENT:
+    case DXGKQAITYPE_QUERYSEGMENT3:
     {
         /*
-         * QUERYSEGMENT two-phase protocol.
+         * Two-phase protocol: with pSegmentDescriptor == NULL report the
+         * count, then fill the descriptors.  QUERYSEGMENT3 (Windows 8+)
+         * uses DXGK_SEGMENTDESCRIPTOR3, which puts Flags first.
          *
-         * softgpu exposes a single CPU-visible aperture segment backed by
-         * the 16 MB write-combined contiguous buffer.
-         *
-         * Segment flags:
-         *   Aperture              = 1: segment is a GPU-accessible mapping
-         *                             of system memory (no real VRAM).
-         *   CpuVisible            = 1: CPU can access directly.
-         *   PopulatedFromSystemMemory = 1: backed by system RAM.
-         *
-         * BaseAddress and CpuTranslatedAddress both point to the physical
-         * base of our framebuffer slab.
+         * With VRAM the one segment is display memory above the boot
+         * framebuffer: a CPU-visible memory segment whose GPU addresses
+         * are VRAM offsets.  The null GPU reports its system-memory slab
+         * as an aperture segment.
          */
-        if (pQueryAdapterInfo->pOutputData == NULL)
-            return STATUS_INVALID_PARAMETER;
+        DXGK_SEGMENTDESCRIPTOR3 Seg;
 
-        if (pQueryAdapterInfo->OutputDataSize < sizeof(DXGK_QUERYSEGMENTOUT))
+        C_ASSERT(FIELD_OFFSET(DXGK_QUERYSEGMENTOUT, PagingBufferPrivateDataSize) ==
+                 FIELD_OFFSET(DXGK_QUERYSEGMENTOUT3, PagingBufferPrivateDataSize));
+
+        if (pQueryAdapterInfo->pOutputData == NULL ||
+            pQueryAdapterInfo->OutputDataSize < sizeof(DXGK_QUERYSEGMENTOUT))
         {
-            DPRINT1("SOFTGPU: QueryAdapterInfo QUERYSEGMENT: output buffer "
-                    "too small (%u < %Iu)\n",
-                    pQueryAdapterInfo->OutputDataSize,
-                    sizeof(DXGK_QUERYSEGMENTOUT));
             return STATUS_BUFFER_TOO_SMALL;
         }
 
         pSegOut = (PDXGK_QUERYSEGMENTOUT)pQueryAdapterInfo->pOutputData;
 
+        SoftGpuDescribeSegment(Device, &Seg);
+
         if (pSegOut->pSegmentDescriptor == NULL)
         {
-            /* Phase 1: report segment count. */
-            DPRINT("SOFTGPU: QueryAdapterInfo QUERYSEGMENT phase 1: "
-                   "reporting 1 segment\n");
-            pSegOut->NbSegment            = 1;
+            pSegOut->NbSegment             = 1;
             pSegOut->PagingBufferSegmentId = SOFTGPU_SEGMENT_ID;
             pSegOut->PagingBufferSize      = 64 * 1024;
+            pSegOut->PagingBufferPrivateDataSize = 0;
             return STATUS_SUCCESS;
         }
 
-        /* Phase 2: fill the descriptor array.  NbSegment must be >= 1. */
         if (pSegOut->NbSegment < 1)
-        {
-            DPRINT1("SOFTGPU: QueryAdapterInfo QUERYSEGMENT phase 2: "
-                    "NbSegment=%u\n", pSegOut->NbSegment);
             return STATUS_INVALID_PARAMETER;
+
+        if (pQueryAdapterInfo->Type == DXGKQAITYPE_QUERYSEGMENT3)
+        {
+            PDXGK_SEGMENTDESCRIPTOR3 pDesc3 =
+                ((PDXGK_QUERYSEGMENTOUT3)pSegOut)->pSegmentDescriptor;
+
+            *pDesc3 = Seg;
         }
-
-        DPRINT("SOFTGPU: QueryAdapterInfo QUERYSEGMENT phase 2: "
-               "filling %u segment(s)\n", pSegOut->NbSegment);
-
-        pDesc = &pSegOut->pSegmentDescriptor[0];
-        RtlZeroMemory(pDesc, sizeof(*pDesc));
-
-        pDesc->BaseAddress.QuadPart          = Device->FrameBufferPhys.QuadPart;
-        pDesc->CpuTranslatedAddress.QuadPart = Device->FrameBufferPhys.QuadPart;
-        pDesc->Size                          = Device->FrameBufferSize;
-        pDesc->CommitLimit                   = Device->FrameBufferSize;
-        pDesc->Flags.Aperture                = 1;
-        pDesc->Flags.CpuVisible              = 1;
-        pDesc->Flags.PopulatedFromSystemMemory = 1;
-
+        else
+        {
+            pDesc = &pSegOut->pSegmentDescriptor[0];
+            RtlZeroMemory(pDesc, sizeof(*pDesc));
+            pDesc->Flags                = Seg.Flags;
+            pDesc->BaseAddress          = Seg.BaseAddress;
+            pDesc->CpuTranslatedAddress = Seg.CpuTranslatedAddress;
+            pDesc->Size                 = Seg.Size;
+            pDesc->CommitLimit          = Seg.CommitLimit;
+        }
         return STATUS_SUCCESS;
     }
 
@@ -638,8 +678,19 @@ SoftGpuDdiCreateDevice(
         return STATUS_INVALID_PARAMETER;
     }
 
-    DPRINT("SOFTGPU: CreateDevice hDevice=%p\n", CreateDevice->hDevice);
-    /* No per-device state; return the dxgkrnl handle unchanged. */
+    {
+        PSOFTGPU_MDEVICE MDevice;
+
+        DPRINT("SOFTGPU: CreateDevice hDevice=%p\n", CreateDevice->hDevice);
+
+        /* hDevice comes in as dxgkrnl's handle and goes out as ours. */
+        MDevice = ExAllocatePoolWithTag(NonPagedPool, sizeof(*MDevice), SOFTGPU_POOL_TAG);
+        if (MDevice == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        MDevice->Magic = SOFTGPU_MDEVICE_MAGIC;
+        MDevice->Adapter = Device;
+        CreateDevice->hDevice = (HANDLE)MDevice;
+    }
     return STATUS_SUCCESS;
 }
 
@@ -648,7 +699,13 @@ APIENTRY
 SoftGpuDdiDestroyDevice(
     _In_ PVOID MiniportDeviceContext)
 {
-    DPRINT("SOFTGPU: DestroyDevice context=%p\n", MiniportDeviceContext);
+    PSOFTGPU_MDEVICE MDevice = (PSOFTGPU_MDEVICE)MiniportDeviceContext;
+
+    DPRINT("SOFTGPU: DestroyDevice hDevice=%p\n", MiniportDeviceContext);
+    if (MDevice == NULL || MDevice->Magic != SOFTGPU_MDEVICE_MAGIC)
+        return STATUS_INVALID_PARAMETER;
+    MDevice->Magic = 0;
+    ExFreePoolWithTag(MDevice, SOFTGPU_POOL_TAG);
     return STATUS_SUCCESS;
 }
 
@@ -740,17 +797,45 @@ SoftGpuDdiCreateAllocation(
             return STATUS_GRAPHICS_NO_VIDEO_MEMORY;
         }
 
-        Alloc->Size   = (Alloc->Size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
         Alloc->Format = D3DDDIFMT_A8R8G8B8;    /* default */
+        pInfo->Alignment = PAGE_SIZE;
+
+        /* Standard allocations carry their geometry (GetStandardAllocationDriverData). */
+        if (pInfo->pPrivateDriverData != NULL &&
+            pInfo->PrivateDriverDataSize >= sizeof(SOFTGPU_ALLOC_PRIVATE) &&
+            ((PSOFTGPU_ALLOC_PRIVATE)pInfo->pPrivateDriverData)->Magic ==
+                SOFTGPU_ALLOC_PRIVATE_MAGIC)
+        {
+            const SOFTGPU_ALLOC_PRIVATE *Private = pInfo->pPrivateDriverData;
+
+            Alloc->StandardType = Private->StandardType;
+            Alloc->Width = Private->Width;
+            Alloc->Height = Private->Height;
+            Alloc->Pitch = Private->Pitch;
+            Alloc->Format = Private->Format;
+            Alloc->Size = (SIZE_T)Private->Pitch * Private->Height;
+            /* A primary's address must sit on a scanline (DISPI Y_OFFSET);
+             * its pitch is a power of two. */
+            if (Private->StandardType == DXGK_STDALLOCATION_SHAREDPRIMARYSURFACE)
+                pInfo->Alignment = max(Private->Pitch, PAGE_SIZE);
+        }
+
+        Alloc->Size   = (Alloc->Size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        if (Alloc->Size > SOFTGPU_FB_SIZE)
+        {
+            ExFreePoolWithTag(Alloc, SOFTGPU_POOL_TAG);
+            return STATUS_GRAPHICS_NO_VIDEO_MEMORY;
+        }
 
         /* Fill in DXGK_ALLOCATIONINFO fields for dxgkrnl placement. */
         pInfo->Size                    = Alloc->Size;
-        pInfo->Alignment               = PAGE_SIZE;
         pInfo->SupportedReadSegmentSet = (1 << (SOFTGPU_SEGMENT_ID - 1));
         pInfo->SupportedWriteSegmentSet= (1 << (SOFTGPU_SEGMENT_ID - 1));
-        pInfo->EvictionSegmentSet      = 0;     /* no eviction for aperture */
+        pInfo->EvictionSegmentSet      = 0;     /* never evicted */
         pInfo->Flags.CpuVisible        = 1;
-        pInfo->Flags.PermanentSysMem   = 1;     /* stays in system memory   */
+        /* The null GPU's slab is system memory; VRAM is not. */
+        pInfo->Flags.PermanentSysMem   =
+            ((PSOFTGPU_DEVICE)MiniportDeviceContext)->HasVram ? 0 : 1;
         pInfo->hAllocation             = (HANDLE)Alloc;
 
         DPRINT("SOFTGPU: CreateAllocation alloc[%lu]: size=%Iu handle=%p\n",

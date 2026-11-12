@@ -58,183 +58,14 @@
 
 #include "dxgmms1_private.h"
 
-/* =========================================================================
- * DXGK paging DDI types
- *
- * These types are defined in the Windows DDK's dispmprt.h / d3dkmddi.h but
- * are not present in the ReactOS SDK headers at this stage.  We define a
- * self-contained subset here so that paging.c can call the miniport DDI
- * without depending on external SDK headers.
- *
- * Naming and layout match the Windows 10 WDK definitions exactly so that
- * these declarations can be removed once the ReactOS SDK is updated.
- * ========================================================================= */
-
 /*
- * DXGK_OPERATION_* — paging DMA buffer operation codes.
- *
- * Passed as DXGKARG_BUILDPAGINGBUFFER.Operation.
- * Values are stable across Windows WDDM versions (Vista+).
+ * DXGKARG_BUILDPAGINGBUFFER, DXGK_BUILDPAGINGBUFFER_OPERATION and the
+ * DxgkDdiBuildPagingBuffer prototype come from the WDK-layout d3dkmddi.h.
  */
-#ifndef DXGK_OPERATION_TRANSFER
-#define DXGK_OPERATION_TRANSFER                 0
-#define DXGK_OPERATION_FILL                     1
-#define DXGK_OPERATION_DISCARD_CONTENT          2
-#define DXGK_OPERATION_READ_PHYSICAL            3
-#define DXGK_OPERATION_WRITE_PHYSICAL           4
-#define DXGK_OPERATION_MAP_APERTURE_SEGMENT     5
-#define DXGK_OPERATION_UNMAP_APERTURE_SEGMENT   6
-#define DXGK_OPERATION_SPECIAL_LOCK_TRANSFER    7
-#endif /* DXGK_OPERATION_TRANSFER */
-
-/*
- * DXGKARG_BUILDPAGINGBUFFER
- *
- * Argument structure passed by dxgmms1 to the miniport's
- * DxgkDdiBuildPagingBuffer DDI.  The miniport writes GPU commands into
- * pDmaBuffer and advances DmaBufferWriteOffset to indicate how many bytes
- * it consumed.
- *
- * Layout matches the Windows 10 WDK DXGKARG_BUILDPAGINGBUFFER exactly
- * (64-bit build; verified against the WDK 10.0.26100 headers).
- */
-#ifndef _DXGKARG_BUILDPAGINGBUFFER_DEFINED_
-#define _DXGKARG_BUILDPAGINGBUFFER_DEFINED_
-
-typedef struct _DXGKARG_BUILDPAGINGBUFFER
-{
-    /*
-     * Kernel VA of the DMA command buffer.
-     * Filled by dxgmms1 before calling the miniport.
-     */
-    PVOID   pDmaBuffer;
-
-    /*
-     * Total size of the DMA buffer in bytes.
-     */
-    ULONG   DmaSize;
-
-    /*
-     * On entry: byte offset of the first writable slot in pDmaBuffer.
-     * On return: updated by the miniport to reflect how many bytes it wrote.
-     */
-    ULONG   DmaBufferWriteOffset;
-
-    /*
-     * Private data area for the miniport (opaque to dxgmms1).
-     * NULL when not used.
-     */
-    PVOID   pDmaBufferPrivateData;
-
-    /*
-     * Size of the private data area in bytes.
-     */
-    ULONG   DmaBufferPrivateDataSize;
-
-    /*
-     * Write offset into pDmaBufferPrivateData (mirrors DmaBufferWriteOffset).
-     */
-    ULONG   DmaBufferPrivateDataWriteOffset;
-
-    /*
-     * Paging operation: DXGK_OPERATION_*.
-     */
-    ULONG   Operation;
-
-    /*
-     * Operation-specific parameters.
-     */
-    union
-    {
-        /*
-         * DXGK_OPERATION_TRANSFER and DXGK_OPERATION_SPECIAL_LOCK_TRANSFER.
-         */
-        struct
-        {
-            HANDLE  hAllocation;        /* Allocation handle                 */
-            ULONG   TransferOffset;     /* Byte offset within the allocation */
-            SIZE_T  TransferSize;       /* Number of bytes to transfer       */
-
-            struct
-            {
-                ULONG           SegmentId;      /* Source segment (0=sysmem)  */
-                ULONGLONG       SegmentAddress; /* Byte offset in segment     */
-                PMDL            pMdl;           /* MDL (when SegmentId == 0)  */
-            } Source;
-
-            struct
-            {
-                ULONG           SegmentId;      /* Dest segment (0=sysmem)    */
-                ULONGLONG       SegmentAddress; /* Byte offset in segment     */
-                PMDL            pMdl;           /* MDL (when SegmentId == 0)  */
-            } Destination;
-        } Transfer;
-
-        /*
-         * DXGK_OPERATION_FILL.
-         */
-        struct
-        {
-            ULONG       SegmentId;      /* Segment to fill                   */
-            SIZE_T      FillSize;       /* Number of bytes to fill           */
-            UINT        FillPattern;    /* 32-bit pattern to repeat          */
-            ULONGLONG   DestinationSegmentAddress; /* Byte offset in segment */
-        } Fill;
-
-        /*
-         * DXGK_OPERATION_DISCARD_CONTENT.
-         */
-        struct
-        {
-            HANDLE    hAllocation;
-            ULONG     SegmentId;
-            SIZE_T    AllocationSize;
-            ULONGLONG SegmentAddress;
-        } DiscardContent;
-
-        /*
-         * DXGK_OPERATION_MAP_APERTURE_SEGMENT.
-         */
-        struct
-        {
-            ULONG   SegmentId;          /* 1-based aperture segment          */
-            SIZE_T  OffsetInPages;      /* First page slot to map            */
-            SIZE_T  NumberOfPages;      /* Number of pages                   */
-            PMDL    pMdl;               /* System-memory MDL to map          */
-        } MapApertureSegment;
-
-        /*
-         * DXGK_OPERATION_UNMAP_APERTURE_SEGMENT.
-         */
-        struct
-        {
-            ULONG   SegmentId;
-            SIZE_T  OffsetInPages;
-            SIZE_T  NumberOfPages;
-        } UnmapApertureSegment;
-
-    }; /* anonymous union */
-
-} DXGKARG_BUILDPAGINGBUFFER, *PDXGKARG_BUILDPAGINGBUFFER;
-
-#endif /* _DXGKARG_BUILDPAGINGBUFFER_DEFINED_ */
-
-/*
- * DXGKDDI_BUILDPAGINGBUFFER
- *
- * Miniport DDI entry point for building paging DMA buffers.
- * The miniport fills pDmaBuffer with GPU commands that implement the
- * requested paging operation.
- *
- * IRQL: PASSIVE_LEVEL
- */
-#ifndef DXGKDDI_BUILDPAGINGBUFFER_DEFINED
-#define DXGKDDI_BUILDPAGINGBUFFER_DEFINED
 typedef NTSTATUS
-(NTAPI *DXGKDDI_BUILDPAGINGBUFFER)(
-    _In_    PVOID                       MiniportDeviceContext,
-    _Inout_ PDXGKARG_BUILDPAGINGBUFFER  pBuildPagingBuffer);
-#endif /* DXGKDDI_BUILDPAGINGBUFFER_DEFINED */
+(APIENTRY *PDXGMMS_DDI_BUILDPAGINGBUFFER)(
+    _In_    CONST HANDLE                hAdapter,
+    _Inout_ DXGKARG_BUILDPAGINGBUFFER  *pBuildPagingBuffer);
 
 /* =========================================================================
  * Constants
@@ -315,9 +146,8 @@ typedef struct _DXGMMS_PAGING_BUFFER
 
     /*
      * Number of bytes the miniport has written into Buffer so far during
-     * the current BuildPagingBuffer call.  Updated by the miniport via
-     * DXGKARG_BUILDPAGINGBUFFER.DmaBufferWriteOffset on return; reset to
-     * zero at the start of each new BuildPagingBuffer sequence.
+     * the current BuildPagingBuffer call: how far the miniport advanced
+     * DXGKARG_BUILDPAGINGBUFFER.pDmaBuffer.
      */
     SIZE_T              UsedSize;
 
