@@ -25,6 +25,7 @@
 #define MAXIMUM_TRANSFER_LENGTH             (128*1024) // 128 KB
 
 #define DEVICE_ATA_BLOCK_SIZE               512
+#define AHCI_ATAPI_SENSE_LENGTH             64  // even: PRDT byte counts must be
 
 // device type (DeviceParams)
 #define AHCI_DEVICE_TYPE_ATA                1
@@ -570,6 +571,10 @@ typedef struct _AHCI_SRB_EXTENSION
     PLOCAL_SCATTER_GATHER_LIST pSgl;
     PAHCI_COMPLETION_ROUTINE CompletionRoutine;
 
+    // DMA target of the REQUEST SENSE issued after an ATAPI CHECK CONDITION;
+    // copied into Srb->SenseInfoBuffer on completion (AutoRequestSense).
+    UCHAR SenseData[AHCI_ATAPI_SENSE_LENGTH];
+
     // for alignment purpose -- 128 byte alignment
     // do not try to access (R/W) this field
     UCHAR Reserved[128];
@@ -589,6 +594,20 @@ AhciProcessIO (
 VOID
 AhciActivatePort (
     __in PAHCI_PORT_EXTENSION PortExtension
+    );
+
+VOID
+AhciProcessSrb (
+    __in PAHCI_PORT_EXTENSION PortExtension,
+    __in PSCSI_REQUEST_BLOCK Srb,
+    __in ULONG SlotIndex
+    );
+
+VOID
+AhciAtapiCheckCondition (
+    __in PAHCI_PORT_EXTENSION PortExtension,
+    __in PSCSI_REQUEST_BLOCK Srb,
+    __in UCHAR ErrorRegister
     );
 
 VOID

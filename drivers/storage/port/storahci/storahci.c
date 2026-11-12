@@ -675,7 +675,12 @@ AhciInterruptHandler (
         ULONG ticks, failedSlots, i;
         ULONG NCS;
 
+        AHCI_TASK_FILE_DATA tfd;
+        PSCSI_REQUEST_BLOCK CheckConditionSrb = NULL;
+
         AhciDebugPrint("\tFatal Error: %x\n", PxIS.Status);
+
+        tfd.Status = StorPortReadRegisterUlong(AdapterExtension, &PortExtension->Port->TFD);
 
         // 6.2.2.1 non-queued error recovery:
         //   clear PxCMD.ST, wait CR=0, clear PxSERR/PxIS, set PxCMD.ST=1
@@ -700,12 +705,46 @@ AhciInterruptHandler (
             StorPortWriteRegisterUlong(AdapterExtension, &PortExtension->Port->CMD, cmd.Status);
         }
 
+        failedSlots = PortExtension->CommandIssuedSlots;
+        NCS = AHCI_Global_Port_CAP_NCS(AdapterExtension->CAP);
+
+        // A task file error from an ATAPI device that left BSY/DRQ clear is not
+        // a port failure: it is the device completing the PACKET command with
+        // CHECK CONDITION (status ERR, sense key in the error register), e.g.
+        // 02/3A "medium not present" from an empty drive. Report it the SCSI
+        // way: ScsiStatus CHECK_CONDITION plus the sense data, fetched with
+        // REQUEST SENSE because we advertise AutoRequestSense (storport and
+        // the class drivers do not request sense themselves). A bare
+        // SRB_STATUS_ERROR without sense makes cdrom.sys retry for seconds.
+        // DrivePortQueue keeps one command in flight on an ATAPI port, so the
+        // single issued slot is the one that failed.
+        if (PxIS.TFES && !PxIS.HBFS && !PxIS.HBDS && !PxIS.IFS &&
+            PortExtension->DeviceParams.DeviceType == AHCI_DEVICE_TYPE_ATAPI &&
+            tfd.STS.ERR && !tfd.STS.BSY && !tfd.STS.DRQ && cmd.CR == 0)
+        {
+            NT_ASSERT(failedSlots != 0 && (failedSlots & (failedSlots - 1)) == 0);
+            for (i = 0; i < NCS; i++)
+            {
+                if (failedSlots & (1 << i))
+                {
+                    CheckConditionSrb = PortExtension->Slot[i];
+                    PortExtension->Slot[i] = NULL;
+                    break;
+                }
+            }
+            failedSlots = 0;
+            PortExtension->CommandIssuedSlots = 0;
+
+            if (CheckConditionSrb != NULL)
+            {
+                AhciAtapiCheckCondition(PortExtension, CheckConditionSrb, tfd.ERR);
+            }
+        }
+
         // Fail every in-flight SRB on this port; the class driver will retry.
         // We must NOT route through AhciCompleteIssuedSrb because it asserts
         // SrbStatus==PENDING and dispatches CompletionRoutine DPCs that expect
         // a valid task-file response.
-        failedSlots = PortExtension->CommandIssuedSlots;
-        NCS = AHCI_Global_Port_CAP_NCS(AdapterExtension->CAP);
         for (i = 0; i < NCS; i++)
         {
             PSCSI_REQUEST_BLOCK FailedSrb;
@@ -724,6 +763,12 @@ AhciInterruptHandler (
         StorPortWriteRegisterUlong(AdapterExtension,
                                    AdapterExtension->IS,
                                    (1 << PortExtension->PortNumber));
+
+        // Issue the REQUEST SENSE (if one was queued) or whatever is waiting.
+        if (cmd.CR == 0)
+        {
+            AhciDrivePortQueue(PortExtension);
+        }
         return;
     }
 
@@ -946,6 +991,17 @@ AhciHwStartIo (
 
                 NT_ASSERT(cdb != NULL);
 
+                // An ATAPI device is a SCSI device: the HBA transmits the CDB
+                // verbatim as the PACKET payload, so every opcode goes to the
+                // device and the device answers it (including TEST UNIT READY,
+                // which must report "no media" from an empty drive). Only the
+                // ATA command set needs the SCSI->ATA translation below.
+                if (AdapterExtension->PortExtension[Srb->PathId].DeviceParams.DeviceType == AHCI_DEVICE_TYPE_ATAPI)
+                {
+                    Srb->SrbStatus = AhciATAPICommand(AdapterExtension, Srb, cdb);
+                    break;
+                }
+
                 switch(cdb->CDB10.OperationCode)
                 {
                     case SCSIOP_INQUIRY:
@@ -968,23 +1024,9 @@ AhciHwStartIo (
                         Srb->SrbStatus = DeviceRequestReadWrite(AdapterExtension, Srb, cdb);
                         break;
                     default:
-                    {
-                        PAHCI_PORT_EXTENSION PortExt = &AdapterExtension->PortExtension[Srb->PathId];
-                        /* For ATAPI devices the AHCI controller transmits the CDB verbatim
-                         * as the PACKET payload, so any SCSI opcode the device itself
-                         * understands (READ_TOC / GET_CONFIGURATION / GET_EVENT_STATUS /
-                         * MODE_SENSE10 / etc.) can be passed straight through. */
-                        if (PortExt->DeviceParams.DeviceType == AHCI_DEVICE_TYPE_ATAPI)
-                        {
-                            Srb->SrbStatus = AhciATAPICommand(AdapterExtension, Srb, cdb);
-                        }
-                        else
-                        {
-                            AhciDebugPrint("\tOperationCode: %d\n", cdb->CDB10.OperationCode);
-                            Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
-                        }
+                        AhciDebugPrint("\tOperationCode: %d\n", cdb->CDB10.OperationCode);
+                        Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
                         break;
-                    }
                 }
             }
             break;
@@ -1732,6 +1774,15 @@ AhciDrivePortQueue (
     NCS = AHCI_Global_Port_CAP_NCS(AdapterExtension->CAP);
     commandSlotMask = ((1 << NCS) - 1) & ~occupiedSlots; // available slots mask
 
+    // ATAPI commands are non-queued and an ATAPI device keeps its sense data
+    // only until the next command: after a CHECK CONDITION the REQUEST SENSE
+    // must be the very next command the device sees. Keep one command in
+    // flight per ATAPI port so nothing can slip in between.
+    if (PortExtension->DeviceParams.DeviceType == AHCI_DEVICE_TYPE_ATAPI)
+    {
+        commandSlotMask = (occupiedSlots == 0) ? 1 : 0;
+    }
+
     // iterate over HBA port slots and pull a queued SRB into each free one
     for (slotIndex = 0; slotIndex < NCS; slotIndex++)
     {
@@ -1844,6 +1895,248 @@ AtapiInquiryCompletion (
 }// -- AtapiInquiryCompletion();
 
 /**
+ * @name AtapiRequestSenseCompletion
+ * @implemented
+ *
+ * The REQUEST SENSE issued by AhciAtapiCheckCondition completed: hand the
+ * sense data to the class driver and complete the original request with
+ * CHECK CONDITION and SRB_STATUS_AUTOSENSE_VALID.
+ *
+ * @param PortExtension
+ * @param Srb
+ *
+ */
+VOID
+AtapiRequestSenseCompletion (
+    __in PVOID _Extension,
+    __in PVOID _Srb
+    )
+{
+    PSCSI_REQUEST_BLOCK Srb;
+    PAHCI_SRB_EXTENSION SrbExtension;
+    ULONG Length, ValidLength;
+
+    UNREFERENCED_PARAMETER(_Extension);
+
+    Srb = (PSCSI_REQUEST_BLOCK)_Srb;
+    SrbExtension = GetSrbExtension(Srb);
+
+    NT_ASSERT(Srb->SenseInfoBuffer != NULL);
+    NT_ASSERT(Srb->SrbStatus == SRB_STATUS_SUCCESS);
+
+    Length = min(Srb->SenseInfoBufferLength, AHCI_ATAPI_SENSE_LENGTH);
+    ValidLength = FIELD_OFFSET(SENSE_DATA, AdditionalSenseLength) + 1 +
+                  ((PSENSE_DATA)SrbExtension->SenseData)->AdditionalSenseLength;
+    if (ValidLength < Length)
+    {
+        Length = ValidLength;
+    }
+
+    StorPortCopyMemory(Srb->SenseInfoBuffer, SrbExtension->SenseData, Length);
+    Srb->SenseInfoBufferLength = (UCHAR)Length;
+
+    AhciDebugPrint("\tCHECK CONDITION op %02x sense %x/%02x/%02x\n",
+                   Srb->Cdb[0],
+                   ((PSENSE_DATA)SrbExtension->SenseData)->SenseKey,
+                   ((PSENSE_DATA)SrbExtension->SenseData)->AdditionalSenseCode,
+                   ((PSENSE_DATA)SrbExtension->SenseData)->AdditionalSenseCodeQualifier);
+
+    Srb->ScsiStatus = SCSISTAT_CHECK_CONDITION;
+    Srb->SrbStatus = SRB_STATUS_ERROR | SRB_STATUS_AUTOSENSE_VALID;
+}// -- AtapiRequestSenseCompletion();
+
+/**
+ * @name AhciAtapiCheckCondition
+ * @implemented
+ *
+ * An ATAPI PACKET command ended with CHECK CONDITION (task file ERR). Called
+ * from the interrupt handler with the port lock held, after the port has been
+ * restarted and before any other command is issued to it. Reuses the failed
+ * SRB's command table to issue REQUEST SENSE as the next command, or
+ * completes the SRB without sense when the caller provided no sense buffer.
+ *
+ * @param PortExtension
+ * @param Srb
+ * @param ErrorRegister
+ *
+ */
+VOID
+AhciAtapiCheckCondition (
+    __in PAHCI_PORT_EXTENSION PortExtension,
+    __in PSCSI_REQUEST_BLOCK Srb,
+    __in UCHAR ErrorRegister
+    )
+{
+    PAHCI_ADAPTER_EXTENSION AdapterExtension;
+    PAHCI_SRB_EXTENSION SrbExtension;
+    PAHCI_COMMAND_TABLE CmdTable;
+    STOR_PHYSICAL_ADDRESS PhysicalAddress;
+    ULONG Length, Remaining, SlotIndex, NCS;
+    PUCHAR Va;
+
+    AdapterExtension = PortExtension->AdapterExtension;
+    SrbExtension = GetSrbExtension(Srb);
+    CmdTable = (PAHCI_COMMAND_TABLE)SrbExtension;
+
+    AhciDebugPrint("AhciAtapiCheckCondition() op %02x error %02x\n", Srb->Cdb[0], ErrorRegister);
+    UNREFERENCED_PARAMETER(ErrorRegister);
+
+    NT_ASSERT(Srb->SrbStatus == SRB_STATUS_PENDING);
+    Srb->ScsiStatus = SCSISTAT_CHECK_CONDITION;
+
+    if (SrbExtension->CompletionRoutine == AtapiRequestSenseCompletion ||
+        Srb->SenseInfoBuffer == NULL ||
+        Srb->SenseInfoBufferLength == 0 ||
+        (Srb->SrbFlags & SRB_FLAGS_DISABLE_AUTOSENSE))
+    {
+        // No sense wanted, or REQUEST SENSE itself failed.
+        Srb->SrbStatus = SRB_STATUS_ERROR;
+        StorPortNotification(RequestComplete, AdapterExtension, Srb);
+        return;
+    }
+
+    AhciZeroMemory((PCHAR)SrbExtension->SenseData, sizeof(SrbExtension->SenseData));
+    AhciZeroMemory((PCHAR)CmdTable->ACMD, sizeof(CmdTable->ACMD));
+    CmdTable->ACMD[0] = SCSIOP_REQUEST_SENSE;
+    CmdTable->ACMD[4] = (UCHAR)min(Srb->SenseInfoBufferLength, AHCI_ATAPI_SENSE_LENGTH);
+
+    SrbExtension->AtaFunction = ATA_FUNCTION_ATAPI_COMMAND;
+    SrbExtension->Flags = ATA_FLAGS_DATA_IN;
+    SrbExtension->CommandReg = IDE_COMMAND_ATAPI_PACKET;
+    SrbExtension->FeaturesLow = 0;
+    SrbExtension->LBA0 = 0;
+    SrbExtension->LBA1 = (UCHAR)(AHCI_ATAPI_SENSE_LENGTH >> 0);
+    SrbExtension->LBA2 = (UCHAR)(AHCI_ATAPI_SENSE_LENGTH >> 8);
+    SrbExtension->Device = 0;
+    SrbExtension->LBA3 = 0;
+    SrbExtension->LBA4 = 0;
+    SrbExtension->LBA5 = 0;
+    SrbExtension->FeaturesHigh = 0;
+    SrbExtension->SectorCountLow = 0;
+    SrbExtension->SectorCountHigh = 0;
+    SrbExtension->CompletionRoutine = AtapiRequestSenseCompletion;
+
+    // DMA target: the sense buffer inside the SRB extension (may straddle a
+    // page boundary).
+    SrbExtension->Sgl.NumberOfElements = 0;
+    Va = SrbExtension->SenseData;
+    Remaining = sizeof(SrbExtension->SenseData);
+    while (Remaining != 0)
+    {
+        PhysicalAddress = StorPortGetPhysicalAddress(AdapterExtension, NULL, Va, &Length);
+        NT_ASSERT(Length != 0);
+        if (Length > Remaining)
+        {
+            Length = Remaining;
+        }
+        NT_ASSERT((Length % 2) == 0);
+        SrbExtension->Sgl.List[SrbExtension->Sgl.NumberOfElements].PhysicalAddress = PhysicalAddress;
+        SrbExtension->Sgl.List[SrbExtension->Sgl.NumberOfElements].Length = Length;
+        SrbExtension->Sgl.NumberOfElements++;
+        Va += Length;
+        Remaining -= Length;
+    }
+    SrbExtension->pSgl = &SrbExtension->Sgl;
+
+    // The port was just restarted and nothing else is in flight on it.
+    NCS = AHCI_Global_Port_CAP_NCS(AdapterExtension->CAP);
+    for (SlotIndex = 0; SlotIndex < NCS; SlotIndex++)
+    {
+        if ((PortExtension->QueueSlots & (1 << SlotIndex)) == 0)
+        {
+            break;
+        }
+    }
+    NT_ASSERT(SlotIndex < NCS);
+    AhciProcessSrb(PortExtension, Srb, SlotIndex);
+}// -- AhciAtapiCheckCondition();
+
+/**
+ * @name AhciCopyAtaString
+ * @implemented
+ *
+ * Convert an IDENTIFY DEVICE string (two characters per word, first character
+ * in the high byte) into a NUL terminated C string with trailing spaces
+ * removed. Destination must hold Length + 1 bytes.
+ */
+static
+VOID
+AhciCopyAtaString (
+    __out PUCHAR Destination,
+    __in PVOID Source,
+    __in ULONG Length
+    )
+{
+    PUCHAR Src = (PUCHAR)Source;
+    ULONG i;
+
+    NT_ASSERT((Length % 2) == 0);
+
+    for (i = 0; i < Length; i += 2)
+    {
+        Destination[i] = Src[i + 1];
+        Destination[i + 1] = Src[i];
+    }
+    Destination[Length] = '\0';
+
+    while (Length > 0 && (Destination[Length - 1] == ' ' || Destination[Length - 1] == '\0'))
+    {
+        Destination[--Length] = '\0';
+    }
+}// -- AhciCopyAtaString();
+
+/**
+ * @name AhciFillInquiryStrings
+ * @implemented
+ *
+ * Fill the space padded INQUIRY VendorId/ProductId/ProductRevisionLevel from
+ * the ATA model and firmware strings.
+ */
+static
+VOID
+AhciFillInquiryStrings (
+    __inout PINQUIRYDATA InquiryData,
+    __in PCHAR Model,
+    __in PCHAR Firmware
+    )
+{
+    ULONG ModelLength, FirmwareLength, VendorLength, ProductStart, i;
+
+    ModelLength = (ULONG)strlen(Model);
+    FirmwareLength = (ULONG)strlen(Firmware);
+
+    // Leading word of at most 8 characters followed by a space is the vendor
+    // ("WDC WD10EZEX", "Samsung SSD 850"); otherwise split at 8 characters.
+    VendorLength = sizeof(InquiryData->VendorId);
+    ProductStart = sizeof(InquiryData->VendorId);
+    for (i = 1; i <= sizeof(InquiryData->VendorId) && i < ModelLength; i++)
+    {
+        if (Model[i] == ' ')
+        {
+            VendorLength = i;
+            ProductStart = i;
+            while (ProductStart < ModelLength && Model[ProductStart] == ' ')
+                ProductStart++;
+            break;
+        }
+    }
+
+    for (i = 0; i < sizeof(InquiryData->VendorId); i++)
+        InquiryData->VendorId[i] = (i < VendorLength && i < ModelLength) ? Model[i] : ' ';
+
+    for (i = 0; i < sizeof(InquiryData->ProductId); i++)
+        InquiryData->ProductId[i] = (ProductStart + i < ModelLength) ? Model[ProductStart + i] : ' ';
+
+    if (FirmwareLength > sizeof(InquiryData->ProductRevisionLevel))
+    {
+        Firmware += FirmwareLength - sizeof(InquiryData->ProductRevisionLevel);
+        FirmwareLength = sizeof(InquiryData->ProductRevisionLevel);
+    }
+    for (i = 0; i < sizeof(InquiryData->ProductRevisionLevel); i++)
+        InquiryData->ProductRevisionLevel[i] = (i < FirmwareLength) ? Firmware[i] : ' ';
+}// -- AhciFillInquiryStrings();
+
+/**
  * @name InquiryCompletion
  * @implemented
  *
@@ -1946,15 +2239,6 @@ InquiryCompletion (
 
         PortExtension->DeviceParams.BytesPerPhysicalSector = DEVICE_ATA_BLOCK_SIZE;
 
-        // last byte should be NULL
-        StorPortCopyMemory(PortExtension->DeviceParams.VendorId, IdentifyDeviceData->ModelNumber, sizeof(PortExtension->DeviceParams.VendorId) - 1);
-        StorPortCopyMemory(PortExtension->DeviceParams.RevisionID, IdentifyDeviceData->FirmwareRevision, sizeof(PortExtension->DeviceParams.RevisionID) - 1);
-        StorPortCopyMemory(PortExtension->DeviceParams.SerialNumber, IdentifyDeviceData->SerialNumber, sizeof(PortExtension->DeviceParams.SerialNumber) - 1);
-
-        PortExtension->DeviceParams.VendorId[sizeof(PortExtension->DeviceParams.VendorId) - 1] = '\0';
-        PortExtension->DeviceParams.RevisionID[sizeof(PortExtension->DeviceParams.RevisionID) - 1] = '\0';
-        PortExtension->DeviceParams.SerialNumber[sizeof(PortExtension->DeviceParams.SerialNumber) - 1] = '\0';
-
         // LBA48 support and addressable sector count.
         PortExtension->DeviceParams.Lba48BitMode =
             (UCHAR)IdentifyDeviceData->CommandSetSupport.BigLba;
@@ -1984,6 +2268,12 @@ InquiryCompletion (
         PortExtension->DeviceParams.AccessType = READ_ONLY_DIRECT_ACCESS_DEVICE;
     }
 
+    // IDENTIFY (PACKET) DEVICE strings are ATA strings: two characters per
+    // word, first character in the high byte. Same layout for ATA and ATAPI.
+    AhciCopyAtaString(PortExtension->DeviceParams.VendorId, IdentifyDeviceData->ModelNumber, sizeof(IdentifyDeviceData->ModelNumber));
+    AhciCopyAtaString(PortExtension->DeviceParams.RevisionID, IdentifyDeviceData->FirmwareRevision, sizeof(IdentifyDeviceData->FirmwareRevision));
+    AhciCopyAtaString(PortExtension->DeviceParams.SerialNumber, IdentifyDeviceData->SerialNumber, sizeof(IdentifyDeviceData->SerialNumber));
+
     // INQUIRYDATABUFFERSIZE = 36 ; Defined in storport.h
     if (Srb->DataTransferLength < INQUIRYDATABUFFERSIZE)
     {
@@ -2005,14 +2295,15 @@ InquiryCompletion (
     InquiryData->DeviceType = PortExtension->DeviceParams.AccessType;
     InquiryData->RemovableMedia = PortExtension->DeviceParams.RemovableDevice;
 
-    // Fill VendorID, Product Revision Level and other string fields
-    StorPortCopyMemory(InquiryData->VendorId, PortExtension->DeviceParams.VendorId, sizeof(InquiryData->VendorId) - 1);
-    StorPortCopyMemory(InquiryData->ProductId, PortExtension->DeviceParams.RevisionID, sizeof(PortExtension->DeviceParams.RevisionID));
-    StorPortCopyMemory(InquiryData->ProductRevisionLevel, PortExtension->DeviceParams.SerialNumber, sizeof(InquiryData->ProductRevisionLevel) - 1);
-
-    InquiryData->VendorId[sizeof(InquiryData->VendorId) - 1] = '\0';
-    InquiryData->ProductId[sizeof(InquiryData->ProductId) - 1] = '\0';
-    InquiryData->ProductRevisionLevel[sizeof(InquiryData->ProductRevisionLevel) - 1] = '\0';
+    // Fill VendorId / ProductId / ProductRevisionLevel the way Windows'
+    // storahci does: the model string is split into vendor and product, and
+    // the revision is the last four characters of the firmware revision
+    // ("WDC WD10EZEX-08WN4A0" fw "01.01A01" -> Ven_WDC&Prod_WD10EZEX-08WN4A0
+    // &Rev_1A01; "ST1000DM003-1CH162" -> Ven_ST1000DM&Prod_003-1CH162).
+    // INQUIRY strings are space padded, never NUL terminated.
+    AhciFillInquiryStrings(InquiryData,
+                           (PCHAR)PortExtension->DeviceParams.VendorId,
+                           (PCHAR)PortExtension->DeviceParams.RevisionID);
 
     // send queue depth
     status = StorPortSetDeviceQueueDepth(PortExtension->AdapterExtension,
@@ -2109,6 +2400,12 @@ AhciATAPICommand (
 
     SrbExtension->CommandReg = IDE_COMMAND_ATAPI_PACKET;
 
+    // Byte count limit (PIO DRQ block size): 16 bits, even, 0 is invalid.
+    if (DataBufferLength > 0xFFFE)
+    {
+        DataBufferLength = 0xFFFE;
+    }
+
     SrbExtension->LBA0 = 0;
     SrbExtension->LBA1 = (UCHAR)(DataBufferLength >> 0);
     SrbExtension->LBA2 = (UCHAR)(DataBufferLength >> 8);
@@ -2158,10 +2455,7 @@ DeviceRequestSense (
 
     PortExtension = &AdapterExtension->PortExtension[Srb->PathId];
 
-    if (PortExtension->DeviceParams.DeviceType == AHCI_DEVICE_TYPE_ATAPI)
-    {
-        return AhciATAPICommand(AdapterExtension, Srb, Cdb);
-    }
+    NT_ASSERT(PortExtension->DeviceParams.DeviceType != AHCI_DEVICE_TYPE_ATAPI);
 
     ModeHeader = (PMODE_PARAMETER_HEADER)Srb->DataBuffer;
 
@@ -2217,10 +2511,7 @@ DeviceRequestReadWrite (
     SrbExtension = GetSrbExtension(Srb);
     PortExtension = &AdapterExtension->PortExtension[Srb->PathId];
 
-    if (PortExtension->DeviceParams.DeviceType == AHCI_DEVICE_TYPE_ATAPI)
-    {
-        return AhciATAPICommand(AdapterExtension, Srb, Cdb);
-    }
+    NT_ASSERT(PortExtension->DeviceParams.DeviceType != AHCI_DEVICE_TYPE_ATAPI);
 
     DataTransferLength = Srb->DataTransferLength;
     BytesPerSector = PortExtension->DeviceParams.BytesPerLogicalSector;
@@ -2328,10 +2619,7 @@ DeviceRequestCapacity (
 
     PortExtension = &AdapterExtension->PortExtension[Srb->PathId];
 
-    if (PortExtension->DeviceParams.DeviceType == AHCI_DEVICE_TYPE_ATAPI)
-    {
-        return AhciATAPICommand(AdapterExtension, Srb, Cdb);
-    }
+    NT_ASSERT(PortExtension->DeviceParams.DeviceType != AHCI_DEVICE_TYPE_ATAPI);
 
     if (Cdb->CDB10.OperationCode == SCSIOP_READ_CAPACITY)
     {
@@ -2423,10 +2711,7 @@ DeviceReportLuns (
     NT_ASSERT(Srb->DataTransferLength >= sizeof(LUN_LIST));
     NT_ASSERT(Cdb->CDB10.OperationCode == SCSIOP_REPORT_LUNS);
 
-    if (PortExtension->DeviceParams.DeviceType == AHCI_DEVICE_TYPE_ATAPI)
-    {
-        return AhciATAPICommand(AdapterExtension, Srb, Cdb);
-    }
+    NT_ASSERT(PortExtension->DeviceParams.DeviceType != AHCI_DEVICE_TYPE_ATAPI);
 
     LunList = (PLUN_LIST)Srb->DataBuffer;
 
@@ -2479,10 +2764,7 @@ DeviceInquiryRequest (
     SrbExtension = GetSrbExtension(Srb);
     PortExtension = &AdapterExtension->PortExtension[Srb->PathId];
 
-    if (PortExtension->DeviceParams.DeviceType == AHCI_DEVICE_TYPE_ATAPI)
-    {
-        return AhciATAPICommand(AdapterExtension, Srb, Cdb);
-    }
+    NT_ASSERT(PortExtension->DeviceParams.DeviceType != AHCI_DEVICE_TYPE_ATAPI);
 
     if (Srb->Lun != 0)
     {
