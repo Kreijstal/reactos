@@ -4910,7 +4910,7 @@ MiQueryMemoryImageInformation(IN HANDLE ProcessHandle,
             ImageSection = ImageSectionObjectFromSegment(RosSegment);
             ImageBase = (PVOID)((Vad->StartingVpn << PAGE_SHIFT) -
                                 RosSegment->Image.VirtualAddress);
-            ImageInfo.SizeOfImage = ImageSection->ImageInformation.ImageFileSize;
+            ImageInfo.SizeOfImage = ImageSection->ImageSize;
         }
         else
         {

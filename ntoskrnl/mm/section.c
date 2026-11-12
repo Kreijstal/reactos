@@ -339,6 +339,8 @@ NTSTATUS NTAPI PeFmtCreateSection(IN CONST VOID * FileHeader,
     ULONG cbSectionHeadersSize;
     ULONG cbSectionHeadersOffsetSize = 0;
     ULONG cbOptHeaderSize;
+    ULONG cbOptFieldsSize;
+    ULONG cbNtHeaderAvailable;
     ULONG cbHeadersSize = 0;
     ULONG nSectionAlignment;
     ULONG nFileAlignment;
@@ -466,6 +468,8 @@ l_ReadHeaderFromFile:
         /* the buffer doesn't contain the whole NT header */
         if(cbReadSize < cbNtHeaderSize)
             DIE(("The file doesn't contain the full NT header\n"));
+
+        cbNtHeaderAvailable = cbReadSize;
     }
     else
     {
@@ -488,6 +492,8 @@ l_ReadHeaderFromFile:
         /* the buffer doesn't contain the whole NT header: read it from the file */
         if(cbOptHeaderOffsetSize > FileHeaderSize)
             goto l_ReadHeaderFromFile;
+
+        cbNtHeaderAvailable = (ULONG)(FileHeaderSize - pidhDosHeader->e_lfanew);
     }
 
     /* read information from the NT header */
@@ -516,8 +522,22 @@ l_ReadHeaderFromFile:
             DIE(("Unrecognized optional header, Magic is %X\n", piohOptHeader->Magic));
     }
 
-    if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, SectionAlignment) &&
-            RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, FileAlignment))
+    /*
+     * Like Windows, read the fixed optional header fields wherever the
+     * header data has them, whatever SizeOfOptionalHeader says (it only
+     * locates the section table): tiny images (8k demos) declare a few bytes
+     * of optional header and still set SizeOfImage. The data directories
+     * stay bounded by SizeOfOptionalHeader.
+     */
+    ASSERT(cbNtHeaderAvailable >= FIELD_OFFSET(IMAGE_NT_HEADERS32, OptionalHeader) + cbOptHeaderSize);
+    cbOptFieldsSize = min(cbNtHeaderAvailable - FIELD_OFFSET(IMAGE_NT_HEADERS32, OptionalHeader),
+                          (piohOptHeader->Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) ?
+                              FIELD_OFFSET(IMAGE_OPTIONAL_HEADER64, DataDirectory) :
+                              FIELD_OFFSET(IMAGE_OPTIONAL_HEADER32, DataDirectory));
+    cbOptFieldsSize = max(cbOptFieldsSize, cbOptHeaderSize);
+
+    if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptFieldsSize, SectionAlignment) &&
+            RTL_CONTAINS_FIELD(piohOptHeader, cbOptFieldsSize, FileAlignment))
     {
         /* See [1], section 3.4.2 */
         if(piohOptHeader->SectionAlignment < PAGE_SIZE)
@@ -548,31 +568,31 @@ l_ReadHeaderFromFile:
     /* PE32 */
     case IMAGE_NT_OPTIONAL_HDR32_MAGIC:
     {
-        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, ImageBase))
+        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptFieldsSize, ImageBase))
             ImageBase = piohOptHeader->ImageBase;
 
-        if(RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, SizeOfImage))
-            ImageSectionObject->ImageInformation.ImageFileSize = piohOptHeader->SizeOfImage;
+        if(RTL_CONTAINS_FIELD(piohOptHeader, cbOptFieldsSize, SizeOfImage))
+            ImageSectionObject->ImageSize = piohOptHeader->SizeOfImage;
 
-        if(RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, SizeOfStackReserve))
+        if(RTL_CONTAINS_FIELD(piohOptHeader, cbOptFieldsSize, SizeOfStackReserve))
             ImageSectionObject->ImageInformation.MaximumStackSize = piohOptHeader->SizeOfStackReserve;
 
-        if(RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, SizeOfStackCommit))
+        if(RTL_CONTAINS_FIELD(piohOptHeader, cbOptFieldsSize, SizeOfStackCommit))
             ImageSectionObject->ImageInformation.CommittedStackSize = piohOptHeader->SizeOfStackCommit;
 
-        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, Subsystem))
+        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptFieldsSize, Subsystem))
         {
             ImageSectionObject->ImageInformation.SubSystemType = piohOptHeader->Subsystem;
 
-            if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, MinorSubsystemVersion) &&
-                    RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, MajorSubsystemVersion))
+            if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptFieldsSize, MinorSubsystemVersion) &&
+                    RTL_CONTAINS_FIELD(piohOptHeader, cbOptFieldsSize, MajorSubsystemVersion))
             {
                 ImageSectionObject->ImageInformation.SubSystemMinorVersion = piohOptHeader->MinorSubsystemVersion;
                 ImageSectionObject->ImageInformation.SubSystemMajorVersion = piohOptHeader->MajorSubsystemVersion;
             }
         }
 
-        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, AddressOfEntryPoint))
+        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptFieldsSize, AddressOfEntryPoint))
         {
             ImageSectionObject->ImageInformation.TransferAddress = (PVOID) (ImageBase +
                     piohOptHeader->AddressOfEntryPoint);
@@ -583,9 +603,9 @@ l_ReadHeaderFromFile:
          * via section alignment or a lone executable section; that case is
          * broken()-tolerated by the loader test, so we keep the simpler rule.) */
         ImageSectionObject->ImageInformation.ImageContainsCode = TRUE;
-        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, SizeOfCode))
+        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptFieldsSize, SizeOfCode))
             ImageSectionObject->ImageInformation.ImageContainsCode = (piohOptHeader->SizeOfCode != 0);
-        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, AddressOfEntryPoint) &&
+        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptFieldsSize, AddressOfEntryPoint) &&
             piohOptHeader->AddressOfEntryPoint != 0)
             ImageSectionObject->ImageInformation.ImageContainsCode = TRUE;
 
@@ -598,7 +618,7 @@ l_ReadHeaderFromFile:
             piohOptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress != 0)
             ImageSectionObject->ImageInformation.LoaderFlags = IMAGE_LOADER_FLAGS_COMPLUS;
 
-        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, DllCharacteristics))
+        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptFieldsSize, DllCharacteristics))
         {
             ImageSectionObject->ImageInformation.DllCharacteristics = piohOptHeader->DllCharacteristics;
 
@@ -626,22 +646,22 @@ l_ReadHeaderFromFile:
 
         pioh64OptHeader = (const IMAGE_OPTIONAL_HEADER64 *)piohOptHeader;
 
-        if(RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, ImageBase))
+        if(RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptFieldsSize, ImageBase))
         {
             ImageBase = pioh64OptHeader->ImageBase;
             if(pioh64OptHeader->ImageBase > MAXULONG_PTR)
                 DIE(("ImageBase exceeds the address space\n"));
         }
 
-        if(RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, SizeOfImage))
+        if(RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptFieldsSize, SizeOfImage))
         {
             if(pioh64OptHeader->SizeOfImage > MAXULONG_PTR)
                 DIE(("SizeOfImage exceeds the address space\n"));
 
-            ImageSectionObject->ImageInformation.ImageFileSize = pioh64OptHeader->SizeOfImage;
+            ImageSectionObject->ImageSize = pioh64OptHeader->SizeOfImage;
         }
 
-        if(RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, SizeOfStackReserve))
+        if(RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptFieldsSize, SizeOfStackReserve))
         {
             if(pioh64OptHeader->SizeOfStackReserve > MAXULONG_PTR)
                 DIE(("SizeOfStackReserve exceeds the address space\n"));
@@ -649,7 +669,7 @@ l_ReadHeaderFromFile:
             ImageSectionObject->ImageInformation.MaximumStackSize = (ULONG_PTR) pioh64OptHeader->SizeOfStackReserve;
         }
 
-        if(RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, SizeOfStackCommit))
+        if(RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptFieldsSize, SizeOfStackCommit))
         {
             if(pioh64OptHeader->SizeOfStackCommit > MAXULONG_PTR)
                 DIE(("SizeOfStackCommit exceeds the address space\n"));
@@ -657,19 +677,19 @@ l_ReadHeaderFromFile:
             ImageSectionObject->ImageInformation.CommittedStackSize = (ULONG_PTR) pioh64OptHeader->SizeOfStackCommit;
         }
 
-        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, Subsystem))
+        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptFieldsSize, Subsystem))
         {
             ImageSectionObject->ImageInformation.SubSystemType = pioh64OptHeader->Subsystem;
 
-            if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, MinorSubsystemVersion) &&
-                    RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, MajorSubsystemVersion))
+            if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptFieldsSize, MinorSubsystemVersion) &&
+                    RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptFieldsSize, MajorSubsystemVersion))
             {
                 ImageSectionObject->ImageInformation.SubSystemMinorVersion = pioh64OptHeader->MinorSubsystemVersion;
                 ImageSectionObject->ImageInformation.SubSystemMajorVersion = pioh64OptHeader->MajorSubsystemVersion;
             }
         }
 
-        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, AddressOfEntryPoint))
+        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptFieldsSize, AddressOfEntryPoint))
         {
             ImageSectionObject->ImageInformation.TransferAddress = (PVOID) (ImageBase +
                     pioh64OptHeader->AddressOfEntryPoint);
@@ -677,9 +697,9 @@ l_ReadHeaderFromFile:
 
         /* See the PE32 branch above for the rationale of these two rules. */
         ImageSectionObject->ImageInformation.ImageContainsCode = TRUE;
-        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, SizeOfCode))
+        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptFieldsSize, SizeOfCode))
             ImageSectionObject->ImageInformation.ImageContainsCode = (pioh64OptHeader->SizeOfCode != 0);
-        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, AddressOfEntryPoint) &&
+        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptFieldsSize, AddressOfEntryPoint) &&
             pioh64OptHeader->AddressOfEntryPoint != 0)
             ImageSectionObject->ImageInformation.ImageContainsCode = TRUE;
 
@@ -689,7 +709,7 @@ l_ReadHeaderFromFile:
             pioh64OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress != 0)
             ImageSectionObject->ImageInformation.LoaderFlags = IMAGE_LOADER_FLAGS_COMPLUS;
 
-        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, DllCharacteristics))
+        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptFieldsSize, DllCharacteristics))
             ImageSectionObject->ImageInformation.DllCharacteristics = pioh64OptHeader->DllCharacteristics;
 
         break;
@@ -736,7 +756,7 @@ l_ReadHeaderFromFile:
         DIE(("Section headers too large\n"));
 
     /* size of the executable's headers */
-    if(RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, SizeOfHeaders))
+    if(RTL_CONTAINS_FIELD(piohOptHeader, cbOptFieldsSize, SizeOfHeaders))
     {
 //        if(!IsAligned(piohOptHeader->SizeOfHeaders, nFileAlignment))
 //            DIE(("SizeOfHeaders is not aligned\n"));
@@ -930,8 +950,42 @@ l_ReadHeaderFromFile:
             DIE(("The image is too large\n"));
     }
 
-    if(nSectionAlignment >= PAGE_SIZE)
-        *Flags |= EXEFMT_LOAD_ASSUME_SEGMENTS_PAGE_ALIGNED;
+    if (nSectionAlignment < PAGE_SIZE)
+    {
+        /*
+         * Like Windows (MiCreateImageFileMap), an image whose sections are
+         * not page aligned is mapped flat: a single execute-writecopy
+         * subsection covering SizeOfImage, read 1:1 from the file. This only
+         * works if every section's raw data sits at its virtual address.
+         */
+        for (i = 0; i < ImageSectionObject->NrSegments - 1; ++i)
+        {
+            if (pishSectionHeaders[i].SizeOfRawData != 0 &&
+                pishSectionHeaders[i].PointerToRawData != pishSectionHeaders[i].VirtualAddress)
+            {
+                DIE(("Section %u of a flat image is not at its file offset\n", i));
+            }
+        }
+
+        pssSegments = ImageSectionObject->Segments;
+        pssSegments[0].Image.FileOffset = 0;
+        pssSegments[0].Image.VirtualAddress = 0;
+        pssSegments[0].Image.Characteristics = 0;
+        pssSegments[0].Length.QuadPart = PAGE_ROUND_UP(max((SIZE_T)ImageSectionObject->ImageSize,
+                                                           nPrevVirtualEndOfSegment));
+        /* Clipped to the end of the file by ExeFmtpCreateImageSection */
+        pssSegments[0].RawLength.QuadPart = pssSegments[0].Length.QuadPart;
+        pssSegments[0].Protection = PAGE_EXECUTE_WRITECOPY;
+        pssSegments[0].WriteCopy = TRUE;
+        ImageSectionObject->NrSegments = 1;
+        ImageSectionObject->MappedFlat = TRUE;
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+        ImageSectionObject->ImageInformation.ImageMappedFlat = TRUE;
+#endif
+    }
+
+    /* Flat images are a single page-aligned segment, see above */
+    *Flags |= EXEFMT_LOAD_ASSUME_SEGMENTS_PAGE_ALIGNED;
 
     /* Success */
     nStatus = STATUS_SUCCESS;// STATUS_ROS_EXEFMT_LOADED_FORMAT | EXEFMT_LOADED_PE32;
@@ -3256,6 +3310,21 @@ ExeFmtpCreateImageSection(PFILE_OBJECT FileObject,
     ULONG OldNrSegments;
     NTSTATUS Status;
     ULONG i;
+    LARGE_INTEGER EndOfFile;
+    PMM_SECTION_SEGMENT LastSegment;
+
+    /*
+     * Like Windows (MiCreateImageFileMap), get the size of the file first:
+     * an image file can't be 4 GB or larger, and the raw data of the image
+     * must be inside the file (see below).
+     */
+    Status = FsRtlGetFileSize(FileObject, &EndOfFile);
+    if (Status == STATUS_FILE_IS_A_DIRECTORY)
+        return STATUS_INVALID_FILE_FOR_SECTION;
+    if (!NT_SUCCESS(Status))
+        return Status;
+    if (EndOfFile.HighPart != 0)
+        return STATUS_INVALID_FILE_FOR_SECTION;
 
     /*
      * Read the beginning of the file (2 pages). Should be enough to contain
@@ -3307,6 +3376,21 @@ ExeFmtpCreateImageSection(PFILE_OBJECT FileObject,
             break;
     }
 
+    /* Like Windows, the section reports the size of the file it maps */
+    ImageSectionObject->ImageInformation.ImageFileSize = EndOfFile.LowPart;
+
+    /* A header too short to hold SizeOfImage: the image ends where its
+     * last segment does */
+    if (NT_SUCCESS(Status) && ImageSectionObject->ImageSize == 0)
+    {
+        for (i = 0; i < ImageSectionObject->NrSegments; i++)
+        {
+            ULONG_PTR End = (ULONG_PTR)(ImageSectionObject->Segments[i].Image.VirtualAddress +
+                                        ImageSectionObject->Segments[i].Length.QuadPart);
+            ImageSectionObject->ImageSize = max(ImageSectionObject->ImageSize, (ULONG)End);
+        }
+    }
+
     ExFreePoolWithTag(FileHeaderBuffer, 'rXmM');
 
     /*
@@ -3323,6 +3407,32 @@ ExeFmtpCreateImageSection(PFILE_OBJECT FileObject,
 
     ASSERT(ImageSectionObject->Segments != NULL);
     ASSERT(ImageSectionObject->RefCount > 0);
+
+    /*
+     * A truncated image is not a valid image: like Windows
+     * (MiParseImageSectionHeaders), fail it when the raw data of the last
+     * section extends past the end of the file, instead of mapping the
+     * missing part as zeroes. The loader stores the sections in header order,
+     * after the headers segment.
+     */
+    LastSegment = &ImageSectionObject->Segments[ImageSectionObject->NrSegments - 1];
+    if (ImageSectionObject->NrSegments > 1 &&
+        LastSegment->Image.FileOffset + LastSegment->RawLength.QuadPart > EndOfFile.QuadPart)
+    {
+        DPRINT1("Image %wZ is truncated: section data ends at 0x%I64x, the file at 0x%I64x\n",
+                &FileObject->FileName,
+                LastSegment->Image.FileOffset + LastSegment->RawLength.QuadPart,
+                EndOfFile.QuadPart);
+        return STATUS_INVALID_IMAGE_FORMAT;
+    }
+
+    /* A flat image maps the file 1:1; what lies past its end reads as zeroes */
+    if (ImageSectionObject->MappedFlat)
+    {
+        ASSERT(ImageSectionObject->NrSegments == 1);
+        ImageSectionObject->Segments[0].RawLength.QuadPart =
+            min(ImageSectionObject->Segments[0].RawLength.QuadPart, EndOfFile.QuadPart);
+    }
 
     /*
      * Some defaults
@@ -3575,9 +3685,11 @@ grab_image_section_object:
         Status = STATUS_SUCCESS;
     }
 
+    /* Like Windows, an image section is as large as the caller says, or
+     * else as the image it maps */
     if (Section->SizeOfSection.QuadPart == 0)
     {
-        Section->SizeOfSection.QuadPart = ImageSectionObject->ImageInformation.ImageFileSize;
+        Section->SizeOfSection.QuadPart = PAGE_ROUND_UP(ImageSectionObject->ImageSize);
     }
 
     //KeSetEvent((PVOID)&FileObject->Lock, IO_NO_INCREMENT, FALSE);
@@ -4377,7 +4489,7 @@ MmMapViewOfSection(
             ImageSize = max(ImageSize, MaxExtent);
         }
 
-        ImageSectionObject->ImageInformation.ImageFileSize = (ULONG)ImageSize;
+        ImageSectionObject->ImageSize = (ULONG)ImageSize;
 
         if (*ViewSize)
         {
@@ -4386,8 +4498,8 @@ MmMapViewOfSection(
         }
         else
         {
-            MappedImageSize = min(PAGE_ROUND_UP((SIZE_T)Section->SizeOfSection.QuadPart),
-                                  PAGE_ROUND_UP(ImageSize));
+            /* The whole image: the section's size is the file's */
+            MappedImageSize = PAGE_ROUND_UP(ImageSize);
         }
 
         /* Check for an illegal base address */
@@ -4626,10 +4738,15 @@ MmCanFileBeTruncated(
     PMM_SECTION_SEGMENT Segment;
     PCONTROL_AREA ControlArea;
 
-    /* Check whether an ImageSectionObject exists */
-    if (SectionObjectPointer->ImageSectionObject != NULL)
+    /*
+     * Like Windows (MiCanFileBeTruncatedInternal), an image section only
+     * blocks the truncation while sections or views of it exist: otherwise
+     * its cached pages are purged and it goes away.
+     */
+    if (SectionObjectPointer->ImageSectionObject != NULL &&
+        !MmFlushImageSection(SectionObjectPointer, MmFlushForWrite))
     {
-        DPRINT1("ERROR: File can't be truncated because it has an image section\n");
+        DPRINT1("File can't be truncated because its image section is in use\n");
         return FALSE;
     }
 
