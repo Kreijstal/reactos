@@ -31,19 +31,36 @@ USBSTOR_CancelIo(
 {
     PFDO_DEVICE_EXTENSION FDODeviceExtension;
 
+    BOOLEAN Removed;
+
     FDODeviceExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
     ASSERT_IRQL_EQUAL(DISPATCH_LEVEL);
     ASSERT(FDODeviceExtension->Common.IsFDO);
 
-    // this IRP isn't in our list here
-    // now release the cancel lock
+    /* IoStartPacket arms this routine, so the IRP is the claimed ActiveSrb and
+     * sits in the device queue behind the packet being finished -- or it has
+     * just been handed to StartIo, which checks Irp->Cancel itself and
+     * completes it there.  It never owns the device queue, so it must not
+     * advance it: IoStartNextPacket here released a packet some other request
+     * still owned. */
+    if (Irp == DeviceObject->CurrentIrp)
+    {
+        IoReleaseCancelSpinLock(Irp->CancelIrql);
+        return;
+    }
+
+    Removed = KeRemoveEntryDeviceQueue(&DeviceObject->DeviceQueue,
+                                       &Irp->Tail.Overlay.DeviceQueueEntry);
     IoReleaseCancelSpinLock(Irp->CancelIrql);
+    NT_ASSERT(Removed);
+
     Irp->IoStatus.Status = STATUS_CANCELLED;
+    Irp->IoStatus.Information = 0;
 
     USBSTOR_QueueTerminateRequest(DeviceObject, Irp);
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
-    USBSTOR_QueueNextRequest(DeviceObject);
+    USBSTOR_QueueStartListHead(DeviceObject);
 }
 
 VOID
@@ -64,11 +81,12 @@ USBSTOR_Cancel(
 
     IoReleaseCancelSpinLock(Irp->CancelIrql);
     Irp->IoStatus.Status = STATUS_CANCELLED;
+    Irp->IoStatus.Information = 0;
 
+    /* The IRP waited on IrpListHead: it was never started and owns neither
+     * ActiveSrb nor the device queue, so there is nothing to advance. */
     USBSTOR_QueueTerminateRequest(DeviceObject, Irp);
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
-
-    USBSTOR_QueueNextRequest(DeviceObject);
 }
 
 BOOLEAN
@@ -76,10 +94,8 @@ USBSTOR_QueueAddIrp(
     IN PDEVICE_OBJECT DeviceObject,
     IN PIRP Irp)
 {
-    PDRIVER_CANCEL OldDriverCancel;
     PFDO_DEVICE_EXTENSION FDODeviceExtension;
-    BOOLEAN IrpListFreeze;
-    BOOLEAN SrbProcessing;
+    BOOLEAN Wait;
     PIO_STACK_LOCATION IoStack = IoGetCurrentIrpStackLocation(Irp);
     PSCSI_REQUEST_BLOCK Request = (PSCSI_REQUEST_BLOCK)IoStack->Parameters.Others.Argument1;
 
@@ -98,16 +114,38 @@ USBSTOR_QueueAddIrp(
      * completed, and classpnp's IoReuseIrp tripped
      * ASSERT(!Irp->CancelRoutine) (ntoskrnl irp.c:2039) on the next packet
      * submission.  Lock order is cancel lock first, then IrpListLock -- the
-     * same order USBSTOR_Cancel and the StartIo reset-park path use. */
+     * same order USBSTOR_Cancel uses. */
     IoAcquireCancelSpinLock(&Irp->CancelIrql);
     KeAcquireSpinLockAtDpcLevel(&FDODeviceExtension->IrpListLock);
 
-    SrbProcessing = FDODeviceExtension->ActiveSrb != NULL;
+    /* IoCancelIrp sets Cancel under the cancel lock held here, so an IRP that
+     * is not cancelled now can only be cancelled through the routine armed
+     * below.  One that already is goes no further: queued, it could be
+     * dequeued and started by another processor before a belated cancel
+     * routine call here found its routine already taken. */
+    if (Irp->Cancel)
+    {
+        KeReleaseSpinLockFromDpcLevel(&FDODeviceExtension->IrpListLock);
+        IoReleaseCancelSpinLock(Irp->CancelIrql);
 
-    if (SrbProcessing)
+        Irp->IoStatus.Status = STATUS_CANCELLED;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return TRUE;
+    }
+
+    /* A request waits on IrpListHead while another one is active, and also
+     * while a device reset is in flight: the reset work item restarts the list
+     * when it is done (USBSTOR_QueueStartListHead).  Starting it anyway is what
+     * the old StartIo reset-park path then had to undo. */
+    Wait = FDODeviceExtension->ActiveSrb != NULL ||
+           BooleanFlagOn(FDODeviceExtension->Flags,
+                         USBSTOR_FDO_FLAGS_IRP_LIST_FREEZE | USBSTOR_FDO_FLAGS_DEVICE_RESETTING);
+
+    if (Wait)
     {
         // add irp to queue, armed before any other CPU can dequeue it
-        OldDriverCancel = IoSetCancelRoutine(Irp, USBSTOR_Cancel);
+        IoSetCancelRoutine(Irp, USBSTOR_Cancel);
         InsertTailList(&FDODeviceExtension->IrpListHead, &Irp->Tail.Overlay.ListEntry);
     }
     else
@@ -120,40 +158,22 @@ USBSTOR_QueueAddIrp(
          * silently overwrote ActiveSrb and lost a request.  Seen on the ASUS
          * X550DP under the burst of SRB_FUNCTION_FLUSH at service start.
          * USBSTOR_QueueTerminateRequest clears ActiveSrb under this same lock,
-         * so test, claim and clear are now all serialised by IrpListLock. */
-        OldDriverCancel = IoSetCancelRoutine(Irp, USBSTOR_CancelIo);
+         * so test, claim and clear are now all serialised by IrpListLock.
+         * No cancel routine yet: the caller's IoStartPacket arms
+         * USBSTOR_CancelIo atomically with the device queue insertion, and it
+         * and StartIo both handle an IRP that is already cancelled. */
         FDODeviceExtension->ActiveSrb = Request;
     }
 
     FDODeviceExtension->IrpPendingCount++;
     KeClearEvent(&FDODeviceExtension->NoPendingRequests);
 
-    // check if queue is freezed
-    IrpListFreeze = BooleanFlagOn(FDODeviceExtension->Flags, USBSTOR_FDO_FLAGS_IRP_LIST_FREEZE);
-
     KeReleaseSpinLockFromDpcLevel(&FDODeviceExtension->IrpListLock);
-
-    // check if the irp has already been cancelled
-    if (Irp->Cancel && OldDriverCancel == NULL)
-    {
-        /* Detach the routine before invoking it, exactly as IoCancelIrp does:
-         * calling through Irp->CancelRoutine directly left the field set, so
-         * the IRP completed back to the class driver still armed and its
-         * IoReuseIrp asserted.  Return TRUE ("do not start") -- the old FALSE
-         * sent the caller into IoStartPacket with an IRP that the cancel
-         * routine has already completed. */
-        PDRIVER_CANCEL CancelRoutine = IoSetCancelRoutine(Irp, NULL);
-        ASSERT(CancelRoutine != NULL);
-        CancelRoutine(DeviceObject, Irp);
-        return TRUE;
-    }
 
     IoReleaseCancelSpinLock(Irp->CancelIrql);
 
-    // if list is freezed, dont start this packet
-    DPRINT("IrpListFreeze: %lu IrpPendingCount %lu\n", IrpListFreeze, FDODeviceExtension->IrpPendingCount);
-
-    return (IrpListFreeze || SrbProcessing);
+    // a waiting request is started later; a claimed one by the caller
+    return Wait;
 }
 
 PIRP
@@ -249,7 +269,7 @@ USBSTOR_QueueTerminateRequest(
 }
 
 VOID
-USBSTOR_QueueNextRequest(
+USBSTOR_QueueStartListHead(
     IN PDEVICE_OBJECT DeviceObject)
 {
     KIRQL OldLevel;
@@ -265,21 +285,28 @@ USBSTOR_QueueNextRequest(
 
     /* Test, dequeue and claim are one atomic step.  Doing them unlocked let two
      * processors both see ActiveSrb == NULL and both start a request, the same
-     * defect USBSTOR_QueueAddIrp had.  USBSTOR_RemoveIrp is inlined here rather
-     * than called because it takes this same lock.  IoStartPacket is deliberately
-     * left outside: it must not run at DISPATCH_LEVEL under a spinlock. */
+     * defect USBSTOR_QueueAddIrp had.  IoStartPacket is deliberately left
+     * outside: it must not run under a spinlock. */
     KeAcquireSpinLock(&FDODeviceExtension->IrpListLock, &OldLevel);
 
-    // check first if there's already a request pending or the queue is frozen
     Busy = FDODeviceExtension->ActiveSrb != NULL ||
-           BooleanFlagOn(FDODeviceExtension->Flags, USBSTOR_FDO_FLAGS_IRP_LIST_FREEZE);
+           BooleanFlagOn(FDODeviceExtension->Flags,
+                         USBSTOR_FDO_FLAGS_IRP_LIST_FREEZE | USBSTOR_FDO_FLAGS_DEVICE_RESETTING);
 
-    if (!Busy && !IsListEmpty(&FDODeviceExtension->IrpListHead))
+    while (!Busy && !IsListEmpty(&FDODeviceExtension->IrpListHead))
     {
         Entry = RemoveHeadList(&FDODeviceExtension->IrpListHead);
+        Irp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
 
-        // get offset to start of irp
-        Irp = (PIRP)CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+        /* USBSTOR_Cancel may already own it: it then waits for this lock to
+         * unlink the IRP and completes it itself.  Leave it a self-linked
+         * entry to unlink and take the next one. */
+        if (IoSetCancelRoutine(Irp, NULL) == NULL)
+        {
+            InitializeListHead(&Irp->Tail.Overlay.ListEntry);
+            Irp = NULL;
+            continue;
+        }
 
         IoStack = IoGetCurrentIrpStackLocation(Irp);
         Request = (PSCSI_REQUEST_BLOCK)IoStack->Parameters.Others.Argument1;
@@ -287,33 +314,51 @@ USBSTOR_QueueNextRequest(
 
         // claim it before anyone else can observe an idle queue
         FDODeviceExtension->ActiveSrb = Request;
+        break;
     }
 
     KeReleaseSpinLock(&FDODeviceExtension->IrpListLock, OldLevel);
 
-    if (Busy)
+    if (!Irp)
     {
-        // no work to do yet
         USBSTOR_Trace(UsbStorTraceNextReqBusy,
                       (ULONG_PTR)FDODeviceExtension->ActiveSrb,
                       (ULONG_PTR)FDODeviceExtension->Flags);
         return;
     }
 
-    USBSTOR_Trace(UsbStorTraceNextReq,
-                  (ULONG_PTR)FDODeviceExtension->IrpPendingCount,
-                  (ULONG_PTR)FDODeviceExtension->Flags);
+    USBSTOR_Trace(UsbStorTraceNextReq, (ULONG_PTR)Irp, (ULONG_PTR)Request);
 
-    // is there an irp pending
-    if (!Irp)
-    {
-        // no work to do
-        IoStartNextPacket(DeviceObject, TRUE);
-        return;
-    }
-
-    // start next packet
+    /* Starts at once if the device queue is idle; otherwise it is queued
+     * behind the packet whose owner is about to call IoStartNextPacket. */
     IoStartPacket(DeviceObject, Irp, &Request->QueueSortKey, USBSTOR_CancelIo);
+}
+
+VOID
+USBSTOR_QueueNextRequest(
+    IN PDEVICE_OBJECT DeviceObject)
+{
+    /*
+     * Called exactly once by the owner of the started packet -- StartIo's own
+     * cancel path or a completion routine that has just terminated it -- and
+     * so it must release the device queue exactly once, unconditionally.
+     *
+     * It used to skip IoStartNextPacket whenever ActiveSrb was already set
+     * again.  That is the normal outcome of the window between
+     * USBSTOR_QueueTerminateRequest and this call: another processor's
+     * USBSTOR_QueueAddIrp sees ActiveSrb == NULL, claims it, and its
+     * IoStartPacket is inserted into the device queue this packet still holds
+     * busy.  Nobody ever released it: the claimed request never reached
+     * StartIo, everything else waited behind it on IrpListHead, and the
+     * watchdog aborted pipes that had nothing outstanding.  The ASUS X550DP
+     * lost its boot disk this way (boot 117: the last CSW completed with
+     * USBD status 0, then "next-busy" with the claimed SRB, then silence).
+     *
+     * Releasing here is right whoever holds ActiveSrb: IoStartNextPacket
+     * starts the claimed request if its IoStartPacket was already inserted,
+     * or idles the queue so that IoStartPacket starts it directly.
+     */
+    USBSTOR_QueueStartListHead(DeviceObject);
     IoStartNextPacket(DeviceObject, TRUE);
 }
 
@@ -322,10 +367,7 @@ USBSTOR_QueueRelease(
     IN PDEVICE_OBJECT DeviceObject)
 {
     PFDO_DEVICE_EXTENSION FDODeviceExtension;
-    PIRP Irp;
     KIRQL OldLevel;
-    PIO_STACK_LOCATION IoStack;
-    PSCSI_REQUEST_BLOCK Request;
 
     FDODeviceExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
     ASSERT(FDODeviceExtension->Common.IsFDO);
@@ -337,21 +379,8 @@ USBSTOR_QueueRelease(
 
     KeReleaseSpinLock(&FDODeviceExtension->IrpListLock, OldLevel);
 
-    // grab newest irp
-    Irp = USBSTOR_RemoveIrp(DeviceObject);
-
-    if (!Irp)
-    {
-        return;
-    }
-
-    IoStack = IoGetCurrentIrpStackLocation(Irp);
-    Request = (PSCSI_REQUEST_BLOCK)IoStack->Parameters.Others.Argument1;
-
-    IoStartPacket(DeviceObject,
-                  Irp,
-                  &Request->QueueSortKey,
-                  USBSTOR_CancelIo);
+    // start the oldest waiting request, claiming ActiveSrb for it
+    USBSTOR_QueueStartListHead(DeviceObject);
 }
 
 VOID
@@ -365,7 +394,6 @@ USBSTOR_StartIo(
     PFDO_DEVICE_EXTENSION FDODeviceExtension;
     PPDO_DEVICE_EXTENSION PDODeviceExtension;
     KIRQL OldLevel;
-    BOOLEAN ResetInProgress;
 
     DPRINT("USBSTOR_StartIo\n");
 
@@ -392,51 +420,19 @@ USBSTOR_StartIo(
 
     IoReleaseCancelSpinLock(OldLevel);
 
-    KeAcquireSpinLock(&FDODeviceExtension->CommonLock, &OldLevel);
-    ResetInProgress = BooleanFlagOn(FDODeviceExtension->Flags, USBSTOR_FDO_FLAGS_DEVICE_RESETTING);
-    KeReleaseSpinLock(&FDODeviceExtension->CommonLock, OldLevel);
-
     IoStack = IoGetCurrentIrpStackLocation(Irp);
 
     PDODeviceExtension = (PPDO_DEVICE_EXTENSION)IoStack->DeviceObject->DeviceExtension;
     Request = IoStack->Parameters.Scsi.Srb;
     ASSERT(PDODeviceExtension->Common.IsFDO == FALSE);
 
-    if (ResetInProgress)
-    {
-        /*
-         * A reset is in flight.  Reporting SRB_STATUS_NO_DEVICE here fails the
-         * request for a device that is merely being recovered -- and the
-         * retry that follows a reset-recovery completion regularly lands in
-         * exactly this window.  Park the request on the driver's own queue
-         * instead; the reset work item restarts it through
-         * USBSTOR_QueueNextRequest once the device is usable again.
-         */
-        /* Park and arm in one atomic step, cancel lock first as
-         * USBSTOR_Cancel establishes that order.  Arming after the list lock
-         * was dropped (as this used to do) raced the reset work item's
-         * USBSTOR_QueueNextRequest: it could dequeue and restart the IRP the
-         * instant ActiveSrb went NULL, and the belated IoSetCancelRoutine then
-         * armed USBSTOR_Cancel on an IRP already back in flight.  The transfer
-         * completed to classpnp with the routine still set and IoReuseIrp
-         * tripped ASSERT(!Irp->CancelRoutine) on the next packet submission
-         * (seen on the ASUS X550DP during xHCI reset storms, boot 34). */
-        IoAcquireCancelSpinLock(&OldLevel);
-        KeAcquireSpinLockAtDpcLevel(&FDODeviceExtension->IrpListLock);
-
-        if (FDODeviceExtension->ActiveSrb == Request)
-            FDODeviceExtension->ActiveSrb = NULL;
-
-        InsertHeadList(&FDODeviceExtension->IrpListHead, &Irp->Tail.Overlay.ListEntry);
-        IoSetCancelRoutine(Irp, USBSTOR_Cancel);
-
-        KeReleaseSpinLockFromDpcLevel(&FDODeviceExtension->IrpListLock);
-        IoReleaseCancelSpinLock(OldLevel);
-
-        /* Keep the device queue busy: USBSTOR_QueueNextRequest owns it until
-         * the driver has no work left, and releases it there. */
-        return;
-    }
+    /* Requests wait on IrpListHead while a reset is in flight
+     * (USBSTOR_QueueAddIrp, USBSTOR_QueueStartListHead), and the error paths
+     * raise DEVICE_RESETTING before they release ActiveSrb, so none can be
+     * started into a reset.  The old answer -- parking the IRP back on the list
+     * with the device queue still busy -- was the same swallowed-packet hang
+     * as USBSTOR_QueueNextRequest's: nothing ever restarted it. */
+    NT_ASSERT(!BooleanFlagOn(FDODeviceExtension->Flags, USBSTOR_FDO_FLAGS_DEVICE_RESETTING));
 
     USBSTOR_Trace(UsbStorTraceStartIo, (ULONG_PTR)Irp, (ULONG_PTR)Request);
 

@@ -336,11 +336,12 @@ USBSTOR_ResetDeviceWorkItemRoutine(
                   (ULONG_PTR)FDODeviceExtension->ActiveSrb);
 
     /* The failing transfer's completion path already terminated the SRB and
-     * released the started packet before queuing this asynchronous reset.
-     * Advancing again here races shutdown/removal and calls
-     * IoStartNextPacket on an idle KDEVICE_QUEUE (DeviceQueue->Busy == FALSE),
-     * which asserts in KeRemoveDeviceQueue.  Reset completion only clears the
-     * reset flag; it does not own a packet-queue advancement. */
+     * released the started packet, so this work item owns no packet and must
+     * not call IoStartNextPacket (on an idle KDEVICE_QUEUE that asserts in
+     * KeRemoveDeviceQueue).  But every request that arrived during the reset
+     * waits on IrpListHead (USBSTOR_QueueAddIrp), and only this point knows the
+     * reset is over: start the oldest one. */
+    USBSTOR_QueueStartListHead(FdoDevice);
 }
 
 VOID
