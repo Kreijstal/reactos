@@ -31,8 +31,7 @@ typedef struct IPDATAGRAM_HOLE {
 
 /* IP datagram reassembly information */
 typedef struct IPDATAGRAM_REASSEMBLY {
-    LIST_ENTRY ListEntry;        /* Entry on list */
-    KSPIN_LOCK Lock;             /* Protecting spin lock */
+    LIST_ENTRY ListEntry;        /* Entry on list, protected by ReassemblyListLock as all fields */
     UINT DataSize;               /* Size of datagram data area */
     IP_ADDRESS SrcAddr;          /* Source address */
     IP_ADDRESS DstAddr;          /* Destination address */
