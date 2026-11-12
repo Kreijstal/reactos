@@ -592,3 +592,90 @@ START_TEST(attrib)
         DoTestEntry(&s_attrib_entries[i]);
     }
 }
+
+static BOOL CreateTestFile(PCSTR Path, DWORD Attributes)
+{
+    HANDLE File = CreateFileA(Path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, Attributes, NULL);
+    if (File == INVALID_HANDLE_VALUE)
+        return FALSE;
+    CloseHandle(File);
+    return TRUE;
+}
+
+static void DoRenTest(INT line, DWORD dwExitCode, BOOL bStdError, PCSTR Format, PCSTR Dir)
+{
+    TEST_ENTRY Entry = { line, dwExitCode };
+    CHAR CommandLine[MAX_PATH * 4];
+
+    sprintf(CommandLine, Format, Dir, Dir);
+    Entry.cmdline = CommandLine;
+    Entry.bStdError = bStdError;
+    DoTestEntry(&Entry);
+}
+
+START_TEST(ren)
+{
+    CHAR TempPath[MAX_PATH], Dir[MAX_PATH], Path[MAX_PATH];
+
+    if (!GetTempPathA(ARRAYSIZE(TempPath), TempPath))
+    {
+        skip("GetTempPathA failed: %lu\n", GetLastError());
+        return;
+    }
+    sprintf(Dir, "%scmd_ren_test", TempPath);
+    CreateDirectoryA(Dir, NULL);
+
+    sprintf(Path, "%s\\plain.txt", Dir);
+    ok(CreateTestFile(Path, FILE_ATTRIBUTE_NORMAL), "CreateFile(%s) failed: %lu\n", Path, GetLastError());
+    sprintf(Path, "%s\\other.txt", Dir);
+    ok(CreateTestFile(Path, FILE_ATTRIBUTE_NORMAL), "CreateFile(%s) failed: %lu\n", Path, GetLastError());
+    sprintf(Path, "%s\\hidden.txt", Dir);
+    ok(CreateTestFile(Path, FILE_ATTRIBUTE_HIDDEN), "CreateFile(%s) failed: %lu\n", Path, GetLastError());
+
+    /* A full source path with a bare destination name renames in that directory */
+    DoRenTest(__LINE__, 0, FALSE, "cmd /c ren \"%s\\plain.txt\" renamed.txt", Dir);
+    sprintf(Path, "%s\\renamed.txt", Dir);
+    ok(GetFileAttributesA(Path) != INVALID_FILE_ATTRIBUTES, "%s was not created\n", Path);
+    sprintf(Path, "%s\\plain.txt", Dir);
+    ok(GetFileAttributesA(Path) == INVALID_FILE_ATTRIBUTES, "%s still exists\n", Path);
+
+    /* Failures report an error and set the errorlevel */
+    DoRenTest(__LINE__, 1, TRUE, "cmd /c ren \"%s\\nosuch.txt\" x.txt", Dir);
+    DoRenTest(__LINE__, 1, TRUE, "cmd /c ren \"%s\\renamed.txt\" other.txt", Dir);
+    /* An existing target is reported in cmd's own words */
+    {
+        TEST_ENTRY Entry = { __LINE__, 1 };
+        CHAR CommandLine[MAX_PATH * 2];
+
+        sprintf(CommandLine, "cmd /c ren \"%s\\renamed.txt\" other.txt", Dir);
+        Entry.cmdline = CommandLine;
+        Entry.bStdError = TRUE;
+        Entry.ErrorContains = "A duplicate file name exists, or the file cannot be found.";
+        DoTestEntry(&Entry);
+    }
+    /* Hidden (and system) files are not matched, like a missing file */
+    DoRenTest(__LINE__, 1, TRUE, "cmd /c ren \"%s\\hidden.txt\" shown.txt", Dir);
+    sprintf(Path, "%s\\hidden.txt", Dir);
+    ok(GetFileAttributesA(Path) != INVALID_FILE_ATTRIBUTES, "%s was renamed\n", Path);
+
+    /* The help lists no switch that does nothing (/Q, /T): REN is silent
+     * like Windows' */
+    {
+        static const TEST_ENTRY HelpEntries[] =
+        {
+            { __LINE__, 0, "cmd /c ren /?", TRUE, FALSE, "REN", NULL, "/Q", NULL },
+            { __LINE__, 0, "cmd /c ren /?", TRUE, FALSE, "REN", NULL, "/T", NULL },
+        };
+        DoTestEntry(&HelpEntries[0]);
+        DoTestEntry(&HelpEntries[1]);
+    }
+
+    sprintf(Path, "%s\\renamed.txt", Dir);
+    DeleteFileA(Path);
+    sprintf(Path, "%s\\other.txt", Dir);
+    DeleteFileA(Path);
+    sprintf(Path, "%s\\hidden.txt", Dir);
+    SetFileAttributesA(Path, FILE_ATTRIBUTE_NORMAL);
+    DeleteFileA(Path);
+    RemoveDirectoryA(Dir);
+}

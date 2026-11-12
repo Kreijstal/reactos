@@ -322,15 +322,13 @@ RMDIR [/S] [/Q] [Laufwerk:]Pfad\nRD [/S] [/Q] [Laufwerk:]Pfad\n\
   /Q    Doesn't prompt for user.\n"
     STRING_RMDIR_HELP2  "Verzeichnis ist nicht leer!\n"//FIXME
     STRING_REN_HELP1 "Benennt Dateien und Verzeichnisse um.\n\n\
-RENAME [/E /N /P /Q /S /T] alter_Name ... neuer_Name\n\
-REN [/E /N /P /Q /S /T] alter_Name ... neuer_Name\n\n\
+RENAME [/E /N /P /S] alter_Name ... neuer_Name\n\
+REN [/E /N /P /S] alter_Name ... neuer_Name\n\n\
   /E    keine Fehlermeldung.\n\
   /N    Nichts.\n\
   /P    Wartet vor jedem Umbennen-Vorgang auf eine Benutzereingabe\n\
         (Noch nicht implementiert!)\n\
-  /Q    Beenden.\n\
-  /S    benennt Unterverzeichnisse um.\n\
-  /T    Zeigt die Anzahl der umbenannten Dateien an.\n\n\
+  /S    benennt Unterverzeichnisse um.\n\n\
 Nutzen Sie den 'move' Befehl falls Sie Objekte verschieben wollen.\n"
     STRING_REN_HELP2 "    %lu Datei umbenannt\n"
     STRING_REN_HELP3 "    %lu Dateien umbenannt\n"
@@ -474,7 +472,7 @@ Titel         neuer Titel"
     STRING_MD_ERROR2 "Der Pfad zum neuen Ordner existiert nicht.\n"//FIXME
     STRING_MOVE_ERROR1 "[OK]\n"
     STRING_MOVE_ERROR2 "[FEHLER]\n"
-    STRING_REN_ERROR "MoveFile() ist fehlgeschlagen. Fehler: %lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "Ungültige Zeit.\n"
     STRING_TYPE_ERROR "Ungültige Option '/%s'\n"
     STRING_WINDOW_ERROR "Fenster nicht gefunden\n"

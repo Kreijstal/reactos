@@ -333,15 +333,13 @@ RMDIR [/S] [/Q] [ドライブ:]パス\nRD [/S] [/Q] [ドライブ:]パス\n\
   /Q    確認のメッセージを表示しません。\n"
     STRING_RMDIR_HELP2 "ディレクトリが空ではありません!\n"
     STRING_REN_HELP1 "ファイルやディレクトリ (複数可) の名前を変更します。\n\n\
-RENAME [/E /N /P /Q /S /T] 元のファイル名 ... 新ファイル名\n\
-REN [/E /N /P /Q /S /T] 元のファイル名 ... 新ファイル名\n\n\
+RENAME [/E /N /P /S] 元のファイル名 ... 新ファイル名\n\
+REN [/E /N /P /S] 元のファイル名 ... 新ファイル名\n\n\
   /E    エラーメッセージを表示しません。\n\
   /N    何もしません。\n\
   /P    ファイルの名前を変更する前にそれぞれ確認を求めます。\n\
         (まだ実装されていません!)\n\
-  /Q    静かにする。\n\
-  /S    サブディレクトリの名前を変更する。\n\
-  /T    名前を変更したファイルの総数を報告する。\n\n\
+  /S    サブディレクトリの名前を変更する。\n\n\
 新ファイル名 には新しいドライブもパスも指定できないので注意してください。\n\
 そういった目的には MOVE コマンドを用いてください。\n"
     STRING_REN_HELP2 "    %lu 個のファイルの名前が変更されました\n"
@@ -481,7 +479,7 @@ RESTORE       ウィンドウを元のサイズに戻します。\n\
     STRING_MD_ERROR2 "新しいフォルダへのパスが存在していません。\n"
     STRING_MOVE_ERROR1 "[OK]\n"
     STRING_MOVE_ERROR2 "[エラー]\n"
-    STRING_REN_ERROR "MoveFile() が失敗しました。エラー: %lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "無効な時刻です。\n"
     STRING_TYPE_ERROR "'/%s' は無効なオプションです\n"
     STRING_WINDOW_ERROR "ウィンドウが見つかりません。\n"

@@ -330,15 +330,13 @@ RMDIR [/S] [/Q] [napęd:]ścieżka\nRD [/S] [/Q] [napęd:]ścieżka\n\
   /Q    Nie wyświetla prośby o potwierdzenie.\n"
     STRING_RMDIR_HELP2 "Katalog nie jest pusty!\n"
     STRING_REN_HELP1 "Zmienia nazwę pliku/katalogu (także wielu).\n\n\
-RENAME [/E /N /P /Q /S /T] stara_nazwa ... nowa_nazwa\n\
-REN [/E /N /P /Q /S /T] stara_nazwa ... nowa_nazwa\n\n\
+RENAME [/E /N /P /S] stara_nazwa ... nowa_nazwa\n\
+REN [/E /N /P /S] stara_nazwa ... nowa_nazwa\n\n\
   /E    Bez komunikatów o błędach.\n\
   /N    Nic.\n\
   /P    Wyświetla prośbę o potwierdzenie przed każdym plikiem/katalogiem.\n\
         (nie jest jeszcze zaimplementowane)\n\
-  /Q    Tryb cichy.\n\
-  /S    Zmienia także nazwy podkatalogów.\n\
-  /T    Wyświetla podsumowanie ilości zmienionych nazw.\n\n\
+  /S    Zmienia także nazwy podkatalogów.\n\n\
 Uwaga: możesz również podać nową ścieżkę dostępu dla zmienionych plików. Użyj\n\
 do tego komendy MOVE.\n"
     STRING_REN_HELP2 "   zmieniono nazwę %lu pliku\n"
@@ -480,7 +478,7 @@ title         nowy tytuł okna\n"
     STRING_MD_ERROR2 "Ścieżka do nowego katalogu nie jest prawidłowa.\n"
     STRING_MOVE_ERROR1 "[OK]\n"
     STRING_MOVE_ERROR2 "[Błąd]\n"
-    STRING_REN_ERROR "MoveFile() nieudane. Błąd: %lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "Nieprawidłowy czas.\n"
     STRING_TYPE_ERROR "Nieprawidłowa opcja '/%s'\n"
     STRING_WINDOW_ERROR "Okno nie zostało odnalezione\n"

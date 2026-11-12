@@ -343,15 +343,13 @@ RMDIR [/S] [/Q] [unidade:] caminho\nRD [/S][/Q][unidade:] caminho\n\
   /Q    Modo silencioso, não solicita confirmação do utilizador.\n"
     STRING_RMDIR_HELP2 "O directório não está vazio!\n"
     STRING_REN_HELP1 "Altera o nome a ficheiro(s) ou directório(s).\n\n\
-RENAME [/E /N /P /Q /S /T] nome_antigo ... nome_novo\n\
-REN [/E /N /P /Q /S /T] nome_antigo ... nome_novo\n\n\
+RENAME [/E /N /P /S] nome_antigo ... nome_novo\n\
+REN [/E /N /P /S] nome_antigo ... nome_novo\n\n\
   /E    Nenhuma mensagem de erro.\n\
   /N    Nada.\n\
   /P    Solicita confirmação antes de renomear cada ficheiro.\n\
         (ainda não implementado!)\n\
-  /Q    Modo silencioso, não solicita confirmação do utilizador.\n\
-  /S    Renomear subdiretórios.\n\
-  /T    Apresenta o número total de ficheiros renomeados.\n\n\
+  /S    Renomear subdiretórios.\n\n\
 Observe que não pode especificar uma nova unidade ou caminho para o seu destino. Use\n\
 o comando MOVE para esse propósito.\n"
     STRING_REN_HELP2 "%lu ficheiro renomeado\n"
@@ -495,7 +493,7 @@ título      Novo título\n"
     STRING_MD_ERROR2 "O caminho para a nova pasta não existe.\n"
     STRING_MOVE_ERROR1 "[OK]\n"
     STRING_MOVE_ERROR2 "[Erro]\n"
-    STRING_REN_ERROR "MoveFile () falhou. Erro: %lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "Horário inválido.\n"
     STRING_TYPE_ERROR "Opção inválida '/%s'\n"
     STRING_WINDOW_ERROR "Janela não encontrada\n"

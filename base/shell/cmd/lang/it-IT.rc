@@ -330,15 +330,13 @@ RMDIR [/S] [/Q] [disco:]percorso\nRD [/S] [/Q] [disco:]percorso\n\
   /Q    Non chiede conferma.\n"
     STRING_RMDIR_HELP2 "La cartella non è vuota!\n"
     STRING_REN_HELP1 "Rinomina file/cartella or file/cartelle.\n\n\
-RENAME [/E /N /P /Q /S /T] vecchio_nome ... nuovo_nome\n\
-REN    [/E /N /P /Q /S /T] vecchio_nome ... nuovo_nome\n\n\
+RENAME [/E /N /P /S] vecchio_nome ... nuovo_nome\n\
+REN    [/E /N /P /S] vecchio_nome ... nuovo_nome\n\n\
   /E    Nessun messaggio di errore.\n\
   /N    Nulla.\n\
   /P    Chiede conferma per ogni file.\n\
         (Non implementato!)\n\
-  /Q    Silente.\n\
-  /S    Rinomina le sottocartelle.\n\
-  /T    Visualizza il numero totale di file rinominati.\n\n\
+  /S    Rinomina le sottocartelle.\n\n\
 Non è possibile indicare un nuovo disco o percorso nella destinazione.\n\
 Usare il comando MOVE.\n"
     STRING_REN_HELP2 "    %lu file rinominato\n"
@@ -483,7 +481,7 @@ titolo        il nuovo titolo\n"
     STRING_MD_ERROR2 "Il percorso della nuova cartella non esiste.\n"
     STRING_MOVE_ERROR1 "[OK]\n"
     STRING_MOVE_ERROR2 "[Errore]\n"
-    STRING_REN_ERROR "MoveFile() fallita. Errore: %lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "Ora non valida.\n"
     STRING_TYPE_ERROR "Opzione '/%s' non valida\n"
     STRING_WINDOW_ERROR "Finestra non trovata\n"

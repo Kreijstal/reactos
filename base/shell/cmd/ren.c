@@ -58,6 +58,7 @@ INT cmd_rename (LPTSTR param)
     INT nEvalArgs = 0; /* number of evaluated arguments */
     DWORD dwFlags = 0;
     DWORD dwFiles = 0; /* number of renamed files */
+    DWORD dwMatched = 0; /* number of files we tried to rename */
     INT i;
 
     LPTSTR srcPattern = NULL; /* Source Argument*/
@@ -232,6 +233,9 @@ INT cmd_rename (LPTSTR param)
     if (hFile == INVALID_HANDLE_VALUE)
     {
         if (!(dwFlags & REN_ERROR)) error_file_not_found();
+        nErrorLevel = 1;
+        freep(arg);
+        return 1;
     }
     do
     {
@@ -252,6 +256,7 @@ INT cmd_rename (LPTSTR param)
         }
 
         TRACE("Found source name: %s\n", debugstr_aw(f.cFileName));
+        dwMatched++;
         /* So here we have splitted the dstFILE and we have find a f.cFileName(thanks to srcPattern)
          * Now we have to use the mask (dstFILE) (which can have Wildcards) with f.cFileName to find destination file name(dstLast) */
         p = f.cFileName;
@@ -304,9 +309,6 @@ INT cmd_rename (LPTSTR param)
 
         TRACE("DestinationPath: %s\n", debugstr_aw(dstFinal));
 
-        if (!(dwFlags & REN_QUIET) && !(dwFlags & REN_TOTAL))
-            ConOutPrintf(_T("%s -> %s\n"),srcFinal , dstFinal);
-
         /* Rename the file */
         if (!(dwFlags & REN_NOTHING))
         {
@@ -316,8 +318,18 @@ INT cmd_rename (LPTSTR param)
             }
             else
             {
+                /* Like Windows: report the reason and fail the command.
+                 * An existing target gets cmd's own wording, not the
+                 * system message of ERROR_ALREADY_EXISTS. */
+                DWORD dwError = GetLastError();
                 if (!(dwFlags & REN_ERROR))
-                    ConErrResPrintf(STRING_REN_ERROR, GetLastError());
+                {
+                    if (dwError == ERROR_ALREADY_EXISTS || dwError == ERROR_FILE_EXISTS)
+                        ConErrResPuts(STRING_REN_ERROR);
+                    else
+                        ErrorMessage(dwError, NULL);
+                }
+                nErrorLevel = 1;
             }
         }
     }
@@ -326,16 +338,21 @@ INT cmd_rename (LPTSTR param)
     //Closing and Printing errors.
     FindClose(hFile);
 
-    if (!(dwFlags & REN_QUIET))
+    /* Only hidden or system files matched: Windows does not rename those
+     * and reports the source as not found */
+    if (dwMatched == 0)
     {
-        if (dwFiles == 1)
-            ConOutResPrintf(STRING_REN_HELP2, dwFiles);
-        else
-            ConOutResPrintf(STRING_REN_HELP3, dwFiles);
+        if (!(dwFlags & REN_ERROR)) error_file_not_found();
+        nErrorLevel = 1;
+        freep(arg);
+        return 1;
     }
 
+    /* Like Windows, a rename that worked prints nothing */
+    TRACE("%lu file(s) renamed\n", dwFiles);
+
     freep(arg);
-    return 0;
+    return nErrorLevel;
 }
 
 #endif

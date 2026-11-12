@@ -324,15 +324,13 @@ RMDIR [/S] [/Q] [drive:]path\nRD [/S] [/Q] [drive:]path\n\
   /Q    Tidak bertanya pada pengguna.\n"
     STRING_RMDIR_HELP2 "Direktori tidak kosong!\n"
     STRING_REN_HELP1 "Mengganti nama file/direktori.\n\n\
-RENAME [/E /N /P /Q /S /T] nama_lama ... nama_baru\n\
-REN [/E /N /P /Q /S /T] nama_lama ... nama_baru\n\n\
+RENAME [/E /N /P /S] nama_lama ... nama_baru\n\
+REN [/E /N /P /S] nama_lama ... nama_baru\n\n\
   /E    Tidak ada pesan.\n\
   /N    Tidak.\n\
   /P    Menanyakan konfirmasi sebelum mengganti nama setiap file.\n\
         (Belum diimplementasikan!)\n\
-  /Q    Diam-diam.\n\
-  /S    Mengganti nama subdirektori.\n\
-  /T    Menampilkan jumlah total dari file yang diganti nama.\n\n\
+  /S    Mengganti nama subdirektori.\n\n\
 Mohon dicatat bahwa anda tidak dapat menetapkan drive baru atau path untuk\n\
 tujuan anda. Gunakan perintah MOVE untuk keperluan itu.\n"
     STRING_REN_HELP2 "    %lu file diganti nama\n"
@@ -473,7 +471,7 @@ title         judul baru\n"
     STRING_MD_ERROR2 "Path ke folder baru tidak ada.\n"
     STRING_MOVE_ERROR1 "[OK]\n"
     STRING_MOVE_ERROR2 "[Salah]\n"
-    STRING_REN_ERROR "MoveFile() gagal. Kesalahan: %lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "Jam tidak benar.\n"
     STRING_TYPE_ERROR "Opsi tidak benar '/%s'\n"
     STRING_WINDOW_ERROR "Jendela tidak ditemukan\n"

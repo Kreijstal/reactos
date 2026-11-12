@@ -314,15 +314,13 @@ RMDIR [/S] [/Q] [驱动器:]路径\nRD [/S] [/Q] [驱动器:]路径\n\
   /Q    删除时不要提示。\n"
     STRING_RMDIR_HELP2 "目录非空！\n"
     STRING_REN_HELP1 "重命名一个或者多个文件或文件夹。\n\n\
-RENAME [/E /N /P /Q /S /T] 旧名称 ... 新名称\n\
-REN [/E /N /P /Q /S /T] 旧名称 ... 新名称\n\n\
+RENAME [/E /N /P /S] 旧名称 ... 新名称\n\
+REN [/E /N /P /S] 旧名称 ... 新名称\n\n\
   /E    不显示错误消息。\n\
   /N    不做任何处理。\n\
   /P    在重命名每个文件前请求确认。\n\
          （尚未实现！）\n\
-  /Q    安静模式。\n\
-  /S    重命名子目录。\n\
-  /T    显示被重命名文件的总数。\n\n\
+  /S    重命名子目录。\n\n\
 注意，您不能在新名称里指定新的驱动器或路径。请使用 MOVE 命令来达成这个目的。\n"
     STRING_REN_HELP2 "    %lu 文件已重命名\n"
     STRING_REN_HELP3 "    %lu 个文件已重命名\n"
@@ -454,7 +452,7 @@ RESTORE       恢复窗口\n\
     STRING_MD_ERROR2 "到新文件夹的路径不存在。\n"
     STRING_MOVE_ERROR1 "[成功]\n"
     STRING_MOVE_ERROR2 "[错误]\n"
-    STRING_REN_ERROR "MoveFile() 失败。错误码：%lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "无效时间。\n"
     STRING_TYPE_ERROR "无效选项“/%s”\n"
     STRING_WINDOW_ERROR "未找到窗口\n"

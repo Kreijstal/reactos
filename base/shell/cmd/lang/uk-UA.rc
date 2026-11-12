@@ -334,15 +334,13 @@ RMDIR [/S] [/Q] [диск:]шлях\nRD [/S] [/Q] [диск:]шлях\n\
   /Q    Вимкнення запиту пiдтвердження.\n"
     STRING_RMDIR_HELP2 "Каталог не порожнiй!\n"
     STRING_REN_HELP1 "Перейменування одного чи кiлькох файлiв/каталогiв.\n\n\
-RENAME [/E /N /P /Q /S /T] старе_iм'я ... нове_iм'я\n\
-REN [/E /N /P /Q /S /T] старе_iм'я ... нове_iм'я\n\n\
+RENAME [/E /N /P /S] старе_iм'я ... нове_iм'я\n\
+REN [/E /N /P /S] старе_iм'я ... нове_iм'я\n\n\
   /E    Не показувати повiдомлення про помилки.\n\
   /N    Нiчого.\n\
   /P    Запит пiдтвердження для кожного файлу.\n\
         (Ще не реалiзовано!)\n\
-  /Q    Тихо.\n\
-  /S    Перейменувати пiдкаталоги.\n\
-  /T    Вiдображення кiлькостi переiменованих файлiв.\n\n\
+  /S    Перейменувати пiдкаталоги.\n\n\
 Для кiнцевого фалу не можна вказати iнший диск чи каталог.\n\
 Для цього використайте команду MOVE.\n"
     STRING_REN_HELP2 "    %lu файл переiменовано\n"
@@ -485,7 +483,7 @@ title         новий заголовок\n"
     STRING_MD_ERROR2 "Шлях до нового каталогу не iснує.\n"
     STRING_MOVE_ERROR1 "[OK]\n"
     STRING_MOVE_ERROR2 "[Помилка]\n"
-    STRING_REN_ERROR "Невдачне виконання MoveFile(). Помилка: %lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "Невiрний час.\n"
     STRING_TYPE_ERROR "Невiрний параметр '/%s'\n"
     STRING_WINDOW_ERROR "Вiкно не знайдено\n"

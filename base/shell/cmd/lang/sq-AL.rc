@@ -327,15 +327,13 @@ RMDIR [/S] [/Q] [drive:]rrugë\nRD [/S] [/Q] [drive:]rrugë\n\
   /Q    Nuk e shfaq për përdoruesin.\n"
     STRING_RMDIR_HELP2 "Direktoria nuk është e zbrazët!\n"
     STRING_REN_HELP1 "Emeron nje dokument/directori ose dokument/skedë.\n\n\
-RENAME [/E /N /P /Q /S /T] emrin_e_vjetër ... emrin_e_ri\n\
-REN [/E /N /P /Q /S /T] emrin_e_vjeter ... emrin_e_ri\n\n\
+RENAME [/E /N /P /S] emrin_e_vjetër ... emrin_e_ri\n\
+REN [/E /N /P /S] emrin_e_vjeter ... emrin_e_ri\n\n\
   /E    Nuk ka mesazhe errori.\n\
   /N    Asgjë.\n\
   /P    Shfaq për të konfirmuar para merimit për secilin dokument.\n\
         (Jo e implementuar ende!)\n\
-  /Q    Dil.\n\
-  /S    Emero nën-direktorite.\n\
-  /T    Shfaq numrin total të dosjeve të riemëruar.\n\n\
+  /S    Emero nën-direktorite.\n\n\
 Vini re se ju nuk mund të specifikoni një drive të ri ose rrugën për në destinacionin tuaj. Përdor\n\
 komandën MOVE për këtë qëllim.\n"
     STRING_REN_HELP2 "    %lu dokumenti u rimërua\n"
@@ -478,7 +476,7 @@ title         titull i ri\n"
     STRING_MD_ERROR2 "Rruga për tek skeda e re nuk ekziston.\n"
     STRING_MOVE_ERROR1 "[OK]\n"
     STRING_MOVE_ERROR2 "[Error]\n"
-    STRING_REN_ERROR "MoveFile() dështoj. Error: %lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "Ora invalide.\n"
     STRING_TYPE_ERROR "Opsion invalid '/%s'\n"
     STRING_WINDOW_ERROR "Dritaria nuk i gjend\n"

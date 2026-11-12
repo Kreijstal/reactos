@@ -329,15 +329,13 @@ RMDIR [/S] [/Q] [unidad:]ruta\nRD [/S] [/Q] [unidad:]ruta\n\
   /Q    No avisa al usuario.\n"
     STRING_RMDIR_HELP2 "La carpeta no está vacía.\n"
     STRING_REN_HELP1 "Renombra un archivo/directorio o varios archivos/directorios.\n\n\
-RENAME [/E /N /P /Q /S /T] nombre_antiguo ... nuevo_nombre\n\
-REN [/E /N /P /Q /S /T] nombre_antiguo ... nuevo_nombre\n\n\
+RENAME [/E /N /P /S] nombre_antiguo ... nuevo_nombre\n\
+REN [/E /N /P /S] nombre_antiguo ... nuevo_nombre\n\n\
   /E    No muestra mensajes de error.\n\
   /N    Nada.\n\
   /P    Pregunta por la confirmación antes de cada archivo.\n\
         (¡No implementado aún!)\n\
-  /Q    Modo silencioso.\n\
-  /S    Renombra los subdirectorios.\n\
-  /T    Muestra el número total de archivos renombrados.\n\n\
+  /S    Renombra los subdirectorios.\n\n\
 Note que no puede especificar una nueva unidad en el destino o ruta. Usa\n\
 el comando MOVE para este propósito.\n"
     STRING_REN_HELP2 "    %lu archivos renombrados.\n"
@@ -481,7 +479,7 @@ title         Nuevo título\n"
     STRING_MD_ERROR2 "The path to the new folder does not exist.\n"
     STRING_MOVE_ERROR1 "[Correcto]\n"
     STRING_MOVE_ERROR2 "[Error]\n"
-    STRING_REN_ERROR "MoveFile() falló. Error: %lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "Hora incorrecta.\n"
     STRING_TYPE_ERROR "Opción incorrecta '/%s'\n"
     STRING_WINDOW_ERROR "Ventana no encontrada\n"

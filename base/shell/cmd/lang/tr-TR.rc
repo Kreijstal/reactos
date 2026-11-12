@@ -329,15 +329,13 @@ RMDIR [/S] [/Q] [sürücü:]yol\nRD [/S] [/Q] [sürücü:]yol\n\
   /Q    Kullanıcı erişimi sormaz.\n"
     STRING_RMDIR_HELP2 "Dizin boş değil!\n"
     STRING_REN_HELP1 "Bir dosyayı/dizini veya dosyaları/dizinleri yeniden adlandırır.\n\n\
-RENAME [/E /N /P /Q /S /T] eski_isim ... yeni_isim\n\
-REN [/E /N /P /Q /S /T] eski_isim ... yeni_isim\n\n\
+RENAME [/E /N /P /S] eski_isim ... yeni_isim\n\
+REN [/E /N /P /S] eski_isim ... yeni_isim\n\n\
   /E    Hata mesajı vermez.\n\
   /N    Hiçbir şey yapmaz.\n\
   /P    Her dosyayı yeniden adlandırmadan önce onay ister.\n\
         (Henüz çalışır halde değil!)\n\
-  /Q    Sessizce çalışır.\n\
-  /S    Alt dizinleri yeniden adlandır.\n\
-  /T    Yeniden adlandırılan dosyaların sayısını gösterir\n\n\
+  /S    Alt dizinleri yeniden adlandır.\n\n\
 Hedefiniz için yeni bir sürücü veya yol belirtemeyeceğinizi unutmayın.\n\
 Bu amaç için MOVE komutunu kullanın.\n"
     STRING_REN_HELP2 "    %lu dosya yeniden adlandırıldı\n"
@@ -476,7 +474,7 @@ başlık        pencere için yeni başlık\n"
     STRING_MD_ERROR2 "Yeni dizinin yolu mevcut değil.\n"
     STRING_MOVE_ERROR1 "[TAMAM]\n"
     STRING_MOVE_ERROR2 "[Hata]\n"
-    STRING_REN_ERROR "MoveFile() hatayla sonuçlandı. Hata: %lu\n"
+    STRING_REN_ERROR "A duplicate file name exists, or the file cannot be found.\n"
     STRING_TIME_ERROR "Yanlış tarih.\n"
     STRING_TYPE_ERROR "Yanlış ayar '/%s'\n"
     STRING_WINDOW_ERROR "Pencere bulunamadı\n"
