@@ -2555,6 +2555,16 @@ USBPORT_MiniportCompleteTransfer(IN PVOID MiniPortExtension,
                                  USBPORT_TRANSFER,
                                  TransferParameters);
 
+    /* The miniport may report a completion only from its PollEndpoint for
+     * this endpoint, where USBPORT holds the endpoint's EndpointSpinLock:
+     * USBPORT_QueueDoneTransfer below unlinks the transfer from
+     * Endpoint->TransferList, which nothing else protects.  A completion from
+     * the miniport's interrupt DPC races every other user of that list and
+     * can leave it cycling without its head. */
+    NT_ASSERT(!KeTestSpinLock(&Transfer->Endpoint->EndpointSpinLock));
+    NT_ASSERT(Transfer->Flags & TRANSFER_FLAG_SUBMITED);
+    NT_ASSERT(!(Transfer->Flags & TRANSFER_FLAG_COMPLETED));
+
     Transfer->Flags |= TRANSFER_FLAG_COMPLETED;
     Transfer->CompletedTransferLen = TransferLength;
     
@@ -2873,6 +2883,40 @@ USBPORT_CompleteTransfer(IN PURB Urb,
     DPRINT_CORE("USBPORT_CompleteTransfer: exit\n");
 }
 
+/*
+ * The adapter channel request USBPORT_FlushMapTransfers made for this FDO has
+ * been served.  AllocateAdapterChannel (IoAllocateAdapterChannel) keeps its
+ * request in the device object's one WAIT_CONTEXT_BLOCK, DeviceObject->
+ * Queue.Wcb, so a device object may have only one request outstanding:
+ * issuing a second while the first waited for map registers re-inserted the
+ * same Wcb into the adapter's queue and overwrote its context, so one
+ * transfer's ExecutionRoutine ran twice -- linking it into TransferList twice
+ * -- and the other transfer never ran at all.  Caller is at DISPATCH_LEVEL.
+ */
+static
+VOID
+USBPORT_ReleaseMapChannel(IN PDEVICE_OBJECT FdoDevice)
+{
+    PUSBPORT_DEVICE_EXTENSION FdoExtension = FdoDevice->DeviceExtension;
+    BOOLEAN Flush;
+
+    KeAcquireSpinLockAtDpcLevel(&FdoExtension->MapTransferSpinLock);
+
+    NT_ASSERT(FdoExtension->MapTransferBusy);
+    FdoExtension->MapTransferBusy = FALSE;
+
+    /* Called from inside that processor's AllocateAdapterChannel call, the
+     * flush loop on its stack picks up the next transfer; called later, from
+     * the HAL once map registers were freed or grown, nobody else will. */
+    Flush = FdoExtension->MapAllocatingCpu != KeGetCurrentProcessorNumber() &&
+            !IsListEmpty(&FdoExtension->MapTransferList);
+
+    KeReleaseSpinLockFromDpcLevel(&FdoExtension->MapTransferSpinLock);
+
+    if (Flush)
+        USBPORT_FlushMapTransfers(FdoDevice);
+}
+
 IO_ALLOCATION_ACTION
 NTAPI
 USBPORT_MapTransfer(IN PDEVICE_OBJECT FdoDevice,
@@ -2910,6 +2954,11 @@ USBPORT_MapTransfer(IN PDEVICE_OBJECT FdoDevice,
     DmaOperations = DmaAdapter->DmaOperations;
 
     Transfer = Context;
+
+    /* Each transfer is handed to AllocateAdapterChannel once, off no list:
+     * a second callback for it would link it into TransferList twice. */
+    NT_ASSERT(!(Transfer->Flags & TRANSFER_FLAG_DMA_MAPPED));
+    NT_ASSERT(Transfer->TransferLink.Flink == &Transfer->TransferLink);
 
     USBPORT_MapWatchMapped(Transfer);
 
@@ -3056,6 +3105,7 @@ USBPORT_MapTransfer(IN PDEVICE_OBJECT FdoDevice,
                                               INVALIDATE_ENDPOINT_WORKER_THREAD);
         }
 
+        USBPORT_ReleaseMapChannel(FdoDevice);
         return DeallocateObjectKeepRegisters;
     }
 
@@ -3084,6 +3134,7 @@ USBPORT_MapTransfer(IN PDEVICE_OBJECT FdoDevice,
                                          TransferLink);
 
             RemoveHeadList(&List);
+            NT_ASSERT(transfer->Endpoint == Endpoint);
             InsertTailList(&Endpoint->TransferList, &transfer->TransferLink);
         }
 
@@ -3118,6 +3169,7 @@ USBPORT_MapTransfer(IN PDEVICE_OBJECT FdoDevice,
                                           INVALIDATE_ENDPOINT_WORKER_THREAD);
     }
 
+    USBPORT_ReleaseMapChannel(FdoDevice);
     return DeallocateObjectKeepRegisters;
 }
 
@@ -3143,21 +3195,47 @@ USBPORT_FlushMapTransfers(IN PDEVICE_OBJECT FdoDevice)
 
     KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
 
+    MapTransferList = &FdoExtension->MapTransferList;
+
     while (TRUE)
     {
-        MapTransferList = &FdoExtension->MapTransferList;
+        PLIST_ENTRY Entry;
 
-        if (IsListEmpty(&FdoExtension->MapTransferList))
+        /*
+         * Take the head under MapTransferSpinLock, the lock
+         * USBPORT_QueueActiveUrbToEndpoint inserts under.  This runs on every
+         * processor that flushes an endpoint, and unlocked two of them could
+         * both read the same head: one transfer was then mapped twice and
+         * inserted into Endpoint->TransferList twice (a self-linked entry the
+         * list walks spin on at DISPATCH_LEVEL for ever), while the
+         * transfer behind it was unlinked by the second RemoveHeadList and
+         * never seen again.
+         */
+        KeAcquireSpinLockAtDpcLevel(&FdoExtension->MapTransferSpinLock);
+
+        /* One adapter channel request at a time: see
+         * USBPORT_ReleaseMapChannel, which flushes again when it is served. */
+        if (FdoExtension->MapTransferBusy || IsListEmpty(MapTransferList))
         {
+            KeReleaseSpinLockFromDpcLevel(&FdoExtension->MapTransferSpinLock);
             KeLowerIrql(OldIrql);
             return;
         }
 
-        Transfer = CONTAINING_RECORD(MapTransferList->Flink,
+        Entry = RemoveHeadList(MapTransferList);
+        FdoExtension->MapTransferBusy = TRUE;
+        FdoExtension->MapAllocatingCpu = KeGetCurrentProcessorNumber();
+
+        KeReleaseSpinLockFromDpcLevel(&FdoExtension->MapTransferSpinLock);
+
+        /* Off every list until USBPORT_MapTransfer links it into the
+         * endpoint's TransferList; never leave it pointing into
+         * MapTransferList. */
+        InitializeListHead(Entry);
+
+        Transfer = CONTAINING_RECORD(Entry,
                                      USBPORT_TRANSFER,
                                      TransferLink);
-
-        RemoveHeadList(MapTransferList);
 
         Mdl = Transfer->Urb->UrbControlTransfer.TransferBufferMDL;
         TransferBufferLength = Transfer->TransferParameters.TransferBufferLength;
@@ -3178,6 +3256,17 @@ USBPORT_FlushMapTransfers(IN PDEVICE_OBJECT FdoDevice)
                                                        USBPORT_MapTransfer,
                                                        Transfer);
 
+        KeAcquireSpinLockAtDpcLevel(&FdoExtension->MapTransferSpinLock);
+        FdoExtension->MapAllocatingCpu = MAXULONG;
+        if (!NT_SUCCESS(Status))
+        {
+            /* The ExecutionRoutine will not run for a rejected request. */
+            FdoExtension->MapTransferBusy = FALSE;
+        }
+        KeReleaseSpinLockFromDpcLevel(&FdoExtension->MapTransferSpinLock);
+
+        /* Transfer may already be completed and freed here if the request
+         * was served on another processor; Status is all that is used. */
         USBPORT_MapWatchStatus(Transfer, Status);
 
         if (!NT_SUCCESS(Status))
@@ -3195,15 +3284,8 @@ USBPORT_FlushMapTransfers(IN PDEVICE_OBJECT FdoDevice)
                     "%lx for transfer %p len %Ix mapregs %lu\n",
                     Status, Transfer, TransferBufferLength, NumMapRegisters);
 
-            /*
-             * USBPORT_QueueDoneTransfer unlinks the transfer itself, and
-             * RemoveHeadList left TransferLink pointing back into
-             * MapTransferList.  Make it point at itself so that unlink is a
-             * no-op rather than a write through stale pointers into the list
-             * we just took it from.
-             */
-            InitializeListHead(&Transfer->TransferLink);
-
+            /* TransferLink points at itself (see above), so the unlink in
+             * USBPORT_QueueDoneTransfer is a no-op. */
             USBPORT_QueueDoneTransfer(Transfer,
                                       USBD_STATUS_INSUFFICIENT_RESOURCES);
         }

@@ -346,6 +346,11 @@ typedef struct _USBPORT_DEVICE_EXTENSION {
   /* Transfers */
   LIST_ENTRY MapTransferList;
   KSPIN_LOCK MapTransferSpinLock;
+  /* Under MapTransferSpinLock: an AllocateAdapterChannel call is outstanding
+   * (its ExecutionRoutine has not finished), and the processor issuing it
+   * while that call is still on its stack, or MAXULONG. */
+  BOOLEAN MapTransferBusy;
+  ULONG MapAllocatingCpu;
   LIST_ENTRY DoneTransferList;
   KSPIN_LOCK DoneTransferSpinLock;
   KDPC TransferFlushDpc;
@@ -400,9 +405,9 @@ typedef struct _USBPORT_DEVICE_EXTENSION {
 
   /* Miniport extension should be aligned on 0x100 */
 #if !defined(_M_X64) && !defined(_M_ARM64)
-  ULONG Padded[64];
+  ULONG Padded[62];
 #else
-  ULONG Padded[30];
+  ULONG Padded[28];
 #endif
 
 } USBPORT_DEVICE_EXTENSION, *PUSBPORT_DEVICE_EXTENSION;

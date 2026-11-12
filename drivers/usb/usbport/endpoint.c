@@ -282,6 +282,12 @@ USBPORT_EndpointHasQueuedTransfers(IN PDEVICE_OBJECT FdoDevice,
                                              USBPORT_TRANSFER,
                                              TransferLink);
 
+                /* Every entry belongs to this endpoint and links back to its
+                 * predecessor; anything else never reaches the head again. */
+                NT_ASSERT(Entry->Flink->Blink == Entry);
+                NT_ASSERT(Entry->Flink != Entry);
+                NT_ASSERT(Transfer->Endpoint == Endpoint);
+
                 if (Transfer->Flags & TRANSFER_FLAG_SUBMITED)
                 {
                     ++*TransferCount;
