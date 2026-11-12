@@ -63,4 +63,32 @@ START_TEST(HalPerformanceCounter)
        Backward, MaxBackward * 1000 / Frequency.QuadPart);
     ok(Jumps == 0, "Counter jumped ahead %lu times when changing processors, by up to %I64d ms\n",
        Jumps, MaxForward * 1000 / Frequency.QuadPart);
+
+    /*
+     * The counter and its frequency must measure time at the right rate:
+     * one second of interrupt time is one second of performance counter
+     * time. The tolerance is wide because in a virtual machine the interrupt
+     * time lags a few percent behind; a badly calibrated frequency is off by
+     * far more (0.4x and 1.3x-1.8x were seen in QEMU).
+     */
+    {
+        LARGE_INTEGER Start, End, Delay;
+        ULONGLONG InterruptStart, InterruptEnd;
+        LONGLONG CounterUs, InterruptUs;
+
+        Delay.QuadPart = -20000000LL; /* 2 s */
+        InterruptStart = KeQueryInterruptTime();
+        Start = KeQueryPerformanceCounter(NULL);
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        End = KeQueryPerformanceCounter(NULL);
+        InterruptEnd = KeQueryInterruptTime();
+
+        CounterUs = (End.QuadPart - Start.QuadPart) * 1000000 / Frequency.QuadPart;
+        InterruptUs = (LONGLONG)(InterruptEnd - InterruptStart) / 10;
+        trace("2 s delay: performance counter %I64d us, interrupt time %I64d us\n",
+              CounterUs, InterruptUs);
+        ok(CounterUs * 100 >= InterruptUs * 85 && CounterUs * 100 <= InterruptUs * 115,
+           "Performance counter measured %I64d us while interrupt time measured %I64d us\n",
+           CounterUs, InterruptUs);
+    }
 }
