@@ -806,21 +806,52 @@ ClassCancelRoutine(
     }
 }
 
+/*
+ * Completes a read IRP with queued input data, or queues it until data
+ * arrives. Irp is a new read IRP (from ClassRead), or NULL when input data
+ * arrived (from ClassCallback), in which case the queued read is completed.
+ *
+ * Like Windows, the decision to queue a read and the hand-over of queued data
+ * to a queued read are both made under ReadData->SpinLock, and whoever takes
+ * the IRP out of ReadData->PendingIrp completes it. Otherwise a read issued
+ * while the previous one is being completed (the reader re-issues its read
+ * from the completion) is forgotten when the completing side clears
+ * PendingIrp after it, or is queued after the completing side looked at
+ * PendingIrp: the data then stays in the class queue and the reader waits
+ * forever, i.e. input stops.
+ */
 static NTSTATUS
 HandleReadIrp(
     IN PDEVICE_OBJECT DeviceObject,
     IN PREAD_DATA ReadData,
     IN PIRP Irp OPTIONAL)
 {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_SUCCESS;
     KIRQL OldIrql;
+    BOOLEAN NewIrp = (Irp != NULL);
 
     TRACE_(CLASS_NAME, "HandleReadIrp(DeviceObject %p, ReadData %p, Irp %p)\n", DeviceObject, ReadData, Irp);
 
-    if (!Irp)
+    KeAcquireSpinLock(&ReadData->SpinLock, &OldIrql);
+
+    if (!NewIrp)
+    {
+        /* Input arrived: hand it to the queued read, if there is one */
         Irp = ReadData->PendingIrp;
-    if (!Irp)
-        return STATUS_SUCCESS;
+        if (!Irp || ReadData->InputCount == 0)
+        {
+            KeReleaseSpinLock(&ReadData->SpinLock, OldIrql);
+            return STATUS_SUCCESS;
+        }
+
+        /* An IRP being cancelled belongs to the cancel routine */
+        if (!IoSetCancelRoutine(Irp, NULL))
+        {
+            KeReleaseSpinLock(&ReadData->SpinLock, OldIrql);
+            return STATUS_SUCCESS;
+        }
+        ReadData->PendingIrp = NULL;
+    }
 
     if (ReadData->InputCount > 0)
     {
@@ -834,7 +865,6 @@ HandleReadIrp(
         else
             Destination = Irp->UserBuffer;
 
-        KeAcquireSpinLock(&ReadData->SpinLock, &OldIrql);
         NumberOfEntries = MIN(
             ReadData->InputCount,
             IoGetCurrentIrpStackLocation(Irp)->Parameters.Read.Length / sizeof(KEYBOARD_INPUT_DATA));
@@ -845,6 +875,7 @@ HandleReadIrp(
             Destination,
             NumberOfEntries);
 
+        Irp->IoStatus.Information = 0;
         if (NT_SUCCESS(Status))
         {
             if (ReadData->InputCount > NumberOfEntries)
@@ -859,33 +890,32 @@ HandleReadIrp(
 
             Irp->IoStatus.Information = NumberOfEntries * sizeof(KEYBOARD_INPUT_DATA);
         }
-
-        /* Go to next packet and complete this request */
         Irp->IoStatus.Status = Status;
 
-        (VOID)IoSetCancelRoutine(Irp, NULL);
-        IoCompleteRequest(Irp, IO_KEYBOARD_INCREMENT);
-        ReadData->PendingIrp = NULL;
         KeReleaseSpinLock(&ReadData->SpinLock, OldIrql);
 
+        IoCompleteRequest(Irp, IO_KEYBOARD_INCREMENT);
         return Status;
     }
 
-    IoAcquireCancelSpinLock(&OldIrql);
-    if (Irp->Cancel)
+    /* No input yet: queue the new read */
+    NT_ASSERT(NewIrp);
+    IoMarkIrpPending(Irp);
+    ReadData->PendingIrp = Irp;
+    (VOID)IoSetCancelRoutine(Irp, ClassCancelRoutine);
+    if (Irp->Cancel && IoSetCancelRoutine(Irp, NULL))
     {
+        /* Cancelled before the cancel routine was set: complete it here */
         ReadData->PendingIrp = NULL;
-        Status = STATUS_CANCELLED;
+        KeReleaseSpinLock(&ReadData->SpinLock, OldIrql);
+
+        Irp->IoStatus.Status = STATUS_CANCELLED;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_PENDING;
     }
-    else
-    {
-        IoMarkIrpPending(Irp);
-        ReadData->PendingIrp = Irp;
-        (VOID)IoSetCancelRoutine(Irp, ClassCancelRoutine);
-        Status = STATUS_PENDING;
-    }
-    IoReleaseCancelSpinLock(OldIrql);
-    return Status;
+    KeReleaseSpinLock(&ReadData->SpinLock, OldIrql);
+    return STATUS_PENDING;
 }
 
 static NTSTATUS NTAPI
