@@ -8,6 +8,7 @@
 /* INCLUDES *******************************************************************/
 
 #include "precomp.h"
+#include <sptilib.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -362,8 +363,8 @@ PortPdoQueryProperty(
         Required = RTL_SIZEOF_THROUGH_FIELD(STORAGE_ADAPTER_DESCRIPTOR, BusMinorVersion);
         Desc.Version = Required;
         Desc.Size = Required;
-        Desc.MaximumTransferLength = 64 * 1024;
-        Desc.MaximumPhysicalPages = 17;
+        Desc.MaximumTransferLength = PORT_MAXIMUM_TRANSFER_LENGTH;
+        Desc.MaximumPhysicalPages = PORT_MAXIMUM_PHYSICAL_PAGES;
         Desc.AlignmentMask = 0;
         Desc.AdapterUsesPio = FALSE;
         Desc.AdapterScansDown = FALSE;
@@ -426,6 +427,74 @@ PortPdoQueryProperty(
     }
 
     return STATUS_NOT_SUPPORTED;
+}
+
+
+/*
+ * IOCTL_SCSI_PASS_THROUGH(_DIRECT), as Windows storport supports it: on a
+ * LUN (normally forwarded by its class driver) or on the adapter, which
+ * routes it to the LUN named by PathId/TargetId/Lun.
+ */
+static
+NTSTATUS
+PortHandleScsiPassThrough(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp)
+{
+    PFDO_DEVICE_EXTENSION FdoExt;
+    PPDO_DEVICE_EXTENSION PdoExt;
+    PDEVICE_OBJECT LunDevice = NULL;
+    PSCSI_PASS_THROUGH Spt;
+    PLIST_ENTRY Entry;
+    KLOCK_QUEUE_HANDLE LockHandle;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (((PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension)->ExtensionType == PdoExtension)
+    {
+        return SptiHandleScsiPassthru(DeviceObject,
+                                      Irp,
+                                      PORT_MAXIMUM_TRANSFER_LENGTH,
+                                      PORT_MAXIMUM_PHYSICAL_PAGES);
+    }
+
+    if (IoGetCurrentIrpStackLocation(Irp)->Parameters.DeviceIoControl.InputBufferLength <
+        RTL_SIZEOF_THROUGH_FIELD(SCSI_PASS_THROUGH, Lun))
+    {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    FdoExt = DeviceObject->DeviceExtension;
+    ASSERT(FdoExt->ExtensionType == FdoExtension);
+    Spt = Irp->AssociatedIrp.SystemBuffer;
+
+    KeAcquireInStackQueuedSpinLock(&FdoExt->PdoListLock, &LockHandle);
+    for (Entry = FdoExt->PdoListHead.Flink;
+         Entry != &FdoExt->PdoListHead;
+         Entry = Entry->Flink)
+    {
+        PdoExt = CONTAINING_RECORD(Entry, PDO_DEVICE_EXTENSION, PdoListEntry);
+        if (PdoExt->Bus == Spt->PathId &&
+            PdoExt->Target == Spt->TargetId &&
+            PdoExt->Lun == Spt->Lun)
+        {
+            LunDevice = PdoExt->Device;
+            ObReferenceObject(LunDevice);
+            break;
+        }
+    }
+    KeReleaseInStackQueuedSpinLock(&LockHandle);
+
+    if (!LunDevice)
+        return STATUS_NO_SUCH_DEVICE;
+
+    Status = SptiHandleScsiPassthru(LunDevice,
+                                    Irp,
+                                    PORT_MAXIMUM_TRANSFER_LENGTH,
+                                    PORT_MAXIMUM_PHYSICAL_PAGES);
+    ObDereferenceObject(LunDevice);
+    return Status;
 }
 
 
@@ -511,6 +580,17 @@ PortDispatchDeviceControl(
         Irp->IoStatus.Information = sizeof(SCSI_ADDRESS);
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         return STATUS_SUCCESS;
+    }
+
+    if (IoControlCode == IOCTL_SCSI_PASS_THROUGH ||
+        IoControlCode == IOCTL_SCSI_PASS_THROUGH_DIRECT)
+    {
+        Status = PortHandleScsiPassThrough(DeviceObject, Irp);
+        Irp->IoStatus.Status = Status;
+        if (!NT_SUCCESS(Status))
+            Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return Status;
     }
 
     Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
