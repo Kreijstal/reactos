@@ -176,6 +176,12 @@ static DMA_OPERATIONS HalpDmaOperations = {
  */
 #define MAX_MAP_REGISTERS 4096
 
+/*
+ * The least a waiting request grows the pool by, in map registers: one 64 KB
+ * block (see HalpGrowMapBufferWorker).
+ */
+#define HALP_MAP_BUFFER_INCREMENT (0x10000 >> PAGE_SHIFT)
+
 #define TAG_DMA ' AMD'
 
 /* FUNCTIONS *****************************************************************/
@@ -317,7 +323,7 @@ NTAPI
 HalpGrowMapBuffers(IN PADAPTER_OBJECT AdapterObject,
                   IN ULONG SizeOfMapBuffers)
 {
-    PVOID VirtualAddress;
+    PVOID VirtualAddress, FirstVirtualAddress;
     PHYSICAL_ADDRESS PhysicalAddress;
     PHYSICAL_ADDRESS HighestAcceptableAddress;
     PHYSICAL_ADDRESS LowestAcceptableAddress;
@@ -397,6 +403,8 @@ HalpGrowMapBuffers(IN PADAPTER_OBJECT AdapterObject,
 
     if (!VirtualAddress) return FALSE;
 
+    FirstVirtualAddress = VirtualAddress;
+    DBG_UNREFERENCED_LOCAL_VARIABLE(FirstVirtualAddress);
     PhysicalAddress = MmGetPhysicalAddress(VirtualAddress);
 
     /*
@@ -435,6 +443,11 @@ HalpGrowMapBuffers(IN PADAPTER_OBJECT AdapterObject,
                     {
                         if ((PreviousEntry->PhysicalAddress.LowPart ^ PhysicalAddress.LowPart) & 0xFFFF0000)
                         {
+                            /* A block of up to 64 KB was asked for inside
+                             * one 64 KB region: only its first page can
+                             * start a new region */
+                            ASSERT((SizeOfMapBuffers > 0x10000) ||
+                                   (VirtualAddress == FirstVirtualAddress));
                             CurrentEntry++;
                             AdapterObject->NumberOfMapRegisters++;
                         }
@@ -1576,81 +1589,107 @@ HalpGrowMapBufferWorker(IN PVOID DeferredContext)
 {
     PGROW_WORK_ITEM WorkItem = (PGROW_WORK_ITEM)DeferredContext;
     PADAPTER_OBJECT MasterAdapter = WorkItem->AdapterObject->MasterAdapter;
-    ULONG NumberOfMapRegisters = WorkItem->NumberOfMapRegisters;
+    ULONG NumberOfMapRegisters;
     PADAPTER_OBJECT Head;
     KIRQL OldIrql;
-    BOOLEAN Succeeded, HeadFits;
+    BOOLEAN Grew, HeadFits, Succeeded = TRUE;
 
     for (;;)
     {
         /*
-         * Try to allocate new map registers for the adapter.
+         * Grow for whoever heads the master queue now, and only if the pool
+         * cannot serve it as it is.  The queue walk hands registers to the
+         * head, which need not be the request this work item was queued for:
+         * a one-register request queued ahead of a fifteen-register one takes
+         * one page of the fifteen just grown, whose own growth then left it a
+         * fourteen-register run, and a work item may also outlive the request
+         * it was queued for (served meanwhile by a free) while that adapter's
+         * next, larger request waits.  Growing for the original request only
+         * left the request behind waiting for some other adapter to free
+         * registers next to its run, which a busy pool of small long-lived
+         * grants never does, and its driver's I/O stalled for good (USB disk,
+         * bug #42).  Growing whenever a work item ran, on the other hand,
+         * grew the pool once for every request that ever had to wait, even
+         * when frees had long served it, and every growth takes slots of the
+         * fixed-size map register table for good.
          *
-         * NOTE: The NT implementation actually tries to allocate more map
-         * registers than needed as an optimization.
+         * HalpDmaLock serializes the growths, so a head that one worker grew
+         * for is not grown for again by the next one.
          */
         KeWaitForSingleObject(&HalpDmaLock, Executive, KernelMode, FALSE, NULL);
-        Succeeded = HalpGrowMapBuffers(MasterAdapter, NumberOfMapRegisters << PAGE_SHIFT);
-        KeSetEvent(&HalpDmaLock, 0, 0);
 
-        /*
-         * Flush the adapter queue no matter how the growth went: map registers
-         * freed by other adapters since this work item was queued may already
-         * satisfy the queue head, and this routine and IoFreeMapRegisters are
-         * the only places that ever re-examine the queue. The easiest way to
-         * flush is to call IoFreeMapRegisters to not free any registers. Note
-         * that we use the magic (PVOID)2 map register base to bypass the
-         * parameter checking.
-         */
-        OldIrql = KfRaiseIrql(DISPATCH_LEVEL);
-        IoFreeMapRegisters(WorkItem->AdapterObject, (PVOID)2, 0);
-        KfLowerIrql(OldIrql);
-
-        /*
-         * The queue walk hands the new registers to whoever is at the head
-         * of the master queue, which need not be the request this growth was
-         * sized for: a one-register request queued ahead of a fifteen-register
-         * one takes one page of the fifteen just grown, whose own growth then
-         * left it a fourteen-register run, and a growth item may also outlive
-         * the request it was queued for (served meanwhile by a free) while
-         * that adapter's next, larger request waits.  Nothing would ever grow
-         * the pool for the request left behind: it waited for some other
-         * adapter to free registers next to its run, which a busy pool of
-         * small long-lived grants never does, and its driver's I/O stalled
-         * for good (USB disk, bug #42).  Keep growing for the head until the
-         * queue is empty.
-         */
         KeAcquireSpinLock(&MasterAdapter->SpinLock, &OldIrql);
         if (IsListEmpty(&MasterAdapter->AdapterQueue))
         {
             KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
+            KeSetEvent(&HalpDmaLock, 0, 0);
             break;
         }
         Head = CONTAINING_RECORD(MasterAdapter->AdapterQueue.Flink, ADAPTER_OBJECT, AdapterQueue);
         NumberOfMapRegisters = Head->NumberOfMapRegisters;
         ASSERT(NumberOfMapRegisters != 0);
         ASSERT(NumberOfMapRegisters <= Head->MapRegistersPerChannel);
-        /* Registers the head fits in were freed after our walk (or are being
-         * handed out right now): that free's own walk, or the walk in
-         * progress, serves the head, as both re-examine the queue once they
-         * have cleared the bits. */
         HeadFits = (RtlFindClearBits(MasterAdapter->MapRegisters, NumberOfMapRegisters, 0) != MAXULONG);
         KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
 
-        if (HeadFits)
-            break;
-
-        if (!Succeeded)
+        Grew = FALSE;
+        if (!HeadFits)
         {
             /*
-             * Growth failed with adapters still queued. Giving up here
-             * strands them forever: their execution routines only run from
-             * the queue walk above, so a request the current bitmap cannot
-             * satisfy would never be delivered to its driver and the IRP
-             * behind it would stay pending for good. Retry the growth
-             * instead, with a delay so a persistent failure does not
-             * busy-loop a worker thread on contiguous-memory allocation.
+             * Grow by at least one 64 KB block (NT, too, grows the map
+             * buffers by more than the waiting request needs).  A block of up
+             * to 64 KB is allocated inside one aligned 64 KB region, so it
+             * is one contiguous run in the bitmap that serves any single
+             * request (HalGetAdapter caps them at 16 registers), and it
+             * costs the table at most one placeholder slot (see
+             * HalpGrowMapBuffers).  Growing by what the head asked for,
+             * often one page, spent a placeholder slot on every page: half
+             * of the table was placeholders, so it filled at 2048 pages and
+             * from then on the pool could not grow at all.  Fall back to the
+             * exact size when a whole block cannot be had (fragmented low
+             * memory, or the table nearly full).
              */
+            Succeeded = HalpGrowMapBuffers(MasterAdapter,
+                                           max(NumberOfMapRegisters, HALP_MAP_BUFFER_INCREMENT) << PAGE_SHIFT);
+            if (!Succeeded && NumberOfMapRegisters < HALP_MAP_BUFFER_INCREMENT)
+                Succeeded = HalpGrowMapBuffers(MasterAdapter, NumberOfMapRegisters << PAGE_SHIFT);
+            Grew = Succeeded;
+        }
+        KeSetEvent(&HalpDmaLock, 0, 0);
+
+        /*
+         * Walk the queue no matter how the growth went: map registers freed
+         * since the check above may satisfy the head by now, and this routine
+         * and IoFreeMapRegisters are the only places that ever re-examine the
+         * queue. The easiest way to walk it is to call IoFreeMapRegisters to
+         * not free any registers. Note that we use the magic (PVOID)2 map
+         * register base to bypass the parameter checking.
+         */
+        OldIrql = KfRaiseIrql(DISPATCH_LEVEL);
+        IoFreeMapRegisters(WorkItem->AdapterObject, (PVOID)2, 0);
+        KfLowerIrql(OldIrql);
+
+        /*
+         * The walk served the head unless something else took the registers
+         * first, and stopped at the next request the pool cannot serve. Look
+         * at the queue again until it is empty: a worker that stopped while
+         * requests were still queued (because the head fit, served by a walk
+         * still in progress elsewhere) left the request behind that head to
+         * wait for a free, and its own work item may already have run.
+         */
+        if (HeadFits || Grew)
+            continue;
+
+        /*
+         * Growth failed with adapters still queued. Giving up here strands
+         * them until someone frees registers: their execution routines only
+         * run from a queue walk, so a request the current bitmap cannot
+         * satisfy would never be delivered to its driver if no adapter frees
+         * any. Retry the growth instead, with a delay so a persistent failure
+         * does not busy-loop a worker thread on contiguous-memory allocation.
+         */
+        ASSERT(!Succeeded);
+        {
             static LONG HalpGrowRetries = 0;
             LONG Retries = InterlockedIncrement(&HalpGrowRetries);
             LARGE_INTEGER Delay;
@@ -1663,7 +1702,6 @@ HalpGrowMapBufferWorker(IN PVOID DeferredContext)
 
             Delay.QuadPart = -250 * 10000;    /* 250 ms */
             KeDelayExecutionThread(KernelMode, FALSE, &Delay);
-            WorkItem->NumberOfMapRegisters = NumberOfMapRegisters;
             ExQueueWorkItem(&WorkItem->WorkQueueItem, DelayedWorkQueue);
             return;
         }
