@@ -16,38 +16,53 @@
 
 LARGE_INTEGER HalpCpuClockFrequency = {{INITIAL_STALL_COUNT * 1000000}};
 
-UCHAR TscCalibrationPhase;
-ULONG64 TscCalibrationArray[NUM_SAMPLES];
-
-#define RTC_MODE 6 /* Mode 6 is 1024 Hz */
-#define SAMPLE_FREQUENCY ((32768 << 1) >> RTC_MODE)
-
 /* PRIVATE FUNCTIONS *********************************************************/
 
+/* PIT channel 2, gated through the system control port B (0x61) */
+#define SYSTEM_CONTROL_PORT_B   0x61
+#define PORTB_TIMER2_GATE       0x01
+#define PORTB_SPEAKER_DATA      0x02
+#define PORTB_TIMER2_OUTPUT     0x20
+
+/* About 50 ms of PIT counts: long enough for an exact TSC rate */
+#define TSC_CALIBRATION_MS      50
+#define TSC_CALIBRATION_COUNT   (PIT_FREQUENCY * TSC_CALIBRATION_MS / 1000)
+C_ASSERT(TSC_CALIBRATION_COUNT <= 0xFFFF);
+#define TSC_CALIBRATION_RUNS    3
+
+/*
+ * Measure the TSC rate against PIT channel 2, by polling it with interrupts
+ * disabled. Counting the TSC between a few RTC periodic interrupts instead
+ * depends on when those interrupts are delivered: in a virtual machine the
+ * ticks raised while interrupts were off arrive bunched up (or late), and the
+ * performance counter ran at less than half or nearly twice the real rate.
+ */
 static
 ULONG64
-DoLinearRegression(
-    ULONG XMax,
-    ULONG64 *ArrayY)
+HalpMeasureTscWithPit(VOID)
 {
-    ULONG X, SumXX;
-    ULONG64 SumXY;
+    UCHAR PortB;
+    ULONG64 Start, End;
 
-    /* Calculate the sum of the squares of X */
-    SumXX = (XMax * (XMax + 1) * (2*XMax + 1)) / 6;
+    /* Enable the gate of timer 2, with the speaker off */
+    PortB = __inbyte(SYSTEM_CONTROL_PORT_B);
+    __outbyte(SYSTEM_CONTROL_PORT_B, (PortB & ~PORTB_SPEAKER_DATA) | PORTB_TIMER2_GATE);
 
-    /* Calculate the sum of the differences to the first value
-       weighted by x */
-    for (SumXY = 0, X = 1; X <= XMax; X++)
-    {
-         SumXY += X * (ArrayY[X] - ArrayY[0]);
-    }
+    /* Timer 2, low then high byte, mode 0: the output goes high at terminal count */
+    __outbyte(TIMER_CONTROL_PORT, 0xB0);
+    __outbyte(TIMER_CHANNEL2_DATA_PORT, TSC_CALIBRATION_COUNT & 0xFF);
+    Start = __rdtsc();
+    __outbyte(TIMER_CHANNEL2_DATA_PORT, TSC_CALIBRATION_COUNT >> 8);
 
-    /* Account for sample frequency */
-    SumXY *= SAMPLE_FREQUENCY;
+    /* Wait for the count to run out */
+    while (!(__inbyte(SYSTEM_CONTROL_PORT_B) & PORTB_TIMER2_OUTPUT))
+        NOTHING;
+    End = __rdtsc();
 
-    /* Return the quotient of the sums */
-    return (SumXY + (SumXX/2)) / SumXX;
+    /* Restore port B */
+    __outbyte(SYSTEM_CONTROL_PORT_B, PortB);
+
+    return End - Start;
 }
 
 VOID
@@ -55,8 +70,8 @@ NTAPI
 HalpInitializeTsc(VOID)
 {
     ULONG_PTR Flags;
-    PVOID PreviousHandler;
-    UCHAR RegisterA, RegisterB;
+    ULONG64 Ticks, MinTicks = ~0ULL;
+    ULONG i;
 
     /* Check if the CPU supports RDTSC */
     if (!(KeGetCurrentPrcb()->FeatureBits & KF_RDTSC))
@@ -64,52 +79,24 @@ HalpInitializeTsc(VOID)
         KeBugCheck(HAL_INITIALIZATION_FAILED);
     }
 
-     /* Save flags and disable interrupts */
+    /* Save flags and disable interrupts */
     Flags = __readeflags();
     _disable();
 
-    /* Enable the periodic interrupt in the CMOS */
-    RegisterB = HalpReadCmos(RTC_REGISTER_B);
-    HalpWriteCmos(RTC_REGISTER_B, RegisterB | RTC_REG_B_PI);
+    /* A measurement can only come out too long (the end of the count is
+     * noticed late, e.g. when a virtual CPU is held up), so keep the
+     * shortest of a few */
+    for (i = 0; i < TSC_CALIBRATION_RUNS; i++)
+    {
+        Ticks = HalpMeasureTscWithPit();
+        MinTicks = min(MinTicks, Ticks);
+    }
 
-    /* Modify register A to RTC_MODE to get SAMPLE_FREQUENCY */
-    RegisterA = HalpReadCmos(RTC_REGISTER_A);
-    RegisterA = (RegisterA & 0xF0) | RTC_MODE;
-    HalpWriteCmos(RTC_REGISTER_A, RegisterA);
-
-    /* Save old IDT entry */
-    PreviousHandler = KeQueryInterruptHandler(APIC_CLOCK_VECTOR);
-
-    /* Set the calibration ISR */
-    KeRegisterInterruptHandler(APIC_CLOCK_VECTOR, TscCalibrationISR);
-
-    /* Enable the timer interrupt */
-    HalEnableSystemInterrupt(APIC_CLOCK_VECTOR, CLOCK_LEVEL, Latched);
-
-    /* Read register C, so that the next interrupt can happen */
-    HalpReadCmos(RTC_REGISTER_C);
-
-    /* Wait for completion */
-    _enable();
-    while (TscCalibrationPhase < NUM_SAMPLES) _ReadWriteBarrier();
-    _disable();
-
-    /* Disable the periodic interrupt in the CMOS */
-    HalpWriteCmos(RTC_REGISTER_B, RegisterB & ~RTC_REG_B_PI);
-
-    /* Disable the timer interrupt */
-    HalDisableSystemInterrupt(APIC_CLOCK_VECTOR, CLOCK_LEVEL);
-
-    /* Restore the previous handler */
-    KeRegisterInterruptHandler(APIC_CLOCK_VECTOR, PreviousHandler);
-
-    /* Calculate an average, using simplified linear regression */
-    HalpCpuClockFrequency.QuadPart = DoLinearRegression(NUM_SAMPLES - 1,
-                                                        TscCalibrationArray);
+    HalpCpuClockFrequency.QuadPart = MinTicks * PIT_FREQUENCY / TSC_CALIBRATION_COUNT;
+    ASSERT(HalpCpuClockFrequency.QuadPart != 0);
 
     /* Restore flags */
     __writeeflags(Flags);
-
 }
 
 CODE_SEG("INIT")

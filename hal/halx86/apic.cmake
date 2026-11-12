@@ -1,7 +1,6 @@
 
 list(APPEND HAL_APIC_ASM_SOURCE
-    apic/apictrap.S
-    apic/tsccal.S)
+    apic/apictrap.S)
 
 list(APPEND HAL_APIC_SOURCE
     apic/apic.c
