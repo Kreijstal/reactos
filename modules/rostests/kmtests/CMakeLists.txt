@@ -181,7 +181,9 @@ if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
     list(APPEND KMTEST_DRV_SOURCE
         ${KMTEST_DRV_ASM}
         hal/HalPortIo.c
-        hal/HalRealTimeClock.c)
+        hal/HalRealTimeClock.c
+        hal/HalAdapterChannel.c
+        hal/HalScatterGather.c)
 endif()
 
 add_library(kmtest_drv MODULE ${KMTEST_DRV_SOURCE})
