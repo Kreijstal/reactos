@@ -7,15 +7,22 @@
 
 #pragma once
 
+/* What the scheduler and its worker thread share: the thread outlives the
+ * scheduler when the scheduler is released from a task it runs. */
+struct SHELL_TASK_QUEUE;
+
 class CShellTaskScheduler :
     public CComCoClass<CShellTaskScheduler, &CLSID_ShellTaskScheduler>,
     public CComObjectRootEx<CComMultiThreadModelNoCS>,
     public IShellTaskScheduler
 {
 private:
+    SHELL_TASK_QUEUE *m_Queue;
 public:
     CShellTaskScheduler();
     ~CShellTaskScheduler();
+
+    HRESULT FinalConstruct();
 
     // *** IShellTaskScheduler methods ***
     STDMETHODIMP AddTask(IRunnableTask *pTask, REFGUID rtoid, DWORD_PTR lParam, DWORD dwPriority) override;
