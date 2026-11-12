@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    PartitionRelayout.c
     StorDeviceNumber.c)
 
 list(APPEND PCH_SKIP_SOURCE
