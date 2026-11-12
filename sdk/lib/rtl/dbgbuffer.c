@@ -135,7 +135,7 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
 
     PRTL_PROCESS_MODULE_INFORMATION ModulePtr = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
-    ULONG UsedSize = sizeof(ULONG);
+    ULONG UsedSize = FIELD_OFFSET(RTL_PROCESS_MODULES, Modules);
     ANSI_STRING AnsiString;
     PCHAR p;
 
@@ -326,6 +326,7 @@ RtlQueryProcessDebugInformation(IN ULONG ProcessId,
                 if (!Mp)
                 {
                     DPRINT1("RtlQueryProcessDebugInformation: Unable to commit %u\n", ReturnSize);
+                    return STATUS_NO_MEMORY;
                 }
 
                 Status = LdrQueryProcessModuleInformation(Mp,
@@ -407,11 +408,18 @@ RtlQueryProcessDebugInformation(IN ULONG ProcessId,
                                                        NULL,
                                                        0,
                                                        &ReturnSize);
+                if (!NT_SUCCESS(Status))
+                {
+                    NtClose(hProcess);
+                    return Status;
+                }
 
                 Mp = RtlpDebugBufferCommit(Buf, ReturnSize);
                 if (!Mp)
                 {
                     DPRINT1("RtlQueryProcessDebugInformation: Unable to commit %u\n", ReturnSize);
+                    NtClose(hProcess);
+                    return STATUS_NO_MEMORY;
                 }
 
                 Status = RtlpQueryRemoteProcessModules(hProcess,
@@ -420,6 +428,7 @@ RtlQueryProcessDebugInformation(IN ULONG ProcessId,
                                                        &ReturnSize);
                 if (!NT_SUCCESS(Status))
                 {
+                    NtClose(hProcess);
                     return Status;
                 }
 
@@ -459,6 +468,7 @@ RtlQueryProcessDebugInformation(IN ULONG ProcessId,
 
             DPRINT("QueryProcessDebugInformation end\n");
             DPRINT("QueryDebugInfo : 0x%lx\n", Buf->OffsetFree);
+            NtClose(hProcess);
         }
 
     return Status;
