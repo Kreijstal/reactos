@@ -18,11 +18,6 @@ DbgCaptureStackBackTace(
     _In_ ULONG cFramesToSkip,
     _In_ ULONG cFramesToCapture);
 
-BOOL
-NTAPI
-DbgGdiHTIntegrityCheck(
-    VOID);
-
 VOID
 NTAPI
 DbgDumpLockedGdiHandles(
