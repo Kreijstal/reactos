@@ -126,62 +126,43 @@ VOID FreeIPDR(
 }
 
 
-VOID RemoveIPDR(
-  PIPDATAGRAM_REASSEMBLY IPDR)
 /*
- * FUNCTION: Removes an IP datagram reassembly structure from the global list
- * ARGUMENTS:
- *     IPDR = Pointer to IP datagram reassembly structure
+ * All reassembly state, the list and every IPDR on it, is protected by
+ * ReassemblyListLock: a fragment finds its IPDR and adds itself to it under
+ * the lock, and an IPDR leaves the list (complete, failed or timed out) under
+ * the lock before it is freed, so nobody can still be using it then.
  */
-{
-  KIRQL OldIrql;
-
-  TI_DbgPrint(DEBUG_IP, ("Removing IPDR at (0x%X).\n", IPDR));
-
-  TcpipAcquireSpinLock(&ReassemblyListLock, &OldIrql);
-  RemoveEntryList(&IPDR->ListEntry);
-  TcpipReleaseSpinLock(&ReassemblyListLock, OldIrql);
-}
-
-
-PIPDATAGRAM_REASSEMBLY GetReassemblyInfo(
+static
+PIPDATAGRAM_REASSEMBLY
+FindReassembly(
   PIP_PACKET IPPacket)
 /*
- * FUNCTION: Returns a pointer to an IP datagram reassembly structure
+ * FUNCTION: Returns the IP datagram reassembly structure a fragment belongs to
  * ARGUMENTS:
  *     IPPacket = Pointer to IP packet
  * NOTES:
- *     A datagram is identified by four paramters, which are
+ *     A datagram is identified by four parameters, which are
  *     Source and destination address, protocol number and
- *     identification number
+ *     identification number. ReassemblyListLock must be held
  */
 {
-  KIRQL OldIrql;
   PLIST_ENTRY CurrentEntry;
   PIPDATAGRAM_REASSEMBLY Current;
   PIPv4_HEADER Header = (PIPv4_HEADER)IPPacket->Header;
 
-  TI_DbgPrint(DEBUG_IP, ("Searching for IPDR for IP packet at (0x%X).\n", IPPacket));
-
-  TcpipAcquireSpinLock(&ReassemblyListLock, &OldIrql);
-
   /* FIXME: Assume IPv4 */
 
-  CurrentEntry = ReassemblyListHead.Flink;
-  while (CurrentEntry != &ReassemblyListHead) {
-	  Current = CONTAINING_RECORD(CurrentEntry, IPDATAGRAM_REASSEMBLY, ListEntry);
+  for (CurrentEntry = ReassemblyListHead.Flink;
+       CurrentEntry != &ReassemblyListHead;
+       CurrentEntry = CurrentEntry->Flink) {
+    Current = CONTAINING_RECORD(CurrentEntry, IPDATAGRAM_REASSEMBLY, ListEntry);
     if (AddrIsEqual(&IPPacket->SrcAddr, &Current->SrcAddr) &&
       (Header->Id == Current->Id) &&
       (Header->Protocol == Current->Protocol) &&
       (AddrIsEqual(&IPPacket->DstAddr, &Current->DstAddr))) {
-      TcpipReleaseSpinLock(&ReassemblyListLock, OldIrql);
-
       return Current;
     }
-    CurrentEntry = CurrentEntry->Flink;
   }
-
-  TcpipReleaseSpinLock(&ReassemblyListLock, OldIrql);
 
   return NULL;
 }
@@ -253,23 +234,22 @@ ReassembleDatagram(
 }
 
 
-static inline VOID Cleanup(
-  PKSPIN_LOCK Lock,
+static VOID DiscardIPDR(
   KIRQL OldIrql,
   PIPDATAGRAM_REASSEMBLY IPDR)
 /*
- * FUNCTION: Performs cleaning operations on errors
+ * FUNCTION: Drops a reassembly on errors
  * ARGUMENTS:
- *     Lock     = Pointer to spin lock to be released
- *     OldIrql  = Value of IRQL when spin lock was acquired
+ *     OldIrql  = Value of IRQL when ReassemblyListLock was acquired
  *     IPDR     = Pointer to IP datagram reassembly structure to free
- *     Buffer   = Optional pointer to a buffer to free
+ * NOTES:
+ *     Called with ReassemblyListLock held, returns with it released
  */
 {
   TI_DbgPrint(MIN_TRACE, ("Insufficient resources.\n"));
 
-  TcpipReleaseSpinLock(Lock, OldIrql);
-  RemoveIPDR(IPDR);
+  RemoveEntryList(&IPDR->ListEntry);
+  TcpipReleaseSpinLock(&ReassemblyListLock, OldIrql);
   FreeIPDR(IPDR);
 }
 
@@ -303,23 +283,26 @@ VOID ProcessFragment(
 
   IPv4Header = (PIPv4_HEADER)IPPacket->Header;
 
+  TcpipAcquireSpinLock(&ReassemblyListLock, &OldIrql);
+
   /* Check if we already have an reassembly structure for this datagram */
-  IPDR = GetReassemblyInfo(IPPacket);
+  IPDR = FindReassembly(IPPacket);
   if (IPDR) {
     TI_DbgPrint(DEBUG_IP, ("Continueing assembly.\n"));
-    /* We have a reassembly structure */
-    TcpipAcquireSpinLock(&IPDR->Lock, &OldIrql);
 
     /* Reset the timeout since we received a fragment */
+    ASSERT(IPDR->TimeoutCount < MAX_TIMEOUT_COUNT);
     IPDR->TimeoutCount = 0;
   } else {
     TI_DbgPrint(DEBUG_IP, ("Starting new assembly.\n"));
 
     /* We don't have a reassembly structure, create one */
     IPDR = ExAllocateFromNPagedLookasideList(&IPDRList);
-    if (!IPDR)
+    if (!IPDR) {
       /* We don't have the resources to process this packet, discard it */
+      TcpipReleaseSpinLock(&ReassemblyListLock, OldIrql);
       return;
+    }
 
     /* Create a descriptor spanning from zero to infinity.
        Actually, we use a value slightly greater than the
@@ -327,6 +310,7 @@ VOID ProcessFragment(
     Hole = CreateHoleDescriptor(0, 65536);
     if (!Hole) {
       /* We don't have the resources to process this packet, discard it */
+      TcpipReleaseSpinLock(&ReassemblyListLock, OldIrql);
       ExFreeToNPagedLookasideList(&IPDRList, IPDR);
       return;
     }
@@ -344,15 +328,8 @@ VOID ProcessFragment(
     InitializeListHead(&IPDR->HoleListHead);
     InsertTailList(&IPDR->HoleListHead, &Hole->ListEntry);
 
-    TcpipInitializeSpinLock(&IPDR->Lock);
-
-    TcpipAcquireSpinLock(&IPDR->Lock, &OldIrql);
-
     /* Update the reassembly list */
-    TcpipInterlockedInsertTailList(
-	&ReassemblyListHead,
-	&IPDR->ListEntry,
-	&ReassemblyListLock);
+    InsertTailList(&ReassemblyListHead, &IPDR->ListEntry);
   }
 
   FragFirst     = (WN2H(IPv4Header->FlagsFragOfs) & IPv4_FRAGOFS_MASK) << 3;
@@ -386,7 +363,7 @@ VOID ProcessFragment(
       if (!NewHole) {
         /* We don't have the resources to process this packet, discard it */
         ExFreeToNPagedLookasideList(&IPHoleList, Hole);
-        Cleanup(&IPDR->Lock, OldIrql, IPDR);
+        DiscardIPDR(OldIrql, IPDR);
         return;
       }
 
@@ -399,7 +376,7 @@ VOID ProcessFragment(
       if (!NewHole) {
         /* We don't have the resources to process this packet, discard it */
         ExFreeToNPagedLookasideList(&IPHoleList, Hole);
-        Cleanup(&IPDR->Lock, OldIrql, IPDR);
+        DiscardIPDR(OldIrql, IPDR);
         return;
       }
 
@@ -416,7 +393,7 @@ VOID ProcessFragment(
                                                  PACKET_BUFFER_TAG);
         if (!IPDR->IPv4Header)
         {
-            Cleanup(&IPDR->Lock, OldIrql, IPDR);
+            DiscardIPDR(OldIrql, IPDR);
             return;
         }
 
@@ -434,7 +411,7 @@ VOID ProcessFragment(
     Fragment = ExAllocateFromNPagedLookasideList(&IPFragmentList);
     if (!Fragment) {
       /* We don't have the resources to process this packet, discard it */
-      Cleanup(&IPDR->Lock, OldIrql, IPDR);
+      DiscardIPDR(OldIrql, IPDR);
       return;
     }
 
@@ -460,46 +437,50 @@ VOID ProcessFragment(
 
   TI_DbgPrint(DEBUG_IP, ("Done searching for hole descriptor.\n"));
 
-  if (IsListEmpty(&IPDR->HoleListHead)) {
-    /* Hole list is empty which means a complete datagram can be assembled.
-       Assemble the datagram and pass it to an upper layer protocol */
+  if (!IsListEmpty(&IPDR->HoleListHead)) {
+    TcpipReleaseSpinLock(&ReassemblyListLock, OldIrql);
+    return;
+  }
 
-    {
-        static volatile LONG ReasmCount = 0;
-        LONG rc = InterlockedIncrement(&ReasmCount);
-        if (rc <= 5) DPRINT("TCPIP-IP: ProcessFragment #%ld complete\n", rc);
-    }
+  /* Hole list is empty which means a complete datagram can be assembled.
+     Take it off the list: from now on it is ours alone. Assemble the
+     datagram and pass it to an upper layer protocol */
+  RemoveEntryList(&IPDR->ListEntry);
+  TcpipReleaseSpinLock(&ReassemblyListLock, OldIrql);
 
-    RemoveIPDR(IPDR);
-    TcpipReleaseSpinLock(&IPDR->Lock, OldIrql);
+  /* FIXME: Assumes IPv4 */
+  IPInitializePacket(&Datagram, IP_ADDRESS_V4);
 
-    /* FIXME: Assumes IPv4 */
-    IPInitializePacket(&Datagram, IP_ADDRESS_V4);
+  Success = ReassembleDatagram(&Datagram, IPDR);
 
-    Success = ReassembleDatagram(&Datagram, IPDR);
+  FreeIPDR(IPDR);
 
-    FreeIPDR(IPDR);
+  if (!Success)
+    /* Not enough free resources, discard the packet */
+    return;
 
-    if (!Success)
-      /* Not enough free resources, discard the packet */
-      return;
+  DISPLAY_IP_PACKET(&Datagram);
 
-    DISPLAY_IP_PACKET(&Datagram);
+  /* Give the packet to the protocol dispatcher */
+  IPDispatchProtocol(IF, &Datagram);
 
-    {
-        static volatile LONG DispCount = 0;
-        LONG dc = InterlockedIncrement(&DispCount);
-        if (dc <= 5) DPRINT("TCPIP-IP: → IPDispatchProtocol #%ld\n", dc);
-    }
+  /* We're done with this datagram */
+  TI_DbgPrint(MAX_TRACE, ("Freeing datagram at (0x%X).\n", Datagram));
+  Datagram.Free(&Datagram);
+}
 
-    /* Give the packet to the protocol dispatcher */
-    IPDispatchProtocol(IF, &Datagram);
 
-    /* We're done with this datagram */
-    TI_DbgPrint(MAX_TRACE, ("Freeing datagram at (0x%X).\n", Datagram));
-    Datagram.Free(&Datagram);
-  } else
-    TcpipReleaseSpinLock(&IPDR->Lock, OldIrql);
+static VOID FreeIPDRList(
+  PLIST_ENTRY ListHead)
+/*
+ * FUNCTION: Frees IP datagram reassembly structures taken off the global list
+ * NOTES:
+ *     Called without ReassemblyListLock: freeing fragments returns their
+ *     packets to the miniport
+ */
+{
+  while (!IsListEmpty(ListHead))
+    FreeIPDR(CONTAINING_RECORD(RemoveHeadList(ListHead), IPDATAGRAM_REASSEMBLY, ListEntry));
 }
 
 
@@ -510,26 +491,16 @@ VOID IPFreeReassemblyList(
  */
 {
   KIRQL OldIrql;
-  PLIST_ENTRY CurrentEntry, NextEntry;
-  PIPDATAGRAM_REASSEMBLY Current;
+  LIST_ENTRY FreeList;
+
+  InitializeListHead(&FreeList);
 
   TcpipAcquireSpinLock(&ReassemblyListLock, &OldIrql);
-
-  CurrentEntry = ReassemblyListHead.Flink;
-  while (CurrentEntry != &ReassemblyListHead) {
-    NextEntry = CurrentEntry->Flink;
-    Current = CONTAINING_RECORD(CurrentEntry, IPDATAGRAM_REASSEMBLY, ListEntry);
-
-    /* Unlink it from the list */
-    RemoveEntryList(CurrentEntry);
-
-    /* And free the descriptor */
-    FreeIPDR(Current);
-
-    CurrentEntry = NextEntry;
-  }
-
+  while (!IsListEmpty(&ReassemblyListHead))
+    InsertTailList(&FreeList, RemoveHeadList(&ReassemblyListHead));
   TcpipReleaseSpinLock(&ReassemblyListLock, OldIrql);
+
+  FreeIPDRList(&FreeList);
 }
 
 
@@ -544,6 +515,9 @@ VOID IPDatagramReassemblyTimeout(
 {
     PLIST_ENTRY CurrentEntry, NextEntry;
     PIPDATAGRAM_REASSEMBLY CurrentIPDR;
+    LIST_ENTRY FreeList;
+
+    InitializeListHead(&FreeList);
 
     TcpipAcquireSpinLockAtDpcLevel(&ReassemblyListLock);
 
@@ -553,24 +527,22 @@ VOID IPDatagramReassemblyTimeout(
        NextEntry = CurrentEntry->Flink;
        CurrentIPDR = CONTAINING_RECORD(CurrentEntry, IPDATAGRAM_REASSEMBLY, ListEntry);
 
-       TcpipAcquireSpinLockAtDpcLevel(&CurrentIPDR->Lock);
-
        if (++CurrentIPDR->TimeoutCount == MAX_TIMEOUT_COUNT)
        {
-           TcpipReleaseSpinLockFromDpcLevel(&CurrentIPDR->Lock);
            RemoveEntryList(CurrentEntry);
-           FreeIPDR(CurrentIPDR);
+           InsertTailList(&FreeList, CurrentEntry);
        }
        else
        {
            ASSERT(CurrentIPDR->TimeoutCount < MAX_TIMEOUT_COUNT);
-           TcpipReleaseSpinLockFromDpcLevel(&CurrentIPDR->Lock);
        }
 
        CurrentEntry = NextEntry;
     }
 
     TcpipReleaseSpinLockFromDpcLevel(&ReassemblyListLock);
+
+    FreeIPDRList(&FreeList);
 }
 
 VOID IPv4Receive(PIP_INTERFACE IF, PIP_PACKET IPPacket)
