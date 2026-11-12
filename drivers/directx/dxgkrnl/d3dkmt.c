@@ -1153,15 +1153,34 @@ DxgkQueryAdapterInfo(
             pSegInfo = (D3DKMT_SEGMENTSIZEINFO *)pQueryAdapterInfo->pPrivateDriverData;
 
             /*
-             * For DOD/display-only: no dedicated VRAM, report system memory.
-             * A real adapter would query segments from vidmm here.
+             * As Windows: the miniport's memory segments are dedicated video
+             * memory (or dedicated system memory when populated from it),
+             * aperture segments are shared system memory.  A display-only
+             * adapter has no segments and only shares system memory.
              */
+            ULONGLONG DedicatedVideo = 0, DedicatedSystem = 0, Shared = 0;
+            ULONG i;
+
+            for (i = 0; Adapter->Segments != NULL && i < Adapter->SegmentCount; i++)
+            {
+                PDXGKRNL_SEGMENT Segment = &((PDXGKRNL_SEGMENT)Adapter->Segments)[i];
+
+                if (Segment->Flags.Aperture)
+                    Shared += Segment->Size;
+                else if (Segment->Flags.PopulatedFromSystemMemory)
+                    DedicatedSystem += Segment->Size;
+                else
+                    DedicatedVideo += Segment->Size;
+            }
+            if (Shared == 0)
+                Shared = 256 * 1024 * 1024; /* 256 MB of system memory */
+
             _SEH2_TRY
             {
                 RtlZeroMemory(pSegInfo, sizeof(*pSegInfo));
-                pSegInfo->DedicatedVideoMemorySize  = 0;
-                pSegInfo->DedicatedSystemMemorySize = 0;
-                pSegInfo->SharedSystemMemorySize    = 256 * 1024 * 1024; /* 256 MB */
+                pSegInfo->DedicatedVideoMemorySize  = DedicatedVideo;
+                pSegInfo->DedicatedSystemMemorySize = DedicatedSystem;
+                pSegInfo->SharedSystemMemorySize    = Shared;
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
@@ -1594,10 +1613,8 @@ DxgkpOpenRenderAllocation(
     OpenArgs.NumAllocations = 1;
     OpenArgs.pOpenAllocation = &OpenInfo;
     OpenArgs.pPrivateDriverData = NULL;
-    OpenArgs.PrivateDriverDataSize = 0;
-    OpenArgs.hResource = (Allocation->Resource != NULL) ?
-                         Allocation->Resource->MiniportHandle : NULL;
-    OpenArgs.ReadOnly = FALSE;
+    OpenArgs.PrivateDriverSize = 0;
+    OpenArgs.Flags.Value = 0;
 
     Status = DXGK_CB_FULL(Adapter, DxgkDdiOpenAllocation)(
                  Device->hMiniportDevice,
@@ -1732,21 +1749,24 @@ DxgkpSubmitVirtGpuCommandEscape(
     if (SubmissionFenceId == 0)
         SubmissionFenceId = 1;
 
+    /*
+     * The DMA buffer is nonpaged pool tracked below by fence id; it is not
+     * yet GPU-addressable, so DmaBufferSegmentId and
+     * DmaBufferPhysicalAddress stay zero.
+     */
     RtlZeroMemory(&SubmitArgs, sizeof(SubmitArgs));
-    SubmitArgs.pDmaBuffer = DmaBuffer;
+    SubmitArgs.hContext = Device->hMiniportDevice;
     SubmitArgs.DmaBufferSize = CommandBytes;
-    SubmitArgs.pDmaBufferPrivateData = &DmaBufferPrivateData;
-    SubmitArgs.DmaBufferPrivateDataSize = sizeof(DmaBufferPrivateData);
     SubmitArgs.DmaBufferSubmissionStartOffset = 0;
     SubmitArgs.DmaBufferSubmissionEndOffset = DmaBytesUsed;
-    SubmitArgs.pAllocationList = NULL;
-    SubmitArgs.AllocationListSize = 0;
+    SubmitArgs.pDmaBufferPrivateData = &DmaBufferPrivateData;
+    SubmitArgs.DmaBufferPrivateDataSize = sizeof(DmaBufferPrivateData);
+    SubmitArgs.DmaBufferPrivateDataSubmissionEndOffset = sizeof(DmaBufferPrivateData);
     SubmitArgs.SubmissionFenceId = SubmissionFenceId;
     SubmitArgs.VidPnSourceId = 0;
-    SubmitArgs.NodeOrdinal = 0;
+    SubmitArgs.Flags.Value = 0;
     SubmitArgs.EngineOrdinal = 0;
-    SubmitArgs.hContext = Device->hMiniportDevice;
-    SubmitArgs.Flags = 0;
+    SubmitArgs.NodeOrdinal = 0;
 
     Status = DXGK_CB_FULL(Adapter, DxgkDdiSubmitCommand)(Adapter->MiniportDeviceContext,
                                                          &SubmitArgs);

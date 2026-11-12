@@ -45,18 +45,25 @@ DxgkpSubmitToHardware(
         return STATUS_NOT_SUPPORTED;
     }
 
+    /*
+     * CmdBuf keeps the DMA buffer's CPU address; the buffer is not yet
+     * GPU-addressable, so DmaBufferSegmentId and DmaBufferPhysicalAddress
+     * stay zero.
+     */
     RtlZeroMemory(&SubmitArg, sizeof(SubmitArg));
-    SubmitArg.pDmaBuffer = CmdBuf->DmaBuffer;
+    SubmitArg.hContext = CmdBuf->ContextHandle;
     SubmitArg.DmaBufferSize = CmdBuf->DmaBufferSize;
-    SubmitArg.pDmaBufferPrivateData = CmdBuf->DmaBufferPrivateData;
-    SubmitArg.DmaBufferPrivateDataSize = CmdBuf->DmaBufferPrivateDataSize;
     SubmitArg.DmaBufferSubmissionStartOffset = 0;
     SubmitArg.DmaBufferSubmissionEndOffset = CmdBuf->DmaBufferSize;
+    SubmitArg.pDmaBufferPrivateData = CmdBuf->DmaBufferPrivateData;
+    SubmitArg.DmaBufferPrivateDataSize = CmdBuf->DmaBufferPrivateDataSize;
+    SubmitArg.DmaBufferPrivateDataSubmissionEndOffset = CmdBuf->DmaBufferPrivateDataSize;
     SubmitArg.SubmissionFenceId = (UINT)CmdBuf->SubmitFenceId;
-    SubmitArg.NodeOrdinal = CmdBuf->NodeOrdinal;
+    SubmitArg.Flags.Value = CmdBuf->Flags;
     SubmitArg.EngineOrdinal = 0;
-    SubmitArg.hContext = CmdBuf->ContextHandle;
-    SubmitArg.Flags = CmdBuf->Flags;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
+    SubmitArg.NodeOrdinal = CmdBuf->NodeOrdinal;
+#endif
 
     DxgkMmsTdrStart(Adapter, Node->NodeOrdinal);
 

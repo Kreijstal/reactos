@@ -27,6 +27,7 @@ list(APPEND SOURCE
     context.c
     dma.c
     present.c
+    kmpresent.c
     sync.c
     vidsch.c
     vidpn.c

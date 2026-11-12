@@ -266,6 +266,22 @@ DxgkpVidPnFromHandle(
     return VidPn;
 }
 
+/* Map a VidPN target ID (a ChildUid) to its mode-set index, or -1. */
+static LONG
+DxgkpTargetIndex(
+    _In_ PDXGKP_VIDPN VidPn,
+    _In_ D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId)
+{
+    ULONG i;
+
+    for (i = 0; i < VidPn->NumTargets; i++)
+    {
+        if (VidPn->TargetIds[i] == TargetId)
+            return (LONG)i;
+    }
+    return -1;
+}
+
 static PDXGKP_VIDPN
 DxgkpTopologyFromHandle(
     _In_ D3DKMDT_HVIDPNTOPOLOGY hTopology)
@@ -533,7 +549,10 @@ DxgkpPopulateDefaultPath(
     Path->VidPnTargetId   = TargetId;
     Path->ImportanceOrdinal = D3DKMDT_VPPI_PRIMARY;
 
-    Path->ContentTransformation.Scaling  = D3DKMDT_VPPS_IDENTITY;
+    /* New paths start with scaling unpinned, as on Windows: the miniport
+     * pins it during cofunctional enumeration (a pinned IDENTITY forbids a
+     * source smaller than the panel's native mode). */
+    Path->ContentTransformation.Scaling  = D3DKMDT_VPPS_UNPINNED;
     Path->ContentTransformation.ScalingSupport.Identity = 1;
     Path->ContentTransformation.ScalingSupport.Centered = 1;
     Path->ContentTransformation.ScalingSupport.Stretched = 1;
@@ -678,13 +697,85 @@ DxgkpPopulateDefaultModes(
  * VidPN object lifecycle
  * ====================================================================== */
 
+/*
+ * Fill VidPn->TargetIds from the miniport's child descriptors: every
+ * TypeVideoOutput child is a VidPN target, its ChildUid is the target ID,
+ * and connected outputs are ordered first.  Returns the target count and
+ * the number of connected targets.  Without descriptors (a miniport that
+ * has not been asked yet) fall back to IDs 0..N-1, all treated connected.
+ */
+static ULONG
+DxgkpBuildTargetIds(
+    _In_  PDXGKRNL_ADAPTER Adapter,
+    _Inout_ PDXGKP_VIDPN   VidPn,
+    _Out_ PULONG           NumConnected)
+{
+    PDXGK_CHILD_DESCRIPTOR Desc = Adapter->ChildDescriptors;
+    D3DDDI_VIDEO_PRESENT_TARGET_ID Disconnected[DXGKP_MAX_TARGETS];
+    ULONG NumOn = 0, NumOff = 0, i;
+
+    if (Desc != NULL)
+    {
+        for (i = 0; i < Adapter->NumberOfChildren; i++)
+        {
+            BOOLEAN Connected = FALSE;
+
+            if (Desc[i].ChildDeviceType != TypeVideoOutput)
+                continue;
+
+            if (Desc[i].ChildCapabilities.HpdAwareness == HpdAwarenessAlwaysConnected)
+            {
+                Connected = TRUE;
+            }
+            else if (Adapter->MiniportContext->InitData.s.DxgkDdiQueryChildStatus != NULL)
+            {
+                DXGK_CHILD_STATUS ChildStatus;
+
+                RtlZeroMemory(&ChildStatus, sizeof(ChildStatus));
+                ChildStatus.Type     = StatusConnection;
+                ChildStatus.ChildUid = Desc[i].ChildUid;
+                if (NT_SUCCESS(Adapter->MiniportContext->InitData.s.DxgkDdiQueryChildStatus(
+                        Adapter->MiniportDeviceContext, &ChildStatus, TRUE)))
+                {
+                    Connected = ChildStatus.HotPlug.Connected;
+                }
+            }
+
+            DXGKRNL_TRACE("DxgkpBuildTargetIds: target ChildUid=%lu Hpd=%d connected=%d\n",
+                          Desc[i].ChildUid,
+                          Desc[i].ChildCapabilities.HpdAwareness, Connected);
+
+            if (Connected && NumOn < DXGKP_MAX_TARGETS)
+                VidPn->TargetIds[NumOn++] = Desc[i].ChildUid;
+            else if (!Connected && NumOff < DXGKP_MAX_TARGETS)
+                Disconnected[NumOff++] = Desc[i].ChildUid;
+        }
+
+        for (i = 0; i < NumOff && NumOn + i < DXGKP_MAX_TARGETS; i++)
+            VidPn->TargetIds[NumOn + i] = Disconnected[i];
+
+        if (NumOn + NumOff > 0)
+        {
+            *NumConnected = NumOn;
+            return min(NumOn + NumOff, DXGKP_MAX_TARGETS);
+        }
+    }
+
+    NumOn = (Adapter->NumberOfChildren > 0) ? Adapter->NumberOfChildren : 1;
+    if (NumOn > DXGKP_MAX_TARGETS) NumOn = DXGKP_MAX_TARGETS;
+    for (i = 0; i < NumOn; i++)
+        VidPn->TargetIds[i] = i;
+    *NumConnected = NumOn;
+    return NumOn;
+}
+
 NTSTATUS
 DxgkVidPnCreateForAdapter(
     _In_  PDXGKRNL_ADAPTER  Adapter,
     _Out_ D3DKMDT_HVIDPN   *phVidPn)
 {
     PDXGKP_VIDPN VidPn;
-    ULONG NumSources, NumTargets;
+    ULONG NumSources, NumTargets, NumConnected;
     ULONG i, PathCount;
 
     PAGED_CODE();
@@ -712,13 +803,10 @@ DxgkVidPnCreateForAdapter(
     /* Determine source/target counts from adapter. */
     NumSources = (Adapter->NumberOfVideoPresentSources > 0)
                  ? Adapter->NumberOfVideoPresentSources : 1;
-    NumTargets = (Adapter->NumberOfChildren > 0)
-                 ? Adapter->NumberOfChildren : 1;
-
     if (NumSources > DXGKP_MAX_SOURCES) NumSources = DXGKP_MAX_SOURCES;
-    if (NumTargets > DXGKP_MAX_TARGETS) NumTargets = DXGKP_MAX_TARGETS;
-
     VidPn->NumSources = NumSources;
+
+    NumTargets = DxgkpBuildTargetIds(Adapter, VidPn, &NumConnected);
     VidPn->NumTargets = NumTargets;
 
     /* Allocate mode sets for each source and target. */
@@ -731,22 +819,24 @@ DxgkVidPnCreateForAdapter(
 
     for (i = 0; i < NumTargets; i++)
     {
-        VidPn->TargetModeSets[i] = DxgkpAllocateTargetModeSet(VidPn, i);
+        VidPn->TargetModeSets[i] = DxgkpAllocateTargetModeSet(VidPn, VidPn->TargetIds[i]);
         if (VidPn->TargetModeSets[i] == NULL)
             goto Fail;
 
-        VidPn->MonitorModeSets[i] = DxgkpAllocateMonitorModeSet(i);
+        VidPn->MonitorModeSets[i] = DxgkpAllocateMonitorModeSet(VidPn->TargetIds[i]);
         if (VidPn->MonitorModeSets[i] == NULL)
             goto Fail;
     }
 
     /* Populate default modes for each source/target pair. */
-    PathCount = (NumSources < NumTargets) ? NumSources : NumTargets;
+    /* Like Windows, the initial topology only drives connected outputs:
+     * a path to a disconnected child makes the miniport reject the VidPN. */
+    PathCount = (NumSources < NumConnected) ? NumSources : NumConnected;
     if (PathCount > DXGKP_MAX_PATHS) PathCount = DXGKP_MAX_PATHS;
 
     for (i = 0; i < PathCount; i++)
     {
-        DxgkpPopulateDefaultPath(&VidPn->Paths[i], i, i);
+        DxgkpPopulateDefaultPath(&VidPn->Paths[i], i, VidPn->TargetIds[i]);
         DxgkpPopulateDefaultModes(
             VidPn->SourceModeSets[i],
             VidPn->TargetModeSets[i],
@@ -819,6 +909,7 @@ DxgkVidPnClone(
     Clone->Adapter    = Source->Adapter;
     Clone->NumSources = Source->NumSources;
     Clone->NumTargets = Source->NumTargets;
+    RtlCopyMemory(Clone->TargetIds, Source->TargetIds, sizeof(Clone->TargetIds));
     Clone->NumPaths   = Source->NumPaths;
 
     /* Copy paths. */
@@ -1155,6 +1246,7 @@ VidPn_AcquireTargetModeSet(
     _Out_ D3DKMDT_HVIDPNTARGETMODESET*                phVidPnTargetModeSet,
     _Out_ CONST DXGK_VIDPNTARGETMODESET_INTERFACE**   ppVidPnTargetModeSetInterface)
 {
+    LONG Index;
     PDXGKP_VIDPN VidPn;
 
     if (phVidPnTargetModeSet == NULL || ppVidPnTargetModeSetInterface == NULL)
@@ -1164,14 +1256,15 @@ VidPn_AcquireTargetModeSet(
     if (VidPn == NULL)
         return STATUS_INVALID_PARAMETER;
 
-    if (VidPnTargetId >= VidPn->NumTargets || VidPn->TargetModeSets[VidPnTargetId] == NULL)
+    Index = DxgkpTargetIndex(VidPn, VidPnTargetId);
+    if (Index < 0 || VidPn->TargetModeSets[Index] == NULL)
     {
         DXGKRNL_WARN("VidPn_AcquireTargetModeSet: invalid target %u (max %lu)\n",
                      VidPnTargetId, VidPn->NumTargets);
         return STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_TARGET;
     }
 
-    *phVidPnTargetModeSet          = (D3DKMDT_HVIDPNTARGETMODESET)VidPn->TargetModeSets[VidPnTargetId];
+    *phVidPnTargetModeSet          = (D3DKMDT_HVIDPNTARGETMODESET)VidPn->TargetModeSets[Index];
     *ppVidPnTargetModeSetInterface = &g_VidPnTargetModeSetInterface;
     return STATUS_SUCCESS;
 }
@@ -1193,6 +1286,7 @@ VidPn_CreateNewTargetModeSet(
     _Out_ D3DKMDT_HVIDPNTARGETMODESET*                phVidPnTargetModeSet,
     _Out_ CONST DXGK_VIDPNTARGETMODESET_INTERFACE**   ppVidPnTargetModeSetInterface)
 {
+    LONG Index;
     PDXGKP_VIDPN VidPn;
     PDXGKP_VIDPN_TARGET_MODESET ModeSet;
 
@@ -1203,16 +1297,17 @@ VidPn_CreateNewTargetModeSet(
     if (VidPn == NULL)
         return STATUS_INVALID_PARAMETER;
 
-    if (VidPnTargetId >= VidPn->NumTargets)
+    Index = DxgkpTargetIndex(VidPn, VidPnTargetId);
+    if (Index < 0)
         return STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_TARGET;
 
-    ModeSet = VidPn->TargetModeSets[VidPnTargetId];
+    ModeSet = VidPn->TargetModeSets[Index];
     if (ModeSet == NULL)
     {
         ModeSet = DxgkpAllocateTargetModeSet(VidPn, VidPnTargetId);
         if (ModeSet == NULL)
             return STATUS_INSUFFICIENT_RESOURCES;
-        VidPn->TargetModeSets[VidPnTargetId] = ModeSet;
+        VidPn->TargetModeSets[Index] = ModeSet;
     }
     else
     {
@@ -1240,7 +1335,7 @@ VidPn_AssignTargetModeSet(
     if (VidPn == NULL)
         return STATUS_INVALID_PARAMETER;
 
-    if (VidPnTargetId >= VidPn->NumTargets)
+    if (DxgkpTargetIndex(VidPn, VidPnTargetId) < 0)
         return STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_TARGET;
 
     return STATUS_SUCCESS;
@@ -1547,7 +1642,7 @@ VidPnTopology_AddPath(
 
     /* Validate source/target IDs. */
     if (pVidPnPresentPath->VidPnSourceId >= VidPn->NumSources ||
-        pVidPnPresentPath->VidPnTargetId >= VidPn->NumTargets)
+        DxgkpTargetIndex(VidPn, pVidPnPresentPath->VidPnTargetId) < 0)
     {
         DXGKRNL_WARN("VidPnTopology_AddPath: src=%u tgt=%u out of range\n",
                      pVidPnPresentPath->VidPnSourceId,
@@ -1726,8 +1821,11 @@ VidPnSourceModeSet_AcquirePinnedModeInfo(
     if (ModeSet == NULL)
         return STATUS_INVALID_PARAMETER;
 
+    /* Windows reports "nothing pinned" as the informational status
+     * STATUS_GRAPHICS_MODE_NOT_PINNED with a NULL mode; miniports (AMD's
+     * atikmdag) test for a non-zero status, not for NULL. */
     if (ModeSet->PinnedModeId == (UINT)-1)
-        return STATUS_SUCCESS;
+        return STATUS_GRAPHICS_MODE_NOT_PINNED;
 
     for (i = 0; i < ModeSet->NumModes; i++)
     {
@@ -1738,7 +1836,7 @@ VidPnSourceModeSet_AcquirePinnedModeInfo(
         }
     }
 
-    return STATUS_SUCCESS;
+    return STATUS_GRAPHICS_MODE_NOT_PINNED;
 }
 
 static NTSTATUS APIENTRY
@@ -1955,8 +2053,11 @@ VidPnTargetModeSet_AcquirePinnedModeInfo(
     if (ModeSet == NULL)
         return STATUS_INVALID_PARAMETER;
 
+    /* Windows reports "nothing pinned" as the informational status
+     * STATUS_GRAPHICS_MODE_NOT_PINNED with a NULL mode; miniports (AMD's
+     * atikmdag) test for a non-zero status, not for NULL. */
     if (ModeSet->PinnedModeId == (UINT)-1)
-        return STATUS_SUCCESS;
+        return STATUS_GRAPHICS_MODE_NOT_PINNED;
 
     for (i = 0; i < ModeSet->NumModes; i++)
     {
@@ -1967,7 +2068,7 @@ VidPnTargetModeSet_AcquirePinnedModeInfo(
         }
     }
 
-    return STATUS_SUCCESS;
+    return STATUS_GRAPHICS_MODE_NOT_PINNED;
 }
 
 static NTSTATUS APIENTRY
@@ -2281,6 +2382,7 @@ Monitor_AcquireMonitorSourceModeSet(
     _Out_ D3DKMDT_HMONITORSOURCEMODESET*               phMonitorSourceModeSet,
     _Out_ CONST DXGK_MONITORSOURCEMODESET_INTERFACE**  ppMonitorSourceModeSetInterface)
 {
+    LONG Index;
     PDXGKRNL_ADAPTER Adapter;
     PDXGKP_VIDPN     VidPn;
 
@@ -2298,13 +2400,13 @@ Monitor_AcquireMonitorSourceModeSet(
     if (VidPn == NULL || VidPn->Signature != DXGKP_VIDPN_SIGNATURE)
         return STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_TARGET;
 
-    if (VideoPresentTargetId >= VidPn->NumTargets ||
-        VidPn->MonitorModeSets[VideoPresentTargetId] == NULL)
+    Index = DxgkpTargetIndex(VidPn, VideoPresentTargetId);
+    if (Index < 0 || VidPn->MonitorModeSets[Index] == NULL)
     {
         return STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_TARGET;
     }
 
-    *phMonitorSourceModeSet = (D3DKMDT_HMONITORSOURCEMODESET)VidPn->MonitorModeSets[VideoPresentTargetId];
+    *phMonitorSourceModeSet = (D3DKMDT_HMONITORSOURCEMODESET)VidPn->MonitorModeSets[Index];
     *ppMonitorSourceModeSetInterface = &g_MonitorSourceModeSetInterface;
     return STATUS_SUCCESS;
 }
@@ -2900,7 +3002,7 @@ DxgkSetDisplayMode(
     SetSourceAddress.VidPnSourceId = 0;
     SetSourceAddress.hAllocation = Allocation->MiniportHandle;
     SetSourceAddress.PrimaryAddress = PrimaryAddress;
-    SetSourceAddress.SegmentId = Allocation->SegmentId;
+    SetSourceAddress.PrimarySegment = Allocation->SegmentId;
     SetSourceAddress.Flags.ModeChange = 1;
 
     DXGKRNL_TRACE("DxgkSetDisplayMode: device=0x%X alloc=0x%X seg=%u addr=0x%I64x\n",
@@ -2926,6 +3028,86 @@ DxgkSetDisplayMode(
     }
 
     return STATUS_SUCCESS;
+}
+
+/*
+ * DxgkEnsureBootPrimary
+ *
+ * Creates (or revalidates) the shared primary for VidPN source 0 of a full
+ * WDDM miniport at the committed mode, through the miniport
+ * (GetStandardAllocationDriverData + CreateAllocation), and returns its
+ * VidMm allocation.  The miniport chooses the layout: AMD makes it 1D-tiled
+ * (GRPH_CONTROL ARRAY_MODE=2), so only the GPU may write it.
+ */
+NTSTATUS
+DxgkEnsureBootPrimary(
+    _In_  PDXGKRNL_ADAPTER     Adapter,
+    _Out_ PDXGKVMM_ALLOCATION *OutAllocation)
+{
+    PDXGKVMM_ALLOCATION Allocation;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    *OutAllocation = NULL;
+
+    Status = DxgkpEnsureSharedPrimary(Adapter, 0);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Allocation = DxgkVidMmHandleToAllocation(Adapter->SharedPrimaryAllocationHandle);
+    if (Allocation == NULL)
+        return STATUS_INTERNAL_ERROR;
+
+    *OutAllocation = Allocation;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * DxgkScanoutBootPrimary
+ *
+ * Points VidPN source 0 at the shared primary with
+ * SetVidPnSourceAddress(ModeChange), as Windows does before the first
+ * frame.  The caller must already have filled the primary on the GPU
+ * (kmpresent.c): the miniport scans it out from now on, and the CPU never
+ * writes it (it may be tiled).
+ */
+NTSTATUS
+DxgkScanoutBootPrimary(
+    _In_ PDXGKRNL_ADAPTER Adapter)
+{
+    DXGKARG_SETVIDPNSOURCEADDRESS SetSourceAddress;
+    PDXGKVMM_ALLOCATION Allocation;
+    LARGE_INTEGER PrimaryAddress;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (DXGK_CB_FULL(Adapter, DxgkDdiSetVidPnSourceAddress) == NULL)
+        return STATUS_NOT_SUPPORTED;
+
+    Allocation = DxgkVidMmHandleToAllocation(Adapter->SharedPrimaryAllocationHandle);
+    if (Allocation == NULL || !Allocation->Resident)
+        return STATUS_INVALID_DEVICE_STATE;
+
+    PrimaryAddress = DxgkVidMmGetAllocationPrimaryAddress(Allocation);
+
+    RtlZeroMemory(&SetSourceAddress, sizeof(SetSourceAddress));
+    SetSourceAddress.VidPnSourceId  = 0;
+    SetSourceAddress.hAllocation    = Allocation->MiniportHandle;
+    SetSourceAddress.PrimaryAddress = PrimaryAddress;
+    SetSourceAddress.PrimarySegment = Allocation->SegmentId;
+    SetSourceAddress.Flags.ModeChange = 1;
+
+    Status = DXGK_CB_FULL(Adapter, DxgkDdiSetVidPnSourceAddress)(
+        Adapter->MiniportDeviceContext,
+        &SetSourceAddress);
+
+    DXGKRNL_WARN("DxgkScanoutBootPrimary: %ux%u seg=%u addr=0x%I64x "
+                 "-> SetVidPnSourceAddress 0x%08lX\n",
+                 Adapter->SharedPrimaryWidth, Adapter->SharedPrimaryHeight,
+                 Allocation->SegmentId, PrimaryAddress.QuadPart, Status);
+    return Status;
 }
 
 NTSTATUS

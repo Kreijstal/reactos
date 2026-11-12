@@ -38,9 +38,8 @@
  */
 
 /*
- * paging.h includes dxgmms1_private.h and defines all paging-layer types
- * including DXGKARG_BUILDPAGINGBUFFER, DXGK_OPERATION_*, and
- * DXGKDDI_BUILDPAGINGBUFFER.  Include it before everything else.
+ * paging.h includes dxgmms1_private.h (and with it the WDK-layout
+ * d3dkmddi.h) and defines the paging-layer types.  Include it first.
  */
 #include "paging.h"
 
@@ -330,6 +329,53 @@ DxgkMmsWaitForPagingFence(
 
 
 /* =========================================================================
+ * DxgkMmsCallBuildPagingBuffer  (internal helper)
+ *
+ * Points Args at the adapter's paging buffer and calls the miniport's
+ * DxgkDdiBuildPagingBuffer. As in the WDK contract, the miniport advances
+ * pDmaBuffer past the commands it wrote; the distance is the used size.
+ * ========================================================================= */
+static
+NTSTATUS
+DxgkMmsCallBuildPagingBuffer(
+    _In_    PDXGMMS_ADAPTER_CONTEXT     Adapter,
+    _In_    PDXGMMS_PAGING_BUFFER       PagBuf,
+    _Inout_ DXGKARG_BUILDPAGINGBUFFER  *Args)
+{
+    PDXGMMS_DDI_BUILDPAGINGBUFFER BuildPagingBuffer;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    BuildPagingBuffer = (PDXGMMS_DDI_BUILDPAGINGBUFFER)Adapter->DxgkDdiBuildPagingBuffer;
+    if (BuildPagingBuffer == NULL)
+    {
+        DXGMMS_WARN("DxgkMmsCallBuildPagingBuffer: DxgkDdiBuildPagingBuffer "
+                    "is NULL (miniport does not support paging?)\n");
+        return STATUS_NOT_IMPLEMENTED;
+    }
+
+    Args->pDmaBuffer = PagBuf->Buffer;
+    Args->DmaSize = (UINT)PagBuf->BufferSize;
+    Args->pDmaBufferPrivateData = NULL;
+    Args->DmaBufferPrivateDataSize = 0;
+
+    Status = BuildPagingBuffer(Adapter->MiniportContext, Args);
+    if (!NT_SUCCESS(Status))
+    {
+        DXGMMS_ERR("DxgkMmsCallBuildPagingBuffer: operation %d -> 0x%08lx\n",
+                   (int)Args->Operation, Status);
+        return Status;
+    }
+
+    ASSERT((PUCHAR)Args->pDmaBuffer >= (PUCHAR)PagBuf->Buffer &&
+           (PUCHAR)Args->pDmaBuffer <= (PUCHAR)PagBuf->Buffer + PagBuf->BufferSize);
+    PagBuf->UsedSize = (SIZE_T)((PUCHAR)Args->pDmaBuffer - (PUCHAR)PagBuf->Buffer);
+    return STATUS_SUCCESS;
+}
+
+
+/* =========================================================================
  * DxgkMmsBuildTransferBuffer  (internal helper)
  *
  * Populate a DXGKARG_BUILDPAGINGBUFFER for a DXGK_OPERATION_TRANSFER
@@ -355,7 +401,6 @@ DxgkMmsBuildTransferBuffer(
     _In_opt_ PMDL                  SysMdl)
 {
     DXGKARG_BUILDPAGINGBUFFER   Args;
-    DXGKDDI_BUILDPAGINGBUFFER   BuildPagingBuffer;
     NTSTATUS                    Status;
 
     PAGED_CODE();
@@ -389,13 +434,8 @@ DxgkMmsBuildTransferBuffer(
     /*
      * Build the DXGKARG_BUILDPAGINGBUFFER for DXGK_OPERATION_TRANSFER.
      *
-     * pDmaBuffer        — VA of the GPU command buffer; the miniport writes
-     *                     GPU copy commands starting at this address.
-     * DmaSize           — total available bytes in the command buffer.
-     * DmaBufferWriteOffset — initialised to 0; the miniport advances it
-     *                     as it writes commands.
-     * pDmaBufferPrivateData — NULL; we do not use per-buffer private data
-     *                     for paging operations.
+     * pDmaBuffer/DmaSize — set by DxgkMmsCallBuildPagingBuffer; the
+     *                     miniport advances pDmaBuffer past what it wrote.
      * Operation         — DXGK_OPERATION_TRANSFER.
      *
      * Transfer.hAllocation    — miniport's allocation handle.
@@ -406,25 +446,23 @@ DxgkMmsBuildTransferBuffer(
      * Transfer.Destination    — dest segment + offset or MDL.
      */
     RtlZeroMemory(&Args, sizeof(Args));
+    Args.Operation = DXGK_OPERATION_TRANSFER;
 
-    Args.pDmaBuffer             = PagBuf->Buffer;
-    Args.DmaSize                = (ULONG)PagBuf->BufferSize;
-    Args.DmaBufferWriteOffset   = 0;
-    Args.pDmaBufferPrivateData  = NULL;
-    Args.DmaBufferPrivateDataWriteOffset = 0;
-    Args.Operation              = DXGK_OPERATION_TRANSFER;
+    Args.Transfer.hAllocation    = (HANDLE)Allocation;
+    Args.Transfer.TransferOffset = 0;   /* full transfer from offset 0 */
+    Args.Transfer.TransferSize   = TransferSize;
 
-    Args.Transfer.hAllocation           = (HANDLE)Allocation;
-    Args.Transfer.TransferOffset        = 0;   /* full transfer from offset 0 */
-    Args.Transfer.TransferSize          = TransferSize;
+    Args.Transfer.Source.SegmentId = SrcSegmentId;
+    if (SrcSegmentId == 0)
+        Args.Transfer.Source.pMdl = SysMdl;
+    else
+        Args.Transfer.Source.SegmentAddress.QuadPart = (LONGLONG)SrcOffset;
 
-    Args.Transfer.Source.SegmentId      = SrcSegmentId;
-    Args.Transfer.Source.SegmentAddress = SrcOffset;
-    Args.Transfer.Source.pMdl           = (SrcSegmentId == 0) ? (PMDL)SysMdl : NULL;
-
-    Args.Transfer.Destination.SegmentId      = DstSegmentId;
-    Args.Transfer.Destination.SegmentAddress = DstOffset;
-    Args.Transfer.Destination.pMdl           = (DstSegmentId == 0) ? (PMDL)SysMdl : NULL;
+    Args.Transfer.Destination.SegmentId = DstSegmentId;
+    if (DstSegmentId == 0)
+        Args.Transfer.Destination.pMdl = SysMdl;
+    else
+        Args.Transfer.Destination.SegmentAddress.QuadPart = (LONGLONG)DstOffset;
 
     DXGMMS_TRACE("DxgkMmsBuildTransferBuffer: TRANSFER "
                  "src seg=%u off=0x%I64x dst seg=%u off=0x%I64x size=%Iu\n",
@@ -432,32 +470,9 @@ DxgkMmsBuildTransferBuffer(
                  DstSegmentId, DstOffset,
                  TransferSize);
 
-    /*
-     * Call the miniport's DxgkDdiBuildPagingBuffer.
-     * The function pointer is stored as PVOID in the adapter context and
-     * cast here to the DXGKDDI_BUILDPAGINGBUFFER type from dispmprt.h.
-     * The miniport receives its own opaque context as the first argument.
-     *
-     * IRQL requirement: PASSIVE_LEVEL (caller must ensure this).
-     */
-    BuildPagingBuffer = (DXGKDDI_BUILDPAGINGBUFFER)Adapter->DxgkDdiBuildPagingBuffer;
-    if (BuildPagingBuffer == NULL)
-    {
-        DXGMMS_WARN("DxgkMmsBuildTransferBuffer: DxgkDdiBuildPagingBuffer "
-                    "is NULL (miniport does not support paging?)\n");
-        return STATUS_NOT_IMPLEMENTED;
-    }
-
-    Status = BuildPagingBuffer(Adapter->MiniportContext, &Args);
+    Status = DxgkMmsCallBuildPagingBuffer(Adapter, PagBuf, &Args);
     if (!NT_SUCCESS(Status))
-    {
-        DXGMMS_ERR("DxgkMmsBuildTransferBuffer: miniport returned 0x%08lx\n",
-                   Status);
         return Status;
-    }
-
-    /* Record how many bytes the miniport wrote into the DMA buffer. */
-    PagBuf->UsedSize = Args.DmaBufferWriteOffset;
 
     DXGMMS_TRACE("DxgkMmsBuildTransferBuffer: miniport wrote %Iu bytes "
                  "of GPU commands\n", PagBuf->UsedSize);
@@ -484,7 +499,6 @@ DxgkMmsBuildApertureBuffer(
     _In_opt_ PMDL                  SysMdl)
 {
     DXGKARG_BUILDPAGINGBUFFER   Args;
-    DXGKDDI_BUILDPAGINGBUFFER   BuildPagingBuffer;
     NTSTATUS                    Status;
 
     PAGED_CODE();
@@ -500,13 +514,7 @@ DxgkMmsBuildApertureBuffer(
         return STATUS_INVALID_PARAMETER;
 
     RtlZeroMemory(&Args, sizeof(Args));
-
-    Args.pDmaBuffer             = PagBuf->Buffer;
-    Args.DmaSize                = (ULONG)PagBuf->BufferSize;
-    Args.DmaBufferWriteOffset   = 0;
-    Args.pDmaBufferPrivateData  = NULL;
-    Args.DmaBufferPrivateDataWriteOffset = 0;
-    Args.Operation              = Operation;
+    Args.Operation = (DXGK_BUILDPAGINGBUFFER_OPERATION)Operation;
 
     if (Operation == DXGK_OPERATION_MAP_APERTURE_SEGMENT)
     {
@@ -530,23 +538,9 @@ DxgkMmsBuildApertureBuffer(
                      SegmentId, OffsetInPages, NumberOfPages);
     }
 
-    BuildPagingBuffer = (DXGKDDI_BUILDPAGINGBUFFER)Adapter->DxgkDdiBuildPagingBuffer;
-    if (BuildPagingBuffer == NULL)
-    {
-        DXGMMS_WARN("DxgkMmsBuildApertureBuffer: DxgkDdiBuildPagingBuffer "
-                    "is NULL\n");
-        return STATUS_NOT_IMPLEMENTED;
-    }
-
-    Status = BuildPagingBuffer(Adapter->MiniportContext, &Args);
+    Status = DxgkMmsCallBuildPagingBuffer(Adapter, PagBuf, &Args);
     if (!NT_SUCCESS(Status))
-    {
-        DXGMMS_ERR("DxgkMmsBuildApertureBuffer: miniport returned 0x%08lx\n",
-                   Status);
         return Status;
-    }
-
-    PagBuf->UsedSize = Args.DmaBufferWriteOffset;
 
     DXGMMS_TRACE("DxgkMmsBuildApertureBuffer: miniport wrote %Iu bytes\n",
                  PagBuf->UsedSize);
@@ -659,7 +653,6 @@ DxgkMmsBuildPagingBuffer(
          * The fill pattern is 0 (zero-initialise) for this simplified path.
          */
         DXGKARG_BUILDPAGINGBUFFER   Args;
-        DXGKDDI_BUILDPAGINGBUFFER   BuildPagingBuffer;
 
         if (TransferSize == 0)
         {
@@ -672,30 +665,14 @@ DxgkMmsBuildPagingBuffer(
                      "size=%Iu pattern=0\n", DstOffset, TransferSize);
 
         RtlZeroMemory(&Args, sizeof(Args));
-        Args.pDmaBuffer             = PagBuf->Buffer;
-        Args.DmaSize                = (ULONG)PagBuf->BufferSize;
-        Args.DmaBufferWriteOffset   = 0;
-        Args.Operation              = DXGK_OPERATION_FILL;
-        Args.Fill.SegmentId         = 1;
-        Args.Fill.FillSize          = TransferSize;
-        Args.Fill.FillPattern       = 0;
-        Args.Fill.DestinationSegmentAddress = DstOffset;
+        Args.Operation                   = DXGK_OPERATION_FILL;
+        Args.Fill.hAllocation            = (HANDLE)Allocation;
+        Args.Fill.FillSize               = TransferSize;
+        Args.Fill.FillPattern            = 0;
+        Args.Fill.Destination.SegmentId  = 1;
+        Args.Fill.Destination.SegmentAddress.QuadPart = (LONGLONG)DstOffset;
 
-        BuildPagingBuffer =
-            (DXGKDDI_BUILDPAGINGBUFFER)Adapter->DxgkDdiBuildPagingBuffer;
-        if (BuildPagingBuffer == NULL)
-        {
-            DXGMMS_WARN("DxgkMmsBuildPagingBuffer: FILL: no miniport DDI\n");
-            Status = STATUS_NOT_IMPLEMENTED;
-            break;
-        }
-
-        Status = BuildPagingBuffer(Adapter->MiniportContext, &Args);
-        if (NT_SUCCESS(Status))
-            PagBuf->UsedSize = Args.DmaBufferWriteOffset;
-        else
-            DXGMMS_ERR("DxgkMmsBuildPagingBuffer: FILL miniport "
-                       "returned 0x%08lx\n", Status);
+        Status = DxgkMmsCallBuildPagingBuffer(Adapter, PagBuf, &Args);
         break;
     }
 
@@ -707,7 +684,6 @@ DxgkMmsBuildPagingBuffer(
          * Build a minimal paging buffer with just the DISCARD opcode.
          */
         DXGKARG_BUILDPAGINGBUFFER   Args;
-        DXGKDDI_BUILDPAGINGBUFFER   BuildPagingBuffer;
 
         if (TransferSize == 0)
         {
@@ -720,30 +696,12 @@ DxgkMmsBuildPagingBuffer(
                      "off=0x%I64x size=%Iu\n", SrcOffset, TransferSize);
 
         RtlZeroMemory(&Args, sizeof(Args));
-        Args.pDmaBuffer             = PagBuf->Buffer;
-        Args.DmaSize                = (ULONG)PagBuf->BufferSize;
-        Args.DmaBufferWriteOffset   = 0;
-        Args.Operation              = DXGK_OPERATION_DISCARD_CONTENT;
+        Args.Operation                  = DXGK_OPERATION_DISCARD_CONTENT;
         Args.DiscardContent.hAllocation = (HANDLE)Allocation;
-        Args.DiscardContent.SegmentId = 1;
-        Args.DiscardContent.AllocationSize = TransferSize;
-        Args.DiscardContent.SegmentAddress = SrcOffset;
+        Args.DiscardContent.SegmentId   = 1;
+        Args.DiscardContent.SegmentAddress.QuadPart = (LONGLONG)SrcOffset;
 
-        BuildPagingBuffer =
-            (DXGKDDI_BUILDPAGINGBUFFER)Adapter->DxgkDdiBuildPagingBuffer;
-        if (BuildPagingBuffer == NULL)
-        {
-            DXGMMS_WARN("DxgkMmsBuildPagingBuffer: DISCARD: no miniport DDI\n");
-            Status = STATUS_NOT_IMPLEMENTED;
-            break;
-        }
-
-        Status = BuildPagingBuffer(Adapter->MiniportContext, &Args);
-        if (NT_SUCCESS(Status))
-            PagBuf->UsedSize = Args.DmaBufferWriteOffset;
-        else
-            DXGMMS_ERR("DxgkMmsBuildPagingBuffer: DISCARD miniport "
-                       "returned 0x%08lx\n", Status);
+        Status = DxgkMmsCallBuildPagingBuffer(Adapter, PagBuf, &Args);
         break;
     }
 

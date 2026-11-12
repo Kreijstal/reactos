@@ -170,17 +170,19 @@ typedef struct _DXGK_VIDEO_OUTPUT_CAPABILITIES
     BOOLEAN                             SupportsSdtvModes;
 } DXGK_VIDEO_OUTPUT_CAPABILITIES;
 
+/* WDK order: the Type union first, HpdAwareness last.  The miniport fills
+ * these, so the layout is ABI, not a matter of taste. */
 typedef struct _DXGK_CHILD_CAPABILITIES
 {
-    DXGK_CHILD_DEVICE_HPD_AWARENESS    HpdAwareness;
     union
     {
         DXGK_VIDEO_OUTPUT_CAPABILITIES VideoOutput;
         struct
         {
-            UINT    Reserved;
+            UINT    MustBeZero;
         } Other;
     } Type;
+    DXGK_CHILD_DEVICE_HPD_AWARENESS    HpdAwareness;
 } DXGK_CHILD_CAPABILITIES;
 
 
@@ -287,12 +289,13 @@ typedef union _DXGK_START_FLAGS
     UINT    Value;
 } DXGK_START_FLAGS;
 
+/* Layout must match the WDK: miniports read RequiredDmaQueueEntry at
+ * offset 0 (AMD's atikmdag sizes its per-pipe buffers from it). */
 typedef struct _DXGK_START_INFO
 {
-    ULONG               RequiredDxgkVtableVersion;
     ULONG               RequiredDmaQueueEntry;
-    LUID                AdapterLuid;
-    DXGK_START_FLAGS    StartFlags;
+    GUID                AdapterGuid;
+    LUID                AdapterLuid;    /* WDDM 1.2+ */
 } DXGK_START_INFO, *PDXGK_START_INFO;
 
 
@@ -328,6 +331,66 @@ typedef enum _DXGK_EVENT_TYPE
 /* DxgkCbEvalAcpiMethod input signature: an ACPI_EVAL_INPUT_BUFFER_COMPLEX
  * whose arguments are also meant for the adapter's child devices */
 #define DXGK_ACPI_PASS_ARGS_TO_CHILDREN 'araP'
+
+/* DxgkCbQueryServices service types */
+typedef enum _DXGK_SERVICES {
+    DxgkServicesAgp,
+    DxgkServicesDebugReport,
+    DxgkServicesTimedOperation,
+    DxgkServicesSPB,
+    DxgkServicesBDD,
+    DxgkServicesFirmwareTable,
+    DxgkServicesIDD,
+} DXGK_SERVICES;
+
+/* DxgkServicesTimedOperation */
+#define DXGK_TIMED_OPERATION_INTERFACE_VERSION_1    0x01
+#define DXGK_TIMED_OPERATION_TIMEOUT_MAX_SECONDS    5
+
+typedef struct _DXGK_TIMED_OPERATION {
+    USHORT Size;
+    ULONG_PTR OwnerTag;
+    BOOLEAN OsHandled;
+    BOOLEAN TimeoutTriggered;
+    LARGE_INTEGER Timeout;
+    LARGE_INTEGER StartTick;
+} DXGK_TIMED_OPERATION, *PDXGK_TIMED_OPERATION;
+
+/* atikmdag presets Size = 0x28 and keeps Timeout/StartTick at 0x18/0x20. */
+#ifdef _WIN64
+C_ASSERT(FIELD_OFFSET(DXGK_TIMED_OPERATION, Timeout) == 0x18);
+C_ASSERT(sizeof(DXGK_TIMED_OPERATION) == 0x28);
+#endif
+
+typedef struct _DXGK_TIMED_OPERATION_INTERFACE {
+    USHORT Size;
+    USHORT Version;
+    PVOID Context;
+    PINTERFACE_REFERENCE InterfaceReference;
+    PINTERFACE_DEREFERENCE InterfaceDereference;
+    NTSTATUS (*TimedOperationStart)(
+        _Out_ DXGK_TIMED_OPERATION *Op,
+        _In_ const LARGE_INTEGER *Timeout,
+        _In_ BOOLEAN OsHandled);
+    NTSTATUS (*TimedOperationDelay)(
+        _Inout_ DXGK_TIMED_OPERATION *Op,
+        _In_ KPROCESSOR_MODE WaitMode,
+        _In_ BOOLEAN Alertable,
+        _In_opt_ const LARGE_INTEGER *Interval);
+    NTSTATUS (*TimedOperationWaitForSingleObject)(
+        _Inout_ DXGK_TIMED_OPERATION *Op,
+        _In_ PVOID Object,
+        _In_ KWAIT_REASON WaitReason,
+        _In_ KPROCESSOR_MODE WaitMode,
+        _In_ BOOLEAN Alertable,
+        _In_opt_ const LARGE_INTEGER *Timeout);
+} DXGK_TIMED_OPERATION_INTERFACE, *PDXGK_TIMED_OPERATION_INTERFACE;
+
+/* atikmdag copies the interface and calls Start/Delay at +0x20/+0x28. */
+#ifdef _WIN64
+C_ASSERT(FIELD_OFFSET(DXGK_TIMED_OPERATION_INTERFACE, TimedOperationStart) == 0x20);
+C_ASSERT(FIELD_OFFSET(DXGK_TIMED_OPERATION_INTERFACE, TimedOperationDelay) == 0x28);
+#endif
 
 
 /* =========================================================================
@@ -807,18 +870,7 @@ typedef union _D3DKMT_PRESENT_DISPLAY_ONLY_FLAGS
     UINT Value;
 } D3DKMT_PRESENT_DISPLAY_ONLY_FLAGS, *PD3DKMT_PRESENT_DISPLAY_ONLY_FLAGS;
 
-/*
- * Reserved for OS use by asynchronous KMDOD presents.
- * ReactOS currently drives display-only presents synchronously and
- * always sets the callback pointer to NULL.
- */
-typedef struct _DXGKARGCB_PRESENT_DISPLAYONLY_PROGRESS
-{
-    D3DDDI_VIDEO_PRESENT_SOURCE_ID               VidPnSourceId;
-    ULONG                                        ProgressId;
-} DXGKARGCB_PRESENT_DISPLAYONLY_PROGRESS,
- *PDXGKARGCB_PRESENT_DISPLAYONLY_PROGRESS;
-
+/* DXGKARGCB_PRESENT_DISPLAYONLY_PROGRESS is in d3dkmddi.h, as in the WDK. */
 typedef VOID
 (APIENTRY *DXGKCB_PRESENT_DISPLAYONLY_PROGRESS)(
     _In_ HANDLE hAdapter,

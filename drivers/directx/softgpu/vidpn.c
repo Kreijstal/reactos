@@ -232,6 +232,8 @@ SoftGpuDdiCommitVidPn(
  *
  * IRQL: PASSIVE_LEVEL or DISPATCH_LEVEL
  */
+#define PrimaryAddressOf(Args) ((ULONGLONG)(Args)->PrimaryAddress.QuadPart)
+
 NTSTATUS
 APIENTRY
 SoftGpuDdiSetVidPnSourceAddress(
@@ -260,10 +262,28 @@ SoftGpuDdiSetVidPnSourceAddress(
         return STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_SOURCE;
     }
 
-    if (SetVidPnSourceAddress->SegmentId != 0 &&
-        SetVidPnSourceAddress->SegmentId != SOFTGPU_SEGMENT_ID)
+    if (SetVidPnSourceAddress->PrimarySegment != 0 &&
+        SetVidPnSourceAddress->PrimarySegment != SOFTGPU_SEGMENT_ID)
     {
         return STATUS_GRAPHICS_INVALID_ALLOCATION_USAGE;
+    }
+
+    if (Device->HasVram)
+    {
+        PSOFTGPU_ALLOC Alloc = (PSOFTGPU_ALLOC)SetVidPnSourceAddress->hAllocation;
+
+        /* Move the DISPI scanout to the primary at its own geometry. */
+        if (Alloc == NULL || Alloc->Magic != SOFTGPU_ALLOC_MAGIC || Alloc->Pitch == 0 ||
+            PrimaryAddressOf(SetVidPnSourceAddress) < Device->SegmentBase ||
+            PrimaryAddressOf(SetVidPnSourceAddress) + Alloc->Size > Device->VramSize)
+        {
+            return STATUS_GRAPHICS_INVALID_ALLOCATION_USAGE;
+        }
+        Device->Width = Alloc->Width;
+        Device->Height = Alloc->Height;
+        return SoftGpuDisplayScanout(Device,
+                                     PrimaryAddressOf(SetVidPnSourceAddress),
+                                     Alloc->Pitch);
     }
 
     FbBase = (ULONGLONG)Device->FrameBufferPhys.QuadPart;

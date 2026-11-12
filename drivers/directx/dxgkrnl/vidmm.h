@@ -56,16 +56,17 @@ typedef struct _DXGKRNL_SEGMENT
      */
     LONGLONG            UsedSize;
 
-    /* Physical base address of the segment (VRAM or aperture window). */
+    /*
+     * GPU logical base address of the segment (DXGK_SEGMENTDESCRIPTOR
+     * BaseAddress).  This is what the GPU uses; it is not a CPU address.
+     */
     PHYSICAL_ADDRESS    BaseAddress;
 
     /*
-     * Kernel-mode virtual address base established by MmMapIoSpace.
-     * NULL until the first CPU-visible allocation is mapped; released
-     * at adapter teardown.  Meaningful only for non-aperture CPU-visible
-     * segments.
+     * CPU physical base of the segment when Flags.CpuVisible (the PCI BAR
+     * window onto it).  CPU mappings must use this, never BaseAddress.
      */
-    PVOID               CpuBase;
+    PHYSICAL_ADDRESS    CpuTranslatedAddress;
 
     /* Capability flags (DXGK_SEGMENTFLAG_* bitmask from d3dkmddi.h). */
     DXGK_SEGMENTFLAGS   Flags;
@@ -90,6 +91,7 @@ typedef struct _DXGKRNL_SEGMENT
      */
     ULONG               PagingBufferSegmentId;
     ULONG               PagingBufferSize;
+    ULONG               PagingBufferPrivateDataSize;
 
 } DXGKRNL_SEGMENT, *PDXGKRNL_SEGMENT;
 
@@ -197,6 +199,9 @@ typedef struct _DXGKVMM_ALLOCATION
      * SystemMemory (system memory / aperture).  NULL when not mapped.
      */
     PVOID               CpuAddress;
+
+    /* TRUE when CpuAddress is a per-allocation MmMapIoSpace mapping. */
+    BOOLEAN             CpuAddressIsIoSpace;
 
     /*
      * User-mode mapping state for D3DKMTLock/D3DKMTUnlock.

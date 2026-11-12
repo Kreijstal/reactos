@@ -81,9 +81,12 @@ NTAPI
 InbvGetGopFrameBufferInfo(
     _Out_ PLOADER_PARAMETER_FRAMEBUFFER FrameBufferInfo);
 
+typedef BOOLEAN (NTAPI *INBV_RESET_DISPLAY_PARAMETERS)(_In_ ULONG Cols, _In_ ULONG Rows);
+
 VOID
 NTAPI
-InbvAcquireDisplayOwnership(VOID);
+InbvNotifyDisplayOwnershipLost(
+    _In_ INBV_RESET_DISPLAY_PARAMETERS Callback);
 
 /* ========================================================================
  * POST (boot) display ownership
@@ -668,7 +671,7 @@ DxgkpRefreshTrackedSharedPrimaryScanout(
     SetSourceAddress.VidPnSourceId = Entry->RefreshVidPnSourceId;
     SetSourceAddress.hAllocation = Allocation->MiniportHandle;
     SetSourceAddress.PrimaryAddress = PrimaryAddress;
-    SetSourceAddress.SegmentId = Allocation->SegmentId;
+    SetSourceAddress.PrimarySegment = Allocation->SegmentId;
     SetSourceAddress.Flags.FlipImmediate = 1;
 
     Status = DXGK_CB_FULL(Adapter, DxgkDdiSetVidPnSourceAddress)(
@@ -2436,10 +2439,169 @@ DxgkCbIndicateChildStatus(
 }
 
 /*
+ * DxgkServicesTimedOperation
+ *
+ * A timed operation is a deadline (at most
+ * DXGK_TIMED_OPERATION_TIMEOUT_MAX_SECONDS) that the miniport's delays and
+ * waits are clamped to. This follows Windows' dxgkrnl (TdrTimedOperation*):
+ * - Start requires Op->Size preset to sizeof(DXGK_TIMED_OPERATION), takes the
+ *   magnitude of *Timeout (the sign is ignored), accepts zero (an already
+ *   expired operation) and clamps anything longer than the maximum.
+ * - Delay/Wait ignore the sign of their interval. Delay with no (or a zero)
+ *   interval returns at once, so "while (!ready) Delay(Op, ..., NULL)" is a
+ *   poll bounded by the deadline. Wait with no (or a zero) timeout waits out
+ *   the deadline.
+ * - Whenever the deadline has passed (before or after the delay/wait), the
+ *   call sets TimeoutTriggered and returns STATUS_TIMEOUT, or, when the
+ *   miniport asked the OS to handle the timeout, bugchecks with
+ *   THREAD_STUCK_IN_DEVICE_DRIVER.
+ * Timeout and StartTick are [system] fields; we keep them in 100ns
+ * interrupt-time units.
+ */
+#define DXGK_TIMED_OPERATION_MAX_100NS \
+    ((LONGLONG)DXGK_TIMED_OPERATION_TIMEOUT_MAX_SECONDS * 10 * 1000 * 1000)
+
+#ifndef THREAD_STUCK_IN_DEVICE_DRIVER
+#define THREAD_STUCK_IN_DEVICE_DRIVER 0xEA
+#endif
+
+static VOID
+DxgkpTimedOpInterfaceNop(
+    _In_ PVOID Context)
+{
+    UNREFERENCED_PARAMETER(Context);
+}
+
+/* Remaining time of Op in 100ns units; 0 once expired */
+static LONGLONG
+DxgkpTimedOpRemaining(
+    _In_ const DXGK_TIMED_OPERATION *Op)
+{
+    LONGLONG Elapsed = (LONGLONG)KeQueryInterruptTime() - Op->StartTick.QuadPart;
+
+    return (Elapsed >= Op->Timeout.QuadPart) ? 0 : Op->Timeout.QuadPart - Elapsed;
+}
+
+static NTSTATUS
+DxgkpTimedOpExpired(
+    _Inout_ DXGK_TIMED_OPERATION *Op)
+{
+    Op->TimeoutTriggered = TRUE;
+    DXGKRNL_WARN("TimedOperation expired: Op=%p owner=%p timeout=%I64d00ns elapsed=%I64d00ns caller=%p\n",
+                 Op, (PVOID)Op->OwnerTag, Op->Timeout.QuadPart,
+                 (LONGLONG)KeQueryInterruptTime() - Op->StartTick.QuadPart, _ReturnAddress());
+    if (Op->OsHandled)
+    {
+        KeBugCheckEx(THREAD_STUCK_IN_DEVICE_DRIVER, (ULONG_PTR)KeGetCurrentThread(),
+                     0, 0, 0);
+    }
+    return STATUS_TIMEOUT;
+}
+
+static LONGLONG
+DxgkpTimedOpMagnitude(
+    _In_ LONGLONG Value)
+{
+    return (Value < 0) ? -Value : Value;
+}
+
+static NTSTATUS
+DxgkpTimedOperationStart(
+    _Out_ DXGK_TIMED_OPERATION *Op,
+    _In_ const LARGE_INTEGER *Timeout,
+    _In_ BOOLEAN OsHandled)
+{
+    LONGLONG Span;
+
+    PAGED_CODE();
+
+    if (Op == NULL || Op->Size != sizeof(*Op) || Timeout == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    Span = DxgkpTimedOpMagnitude(Timeout->QuadPart);
+    if (Span > DXGK_TIMED_OPERATION_MAX_100NS)
+        Span = DXGK_TIMED_OPERATION_MAX_100NS;
+
+    Op->OwnerTag = (ULONG_PTR)_ReturnAddress();
+    Op->OsHandled = (OsHandled != FALSE);
+    Op->TimeoutTriggered = FALSE;
+    Op->Timeout.QuadPart = Span;
+    Op->StartTick.QuadPart = (LONGLONG)KeQueryInterruptTime();
+    DXGKRNL_TRACE("TimedOperationStart: Op=%p timeout=%I64d00ns OsHandled=%u owner=%p\n",
+                  Op, Span, OsHandled, (PVOID)Op->OwnerTag);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+DxgkpTimedOperationDelay(
+    _Inout_ DXGK_TIMED_OPERATION *Op,
+    _In_ KPROCESSOR_MODE WaitMode,
+    _In_ BOOLEAN Alertable,
+    _In_opt_ const LARGE_INTEGER *Interval)
+{
+    LONGLONG Remaining, Span;
+    LARGE_INTEGER Delay;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    PAGED_CODE();
+    ASSERT(Op != NULL && Op->Size == sizeof(*Op));
+
+    Remaining = DxgkpTimedOpRemaining(Op);
+    if (Remaining != 0 && Interval != NULL && Interval->QuadPart != 0)
+    {
+        Span = DxgkpTimedOpMagnitude(Interval->QuadPart);
+        Delay.QuadPart = -min(Span, Remaining);
+        Status = KeDelayExecutionThread(WaitMode, Alertable, &Delay);
+        DXGKRNL_VERBOSE("TimedOperationDelay: Op=%p delay=%I64d remaining=%I64d -> 0x%08lx\n",
+                        Op, Delay.QuadPart, Remaining, Status);
+        Remaining = DxgkpTimedOpRemaining(Op);
+    }
+
+    if (Remaining == 0)
+        return DxgkpTimedOpExpired(Op);
+    return Status;
+}
+
+static NTSTATUS
+DxgkpTimedOperationWaitForSingleObject(
+    _Inout_ DXGK_TIMED_OPERATION *Op,
+    _In_ PVOID Object,
+    _In_ KWAIT_REASON WaitReason,
+    _In_ KPROCESSOR_MODE WaitMode,
+    _In_ BOOLEAN Alertable,
+    _In_opt_ const LARGE_INTEGER *Timeout)
+{
+    LONGLONG Remaining, Span;
+    LARGE_INTEGER Wait;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+    ASSERT(Op != NULL && Op->Size == sizeof(*Op) && Object != NULL);
+
+    Remaining = DxgkpTimedOpRemaining(Op);
+    if (Remaining == 0)
+        return DxgkpTimedOpExpired(Op);
+
+    Span = Remaining;
+    if (Timeout != NULL && Timeout->QuadPart != 0)
+        Span = min(DxgkpTimedOpMagnitude(Timeout->QuadPart), Remaining);
+    Wait.QuadPart = -Span;
+
+    Status = KeWaitForSingleObject(Object, WaitReason, WaitMode, Alertable, &Wait);
+    DXGKRNL_TRACE("TimedOperationWait: Op=%p owner=%p obj=%p type=%u wait=%I64d remaining=%I64d caller=%p -> 0x%08lx\n",
+                  Op, (PVOID)Op->OwnerTag, Object, ((PDISPATCHER_HEADER)Object)->Type,
+                  Wait.QuadPart, Remaining, _ReturnAddress(), Status);
+    if (DxgkpTimedOpRemaining(Op) == 0)
+        return DxgkpTimedOpExpired(Op);
+    return Status;
+}
+
+/*
  * DxgkCbQueryServices
  *
- * Returns an interface for the requested service type. Used by miniports
- * to obtain DMA adapter, AGP, or debug report interfaces.
+ * Returns the interface for a DXGK_SERVICES type. Every miniport may query
+ * the timed-operation service; AGP is only offered on AGP buses, which no
+ * adapter we drive sits on.
  */
 NTSTATUS
 APIENTRY
@@ -2448,26 +2610,46 @@ DxgkCbQueryServices(
     _In_  ULONG   ServicesType,   /* DXGK_SERVICES enum */
     _Inout_ PVOID Interface)
 {
+    PDXGKRNL_ADAPTER Adapter;
+
+    PAGED_CODE();
+
     DXGKRNL_TRACE("DxgkCbQueryServices: handle=%p type=%lu iface=%p\n",
                   DeviceHandle, ServicesType, Interface);
 
-    /*
-     * DXGK_SERVICES enum values:
-     *   0 = DxgkServicesAgp          (AGP interface)
-     *   1 = DxgkServicesBusInterface (PCI bus interface — internal)
-     *   2 = DxgkServicesDebugReport  (debug report interface)
-     *   3 = DxgkServicesTimedOperation
-     *   4 = DxgkServicesSPB
-     *   5 = DxgkServicesFirmwareTable
-     *
-     * For DOD drivers, none of these are required.  Full WDDM drivers
-     * may use AGP or debug report.  Return NOT_SUPPORTED for now;
-     * miniports that need these services will fall back gracefully.
-     */
-    UNREFERENCED_PARAMETER(DeviceHandle);
-    UNREFERENCED_PARAMETER(Interface);
+    Adapter = DxgkpHandleToAdapter(DeviceHandle);
+    if (Adapter == NULL || Interface == NULL)
+        return STATUS_INVALID_PARAMETER;
 
-    return STATUS_NOT_SUPPORTED;
+    switch (ServicesType)
+    {
+        case DxgkServicesTimedOperation:
+        {
+            PDXGK_TIMED_OPERATION_INTERFACE Timed = Interface;
+
+            if (Timed->Size < sizeof(*Timed) ||
+                Timed->Version < DXGK_TIMED_OPERATION_INTERFACE_VERSION_1)
+            {
+                DXGKRNL_WARN("DxgkCbQueryServices: timed operation Size=%u Version=%u\n",
+                             Timed->Size, Timed->Version);
+                return STATUS_NOT_SUPPORTED;
+            }
+
+            Timed->Size = sizeof(*Timed);
+            Timed->Version = DXGK_TIMED_OPERATION_INTERFACE_VERSION_1;
+            Timed->Context = Adapter;
+            Timed->InterfaceReference = DxgkpTimedOpInterfaceNop;
+            Timed->InterfaceDereference = DxgkpTimedOpInterfaceNop;
+            Timed->TimedOperationStart = DxgkpTimedOperationStart;
+            Timed->TimedOperationDelay = DxgkpTimedOperationDelay;
+            Timed->TimedOperationWaitForSingleObject = DxgkpTimedOperationWaitForSingleObject;
+            return STATUS_SUCCESS;
+        }
+
+        default:
+            DXGKRNL_WARN("DxgkCbQueryServices: service %lu not provided\n", ServicesType);
+            return STATUS_NOT_SUPPORTED;
+    }
 }
 
 /*
@@ -2675,6 +2857,24 @@ DxgkpAcquireVbeDisplayOwnership(
                 FbPhysAddr.QuadPart, DisplayInformation->Pitch);
 
     return TRUE;
+}
+
+/*
+ * Called by InbvAcquireDisplayOwnership when INBV takes the display back
+ * (bugcheck).  Windows switches the miniport to its system display
+ * (DxgkDdiSystemDisplayEnable) there; that is not implemented yet, so the
+ * bugcheck text lands on whatever the miniport scans out.
+ */
+static
+BOOLEAN
+NTAPI
+DxgkpInbvResetDisplay(
+    _In_ ULONG Cols,
+    _In_ ULONG Rows)
+{
+    UNREFERENCED_PARAMETER(Cols);
+    UNREFERENCED_PARAMETER(Rows);
+    return FALSE;
 }
 
 NTSTATUS
@@ -2914,11 +3114,17 @@ DxgkCbAcquirePostDisplayOwnership(
                   DisplayInformation->PhysicAddress.QuadPart);
 
     /*
-     * Transfer display ownership from InbV to the miniport.
-     * After this call InbV stops writing to the framebuffer.
+     * Transfer display ownership from InbV to the miniport, as videoprt does
+     * for XDDM: from now on InbV (bootvid) must not write the firmware
+     * framebuffer.  The miniport is about to scan out its own (tiled) primary
+     * from that same memory, so every boot-video string - e.g. the KDNET
+     * transport's "break-in" trace - would land there as linear rows, a
+     * full-width staircase band (seen on the X550DP on every KD break-in).
+     * InbvAcquireDisplayOwnership, used here before, does the opposite: it
+     * hands the display (back) to InbV.
      */
     StepStart100ns = DxgkpTraceNow100ns();
-    InbvAcquireDisplayOwnership();
+    InbvNotifyDisplayOwnershipLost(DxgkpInbvResetDisplay);
     OwnershipUs = DxgkpTraceElapsedUs(StepStart100ns);
 
     g_PostDisplayOwnerAdapter = (PDXGKRNL_ADAPTER)DeviceHandle;
@@ -3505,12 +3711,29 @@ DxgkAdapterStart(
     }
 
     /*
+     * As VidMm does at adapter start: the system (paging) device/context and
+     * the GDI device/context of a full WDDM miniport.  Failure is logged and
+     * leaves the CPU present path in place.
+     */
+    DxgkKmPresentInitialize(Adapter);
+
+    /*
      * Create the VidPN (Video Present Network) for this adapter.
      * The VidPN is needed by the miniport driver for mode enumeration
      * (IsSupportedVidPn, EnumVidPnCofuncModality, CommitVidPn).
      */
     {
         D3DKMDT_HVIDPN hVidPn = NULL;
+
+        /* Windows asks for the children before it builds a VidPN: the
+         * VidPN target IDs are the ChildUids the miniport reports. */
+        Status = DxgkpQueryChildDescriptors(Adapter);
+        if (!NT_SUCCESS(Status))
+        {
+            DXGKRNL_WARN("DxgkAdapterStart: DxgkpQueryChildDescriptors failed "
+                         "0x%08lX; VidPN target IDs fall back to indices\n", Status);
+        }
+
         StepStart100ns = DxgkpTraceNow100ns();
         Status = DxgkVidPnCreateForAdapter(Adapter, &hVidPn);
         VidPnUs = DxgkpTraceElapsedUs(StepStart100ns);
@@ -3697,8 +3920,10 @@ DxgkAdapterStop(
         Adapter->VidPn = NULL;
     }
 
+    DxgkKmPresentTeardown(Adapter);
     DxgkDestroySharedPrimary(Adapter);
     DxgkReleaseTrackedDmaBuffers(Adapter);
+    DxgkKmPagingTeardown(Adapter);
 
     /* Tear down the video scheduler before the memory manager. */
     VidSchDestroy(Adapter);
