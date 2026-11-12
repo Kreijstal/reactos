@@ -72,6 +72,10 @@ VOID ICMPReceive(
     PIP_INTERFACE Interface,
     PIP_PACKET IPPacket);
 
+VOID
+IcmpEchoReceive(
+    _In_ PIP_PACKET IPPacket);
+
 VOID ICMPReply(
     PIP_INTERFACE Interface,
     PIP_PACKET IPPacket,

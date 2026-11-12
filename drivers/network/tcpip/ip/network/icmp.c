@@ -86,6 +86,11 @@ VOID ICMPReceive(
     {
         ICMPReply(Interface, IPPacket, ICMP_TYPE_ECHO_REPLY, 0);
     }
+    else
+    {
+        /* Replies to our own echo requests (IcmpSendEcho) */
+        IcmpEchoReceive(IPPacket);
+    }
 }
 
 VOID ICMPReply(
