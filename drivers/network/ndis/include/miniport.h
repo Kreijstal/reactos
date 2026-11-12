@@ -108,6 +108,15 @@ typedef struct _LOGICAL_ADAPTER
     PVOID                       WdfReserved[4];         /* NdisGetDeviceReservedExtension area
                                                            (NDIS-WDF miniports stash their
                                                            framework context here) */
+
+    /* Serialization of a serialized (non-NDIS_ATTRIBUTE_DESERIALIZE) miniport:
+     * NDIS never runs two of its MiniportSend(Packets)/MiniportHandleInterrupt
+     * at once. Calls that find it busy are deferred to the owner (see
+     * MiniAcquireSerialization / MiniReleaseSerialization). */
+    KSPIN_LOCK                  SerialLock;
+    BOOLEAN                     SerialOwned;            /* A MiniportXxx call is in progress */
+    BOOLEAN                     SerialDpcDeferred;      /* HandleInterrupt to run on release */
+    BOOLEAN                     SerialSendDeferred;     /* Sends were queued, kick the worker on release */
 } LOGICAL_ADAPTER, *PLOGICAL_ADAPTER;
 
 #define GET_LOGICAL_ADAPTER(Handle)((PLOGICAL_ADAPTER)Handle)
@@ -211,5 +220,23 @@ VOID
 MiniWorkItemComplete(
     PLOGICAL_ADAPTER     Adapter,
     NDIS_WORK_ITEM_TYPE  WorkItemType);
+
+BOOLEAN
+MiniIsSerialized(
+    PLOGICAL_ADAPTER Adapter);
+
+VOID
+MiniRunHandleInterrupt(
+    PLOGICAL_ADAPTER Adapter);
+
+VOID
+MiniReleaseSerialization(
+    PLOGICAL_ADAPTER Adapter);
+
+NDIS_STATUS
+MiniSendSerialized(
+    PLOGICAL_ADAPTER Adapter,
+    PNDIS_PACKET     Packet,
+    BOOLEAN          Requeue);
 
 /* EOF */

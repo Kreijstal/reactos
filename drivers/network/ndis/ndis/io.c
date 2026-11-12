@@ -44,15 +44,28 @@ VOID NTAPI HandleDeferredProcessing(
       return;
   }
 
-  /* Call the deferred interrupt service handler for this adapter */
-  (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.HandleInterruptHandler)(
-      Adapter->NdisMiniportBlock.MiniportAdapterContext);
+  if (MiniIsSerialized(Adapter))
+  {
+      /* A serialized miniport's MiniportHandleInterrupt never runs
+       * concurrently with its MiniportSend: if a send (or anything else
+       * serialized) is in progress, its owner runs the handler when done */
+      KeAcquireSpinLockAtDpcLevel(&Adapter->SerialLock);
+      if (Adapter->SerialOwned)
+      {
+          Adapter->SerialDpcDeferred = TRUE;
+          KeReleaseSpinLockFromDpcLevel(&Adapter->SerialLock);
+          return;
+      }
+      Adapter->SerialOwned = TRUE;
+      KeReleaseSpinLockFromDpcLevel(&Adapter->SerialLock);
 
-  /* re-enable the interrupt */
-  NDIS_DbgPrint(MAX_TRACE, ("re-enabling the interrupt\n"));
-  if(Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.EnableInterruptHandler)
-    (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.EnableInterruptHandler)(
-        Adapter->NdisMiniportBlock.MiniportAdapterContext);
+      MiniRunHandleInterrupt(Adapter);
+      MiniReleaseSerialization(Adapter);
+  }
+  else
+  {
+      MiniRunHandleInterrupt(Adapter);
+  }
 
   NDIS_DbgPrint(MAX_TRACE, ("Leaving.\n"));
 }
