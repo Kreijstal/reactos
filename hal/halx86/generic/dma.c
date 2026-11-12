@@ -1839,6 +1839,11 @@ IoFreeAdapterChannel(IN PADAPTER_OBJECT AdapterObject)
         AdapterObject->CurrentWcb = WaitContextBlock;
         AdapterObject->NumberOfMapRegisters = WaitContextBlock->NumberOfMapRegisters;
 
+        /* Each dequeued request needs its own grant: a stale Index from the
+         * previous round, with the master queue busy, handed this request the
+         * previous one's (already freed) map registers without reserving them. */
+        Index = MAXULONG;
+
         if ((WaitContextBlock->NumberOfMapRegisters) && (AdapterObject->MasterAdapter))
         {
             KeAcquireSpinLock(&MasterAdapter->SpinLock, &OldIrql);
