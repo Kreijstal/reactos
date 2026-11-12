@@ -274,6 +274,68 @@ AcpiGetName (
     return AE_OK;
 }
 
+/* The control methods the tests evaluate, with the parameter counts the ACPI spec declares */
+static const struct
+{
+    CHAR Name[ACPI_NAMESEG_SIZE + 1];
+    UINT8 ParamCount;
+} DrvpMethods[] =
+{
+    { "_STM", 3 },
+    { "_GTM", 0 },
+    { "_BIF", 0 },
+    { "_PCL", 0 },
+    { "_PRT", 0 },
+    { "_DSM", 4 },
+};
+
+ACPI_STATUS
+AcpiGetHandle (
+    ACPI_HANDLE             Parent,
+    ACPI_STRING             Pathname,
+    ACPI_HANDLE             *RetHandle)
+{
+    ULONG i;
+
+    UNREFERENCED_PARAMETER(Parent);
+
+    for (i = 0; i < RTL_NUMBER_OF(DrvpMethods); i++)
+    {
+        if (strcmp(Pathname, DrvpMethods[i].Name) == 0)
+        {
+            *RetHandle = (ACPI_HANDLE)&DrvpMethods[i];
+            return AE_OK;
+        }
+    }
+
+    return AE_NOT_FOUND;
+}
+
+ACPI_STATUS
+AcpiGetObjectInfo (
+    ACPI_HANDLE             Object,
+    ACPI_DEVICE_INFO        **ReturnBuffer)
+{
+    const ULONG_PTR Index = ((ULONG_PTR)Object - (ULONG_PTR)&DrvpMethods[0]) / sizeof(DrvpMethods[0]);
+    ACPI_DEVICE_INFO *Info;
+
+    ok(Index < RTL_NUMBER_OF(DrvpMethods), "Unexpected handle %p\n", Object);
+    if (Index >= RTL_NUMBER_OF(DrvpMethods))
+        return AE_BAD_PARAMETER;
+
+    Info = AcpiOsAllocate(sizeof(*Info));
+    if (!Info)
+        return AE_NO_MEMORY;
+
+    RtlZeroMemory(Info, sizeof(*Info));
+    Info->Type = ACPI_TYPE_METHOD;
+    Info->ParamCount = DrvpMethods[Index].ParamCount;
+    RtlCopyMemory(&Info->Name, DrvpMethods[Index].Name, ACPI_NAMESEG_SIZE);
+
+    *ReturnBuffer = Info;
+    return AE_OK;
+}
+
 ACPI_STATUS
 AcpiEvaluateObject (
     ACPI_HANDLE             Object,
