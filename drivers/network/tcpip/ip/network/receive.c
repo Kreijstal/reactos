@@ -335,6 +335,11 @@ VOID ProcessFragment(
     IPDR->Id         = IPv4Header->Id;
     IPDR->Protocol   = IPv4Header->Protocol;
     IPDR->TimeoutCount = 0;
+    /* Lookaside memory is recycled: until the first fragment arrives there
+     * is no header, and FreeIPDR must not free a previous user's */
+    IPDR->IPv4Header = NULL;
+    IPDR->HeaderSize = 0;
+    IPDR->DataSize   = 0;
     InitializeListHead(&IPDR->FragmentListHead);
     InitializeListHead(&IPDR->HoleListHead);
     InsertTailList(&IPDR->HoleListHead, &Hole->ListEntry);
