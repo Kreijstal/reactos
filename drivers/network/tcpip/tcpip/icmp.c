@@ -14,23 +14,46 @@
 #undef UNIMPLEMENTED
 #include <reactos/debug.h>
 
+/*
+ * An echo request in flight. Replies are matched to it by the identifier and
+ * sequence number of the echo request they answer (an echo reply carries
+ * them in its own header, an ICMP error in the copy of the request it
+ * quotes), not by address file: every raw ICMP address file receives every
+ * ICMP datagram, so a request must never take a reply meant for another one,
+ * including late replies to requests that already ended.
+ */
 typedef struct _ICMP_PACKET_CONTEXT
 {
-    TDI_REQUEST TdiRequest;
-    KDPC TimeoutDpc;
-    KEVENT InitializationFinishedEvent;
-    KEVENT DatagramProcessedEvent;
-    LARGE_INTEGER TimerResolution;
-    INT64 StartTicks;
-    PIRP Irp;
+    /* On IcmpEchoRequestList while Accepting, protected by IcmpEchoRequestLock */
+    LIST_ENTRY ListEntry;
+    BOOLEAN Accepting;
+    BOOLEAN TimerSet;
+    UINT16 Identifier;
+    UINT16 Sequence;
     PUCHAR CurrentReply;
     UINT32 RemainingSize;
     LONG nReplies;
-    PIO_WORKITEM FinishWorker;
+
+    TDI_REQUEST TdiRequest;
+    KDPC TimeoutDpc;
     KTIMER TimeoutTimer;
+    LARGE_INTEGER TimerResolution;
+    INT64 StartTicks;
+    PIRP Irp;
+    PIO_WORKITEM FinishWorker;
 } ICMP_PACKET_CONTEXT, *PICMP_PACKET_CONTEXT;
 
+/*
+ * The requests that still take replies. A request leaves the list when its
+ * reply buffer is full or when it times out, under this lock, and exactly
+ * one of those two (or DispEchoRequest, when the buffer filled up before the
+ * timer was set) queues EndRequestHandler, which alone frees the request.
+ */
+static LIST_ENTRY IcmpEchoRequestList = { &IcmpEchoRequestList, &IcmpEchoRequestList };
+static KSPIN_LOCK IcmpEchoRequestLock;
+
 static volatile INT16 IcmpSequence = 0;
+
 
 static
 UINT32
@@ -72,14 +95,124 @@ GetReplyStatus(PICMP_HEADER IcmpHeader)
     }
 }
 
+/*
+ * Get the identifier and the sequence number of the echo request an ICMP
+ * message answers, if it answers one
+ */
+static
+BOOLEAN
+GetEchoRequestKey(
+    _In_ PICMP_HEADER IcmpHeader,
+    _In_ UINT32 IcmpSize,
+    _Out_ PUINT16 Identifier,
+    _Out_ PUINT16 Sequence)
+{
+    PIPv4_HEADER Original;
+    PICMP_HEADER OriginalIcmp;
+    UINT32 OriginalHeaderSize;
+
+    ASSERT(IcmpSize >= sizeof(ICMP_HEADER));
+
+    switch (IcmpHeader->Type)
+    {
+        case ICMP_TYPE_ECHO_REPLY:
+            *Identifier = IcmpHeader->Identifier;
+            *Sequence = IcmpHeader->Seq;
+            return TRUE;
+
+        case ICMP_TYPE_DEST_UNREACH:
+        case ICMP_TYPE_SOURCE_QUENCH:
+        case ICMP_TYPE_TIME_EXCEEDED:
+        case ICMP_TYPE_PARAMETER:
+            /* An error quotes the IP header of the datagram that caused it
+             * and at least the first 8 bytes of its payload: for an echo
+             * request, its ICMP header */
+            if (IcmpSize < sizeof(ICMP_HEADER) + sizeof(IPv4_HEADER))
+                return FALSE;
+
+            Original = (PIPv4_HEADER)(IcmpHeader + 1);
+            OriginalHeaderSize = (Original->VerIHL & 0x0F) * 4;
+            if (OriginalHeaderSize < sizeof(IPv4_HEADER) ||
+                IcmpSize < sizeof(ICMP_HEADER) + OriginalHeaderSize + sizeof(ICMP_HEADER) ||
+                Original->Protocol != IPPROTO_ICMP)
+            {
+                return FALSE;
+            }
+
+            OriginalIcmp = (PICMP_HEADER)((PUCHAR)Original + OriginalHeaderSize);
+            if (OriginalIcmp->Type != ICMP_TYPE_ECHO_REQUEST)
+                return FALSE;
+
+            *Identifier = OriginalIcmp->Identifier;
+            *Sequence = OriginalIcmp->Seq;
+            return TRUE;
+
+        default:
+            return FALSE;
+    }
+}
+
+/* Store a reply in the request's buffer. Called with IcmpEchoRequestLock held */
 static
 VOID
-ClearReceiveHandler(
-    _In_ PADDRESS_FILE AddrFile)
+StoreReply(
+    _Inout_ PICMP_PACKET_CONTEXT Context,
+    _In_ PIP_PACKET IPPacket)
 {
-    LockObject(AddrFile);
-    AddrFile->RegisteredReceiveDatagramHandler = FALSE;
-    UnlockObject(AddrFile);
+    PIPv4_HEADER IpHeader = IPPacket->Header;
+    PICMP_HEADER IcmpHeader = IPPacket->Data;
+    PUCHAR Data = (PUCHAR)(IcmpHeader + 1);
+    UINT32 DataSize = IPPacket->TotalSize - IPPacket->HeaderSize - sizeof(ICMP_HEADER);
+    PUCHAR Options = (PUCHAR)(IpHeader + 1);
+    UINT32 OptionsSize = IPPacket->HeaderSize - sizeof(IPv4_HEADER);
+    PUCHAR SystemBuffer = Context->Irp->AssociatedIrp.SystemBuffer;
+    PUCHAR UserBuffer = Context->Irp->UserBuffer;
+    PICMP_ECHO_REPLY Reply = (PICMP_ECHO_REPLY)Context->CurrentReply;
+    UINT32 Size;
+    PUCHAR Target;
+
+    ASSERT(Context->Accepting);
+    ASSERT(Context->RemainingSize >= sizeof(ICMP_ECHO_REPLY));
+
+    Reply->Address = IpHeader->SrcAddr;
+    Reply->Status = GetReplyStatus(IcmpHeader);
+    Reply->RoundTripTime = (UINT32)((KeQueryPerformanceCounter(NULL).QuadPart - Context->StartTicks) * 1000 /
+                                    Context->TimerResolution.QuadPart);
+    Reply->Reserved = 0;
+    Reply->Data = NULL;
+    Reply->DataSize = 0;
+    Reply->Options.Ttl = IpHeader->Ttl;
+    Reply->Options.Tos = IpHeader->Tos;
+    Reply->Options.Flags = WN2H(IpHeader->FlagsFragOfs) >> 13;
+    Reply->Options.OptionsData = NULL;
+    Reply->Options.OptionsSize = 0;
+
+    Context->RemainingSize -= sizeof(ICMP_ECHO_REPLY);
+    Context->CurrentReply += sizeof(ICMP_ECHO_REPLY);
+
+    /* The reply structures grow from the start of the buffer, their data
+     * and options from its end */
+    Size = min(Context->RemainingSize, DataSize);
+    if (Size > 0)
+    {
+        Context->RemainingSize -= Size;
+        Target = Context->CurrentReply + Context->RemainingSize;
+        RtlCopyMemory(Target, Data, Size);
+        Reply->Data = UserBuffer + (Target - SystemBuffer);
+        Reply->DataSize = (USHORT)Size;
+    }
+
+    Size = min(Context->RemainingSize, OptionsSize);
+    if (Size > 0)
+    {
+        Context->RemainingSize -= Size;
+        Target = Context->CurrentReply + Context->RemainingSize;
+        RtlCopyMemory(Target, Options, Size);
+        Reply->Options.OptionsData = UserBuffer + (Target - SystemBuffer);
+        Reply->Options.OptionsSize = (UCHAR)Size;
+    }
+
+    Context->nReplies++;
 }
 
 IO_WORKITEM_ROUTINE EndRequestHandler;
@@ -93,12 +226,10 @@ EndRequestHandler(
     PICMP_PACKET_CONTEXT Context = (PICMP_PACKET_CONTEXT)_Context;
     PIO_STACK_LOCATION CurrentStack;
     PIRP Irp;
-    UINT32 nReplies;
-    KIRQL OldIrql;
+    NTSTATUS Status;
 
-    ClearReceiveHandler((PADDRESS_FILE)Context->TdiRequest.Handle.AddressHandle);
-
-    KeWaitForSingleObject(&Context->DatagramProcessedEvent, Executive, KernelMode, FALSE, NULL);
+    /* No reply can reach the request any more */
+    ASSERT(!Context->Accepting);
 
     TI_DbgPrint(DEBUG_ICMP, ("Finishing request Context: %p\n", Context));
 
@@ -121,143 +252,69 @@ EndRequestHandler(
         Irp->IoStatus.Information = sizeof(*ReplyBuffer);
     }
 
-    // for debugging
-    nReplies = ((PICMP_ECHO_REPLY)Irp->AssociatedIrp.SystemBuffer)->Reserved;
-
-    // taken from dispatch.c:IRPFinish
-    IoAcquireCancelSpinLock(&OldIrql);
-    IoSetCancelRoutine(Irp, NULL);
-    IoReleaseCancelSpinLock(OldIrql);
     IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
 
-    {
-        NTSTATUS _Status = FileCloseAddress(&Context->TdiRequest);
-        ASSERT(NT_SUCCESS(_Status));
-    }
+    Status = FileCloseAddress(&Context->TdiRequest);
+    ASSERT(NT_SUCCESS(Status));
 
     IoFreeWorkItem(Context->FinishWorker);
     ExFreePoolWithTag(Context, OUT_DATA_TAG);
-
-    TI_DbgPrint(DEBUG_ICMP, ("Leaving, nReplies: %u\n", nReplies));
 }
 
-NTSTATUS
-NTAPI
-ReceiveDatagram(
-    _In_opt_ PVOID TdiEventContext,
-    _In_ LONG SourceAddressLength,
-    _In_reads_bytes_(SourceAddressLength) PVOID SourceAddress,
-    _In_ LONG OptionsLength,
-    _In_reads_bytes_opt_(OptionsLength) PVOID Options,
-    _In_ ULONG ReceiveDatagramFlags,
-    _In_ ULONG BytesIndicated,
-    _In_ ULONG BytesAvailable,
-    _Out_ ULONG *OutBytesTaken,
-    _In_ PVOID Tsdu,
-    _Out_opt_ PIRP *IoRequestPacket)
+/*
+ * Called by ICMPReceive for every ICMP datagram received: hand a reply to
+ * the echo request it answers, if that one still takes replies
+ */
+VOID
+IcmpEchoReceive(
+    _In_ PIP_PACKET IPPacket)
 {
-    PICMP_PACKET_CONTEXT Context = TdiEventContext;
-    PIPv4_HEADER IpHeader = Tsdu;
-    UINT16 IpHeaderSize = sizeof(IPv4_HEADER) + OptionsLength;
-    PICMP_HEADER IcmpHeader = (PICMP_HEADER)((PUCHAR)Tsdu + IpHeaderSize);
+    PICMP_PACKET_CONTEXT Context = NULL;
+    PLIST_ENTRY Entry;
+    UINT16 Identifier, Sequence;
+    BOOLEAN Finish = FALSE;
+    KIRQL OldIrql;
 
-    PVOID DataBuffer = (PUCHAR)Tsdu + IpHeaderSize + sizeof(ICMP_HEADER);
-    INT32 DataSize = min(BytesAvailable, UINT16_MAX) - IpHeaderSize - sizeof(ICMP_HEADER);
+    if (IPPacket->Type != IP_ADDRESS_V4)
+        return;
 
-    INT64 CurrentTime;
-    UINT32 RoundTripTime;
-    PICMP_ECHO_REPLY CurrentReply;
-    PUCHAR CurrentUserBuffer;
-
-    // do not handle echo requests
-    if (DataSize >= 0 && IcmpHeader->Type == ICMP_TYPE_ECHO_REQUEST)
+    if (!GetEchoRequestKey(IPPacket->Data, IPPacket->TotalSize - IPPacket->HeaderSize,
+                           &Identifier, &Sequence))
     {
-        return STATUS_SUCCESS;
+        return;
     }
 
-    KeWaitForSingleObject(&Context->InitializationFinishedEvent, Executive, KernelMode, FALSE, NULL);
-    KeClearEvent(&Context->DatagramProcessedEvent);
+    KeAcquireSpinLock(&IcmpEchoRequestLock, &OldIrql);
 
-    /* The source is a TRANSPORT_ADDRESS (TA_IP_ADDRESS for IPv4) */
-    ASSERT(SourceAddressLength == sizeof(TA_IP_ADDRESS));
-    TI_DbgPrint(DEBUG_ICMP, ("Received datagram Context: 0x%p\n", TdiEventContext));
-
-    CurrentTime = KeQueryPerformanceCounter(NULL).QuadPart;
-    RoundTripTime = (CurrentTime - Context->StartTicks) * 1000 / Context->TimerResolution.QuadPart;
-    CurrentReply = (PICMP_ECHO_REPLY)Context->CurrentReply;
-
-    if (Context->RemainingSize >= sizeof(ICMP_ECHO_REPLY) && DataSize >= 0)
+    for (Entry = IcmpEchoRequestList.Flink; Entry != &IcmpEchoRequestList; Entry = Entry->Flink)
     {
-        TI_DbgPrint(DEBUG_ICMP, ("RemainingSize: %u, RoundTripTime: %u\n", Context->RemainingSize, RoundTripTime));
-
-        CurrentReply->Address = ((PTA_IP_ADDRESS)SourceAddress)->Address[0].Address[0].in_addr;
-        CurrentReply->Status = GetReplyStatus(IcmpHeader);
-        CurrentReply->RoundTripTime = RoundTripTime;
-        CurrentReply->Reserved = 0;
-        CurrentReply->Data = NULL;
-        CurrentReply->DataSize = 0;
-        CurrentReply->Options.Ttl = IpHeader->Ttl;
-        CurrentReply->Options.Tos = IpHeader->Tos;
-        CurrentReply->Options.Flags = IpHeader->FlagsFragOfs >> 13;
-        CurrentReply->Options.OptionsData = NULL;
-        CurrentReply->Options.OptionsSize = 0;
-
-        Context->RemainingSize -= sizeof(ICMP_ECHO_REPLY);
-        Context->CurrentReply += sizeof(ICMP_ECHO_REPLY);
+        Context = CONTAINING_RECORD(Entry, ICMP_PACKET_CONTEXT, ListEntry);
+        if (Context->Identifier == Identifier && Context->Sequence == Sequence)
+            break;
+        Context = NULL;
     }
 
-    CurrentUserBuffer = (PUCHAR)Context->Irp->UserBuffer + (Context->CurrentReply - (PUCHAR)Context->Irp->AssociatedIrp.SystemBuffer);
-
-    if (DataSize > 0 && Context->RemainingSize > 0)
+    if (Context)
     {
-        UINT32 _DataSize = min(Context->RemainingSize, DataSize);
+        TI_DbgPrint(DEBUG_ICMP, ("Reply for Context: %p\n", Context));
 
-        memcpy(Context->CurrentReply + Context->RemainingSize - _DataSize, DataBuffer, _DataSize);
-        CurrentReply->Data = CurrentUserBuffer + Context->RemainingSize - _DataSize;
-        CurrentReply->DataSize = _DataSize;
+        StoreReply(Context, IPPacket);
 
-        Context->RemainingSize -= _DataSize;
-        // Context->ReplyBuffer += _DataSize;
-    }
-    else
-    {
-        TI_DbgPrint(DEBUG_ICMP, ("RemainingSize: %u, DataSize: %d\n", Context->RemainingSize, DataSize));
-    }
-
-    if (OptionsLength > 0 && Context->RemainingSize > 0)
-    {
-        UINT32 _OptSize = min(Context->RemainingSize, OptionsLength);
-
-        memcpy(Context->CurrentReply + Context->RemainingSize + _OptSize, Options, _OptSize);
-        CurrentReply->Options.OptionsData = CurrentUserBuffer + Context->RemainingSize + _OptSize;
-        CurrentReply->Options.OptionsSize = _OptSize;
-
-        Context->RemainingSize -= _OptSize;
-        // Context->ReplyBuffer += _OptSize;
-    }
-    else
-    {
-        TI_DbgPrint(DEBUG_ICMP, ("RemainingSize: %u, OptSize: %d\n", Context->RemainingSize, OptionsLength));
-    }
-
-    Context->nReplies++;
-
-    if (Context->RemainingSize < sizeof(ICMP_ECHO_REPLY))
-    {
-        TI_DbgPrint(DEBUG_ICMP, ("The space is over: %u\n", Context->RemainingSize));
-
-        // if the timer was inserted, that means DPC has not been queued yet
-        if (KeCancelTimer(&Context->TimeoutTimer))
+        if (Context->RemainingSize < sizeof(ICMP_ECHO_REPLY))
         {
-            PADDRESS_FILE AddrFile = (PADDRESS_FILE)Context->TdiRequest.Handle.AddressHandle;
-            ClearReceiveHandler(AddrFile);
-
-            IoQueueWorkItem(Context->FinishWorker, &EndRequestHandler, DelayedWorkQueue, Context);
+            /* The buffer is full: the request ends now, unless its timer
+             * already expired (the timeout DPC ends it then) or is not set
+             * yet (DispEchoRequest ends it then) */
+            RemoveEntryList(&Context->ListEntry);
+            Context->Accepting = FALSE;
+            Finish = Context->TimerSet && KeCancelTimer(&Context->TimeoutTimer);
         }
     }
 
-    KeSetEvent(&Context->DatagramProcessedEvent, IO_NO_INCREMENT, FALSE);
-    return STATUS_SUCCESS;
+    KeReleaseSpinLock(&IcmpEchoRequestLock, OldIrql);
+
+    if (Finish)
+        IoQueueWorkItem(Context->FinishWorker, EndRequestHandler, DelayedWorkQueue, Context);
 }
 
 KDEFERRED_ROUTINE TimeoutHandler;
@@ -272,7 +329,18 @@ TimeoutHandler(
 {
     PICMP_PACKET_CONTEXT Context = (PICMP_PACKET_CONTEXT)_Context;
 
-    IoQueueWorkItem(Context->FinishWorker, &EndRequestHandler, DelayedWorkQueue, _Context);
+    /* The timer expired: IcmpEchoReceive could not cancel it, so ending the
+     * request is up to us, whether or not its buffer filled up meanwhile */
+    KeAcquireSpinLockAtDpcLevel(&IcmpEchoRequestLock);
+    ASSERT(Context->TimerSet);
+    if (Context->Accepting)
+    {
+        RemoveEntryList(&Context->ListEntry);
+        Context->Accepting = FALSE;
+    }
+    KeReleaseSpinLockFromDpcLevel(&IcmpEchoRequestLock);
+
+    IoQueueWorkItem(Context->FinishWorker, EndRequestHandler, DelayedWorkQueue, Context);
 }
 
 NTSTATUS
@@ -284,7 +352,7 @@ DispEchoRequest(
     PICMP_ECHO_REQUEST Request = Irp->AssociatedIrp.SystemBuffer;
     UINT32 OutputBufferLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
     UINT32 InputBufferLength = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
-    NTSTATUS Status;
+    NTSTATUS Status, CloseStatus;
     TDI_CONNECTION_INFORMATION ConnectionInfo;
     TA_IP_ADDRESS RemoteAddressTa, LocalAddressTa;
     PADDRESS_FILE AddrFile;
@@ -294,21 +362,16 @@ DispEchoRequest(
     PICMP_PACKET_CONTEXT SendContext;
     LARGE_INTEGER RequestTimeout;
     UINT8 SavedTtl;
+    BOOLEAN Finish;
+    KIRQL OldIrql;
 
     TI_DbgPrint(DEBUG_ICMP, ("About to send datagram, OutputBufferLength: %u, SystemBuffer: %p\n", OutputBufferLength, Irp->AssociatedIrp.SystemBuffer));
-    DPRINT("TCPIP-ICMP: DispEchoRequest ENTER OutBuf=%u InBuf=%u Request=%p\n",
-             OutputBufferLength, InputBufferLength, Request);
 
     // check buffers
     if (OutputBufferLength < sizeof(ICMP_ECHO_REPLY) || InputBufferLength < sizeof(ICMP_ECHO_REQUEST))
     {
-        DPRINT("TCPIP-ICMP: REJECT - buffer size (out=%u<%u or in=%u<%u)\n",
-                 OutputBufferLength, (ULONG)sizeof(ICMP_ECHO_REPLY),
-                 InputBufferLength, (ULONG)sizeof(ICMP_ECHO_REQUEST));
         return STATUS_INVALID_PARAMETER;
     }
-    DPRINT("TCPIP-ICMP: Request target=0x%08x DataSize=%u Ttl=%u Timeout=%u\n",
-             Request->Address, Request->DataSize, Request->Ttl, Request->Timeout);
 
     // check request parameters
     if ((Request->DataSize > UINT16_MAX - sizeof(ICMP_HEADER) - sizeof(IPv4_HEADER)) ||
@@ -323,8 +386,21 @@ DispEchoRequest(
     {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+    RtlZeroMemory(SendContext, sizeof(*SendContext));
 
-    RtlZeroMemory(&SendContext->TdiRequest, sizeof(SendContext->TdiRequest));
+    RequestSize = sizeof(ICMP_HEADER) + Request->DataSize;
+    Buffer = ExAllocatePoolWithTag(NonPagedPool, RequestSize, OUT_DATA_TAG);
+    SendContext->FinishWorker = IoAllocateWorkItem(DeviceObject);
+    if (!Buffer || !SendContext->FinishWorker)
+    {
+        if (SendContext->FinishWorker)
+            IoFreeWorkItem(SendContext->FinishWorker);
+        if (Buffer)
+            ExFreePoolWithTag(Buffer, OUT_DATA_TAG);
+        ExFreePoolWithTag(SendContext, OUT_DATA_TAG);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
     SendContext->TdiRequest.RequestContext = Irp;
 
     // setting up everything needed for sending the packet
@@ -344,54 +420,25 @@ DispEchoRequest(
     LocalAddressTa.Address[0].Address[0].in_addr = 0;
 
     Status = FileOpenAddress(&SendContext->TdiRequest, &LocalAddressTa, IPPROTO_ICMP, FALSE, NULL);
-    DPRINT("TCPIP-ICMP: FileOpenAddress(ICMP) -> 0x%08x handle=%p\n",
-             Status, SendContext->TdiRequest.Handle.AddressHandle);
-
     if (!NT_SUCCESS(Status))
     {
         TI_DbgPrint(DEBUG_ICMP, ("Failed to open address file status: 0x%x\n", Status));
-        DPRINT("TCPIP-ICMP: ABORT - FileOpenAddress failed\n");
 
+        IoFreeWorkItem(SendContext->FinishWorker);
+        ExFreePoolWithTag(Buffer, OUT_DATA_TAG);
         ExFreePoolWithTag(SendContext, OUT_DATA_TAG);
-
         return Status;
     }
 
     AddrFile = (PADDRESS_FILE)SendContext->TdiRequest.Handle.AddressHandle;
 
-    // setting up the context
-
-    KeQueryPerformanceCounter(&SendContext->TimerResolution);
-    SendContext->Irp = Irp;
-    SendContext->CurrentReply = Irp->AssociatedIrp.SystemBuffer;
-    SendContext->RemainingSize = OutputBufferLength;
-    SendContext->nReplies = 0;
-    SendContext->FinishWorker = IoAllocateWorkItem(DeviceObject);
-    KeInitializeEvent(&SendContext->InitializationFinishedEvent, NotificationEvent, FALSE);
-    KeInitializeEvent(&SendContext->DatagramProcessedEvent, NotificationEvent, TRUE);
-
-    KeInitializeDpc(&SendContext->TimeoutDpc, &TimeoutHandler, SendContext);
-    KeInitializeTimerEx(&SendContext->TimeoutTimer, SynchronizationTimer);
-
-    RequestTimeout.QuadPart = (-1LL) * 10 * 1000 * Request->Timeout;
-
     ConnectionInfo.RemoteAddress = &RemoteAddressTa;
     ConnectionInfo.RemoteAddressLength = sizeof(RemoteAddressTa);
 
-    RequestSize = sizeof(ICMP_HEADER) + Request->DataSize;
-
     // making up the request packet
-    Buffer = ExAllocatePoolWithTag(NonPagedPool, RequestSize, OUT_DATA_TAG);
-
-    if (!Buffer)
-    {
-        ExFreePoolWithTag(SendContext, OUT_DATA_TAG);
-
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
 
     ((PICMP_HEADER)Buffer)->Type = ICMP_TYPE_ECHO_REQUEST;
-    ((PICMP_HEADER)Buffer)->Code = ICMP_TYPE_ECHO_REPLY;
+    ((PICMP_HEADER)Buffer)->Code = 0;
     ((PICMP_HEADER)Buffer)->Checksum = 0;
     ((PICMP_HEADER)Buffer)->Identifier = (UINT_PTR)PsGetCurrentProcessId() & UINT16_MAX;
     ((PICMP_HEADER)Buffer)->Seq = InterlockedIncrement16(&IcmpSequence);
@@ -400,49 +447,72 @@ DispEchoRequest(
     /* Without options (IcmpSendEcho(..., RequestOptions = NULL, ...)) the
      * echo goes out with the default TTL: Ttl is zero then */
     SavedTtl = Request->HasOptions ? Request->Ttl : 128;
+    RequestTimeout.QuadPart = (-1LL) * 10 * 1000 * Request->Timeout;
+
+    // setting up the context; the reply buffer overlays the request
+
+    KeQueryPerformanceCounter(&SendContext->TimerResolution);
+    SendContext->Irp = Irp;
+    SendContext->Identifier = ((PICMP_HEADER)Buffer)->Identifier;
+    SendContext->Sequence = ((PICMP_HEADER)Buffer)->Seq;
+    SendContext->CurrentReply = Irp->AssociatedIrp.SystemBuffer;
+    SendContext->RemainingSize = OutputBufferLength;
+    SendContext->nReplies = 0;
+    KeInitializeDpc(&SendContext->TimeoutDpc, &TimeoutHandler, SendContext);
+    KeInitializeTimerEx(&SendContext->TimeoutTimer, SynchronizationTimer);
 
     RtlZeroMemory(Irp->AssociatedIrp.SystemBuffer, OutputBufferLength);
 
     LockObject(AddrFile);
-
     AddrFile->TTL = SavedTtl;
-    AddrFile->ReceiveDatagramHandlerContext = SendContext;
-    AddrFile->ReceiveDatagramHandler = ReceiveDatagram;
-    AddrFile->RegisteredReceiveDatagramHandler = TRUE;
-
     UnlockObject(AddrFile);
 
-    DPRINT("TCPIP-ICMP: calling AddrFile->Send(%p) RequestSize=%u target=0x%08x\n",
-             AddrFile->Send, RequestSize, Request->Address);
-    Status = AddrFile->Send(AddrFile, &ConnectionInfo, (PCHAR)Buffer, RequestSize, &DataUsed);
-    DPRINT("TCPIP-ICMP: AddrFile->Send returned 0x%08x DataUsed=%u\n",
-             Status, DataUsed);
-
-    // From this point we may receive a reply packet.
-    // But we are not ready for it thus InitializationFinishedEvent is needed (see below)
+    /* A reply can arrive as soon as the request is sent */
+    KeAcquireSpinLock(&IcmpEchoRequestLock, &OldIrql);
+    InsertTailList(&IcmpEchoRequestList, &SendContext->ListEntry);
+    SendContext->Accepting = TRUE;
+    KeReleaseSpinLock(&IcmpEchoRequestLock, OldIrql);
 
     SendContext->StartTicks = KeQueryPerformanceCounter(NULL).QuadPart;
+    Status = AddrFile->Send(AddrFile, &ConnectionInfo, (PCHAR)Buffer, RequestSize, &DataUsed);
 
     ExFreePoolWithTag(Buffer, OUT_DATA_TAG);
 
     if (!NT_SUCCESS(Status))
     {
-        NTSTATUS _Status;
+        TI_DbgPrint(DEBUG_ICMP, ("Failed to send a datagram: 0x%x\n", Status));
 
-        ClearReceiveHandler(AddrFile);
-        _Status = FileCloseAddress(&SendContext->TdiRequest);
-        ASSERT(NT_SUCCESS(_Status));
+        /* No timer was set: nobody else ends the request */
+        KeAcquireSpinLock(&IcmpEchoRequestLock, &OldIrql);
+        if (SendContext->Accepting)
+        {
+            RemoveEntryList(&SendContext->ListEntry);
+            SendContext->Accepting = FALSE;
+        }
+        KeReleaseSpinLock(&IcmpEchoRequestLock, OldIrql);
+
+        CloseStatus = FileCloseAddress(&SendContext->TdiRequest);
+        ASSERT(NT_SUCCESS(CloseStatus));
 
         IoFreeWorkItem(SendContext->FinishWorker);
         ExFreePoolWithTag(SendContext, OUT_DATA_TAG);
-
-        TI_DbgPrint(DEBUG_ICMP, ("Failed to send a datagram: 0x%x\n", Status));
         return Status;
     }
 
     IoMarkIrpPending(Irp);
-    KeSetTimer(&SendContext->TimeoutTimer, RequestTimeout, &SendContext->TimeoutDpc);
-    KeSetEvent(&SendContext->InitializationFinishedEvent, IO_NO_INCREMENT, FALSE);
+
+    KeAcquireSpinLock(&IcmpEchoRequestLock, &OldIrql);
+    Finish = !SendContext->Accepting;
+    if (!Finish)
+    {
+        KeSetTimer(&SendContext->TimeoutTimer, RequestTimeout, &SendContext->TimeoutDpc);
+        SendContext->TimerSet = TRUE;
+    }
+    KeReleaseSpinLock(&IcmpEchoRequestLock, OldIrql);
+
+    /* The buffer filled up before the timer was set */
+    if (Finish)
+        IoQueueWorkItem(SendContext->FinishWorker, EndRequestHandler, DelayedWorkQueue, SendContext);
 
     return STATUS_PENDING;
 }
