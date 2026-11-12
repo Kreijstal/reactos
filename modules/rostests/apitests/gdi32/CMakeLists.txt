@@ -37,6 +37,7 @@ list(APPEND SOURCE
     GdiDeleteLocalDC.c
     GdiGetCharDimensions.c
     GdiGetLocalBrush.c
+    GdiHandleChurn.c
     GdiGetLocalDC.c
     GdiReleaseLocalDC.c
     GdiSetAttrs.c
