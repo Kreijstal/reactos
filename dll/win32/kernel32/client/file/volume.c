@@ -162,19 +162,16 @@ IsThisARootDirectory(IN HANDLE VolumeHandle,
         WCHAR Buffer[MAX_PATH];
     } FileNameInfo;
 
-    /* If we have a handle, query the name */
+    /* If we have a handle, its name says it: only the root of a volume
+     * ends with a \ (a drive letter, a device, a mounted folder or a share
+     * alike) */
     if (VolumeHandle)
     {
         Status = NtQueryInformationFile(VolumeHandle, &IoStatusBlock, &FileNameInfo, sizeof(FileNameInfo), FileNameInformation);
-        if (!NT_SUCCESS(Status))
+        if (NT_SUCCESS(Status))
         {
-            return FALSE;
-        }
-
-        /* Check we properly end with a \ */
-        if (FileNameInfo.FileName[FileNameInfo.FileNameLength / sizeof(WCHAR) - 1] != L'\\')
-        {
-            return FALSE;
+            return FileNameInfo.FileNameLength != 0 &&
+                   FileNameInfo.FileName[FileNameInfo.FileNameLength / sizeof(WCHAR) - 1] == L'\\';
         }
     }
 
