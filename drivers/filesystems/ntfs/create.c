@@ -2318,6 +2318,10 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
 
         DPRINT("New File Reference: 0x%016I64x\n", FileReference);
 
+        /* Both names go into the parent's index in one transaction,
+         * committed with the record (NtfsReleaseIndexExclusive) */
+        KeEnterCriticalRegion();
+        NtfsAcquireIndexExclusive(DeviceExt);
         // Add the filename attribute to the filename-index of the parent directory
         Status = NtfsAddFilenameToDirectory(DeviceExt,
                                             ParentReference & NTFS_MFT_MASK,
@@ -2333,9 +2337,13 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
                                                             FilenameAttribute, CaseSensitive)))
             {
                 NtfsMarkVolumeCorrupt(DeviceExt);
+                NtfsReleaseIndexExclusive(DeviceExt);
+                KeLeaveCriticalRegion();
                 goto FreeRecord;
             }
         }
+        NtfsReleaseIndexExclusive(DeviceExt);
+        KeLeaveCriticalRegion();
         if (!NT_SUCCESS(Status))
         {
             /* Nothing refers to the record, so give it back */

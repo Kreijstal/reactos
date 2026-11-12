@@ -288,7 +288,7 @@ NtfsTrimUsnJournalLocked(PDEVICE_EXTENSION Vcb, BOOLEAN Checkpoint)
     if (First <= Vcb->UsnFirstUsn)
         return STATUS_SUCCESS;
 
-    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    NtfsAcquireIndexExclusive(Vcb);
     Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     if (Record == NULL) { Status = STATUS_INSUFFICIENT_RESOURCES; goto Cleanup; }
     Status = ReadFileRecord(Vcb, Vcb->UsnJournalMftIndex, Record);
@@ -326,7 +326,7 @@ Cleanup:
     if (Holder != NULL) NtfsReleaseAttributeHolder(Vcb, Record, Holder);
     if (Context != NULL) ReleaseAttributeContext(Context);
     if (Record != NULL) ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
-    ExReleaseResourceLite(&Vcb->IndexResource);
+    NtfsReleaseIndexExclusive(Vcb);
     return Status;
 }
 

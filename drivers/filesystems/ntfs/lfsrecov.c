@@ -529,16 +529,40 @@ LogRecordIo(PLOG_READER Reader, PNTFS_LFS_RECORD_HEADER Rec, PUCHAR Buffer, BOOL
     return Status;
 }
 
-/* Whether two records' images share a byte of the volume. */
-static BOOLEAN
-LogRecordsOverlap(PLOG_READER Reader, PNTFS_LFS_RECORD_HEADER A, const LONGLONG *LcnsA,
-                  ULONG WithinA, ULONG SizeA, PNTFS_LFS_RECORD_HEADER B)
+/* A copy of a record (the reader reuses its buffer), with its data. */
+static PNTFS_LFS_RECORD_HEADER
+LogCopyRecord(PNTFS_LFS_RECORD_HEADER Rec)
 {
-    PLONGLONG LcnsB = (PLONGLONG)((PUCHAR)B + sizeof(NTFS_LFS_RECORD_HEADER));
-    ULONG Bpc = Reader->Vcb->NtfsInfo.BytesPerCluster, WithinB, SizeB, i, j, DoneA, DoneB, PartA, PartB, WA, WB;
-    ULONGLONG StartA, StartB;
+    ULONG Size = NTFS_LFS_RECORD_HEADER_LENGTH + Rec->ClientDataLength;
+    PNTFS_LFS_RECORD_HEADER Copy = ExAllocatePoolWithTag(PagedPool, Size, TAG_NTFS);
 
-    UNREFERENCED_PARAMETER(A);
+    if (Copy != NULL)
+        RtlCopyMemory(Copy, Rec, Size);
+    return Copy;
+}
+
+/* The redo and undo bytes of a range record. */
+#define LOG_REDO_DATA(Rec) ((PUCHAR)(Rec) + NTFS_LFS_RECORD_HEADER_LENGTH + (Rec)->RedoOffset)
+#define LOG_UNDO_DATA(Rec) ((PUCHAR)(Rec) + NTFS_LFS_RECORD_HEADER_LENGTH + (Rec)->UndoOffset)
+
+/*
+ * Whether B changes a bit of the volume that A changes. A range record
+ * carries the bytes around its changes too (nearby changes share a
+ * record), so only the bits that differ between its redo and undo images
+ * are its own. A file record image is all its own.
+ */
+static BOOLEAN
+LogRecordsConflict(PLOG_READER Reader, PNTFS_LFS_RECORD_HEADER A, PNTFS_LFS_RECORD_HEADER B)
+{
+    PLONGLONG LcnsA = (PLONGLONG)((PUCHAR)A + sizeof(NTFS_LFS_RECORD_HEADER));
+    PLONGLONG LcnsB = (PLONGLONG)((PUCHAR)B + sizeof(NTFS_LFS_RECORD_HEADER));
+    ULONG Bpc = Reader->Vcb->NtfsInfo.BytesPerCluster, WithinA, SizeA, WithinB, SizeB;
+    ULONG i, j, DoneA, DoneB, PartA, PartB, WA, WB;
+    ULONGLONG StartA, StartB, From, To, At;
+    BOOLEAN Bits = A->RedoOperation == NTFS_LFS_OP_UPDATE_NONRESIDENT_VALUE &&
+                   B->RedoOperation == NTFS_LFS_OP_UPDATE_NONRESIDENT_VALUE;
+
+    LogRecordTarget(Reader, A, &WithinA, &SizeA);
     LogRecordTarget(Reader, B, &WithinB, &SizeB);
     for (i = 0, DoneA = 0, WA = WithinA; DoneA < SizeA; i++, WA = 0)
     {
@@ -548,8 +572,23 @@ LogRecordsOverlap(PLOG_READER Reader, PNTFS_LFS_RECORD_HEADER A, const LONGLONG 
         {
             PartB = min(Bpc - WB, SizeB - DoneB);
             StartB = LcnsB[j] * Bpc + WB;
-            if (StartA < StartB + PartB && StartB < StartA + PartA)
-                return TRUE;
+            From = max(StartA, StartB);
+            To = min(StartA + PartA, StartB + PartB);
+            for (At = From; At < To; At++)
+            {
+                ULONG Ia = DoneA + (ULONG)(At - StartA), Ib = DoneB + (ULONG)(At - StartB);
+
+                if (!Bits ||
+                    ((LOG_REDO_DATA(A)[Ia] ^ LOG_UNDO_DATA(A)[Ia]) &
+                     (LOG_REDO_DATA(B)[Ib] ^ LOG_UNDO_DATA(B)[Ib])))
+                {
+                    if (Bits)
+                        DPRINT1("LFS recovery: byte %I64x: %02x -> %02x, then %02x -> %02x\n", At,
+                                LOG_UNDO_DATA(A)[Ia], LOG_REDO_DATA(A)[Ia],
+                                LOG_UNDO_DATA(B)[Ib], LOG_REDO_DATA(B)[Ib]);
+                    return TRUE;
+                }
+            }
             DoneB += PartB;
         }
         DoneA += PartA;
@@ -557,22 +596,21 @@ LogRecordsOverlap(PLOG_READER Reader, PNTFS_LFS_RECORD_HEADER A, const LONGLONG 
     return FALSE;
 }
 
-/* Undoing a transaction must not undo a later change of another one to
- * the same bytes: that would be a guess, and fails. */
+/*
+ * Undoing a transaction must not undo a later change of another one: that
+ * would be a guess, and fails. Windows' NTFS holds what a transaction
+ * changes until it commits, so another transaction can only have changed
+ * other bits (of a bitmap, say) next to them, which the undo leaves alone.
+ */
 static NTSTATUS
 LogCheckUndo(PLOG_READER Reader)
 {
-    struct
-    {
-        NTFS_LFS_RECORD_HEADER Header;
-        LONGLONG Lcns[64];
-    } Copy;
-    PNTFS_LFS_RECORD_HEADER Rec;
+    PNTFS_LFS_RECORD_HEADER Rec, Copy;
     PLOG_RECORD_INFO Op, Later;
-    ULONG i, j, Within, Size;
-    NTSTATUS Status;
+    ULONG i, j;
+    NTSTATUS Status = STATUS_SUCCESS;
 
-    for (i = 0; i < Reader->Count; i++)
+    for (i = 0; i < Reader->Count && NT_SUCCESS(Status); i++)
     {
         Op = &Reader->Records[i];
         if (!LogIsImageOp(Op) || Op->Committed)
@@ -580,10 +618,9 @@ LogCheckUndo(PLOG_READER Reader)
         Status = LogReadRecord(Reader, Op->Lsn, &Rec);
         if (!NT_SUCCESS(Status))
             return Status;
-        if (Rec->LcnsToFollow > RTL_NUMBER_OF(Copy.Lcns))
-            return STATUS_FILE_CORRUPT_ERROR;
-        RtlCopyMemory(&Copy, Rec, sizeof(Copy.Header) + Rec->LcnsToFollow * sizeof(LONGLONG));
-        LogRecordTarget(Reader, &Copy.Header, &Within, &Size);
+        Copy = LogCopyRecord(Rec);
+        if (Copy == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
         for (j = i + 1; j < Reader->Count; j++)
         {
             Later = &Reader->Records[j];
@@ -591,16 +628,18 @@ LogCheckUndo(PLOG_READER Reader)
                 continue;
             Status = LogReadRecord(Reader, Later->Lsn, &Rec);
             if (!NT_SUCCESS(Status))
-                return Status;
-            if (LogRecordsOverlap(Reader, &Copy.Header, Copy.Lcns, Within, Size, Rec))
+                break;
+            if (LogRecordsConflict(Reader, Copy, Rec))
             {
-                DPRINT1("LFS recovery: uncommitted %I64x is followed by %I64x of the same bytes\n",
+                DPRINT1("LFS recovery: uncommitted %I64x is followed by %I64x changing the same bits\n",
                         Op->Lsn, Later->Lsn);
-                return STATUS_FILE_CORRUPT_ERROR;
+                Status = STATUS_FILE_CORRUPT_ERROR;
+                break;
             }
         }
+        ExFreePoolWithTag(Copy, TAG_NTFS);
     }
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 /* The record's LSN on disk, or 0 when it is not a readable file record. */
@@ -649,7 +688,31 @@ LogWriteImage(PLOG_READER Reader, PNTFS_LFS_RECORD_HEADER Rec, ULONGLONG Target,
     NTSTATUS Status;
 
     if (Rec->RedoOperation == NTFS_LFS_OP_UPDATE_NONRESIDENT_VALUE)
-        return LogRecordIo(Reader, Rec, Image, TRUE);
+    {
+        PUCHAR Current;
+        PUCHAR RedoImage = (PUCHAR)Rec + NTFS_LFS_RECORD_HEADER_LENGTH + Rec->RedoOffset;
+
+        if (Redo)
+            return LogRecordIo(Reader, Rec, Image, TRUE);
+
+        /* Put back only the bits this record changed: later transactions
+         * may have changed others in the same bytes (LogCheckUndo). */
+        Current = ExAllocatePoolWithTag(PagedPool, Rec->RedoLength, TAG_NTFS);
+        if (Current == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        Status = LogRecordIo(Reader, Rec, Current, FALSE);
+        if (NT_SUCCESS(Status))
+        {
+            for (i = 0; i < Rec->RedoLength; i++)
+            {
+                UCHAR Mask = RedoImage[i] ^ Image[i];
+                Current[i] = (Current[i] & ~Mask) | (Image[i] & Mask);
+            }
+            Status = LogRecordIo(Reader, Rec, Current, TRUE);
+        }
+        ExFreePoolWithTag(Current, TAG_NTFS);
+        return Status;
+    }
 
     RtlCopyMemory(Reader->Image, Image, Size);
     for (i = 0; i < Size && Reader->Image[i] == 0; i++);

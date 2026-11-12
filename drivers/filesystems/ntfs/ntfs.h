@@ -2081,6 +2081,14 @@ NtfsUpdateDuplicatedInformation(PDEVICE_EXTENSION Vcb,
 VOID
 NtfsMarkVolumeCorrupt(PDEVICE_EXTENSION Vcb);
 
+/* lfslog.c: IndexResource, exclusively, for a change of what it guards;
+ * the release commits the request's changes so far (see there) */
+VOID
+NtfsAcquireIndexExclusive(PDEVICE_EXTENSION Vcb);
+
+VOID
+NtfsReleaseIndexExclusive(PDEVICE_EXTENSION Vcb);
+
 NTSTATUS
 UpdateFileNameRecord(PDEVICE_EXTENSION Vcb,
                      ULONGLONG ParentMFTIndex,
