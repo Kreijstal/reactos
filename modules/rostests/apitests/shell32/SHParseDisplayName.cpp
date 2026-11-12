@@ -147,6 +147,62 @@ UINT get_host_os_flag()
     return 0;
 }
 
+/* A path inside the desktop directory parses to a child of the desktop (alias
+ * translation), however often special folders are looked up and after the
+ * special folder cache is flushed. */
+static void TestDesktopAlias(void)
+{
+    typedef void (WINAPI *FN_SHFlushSFCache)(void);
+    FN_SHFlushSFCache pSHFlushSFCache = (FN_SHFlushSFCache)GetProcAddress(GetModuleHandleW(L"shell32.dll"), MAKEINTRESOURCEA(526));
+    /* Use an item that is already there (the desktop may be read-only, e.g. on a live CD) */
+    static const int csidls[] = { CSIDL_DESKTOPDIRECTORY, CSIDL_COMMON_DESKTOPDIRECTORY };
+    WCHAR szPath[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    BOOL bFound = FALSE;
+    for (UINT c = 0; c < _countof(csidls) && !bFound; ++c)
+    {
+        WCHAR szPattern[MAX_PATH];
+        if (!SHGetSpecialFolderPathW(NULL, szPath, csidls[c], FALSE))
+            continue;
+        lstrcpynW(szPattern, szPath, _countof(szPattern));
+        PathAppendW(szPattern, L"*");
+        HANDLE hFind = FindFirstFileW(szPattern, &fd);
+        if (hFind == INVALID_HANDLE_VALUE)
+            continue;
+        do
+        {
+            if (!(fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_HIDDEN)))
+            {
+                bFound = TRUE;
+                break;
+            }
+        } while (FindNextFileW(hFind, &fd));
+        FindClose(hFind);
+    }
+    if (!bFound)
+    {
+        skip("No file on the desktop\n");
+        return;
+    }
+    PathAppendW(szPath, fd.cFileName);
+
+    for (int i = 0; i < 3; ++i)
+    {
+        if (i == 2 && pSHFlushSFCache)
+            pSHFlushSFCache();
+        PIDLIST_ABSOLUTE pidl = NULL;
+        HRESULT hr = SHParseDisplayName(szPath, NULL, &pidl, 0, NULL);
+        ok(hr == S_OK, "%d: hr = 0x%lx\n", i, hr);
+        if (pidl)
+        {
+            ok(pidl->mkid.cb && !ILGetNext(pidl)->mkid.cb, "%d: not a direct child of the desktop\n", i);
+            WCHAR szParsed[MAX_PATH];
+            ok(SHGetPathFromIDListW(pidl, szParsed) && !lstrcmpiW(szParsed, szPath), "%d: path '%ls'\n", i, szParsed);
+            ILFree(pidl);
+        }
+    }
+}
+
 START_TEST(SHParseDisplayName)
 {
     HRESULT hr;
@@ -207,6 +263,8 @@ START_TEST(SHParseDisplayName)
             ok(!wcscmp(strret.pOleStr, strretSpecial.pOleStr), "%d: expected %S got %S\n", Tests[i].testline, strretSpecial.pOleStr, strret.pOleStr);
         }
     }
+
+    TestDesktopAlias();
 
     CoUninitialize();
 }
