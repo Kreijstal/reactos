@@ -331,17 +331,8 @@ ProRequest(
 
   MacBlock->Binding = &AdapterBinding->NdisOpenBlock;
 
-#if WORKER_TEST
-  MiniQueueWorkItem(Adapter, NdisWorkItemRequest, NdisRequest, FALSE);
-  return NDIS_STATUS_PENDING;
-#else
-  if (MiniIsBusy(Adapter, NdisWorkItemRequest)) {
-      MiniQueueWorkItem(Adapter, NdisWorkItemRequest, NdisRequest, FALSE);
-      return NDIS_STATUS_PENDING;
-  }
-
+  /* Waits behind the request in progress, if any */
   return MiniDoRequest(Adapter, NdisRequest);
-#endif
 }
 
 
@@ -389,8 +380,8 @@ NDIS_STATUS
 proSendPacketToMiniport(PLOGICAL_ADAPTER Adapter, PNDIS_PACKET Packet)
 {
 #if WORKER_TEST
-   MiniQueueWorkItem(Adapter, NdisWorkItemSend, Packet, FALSE);
-   return NDIS_STATUS_PENDING;
+   NDIS_STATUS NdisStatus = MiniQueueWorkItem(Adapter, NdisWorkItemSend, Packet, FALSE);
+   return (NdisStatus == NDIS_STATUS_SUCCESS) ? NDIS_STATUS_PENDING : NdisStatus;
 #else
    KIRQL RaiseOldIrql;
    NDIS_STATUS NdisStatus;
@@ -409,8 +400,9 @@ proSendPacketToMiniport(PLOGICAL_ADAPTER Adapter, PNDIS_PACKET Packet)
    if(MiniIsBusy(Adapter, NdisWorkItemSend)) {
       NDIS_DbgPrint(MID_TRACE, ("Busy: NdisWorkItemSend.\n"));
 
-      MiniQueueWorkItem(Adapter, NdisWorkItemSend, Packet, FALSE);
-      return NDIS_STATUS_PENDING;
+      /* If it cannot be queued, the send fails (the caller completes it) */
+      NdisStatus = MiniQueueWorkItem(Adapter, NdisWorkItemSend, Packet, FALSE);
+      return (NdisStatus == NDIS_STATUS_SUCCESS) ? NDIS_STATUS_PENDING : NdisStatus;
    }
 
 #if DBG
@@ -497,8 +489,8 @@ ProSend(
       MiniAdapterHasAddress(Adapter, Packet))
     {
 #if WORKER_TEST
-        MiniQueueWorkItem(Adapter, NdisWorkItemSendLoopback, Packet, FALSE);
-        return NDIS_STATUS_PENDING;
+        NdisStatus = MiniQueueWorkItem(Adapter, NdisWorkItemSendLoopback, Packet, FALSE);
+        return (NdisStatus == NDIS_STATUS_SUCCESS) ? NDIS_STATUS_PENDING : NdisStatus;
 #else
         return ProIndicatePacket(Adapter, Packet);
 #endif
@@ -569,7 +561,6 @@ ProSendPackets(
 {
     PADAPTER_BINDING AdapterBinding = NdisBindingHandle;
     PLOGICAL_ADAPTER Adapter = AdapterBinding->Adapter;
-    KIRQL RaiseOldIrql;
     NDIS_STATUS NdisStatus;
     UINT i;
 
@@ -590,53 +581,30 @@ ProSendPackets(
         return;
     }
 
-    if(Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendPacketsHandler)
+    for (i = 0; i < NumberOfPackets; i++)
+        PacketArray[i]->Reserved[1] = (ULONG_PTR)NdisBindingHandle;
+
+    if (Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendPacketsHandler &&
+        (Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE) &&
+        Adapter->NdisMiniportBlock.ScatterGatherListSize == 0 &&
+        !(Adapter->NdisMiniportBlock.MacOptions & NDIS_MAC_OPTION_NO_LOOPBACK))
     {
-       if(Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE)
-       {
-          (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendPacketsHandler)(
-           Adapter->NdisMiniportBlock.MiniportAdapterContext, PacketArray, NumberOfPackets);
-       }
-       else
-       {
-          /* Serialized: one packet at a time, never concurrently with the
-           * miniport's other send/interrupt handlers */
-          for (i = 0; i < NumberOfPackets; i++)
-          {
-             PacketArray[i]->Reserved[1] = (ULONG_PTR)NdisBindingHandle;
-             KeRaiseIrql(DISPATCH_LEVEL, &RaiseOldIrql);
-             NdisStatus = MiniSendSerialized(Adapter, PacketArray[i], FALSE);
-             KeLowerIrql(RaiseOldIrql);
-             if (NdisStatus != NDIS_STATUS_PENDING)
-                 MiniSendComplete(Adapter, PacketArray[i], NdisStatus);
-          }
-       }
-     }
-     else
-     {
-       if(Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE)
-       {
-          for (i = 0; i < NumberOfPackets; i++)
-          {
-             NdisStatus = (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendHandler)(
-                           Adapter->NdisMiniportBlock.MiniportAdapterContext, PacketArray[i], PacketArray[i]->Private.Flags);
-             if (NdisStatus != NDIS_STATUS_PENDING)
-                 MiniSendComplete(Adapter, PacketArray[i], NdisStatus);
-          }
-       }
-       else
-       {
-         for (i = 0; i < NumberOfPackets; i++)
-         {
-            PacketArray[i]->Reserved[1] = (ULONG_PTR)NdisBindingHandle;
-            KeRaiseIrql(DISPATCH_LEVEL, &RaiseOldIrql);
-            NdisStatus = MiniSendSerialized(Adapter, PacketArray[i], FALSE);
-            KeLowerIrql(RaiseOldIrql);
-            if (NdisStatus != NDIS_STATUS_PENDING)
-                MiniSendComplete(Adapter, PacketArray[i], NdisStatus);
-         }
-       }
-     }
+        /* A deserialized miniport takes the whole array at once, as is */
+        (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendPacketsHandler)(
+         Adapter->NdisMiniportBlock.MiniportAdapterContext, PacketArray, NumberOfPackets);
+        return;
+    }
+
+    /* Otherwise every packet takes the NdisSend path: NDIS loops it back if
+     * the miniport cannot, maps it for a scatter/gather DMA miniport, and
+     * hands it to a serialized miniport one call at a time. NdisSendPackets
+     * has no return status: every packet is completed */
+    for (i = 0; i < NumberOfPackets; i++)
+    {
+        NdisStatus = ProSend(NdisBindingHandle, PacketArray[i]);
+        if (NdisStatus != NDIS_STATUS_PENDING)
+            MiniSendComplete(Adapter, PacketArray[i], NdisStatus);
+    }
 }
 
 NDIS_STATUS NTAPI

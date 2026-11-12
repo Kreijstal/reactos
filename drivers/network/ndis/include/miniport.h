@@ -117,6 +117,12 @@ typedef struct _LOGICAL_ADAPTER
     BOOLEAN                     SerialOwned;            /* A MiniportXxx call is in progress */
     BOOLEAN                     SerialDpcDeferred;      /* HandleInterrupt to run on release */
     BOOLEAN                     SerialSendDeferred;     /* Sends were queued, kick the worker on release */
+    BOOLEAN                     SerialRequestDeferred;  /* PendingRequest to issue on release */
+
+    /* Requests waiting for the one in progress (PendingRequest) to finish,
+     * oldest first. Protected by NdisMiniportBlock.Lock */
+    PNDIS_MINIPORT_WORK_ITEM    RequestQueueHead;
+    PNDIS_MINIPORT_WORK_ITEM    RequestQueueTail;
 } LOGICAL_ADAPTER, *PLOGICAL_ADAPTER;
 
 #define GET_LOGICAL_ADAPTER(Handle)((PLOGICAL_ADAPTER)Handle)
@@ -161,7 +167,7 @@ MiniQueryInformation(
     PVOID               Buffer,
     PULONG              BytesWritten);
 
-VOID
+NDIS_STATUS
 FASTCALL
 MiniQueueWorkItem(
     PLOGICAL_ADAPTER    Adapter,
