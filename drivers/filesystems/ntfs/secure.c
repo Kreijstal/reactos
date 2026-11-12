@@ -472,13 +472,13 @@ NtfsStoreDescriptor(PDEVICE_EXTENSION DeviceExt,
 
     /* Allocating SecurityIds and $SDS space, and the indexes, change together */
     KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite(&DeviceExt->IndexResource, TRUE);
+    NtfsAcquireIndexExclusive(DeviceExt);
 
     Status = NtfsFindStoredDescriptor(DeviceExt, Sd, SdLength, Hash, SecurityId);
     if (NT_SUCCESS(Status) && *SecurityId == 0)
         Status = NtfsAppendDescriptor(DeviceExt, Sd, SdLength, Hash, SecurityId);
 
-    ExReleaseResourceLite(&DeviceExt->IndexResource);
+    NtfsReleaseIndexExclusive(DeviceExt);
     KeLeaveCriticalRegion();
 
     return Status;

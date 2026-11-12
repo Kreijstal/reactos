@@ -2944,9 +2944,9 @@ UpdateFileNameRecord(PDEVICE_EXTENSION Vcb,
     NTSTATUS Status;
 
     KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    NtfsAcquireIndexExclusive(Vcb);
     Status = UpdateFileNameRecordWorker(Vcb, ParentMFTIndex, FileName, DirSearch, Update, CaseSensitive);
-    ExReleaseResourceLite(&Vcb->IndexResource);
+    NtfsReleaseIndexExclusive(Vcb);
     KeLeaveCriticalRegion();
 
     return Status;
@@ -4073,9 +4073,9 @@ NtfsInsertIndexEntry(PDEVICE_EXTENSION DeviceExt,
     NTSTATUS Status;
 
     KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite(&DeviceExt->IndexResource, TRUE);
+    NtfsAcquireIndexExclusive(DeviceExt);
     Status = InsertIndexEntryWorker(DeviceExt, MftIndex, IndexName, IndexNameLength, Entry, CaseSensitive);
-    ExReleaseResourceLite(&DeviceExt->IndexResource);
+    NtfsReleaseIndexExclusive(DeviceExt);
     KeLeaveCriticalRegion();
 
     return Status;
@@ -4366,9 +4366,9 @@ NtfsRemoveIndexEntry(PDEVICE_EXTENSION DeviceExt,
     NTSTATUS Status;
 
     KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite(&DeviceExt->IndexResource, TRUE);
+    NtfsAcquireIndexExclusive(DeviceExt);
     Status = RemoveIndexEntryWorker(DeviceExt, MftIndex, IndexName, IndexNameLength, Entry, CaseSensitive);
-    ExReleaseResourceLite(&DeviceExt->IndexResource);
+    NtfsReleaseIndexExclusive(DeviceExt);
     KeLeaveCriticalRegion();
 
     return Status;
@@ -4842,8 +4842,8 @@ static NTSTATUS NtfsFreeRecordClusters(PDEVICE_EXTENSION DeviceExt, PFILE_RECORD
 * file whole; then the extension records, the clusters of the base record's attributes and
 * the record itself are released.
 */
-NTSTATUS
-NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
+static NTSTATUS
+NtfsDeleteFileRecordLocked(PDEVICE_EXTENSION DeviceExt,
                      ULONGLONG MftIndex,
                      BOOLEAN CaseSensitive)
 {
@@ -4921,6 +4921,22 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
     return FreeMftEntry(DeviceExt, MftIndex);
+}
+
+/* One transaction: the names go with the record, committed together (NtfsReleaseIndexExclusive). */
+NTSTATUS
+NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
+                     ULONGLONG MftIndex,
+                     BOOLEAN CaseSensitive)
+{
+    NTSTATUS Status;
+
+    KeEnterCriticalRegion();
+    NtfsAcquireIndexExclusive(DeviceExt);
+    Status = NtfsDeleteFileRecordLocked(DeviceExt, MftIndex, CaseSensitive);
+    NtfsReleaseIndexExclusive(DeviceExt);
+    KeLeaveCriticalRegion();
+    return Status;
 }
 
 /**
@@ -5219,8 +5235,8 @@ NtfsRemoveFileNameAttribute(PDEVICE_EXTENSION Vcb,
 * @param CaseSensitive
 * TRUE for a POSIX-semantics lookup of the index entry.
 */
-NTSTATUS
-NtfsUnlinkFileName(PDEVICE_EXTENSION DeviceExt,
+static NTSTATUS
+NtfsUnlinkFileNameLocked(PDEVICE_EXTENSION DeviceExt,
                    ULONGLONG MftIndex,
                    ULONGLONG ParentIndex,
                    PCUNICODE_STRING Name,
@@ -5296,6 +5312,24 @@ NtfsUnlinkFileName(PDEVICE_EXTENSION DeviceExt,
         NtfsFreeFileNames(Names, Count);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
+    return Status;
+}
+
+/* One transaction: the names change together, committed together (NtfsReleaseIndexExclusive). */
+NTSTATUS
+NtfsUnlinkFileName(PDEVICE_EXTENSION DeviceExt,
+                   ULONGLONG MftIndex,
+                   ULONGLONG ParentIndex,
+                   PCUNICODE_STRING Name,
+                   BOOLEAN CaseSensitive)
+{
+    NTSTATUS Status;
+
+    KeEnterCriticalRegion();
+    NtfsAcquireIndexExclusive(DeviceExt);
+    Status = NtfsUnlinkFileNameLocked(DeviceExt, MftIndex, ParentIndex, Name, CaseSensitive);
+    NtfsReleaseIndexExclusive(DeviceExt);
+    KeLeaveCriticalRegion();
     return Status;
 }
 

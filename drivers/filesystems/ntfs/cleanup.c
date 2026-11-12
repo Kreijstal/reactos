@@ -112,7 +112,7 @@ NtfsStampWriteTimes(PDEVICE_EXTENSION Vcb, PNTFS_FCB Fcb, PFILE_OBJECT FileObjec
     Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     if (Record == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
-    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    NtfsAcquireIndexExclusive(Vcb);
     Status = ReadFileRecord(Vcb, Fcb->MFTIndex, Record);
     if (NT_SUCCESS(Status))
     {
@@ -138,7 +138,7 @@ NtfsStampWriteTimes(PDEVICE_EXTENSION Vcb, PNTFS_FCB Fcb, PFILE_OBJECT FileObjec
             Ccb->Flags &= ~CCB_UPDATE_CHANGE_TIME;
         }
     }
-    ExReleaseResourceLite(&Vcb->IndexResource);
+    NtfsReleaseIndexExclusive(Vcb);
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
     return Status;
 }

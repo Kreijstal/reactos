@@ -366,6 +366,8 @@ typedef struct _NTFS_LOG_REQUEST
     ULONGLONG FirstLsn;         /* its first record */
     BOOLEAN Joined;             /* nested: the outer request is the one */
     BOOLEAN Forced;             /* committed early, for a full log */
+    BOOLEAN IndexChanged;       /* logged under IndexResource since its last commit */
+    ULONG IndexDepth;           /* NtfsAcquireIndexExclusive levels held */
 } NTFS_LOG_REQUEST, *PNTFS_LOG_REQUEST;
 
 VOID NtfsLfsBeginRequest(PVOID Writer, PNTFS_LOG_REQUEST Request);

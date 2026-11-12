@@ -542,6 +542,20 @@ START_TEST(NtfsLogReplay)
     Status = NtfsKmtOpenVolume(Letter, FILE_READ_DATA | FILE_WRITE_DATA, &Volume);
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status)) goto Cleanup;
+
+    /* The test checks that recovery leaves the volume clean, so it needs a
+     * clean volume. The dirty bit persists until chkdsk (as on Windows), so
+     * after FSCTL_MARK_VOLUME_DIRTY (NtfsVolumeDirty) only a new volume will do. */
+    {
+        ULONG Dirty = 0;
+
+        Status = NtfsKmtFsctl(Volume, FSCTL_IS_VOLUME_DIRTY, NULL, 0, &Dirty, sizeof(Dirty), NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (skip(NT_SUCCESS(Status) && !(Dirty & VOLUME_IS_DIRTY),
+                 "the volume is already dirty (0x%lx), recovery cannot be checked\n", Dirty))
+            goto Cleanup;
+    }
+
     Status = NtfsKmtFsctl(Volume, FSCTL_GET_NTFS_VOLUME_DATA, NULL, 0, &Geometry, sizeof(Geometry), NULL);
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status)) goto Cleanup;

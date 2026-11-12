@@ -177,7 +177,7 @@ NtfsReadQuotaEntry(PDEVICE_EXTENSION Vcb,
 */
 static
 NTSTATUS
-NtfsWriteQuotaEntry(PDEVICE_EXTENSION Vcb,
+NtfsWriteQuotaEntryLocked(PDEVICE_EXTENSION Vcb,
                     ULONG OwnerId,
                     PNTFS_QUOTA_CONTROL Control,
                     PSID Sid)
@@ -206,6 +206,23 @@ NtfsWriteQuotaEntry(PDEVICE_EXTENSION Vcb,
 
     ExFreePoolWithTag(Entry, TAG_NTFS);
 
+    return Status;
+}
+
+/* One transaction: the old entry goes and the new one comes together. */
+static NTSTATUS
+NtfsWriteQuotaEntry(PDEVICE_EXTENSION Vcb,
+                    ULONG OwnerId,
+                    PNTFS_QUOTA_CONTROL Control,
+                    PSID Sid)
+{
+    NTSTATUS Status;
+
+    KeEnterCriticalRegion();
+    NtfsAcquireIndexExclusive(Vcb);
+    Status = NtfsWriteQuotaEntryLocked(Vcb, OwnerId, Control, Sid);
+    NtfsReleaseIndexExclusive(Vcb);
+    KeLeaveCriticalRegion();
     return Status;
 }
 
@@ -577,10 +594,10 @@ NtfsUpdateFileQuota(PDEVICE_EXTENSION Vcb, ULONGLONG MftIndex)
     Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     if (Record == NULL) return STATUS_INSUFFICIENT_RESOURCES;
     NtfsQuotaRecordResources(Vcb, MftIndex, FALSE, TRUE);
-    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    NtfsAcquireIndexExclusive(Vcb);
     Status = ReadFileRecord(Vcb, MftIndex, Record);
     if (NT_SUCCESS(Status)) Status = NtfsReconcileQuotaRecord(Vcb, Record, FALSE);
-    ExReleaseResourceLite(&Vcb->IndexResource);
+    NtfsReleaseIndexExclusive(Vcb);
     NtfsQuotaRecordResources(Vcb, MftIndex, FALSE, FALSE);
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
     return Status;
@@ -612,7 +629,7 @@ NtfsCheckQuotaGrowth(PNTFS_IRP_CONTEXT IrpContext)
     if (IrpContext->MajorFunction == IRP_MJ_WRITE && Stack->Parameters.Write.Length == 0)
         return STATUS_SUCCESS;
     ASSERT(ExIsResourceAcquiredExclusiveLite(&Vcb->QuotaResource));
-    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    NtfsAcquireIndexExclusive(Vcb);
     Status = NtfsReadQuotaEntry(Vcb, NTFS_QUOTA_DEFAULTS_ID, &Defaults, NULL);
     if (!NT_SUCCESS(Status) || !(Defaults.Flags & NTFS_QUOTA_FLAG_ENFORCEMENT_ENABLED))
         goto Cleanup;
@@ -648,7 +665,7 @@ NtfsCheckQuotaGrowth(PNTFS_IRP_CONTEXT IrpContext)
 Cleanup:
     if (Attribute != NULL) ReleaseAttributeContext(Attribute);
     if (Record != NULL) ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
-    ExReleaseResourceLite(&Vcb->IndexResource);
+    NtfsReleaseIndexExclusive(Vcb);
     return Status;
 }
 
@@ -661,14 +678,14 @@ NtfsInvalidateQuota(PDEVICE_EXTENSION Vcb)
     NTSTATUS Status;
 
     Vcb->QuotaRebuildRequired = TRUE;
-    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    NtfsAcquireIndexExclusive(Vcb);
     Status = NtfsReadQuotaEntry(Vcb, NTFS_QUOTA_DEFAULTS_ID, &Control, NULL);
     if (NT_SUCCESS(Status))
     {
         Control.Flags |= NTFS_QUOTA_FLAG_OUT_OF_DATE;
         Status = NtfsWriteQuotaEntry(Vcb, NTFS_QUOTA_DEFAULTS_ID, &Control, NULL);
     }
-    ExReleaseResourceLite(&Vcb->IndexResource);
+    NtfsReleaseIndexExclusive(Vcb);
     if (!NT_SUCCESS(Status)) NtfsMarkVolumeCorrupt(Vcb);
 }
 
@@ -686,7 +703,7 @@ NtfsReleaseFileQuota(PDEVICE_EXTENSION Vcb, PFILE_RECORD_HEADER Record)
     Info = GetStandardInformationFromRecord(Vcb, Record);
     ASSERT(Info != NULL);
     if (Info->QuotaId == 0 || Info->QuotaCharge == 0) return;
-    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    NtfsAcquireIndexExclusive(Vcb);
     Status = NtfsReadQuotaEntry(Vcb, Info->QuotaId, &Control, &Sid);
     if (NT_SUCCESS(Status))
     {
@@ -697,7 +714,7 @@ NtfsReleaseFileQuota(PDEVICE_EXTENSION Vcb, PFILE_RECORD_HEADER Record)
     if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_NOT_FOUND)
         NtfsInvalidateQuota(Vcb);
     if (Sid != NULL) ExFreePoolWithTag(Sid, TAG_NTFS);
-    ExReleaseResourceLite(&Vcb->IndexResource);
+    NtfsReleaseIndexExclusive(Vcb);
 }
 
 /* Namespace deletion owns the quota operation; the low-level MFT allocator
@@ -774,7 +791,7 @@ NtfsRebuildQuota(PDEVICE_EXTENSION Vcb)
 
     ASSERT(ExIsResourceAcquiredExclusiveLite(&Vcb->QuotaResource));
     NtfsQuotaRecordResources(Vcb, 0, TRUE, TRUE);
-    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    NtfsAcquireIndexExclusive(Vcb);
     LowEntry = NtfsAllocateViewIndexEntry(&Low, sizeof(Low), NULL, 0);
     HighEntry = NtfsAllocateViewIndexEntry(&High, sizeof(High), NULL, 0);
     Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
@@ -835,7 +852,7 @@ Cleanup:
     if (LowEntry != NULL) ExFreePoolWithTag(LowEntry, TAG_NTFS);
     if (HighEntry != NULL) ExFreePoolWithTag(HighEntry, TAG_NTFS);
     if (Record != NULL) ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
-    ExReleaseResourceLite(&Vcb->IndexResource);
+    NtfsReleaseIndexExclusive(Vcb);
     NtfsQuotaRecordResources(Vcb, 0, TRUE, FALSE);
     return Status;
 }
@@ -900,7 +917,7 @@ NtfsSetQuota(PNTFS_IRP_CONTEXT IrpContext)
 
     /* The owner IDs and both indexes change together */
     KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    NtfsAcquireIndexExclusive(Vcb);
 
     for (;;)
     {
@@ -910,7 +927,7 @@ NtfsSetQuota(PNTFS_IRP_CONTEXT IrpContext)
         Quota = (PFILE_QUOTA_INFORMATION)((PUCHAR)Quota + Quota->NextEntryOffset);
     }
 
-    ExReleaseResourceLite(&Vcb->IndexResource);
+    NtfsReleaseIndexExclusive(Vcb);
     KeLeaveCriticalRegion();
 
     return Status;
@@ -1229,7 +1246,7 @@ NtfsSetFsControl(PDEVICE_EXTENSION Vcb,
         return STATUS_MEDIA_WRITE_PROTECTED;
 
     KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    NtfsAcquireIndexExclusive(Vcb);
 
     Status = NtfsReadQuotaEntry(Vcb, NTFS_QUOTA_DEFAULTS_ID, &Control, NULL);
     if (NT_SUCCESS(Status))
@@ -1262,7 +1279,7 @@ NtfsSetFsControl(PDEVICE_EXTENSION Vcb,
         }
     }
 
-    ExReleaseResourceLite(&Vcb->IndexResource);
+    NtfsReleaseIndexExclusive(Vcb);
     if (NT_SUCCESS(Status) && Vcb->QuotaRebuildRequired)
         Status = NtfsRebuildQuota(Vcb);
     KeLeaveCriticalRegion();

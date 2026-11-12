@@ -2398,7 +2398,7 @@ NtfsPrepareExpandedRename(PDEVICE_EXTENSION Vcb,
 }
 
 static NTSTATUS
-NtfsCommitExpandedRename(PDEVICE_EXTENSION Vcb,
+NtfsCommitExpandedRenameLocked(PDEVICE_EXTENSION Vcb,
                           PNTFS_FCB Fcb,
                           PFILENAME_ATTRIBUTE OldValue,
                           PFILENAME_ATTRIBUTE DosValue,
@@ -2446,6 +2446,25 @@ NtfsCommitExpandedRename(PDEVICE_EXTENSION Vcb,
     return Status;
 }
 
+/* One transaction: the names change together, committed together (NtfsReleaseIndexExclusive). */
+static NTSTATUS
+NtfsCommitExpandedRename(PDEVICE_EXTENSION Vcb,
+                          PNTFS_FCB Fcb,
+                          PFILENAME_ATTRIBUTE OldValue,
+                          PFILENAME_ATTRIBUTE DosValue,
+                          PFILENAME_ATTRIBUTE NewValue,
+                          BOOLEAN CaseSensitive)
+{
+    NTSTATUS Status;
+
+    KeEnterCriticalRegion();
+    NtfsAcquireIndexExclusive(Vcb);
+    Status = NtfsCommitExpandedRenameLocked(Vcb, Fcb, OldValue, DosValue, NewValue, CaseSensitive);
+    NtfsReleaseIndexExclusive(Vcb);
+    KeLeaveCriticalRegion();
+    return Status;
+}
+
 /**
 * @name NtfsCommitRename
 *
@@ -2460,7 +2479,7 @@ NtfsCommitExpandedRename(PDEVICE_EXTENSION Vcb,
 */
 static
 NTSTATUS
-NtfsCommitRename(
+NtfsCommitRenameLocked(
     _In_ PDEVICE_EXTENSION DeviceExt,
     _In_ PNTFS_FCB Fcb,
     _Inout_ PFILE_RECORD_HEADER FileRecord,
@@ -2499,6 +2518,30 @@ NtfsCommitRename(
         NtfsRelinkFileNames(DeviceExt, Original, FileReference, Removed, CaseSensitive, Instance, OldParentMft, RemoveDos);
     }
 
+    return Status;
+}
+
+/* One transaction: the names change together, committed together (NtfsReleaseIndexExclusive). */
+static NTSTATUS
+NtfsCommitRename(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PNTFS_FCB Fcb,
+    _Inout_ PFILE_RECORD_HEADER FileRecord,
+    _In_ PFILE_RECORD_HEADER Original,
+    _In_ ULONGLONG OldParentMft,
+    _In_ ULONGLONG TargetDirMft,
+    _In_ PFILENAME_ATTRIBUTE NewValue,
+    _In_ BOOLEAN CaseSensitive,
+    _In_ USHORT Instance,
+    _In_ BOOLEAN RemoveDos)
+{
+    NTSTATUS Status;
+
+    KeEnterCriticalRegion();
+    NtfsAcquireIndexExclusive(DeviceExt);
+    Status = NtfsCommitRenameLocked(DeviceExt, Fcb, FileRecord, Original, OldParentMft, TargetDirMft, NewValue, CaseSensitive, Instance, RemoveDos);
+    NtfsReleaseIndexExclusive(DeviceExt);
+    KeLeaveCriticalRegion();
     return Status;
 }
 
@@ -2651,7 +2694,7 @@ NtfsCommitReplacingRename(PDEVICE_EXTENSION Vcb,
     ULONGLONG Parent = NewValue->DirectoryFileReferenceNumber & NTFS_MFT_MASK;
     ULONGLONG OldParent = OldValue->DirectoryFileReferenceNumber & NTFS_MFT_MASK;
     ULONGLONG Reference = NtfsFileReference(Fcb);
-    BOOLEAN IndexChanged = FALSE;
+    BOOLEAN IndexChanged = FALSE, IndexHeld = FALSE;
     NTSTATUS Status, RestoreStatus = STATUS_SUCCESS;
     LIST_ENTRY TargetFcbs;
 
@@ -2660,6 +2703,12 @@ NtfsCommitReplacingRename(PDEVICE_EXTENSION Vcb,
                                      ((ULONGLONG)Target->SequenceNumber << 48), &TargetFcbs);
     if (!NT_SUCCESS(Status))
         goto Restore;
+    /* One transaction from here: the names change together and the
+     * replaced file goes with them, committed together
+     * (NtfsReleaseIndexExclusive).  After the FCB resources. */
+    KeEnterCriticalRegion();
+    NtfsAcquireIndexExclusive(Vcb);
+    IndexHeld = TRUE;
     Status = ReadFileRecord(Vcb, Target->MFTRecordNumber, Target);
     if (!NT_SUCCESS(Status))
         goto Restore;
@@ -2765,6 +2814,11 @@ Restore:
     if (!NT_SUCCESS(RestoreStatus))
         NtfsMarkVolumeCorrupt(Vcb);
 Cleanup:
+    if (IndexHeld)
+    {
+        NtfsReleaseIndexExclusive(Vcb);
+        KeLeaveCriticalRegion();
+    }
     if (Names != NULL)
         NtfsFreeFileNames(Names, Count);
     while (!IsListEmpty(&TargetFcbs))
@@ -3354,14 +3408,14 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             /* A directory's record carries its index, which a create in it
              * could be changing; IndexResource keeps the two apart */
             KeEnterCriticalRegion();
-            ExAcquireResourceExclusiveLite(&DeviceExt->IndexResource, TRUE);
+            NtfsAcquireIndexExclusive(DeviceExt);
             Status = NtfsSetBasicInformation(DeviceExt,
                                              Fcb,
                                              FileObject,
                                              BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
                                              (PFILE_BASIC_INFORMATION)SystemBuffer,
                                              &NotifyFilter);
-            ExReleaseResourceLite(&DeviceExt->IndexResource);
+            NtfsReleaseIndexExclusive(DeviceExt);
             KeLeaveCriticalRegion();
             break;
 

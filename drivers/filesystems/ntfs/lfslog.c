@@ -825,6 +825,11 @@ NtfsLogEmitOwn(PNTFS_LOG_WRITER Writer, PLFS_EMIT_PARAMS Params, ULONG Count, PU
     {
         /* Checkpoints keep the transaction's records from its first one. */
         Request->TransactionId = Transaction;
+        if (Request->IndexDepth != 0)
+        {
+            ASSERT(ExIsResourceAcquiredExclusiveLite(&Writer->Vcb->IndexResource));
+            Request->IndexChanged = TRUE;
+        }
     }
     Status = NtfsLogEmit(Writer, Params, Count, Lsns, Own ? Transaction : 0, FALSE);
     if (NT_SUCCESS(Status) && Own && Request->FirstLsn == 0)
@@ -858,17 +863,42 @@ NtfsLfsBeginRequest(PVOID Context, PNTFS_LOG_REQUEST Request)
     KeReleaseSpinLock(&Writer->PendingLock, OldIrql);
 }
 
+/* Logs the commit of the request's transaction: until it is on disk,
+ * recovery undoes the transaction.  The caller owns the writer. */
+static NTSTATUS
+NtfsLogCommitLocked(PNTFS_LOG_WRITER Writer, PNTFS_LOG_REQUEST Request)
+{
+    LFS_EMIT_PARAMS Params;
+    ULONGLONG Lsn;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    ASSERT(ExIsResourceAcquiredExclusiveLite(&Writer->Resource));
+    if (Writer->Enabled && Request->Session == Writer->Session &&
+        Request->TransactionId != 0 && !Request->Forced)
+    {
+        RtlZeroMemory(&Params, sizeof(Params));
+        Params.RedoOperation = NTFS_LFS_OP_FORGET_TRANSACTION;
+        Params.UndoOperation = NTFS_LFS_OP_NOOP;
+        Params.TransactionId = Request->TransactionId;
+        Writer->InIo = TRUE;
+        Status = NtfsLogEmit(Writer, &Params, 1, &Lsn, 0, TRUE);
+        Writer->InIo = FALSE;
+        if (!NT_SUCCESS(Status))
+            DPRINT1("Couldn't log the commit of transaction %lu (%lx)\n", Request->TransactionId, Status);
+    }
+    return Status;
+}
+
 NTSTATUS
 NtfsLfsEndRequest(PVOID Context, PNTFS_LOG_REQUEST Request, BOOLEAN ForceLog)
 {
     PNTFS_LOG_WRITER Writer = Context;
-    LFS_EMIT_PARAMS Params;
-    ULONGLONG Lsn;
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS Status;
     KIRQL OldIrql;
 
     if (Request->Joined)
         return STATUS_SUCCESS;
+    ASSERT(Request->IndexDepth == 0);
     /* A request that logged nothing has nothing to commit, and must not
      * wait for the writer: the lazy writer's paging writes end here while
      * it holds the volume stream a committing request may be flushing.
@@ -881,20 +911,7 @@ NtfsLfsEndRequest(PVOID Context, PNTFS_LOG_REQUEST Request, BOOLEAN ForceLog)
         return ForceLog ? NtfsLfsForce(Writer) : STATUS_SUCCESS;
     }
     ExAcquireResourceExclusiveLite(&Writer->Resource, TRUE);
-    if (Writer->Enabled && Request->Session == Writer->Session &&
-        Request->TransactionId != 0 && !Request->Forced)
-    {
-        /* The commit: until it is on disk, recovery undoes the request. */
-        RtlZeroMemory(&Params, sizeof(Params));
-        Params.RedoOperation = NTFS_LFS_OP_FORGET_TRANSACTION;
-        Params.UndoOperation = NTFS_LFS_OP_NOOP;
-        Params.TransactionId = Request->TransactionId;
-        Writer->InIo = TRUE;
-        Status = NtfsLogEmit(Writer, &Params, 1, &Lsn, 0, TRUE);
-        Writer->InIo = FALSE;
-        if (!NT_SUCCESS(Status))
-            DPRINT1("Couldn't log the commit of transaction %lu (%lx)\n", Request->TransactionId, Status);
-    }
+    Status = NtfsLogCommitLocked(Writer, Request);
     KeAcquireSpinLock(&Writer->PendingLock, &OldIrql);
     RemoveEntryList(&Request->Link);
     KeReleaseSpinLock(&Writer->PendingLock, OldIrql);
@@ -903,6 +920,61 @@ NtfsLfsEndRequest(PVOID Context, PNTFS_LOG_REQUEST Request, BOOLEAN ForceLog)
     if (NT_SUCCESS(Status) && ForceLog)
         Status = NtfsLfsForce(Writer);
     return Status;
+}
+
+/*
+ * IndexResource serializes every change of a directory's index and record,
+ * and of the indexes of $Secure, $Quota and the like.  Windows' NTFS keeps
+ * what a transaction changed from every other transaction until it
+ * commits: were another one to change the same bytes first (an index
+ * buffer's update sequence number, say), recovery could neither undo the
+ * first without undoing the second nor keep the second without the first,
+ * and the volume would not mount.  IndexResource is the volume's, taken
+ * after the FCB resources, so it cannot stay held to the end of a request
+ * without inverting that order; instead, a request that changed what it
+ * guards commits its changes so far before giving it up (the rest of the
+ * request is a new transaction), so no other transaction ever changes what
+ * an uncommitted one changed.  An operation whose index changes must stand
+ * or fall together (a rename) holds it across all of them.
+ */
+VOID
+NtfsAcquireIndexExclusive(PDEVICE_EXTENSION Vcb)
+{
+    PNTFS_LOG_WRITER Writer = Vcb->LfsWriter;
+    PNTFS_LOG_REQUEST Request;
+
+    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    Request = Writer != NULL ? NtfsLogCurrentRequest(Writer) : NULL;
+    if (Request != NULL)
+        Request->IndexDepth++;
+}
+
+VOID
+NtfsReleaseIndexExclusive(PDEVICE_EXTENSION Vcb)
+{
+    PNTFS_LOG_WRITER Writer = Vcb->LfsWriter;
+    PNTFS_LOG_REQUEST Request;
+
+    ASSERT(ExIsResourceAcquiredExclusiveLite(&Vcb->IndexResource));
+    Request = Writer != NULL ? NtfsLogCurrentRequest(Writer) : NULL;
+    if (Request != NULL)
+    {
+        ASSERT(Request->IndexDepth != 0);
+        if (--Request->IndexDepth == 0 && Request->IndexChanged)
+        {
+            Request->IndexChanged = FALSE;
+            ExAcquireResourceExclusiveLite(&Writer->Resource, TRUE);
+            /* A failed commit leaves the transaction open: recovery then
+             * undoes it with the rest of the request, as before. */
+            if (NT_SUCCESS(NtfsLogCommitLocked(Writer, Request)) && !Request->Forced)
+            {
+                Request->TransactionId = 0;
+                Request->FirstLsn = 0;
+            }
+            ExReleaseResourceLite(&Writer->Resource);
+        }
+    }
+    ExReleaseResourceLite(&Vcb->IndexResource);
 }
 
 NTSTATUS
