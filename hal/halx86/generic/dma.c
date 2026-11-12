@@ -84,7 +84,14 @@ static LIST_ENTRY HalpDmaAdapterList;
 static PADAPTER_OBJECT HalpEisaAdapter[8];
 #endif
 static BOOLEAN HalpEisaDma;
+
+/*
+ * Highest physical address of RAM, like Windows' HalpMaximumPhysicalMemoryAddress.
+ * Until HalpInitDma has looked at the memory map, assume memory may lie
+ * anywhere, so every device that cannot address it all gets map registers.
+ */
 #ifndef _MINIHAL_
+static ULONGLONG HalpMaximumPhysicalMemoryAddress = MAXULONGLONG;
 static PADAPTER_OBJECT HalpMasterAdapter;
 #endif
 
@@ -229,6 +236,31 @@ HalpInitDma(VOID)
      * waiter passed it and growths / adapter creation ran concurrently. */
     KeInitializeEvent(&HalpDmaLock, SynchronizationEvent, TRUE);
     HalpMasterAdapter = HalpDmaAllocateMasterAdapter();
+
+    /*
+     * Find the highest RAM address: a 32-bit bus master can reach all of
+     * memory when there is none above 4 GB, and then needs no map registers.
+     */
+    {
+        PPHYSICAL_MEMORY_RANGE Ranges, Range;
+        ULONGLONG Highest = 0;
+
+        Ranges = MmGetPhysicalMemoryRanges();
+        NT_ASSERT(Ranges != NULL);
+        if (Ranges)
+        {
+            for (Range = Ranges;
+                 Range->BaseAddress.QuadPart || Range->NumberOfBytes.QuadPart;
+                 Range++)
+            {
+                Highest = max(Highest, (ULONGLONG)(Range->BaseAddress.QuadPart +
+                                                   Range->NumberOfBytes.QuadPart - 1));
+            }
+            ExFreePoolWithTag(Ranges, 'hPmM');
+            HalpMaximumPhysicalMemoryAddress = Highest;
+        }
+        DPRINT1("Highest physical memory address 0x%I64x\n", HalpMaximumPhysicalMemoryAddress);
+    }
 
     /*
      * Setup the HalDispatchTable callback for creating PnP DMA adapters. It's
@@ -782,13 +814,20 @@ HalGetAdapter(IN PDEVICE_DESCRIPTION DeviceDescription,
      *   DeviceDescription->MaximumLength.
      *
      * PCI scatter/gather devices with only 32-bit addressing still need map
-     * registers so IoMapTransfer can bounce buffers above the device limit.
+     * registers so IoMapTransfer can bounce buffers above the device limit,
+     * but only when there is memory above that limit. Like Windows
+     * (HalGetAdapterV2 compares HalpMaximumPhysicalMemoryAddress with 4 GB),
+     * give them none otherwise: the device reaches every buffer directly,
+     * and the small shared map register pool is not tied up by every
+     * transfer in flight (a NIC's whole transmit ring) until a disk request
+     * can no longer get any and its I/O stalls for good.
      */
     MaximumLength = DeviceDescription->MaximumLength & MAXLONG;
     if ((DeviceDescription->ScatterGather) &&
         ((DeviceDescription->InterfaceType == Eisa) ||
          ((DeviceDescription->InterfaceType == PCIBus) &&
-          (DeviceDescription->Dma64BitAddresses))))
+          ((DeviceDescription->Dma64BitAddresses) ||
+           (HalpMaximumPhysicalMemoryAddress <= 0xFFFFFFFFULL)))))
     {
         MapRegisters = 0;
     }
