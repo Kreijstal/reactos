@@ -22,6 +22,10 @@
 #include <mountdev.h>
 #include <wdmguid.h>
 
+/* The transfer limits reported in STORAGE_ADAPTER_DESCRIPTOR */
+#define PORT_MAXIMUM_TRANSFER_LENGTH (64 * 1024)
+#define PORT_MAXIMUM_PHYSICAL_PAGES  17
+
 /* Memory Tags */
 #define TAG_GLOBAL_DATA     'DGtS'
 #define TAG_INIT_DATA       'DItS'
