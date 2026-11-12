@@ -36,6 +36,7 @@ extern void func_GdiConvertRegion(void);
 extern void func_GdiDeleteLocalDC(void);
 extern void func_GdiGetCharDimensions(void);
 extern void func_GdiGetLocalBrush(void);
+extern void func_GdiHandleChurn(void);
 extern void func_GdiGetLocalDC(void);
 extern void func_GdiReleaseLocalDC(void);
 extern void func_GdiSetAttrs(void);
@@ -115,6 +116,7 @@ const struct test winetest_testlist[] =
     { "GdiDeleteLocalDC", func_GdiDeleteLocalDC },
     { "GdiGetCharDimensions", func_GdiGetCharDimensions },
     { "GdiGetLocalBrush", func_GdiGetLocalBrush },
+    { "GdiHandleChurn", func_GdiHandleChurn },
     { "GdiGetLocalDC", func_GdiGetLocalDC },
     { "GdiReleaseLocalDC", func_GdiReleaseLocalDC },
     { "GdiSetAttrs", func_GdiSetAttrs },
