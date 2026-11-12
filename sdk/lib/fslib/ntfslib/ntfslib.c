@@ -528,6 +528,29 @@ NtfsFormat(
         goto end;
     }
 
+    // Like Windows' format, mark an MBR partition as an IFS (NTFS) one.
+    // A disk without a partition table has nothing to update.
+    {
+        PARTITION_INFORMATION_EX PartitionInfo;
+        SET_PARTITION_INFORMATION SetPartitionInfo;
+
+        if (NT_SUCCESS(NtDeviceIoControlFile(DiskHandle, NULL, NULL, NULL, &Iosb,
+                                             IOCTL_DISK_GET_PARTITION_INFO_EX,
+                                             NULL, 0,
+                                             &PartitionInfo, sizeof(PartitionInfo))) &&
+            PartitionInfo.PartitionStyle == PARTITION_STYLE_MBR &&
+            PartitionInfo.Mbr.PartitionType != PARTITION_IFS)
+        {
+            SetPartitionInfo.PartitionType = PARTITION_IFS;
+            Status = NtDeviceIoControlFile(DiskHandle, NULL, NULL, NULL, &Iosb,
+                                           IOCTL_DISK_SET_PARTITION_INFO,
+                                           &SetPartitionInfo, sizeof(SetPartitionInfo),
+                                           NULL, 0);
+            if (!NT_SUCCESS(Status))
+                DPRINT1("Setting the partition type failed with status 0x%.08x\n", Status);
+        }
+    }
+
     Result = TRUE;
     DPRINT1("NtfsFormat() completed successfully\n");
 
