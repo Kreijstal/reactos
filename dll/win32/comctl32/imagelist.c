@@ -78,6 +78,20 @@ BOOL WINAPI Internal_SetOverlayImage (HIMAGELIST himl, INT iImage, INT iOverlay)
 #define ImageList_GetBkColor Internal_GetBkColor
 #define ImageList_BeginDrag Internal_BeginDrag
 #define ImageList_DrawIndirect Internal_DrawIndirect
+
+/* Like Windows, every image list operation runs under one lock: the system
+ * image list is shared by all threads of a process, and shell32 adds icons to
+ * it from background tasks while windows draw from it. The IImageList methods
+ * take it (the exported functions call them), and so do the exported
+ * functions that do not go through IImageList. */
+static CRITICAL_SECTION ImlLock;
+static CRITICAL_SECTION_DEBUG ImlLockDebug =
+{
+    0, 0, &ImlLock,
+    { &ImlLockDebug.ProcessLocksList, &ImlLockDebug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": ImlLock") }
+};
+static CRITICAL_SECTION ImlLock = { &ImlLockDebug, -1, 0, 0, 0, 0 };
 #endif
 
 struct _IMAGELIST
@@ -1298,7 +1312,17 @@ ImageList_DrawEx (HIMAGELIST himl, INT i, HDC hdc, INT x, INT y,
     imldp.rgbFg   = rgbFg;
     imldp.fStyle  = fStyle;
 
+#ifdef __REACTOS__
+    {
+        BOOL ret;
+        EnterCriticalSection(&ImlLock);
+        ret = ImageList_DrawIndirect (&imldp);
+        LeaveCriticalSection(&ImlLock);
+        return ret;
+    }
+#else
     return ImageList_DrawIndirect (&imldp);
+#endif
 }
 
 #ifdef __REACTOS__
@@ -4042,39 +4066,342 @@ static HRESULT WINAPI ImageListImpl_ReplaceFromImageList(IImageList2 *iface, INT
     return E_NOTIMPL;
 }
 
+#ifdef __REACTOS__
+/* The IImageList methods that touch the image list, run under ImlLock */
+static HRESULT WINAPI ImageListLocked_Add(IImageList2 *iface, HBITMAP hbmImage, HBITMAP hbmMask, int *pi)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_Add(iface, hbmImage, hbmMask, pi);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_ReplaceIcon(IImageList2 *iface, int i, HICON hicon, int *pi)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_ReplaceIcon(iface, i, hicon, pi);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_SetOverlayImage(IImageList2 *iface, int iImage, int iOverlay)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_SetOverlayImage(iface, iImage, iOverlay);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_Replace(IImageList2 *iface, int i, HBITMAP hbmImage, HBITMAP hbmMask)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_Replace(iface, i, hbmImage, hbmMask);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_AddMasked(IImageList2 *iface, HBITMAP hbmImage, COLORREF crMask, int *pi)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_AddMasked(iface, hbmImage, crMask, pi);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_Draw(IImageList2 *iface, IMAGELISTDRAWPARAMS *pimldp)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_Draw(iface, pimldp);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_Remove(IImageList2 *iface, int i)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_Remove(iface, i);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_GetIcon(IImageList2 *iface, int i, UINT flags, HICON *picon)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_GetIcon(iface, i, flags, picon);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_GetImageInfo(IImageList2 *iface, int i, IMAGEINFO *pImageInfo)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_GetImageInfo(iface, i, pImageInfo);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_Copy(IImageList2 *iface, int dst_index, IUnknown *unk_src, int src_index, UINT flags)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_Copy(iface, dst_index, unk_src, src_index, flags);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_Merge(IImageList2 *iface, int i1, IUnknown *punk2, int i2, int dx, int dy, REFIID riid, void **ppv)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_Merge(iface, i1, punk2, i2, dx, dy, riid, ppv);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_Clone(IImageList2 *iface, REFIID riid, void **ppv)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_Clone(iface, riid, ppv);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_GetImageRect(IImageList2 *iface, int i, RECT *prc)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_GetImageRect(iface, i, prc);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_GetIconSize(IImageList2 *iface, int *cx, int *cy)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_GetIconSize(iface, cx, cy);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_SetIconSize(IImageList2 *iface, int cx, int cy)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_SetIconSize(iface, cx, cy);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_GetImageCount(IImageList2 *iface, int *pi)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_GetImageCount(iface, pi);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_SetImageCount(IImageList2 *iface, UINT count)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_SetImageCount(iface, count);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_SetBkColor(IImageList2 *iface, COLORREF clrBk, COLORREF *pclr)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_SetBkColor(iface, clrBk, pclr);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_GetBkColor(IImageList2 *iface, COLORREF *pclr)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_GetBkColor(iface, pclr);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_BeginDrag(IImageList2 *iface, int iTrack, int dxHotspot, int dyHotspot)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_BeginDrag(iface, iTrack, dxHotspot, dyHotspot);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_SetDragCursorImage(IImageList2 *iface, IUnknown *punk, int iDrag, int dxHotspot, int dyHotspot)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_SetDragCursorImage(iface, punk, iDrag, dxHotspot, dyHotspot);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_GetDragImage(IImageList2 *iface, POINT *ppt, POINT *pptHotspot, REFIID riid, PVOID *ppv)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_GetDragImage(iface, ppt, pptHotspot, riid, ppv);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+static HRESULT WINAPI ImageListLocked_GetOverlayImage(IImageList2 *iface, int iOverlay, int *piIndex)
+{
+    HRESULT hr;
+    EnterCriticalSection(&ImlLock);
+    hr = ImageListImpl_GetOverlayImage(iface, iOverlay, piIndex);
+    LeaveCriticalSection(&ImlLock);
+    return hr;
+}
+
+#endif
+
 static const IImageList2Vtbl ImageListImpl_Vtbl = {
     ImageListImpl_QueryInterface,
     ImageListImpl_AddRef,
     ImageListImpl_Release,
+#ifdef __REACTOS__
+    ImageListLocked_Add,
+#else
     ImageListImpl_Add,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_ReplaceIcon,
+#else
     ImageListImpl_ReplaceIcon,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_SetOverlayImage,
+#else
     ImageListImpl_SetOverlayImage,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_Replace,
+#else
     ImageListImpl_Replace,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_AddMasked,
+#else
     ImageListImpl_AddMasked,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_Draw,
+#else
     ImageListImpl_Draw,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_Remove,
+#else
     ImageListImpl_Remove,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_GetIcon,
+#else
     ImageListImpl_GetIcon,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_GetImageInfo,
+#else
     ImageListImpl_GetImageInfo,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_Copy,
+#else
     ImageListImpl_Copy,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_Merge,
+#else
     ImageListImpl_Merge,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_Clone,
+#else
     ImageListImpl_Clone,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_GetImageRect,
+#else
     ImageListImpl_GetImageRect,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_GetIconSize,
+#else
     ImageListImpl_GetIconSize,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_SetIconSize,
+#else
     ImageListImpl_SetIconSize,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_GetImageCount,
+#else
     ImageListImpl_GetImageCount,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_SetImageCount,
+#else
     ImageListImpl_SetImageCount,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_SetBkColor,
+#else
     ImageListImpl_SetBkColor,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_GetBkColor,
+#else
     ImageListImpl_GetBkColor,
+#endif
+#ifdef __REACTOS__
+    ImageListLocked_BeginDrag,
+#else
     ImageListImpl_BeginDrag,
+#endif
     ImageListImpl_EndDrag,
     ImageListImpl_DragEnter,
     ImageListImpl_DragLeave,
     ImageListImpl_DragMove,
+#ifdef __REACTOS__
+    ImageListLocked_SetDragCursorImage,
+#else
     ImageListImpl_SetDragCursorImage,
+#endif
     ImageListImpl_DragShowNolock,
+#ifdef __REACTOS__
+    ImageListLocked_GetDragImage,
+#else
     ImageListImpl_GetDragImage,
+#endif
     ImageListImpl_GetItemFlags,
+#ifdef __REACTOS__
+    ImageListLocked_GetOverlayImage,
+#else
     ImageListImpl_GetOverlayImage,
+#endif
     ImageListImpl_Resize,
     ImageListImpl_GetOriginalSize,
     ImageListImpl_SetOriginalSize,
