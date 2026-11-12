@@ -601,6 +601,8 @@ USBPORT_StartDevice(IN PDEVICE_OBJECT FdoDevice,
     KeInitializeSpinLock(&FdoExtension->IdleIoCsqSpinLock);
     KeInitializeSpinLock(&FdoExtension->BadRequestIoCsqSpinLock);
     KeInitializeSpinLock(&FdoExtension->MapTransferSpinLock);
+    FdoExtension->MapTransferBusy = FALSE;
+    FdoExtension->MapAllocatingCpu = MAXULONG;
     KeInitializeSpinLock(&FdoExtension->FlushTransferSpinLock);
     KeInitializeSpinLock(&FdoExtension->FlushPendingTransferSpinLock);
     KeInitializeSpinLock(&FdoExtension->DoneTransferSpinLock);

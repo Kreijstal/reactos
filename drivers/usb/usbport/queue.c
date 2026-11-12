@@ -850,6 +850,8 @@ USBPORT_FlushPendingTransfers(IN PUSBPORT_ENDPOINT Endpoint)
         {
             if (!IsListEmpty(&Endpoint->TransferList))
             {
+                PLIST_ENTRY Prev = &Endpoint->TransferList;
+
                 List = Endpoint->TransferList.Flink;
 
                 while (List && List != &Endpoint->TransferList)
@@ -857,6 +859,14 @@ USBPORT_FlushPendingTransfers(IN PUSBPORT_ENDPOINT Endpoint)
                     Transfer = CONTAINING_RECORD(List,
                                                  USBPORT_TRANSFER,
                                                  TransferLink);
+
+                    /* Every entry is this endpoint's and is linked back to
+                     * the one before it; a list that stops leading back to
+                     * its head would spin here at DISPATCH_LEVEL for ever. */
+                    NT_ASSERT(List->Blink == Prev);
+                    NT_ASSERT(List->Flink != List);
+                    NT_ASSERT(Transfer->Endpoint == Endpoint);
+                    Prev = List;
 
                     if (!(Transfer->Flags & TRANSFER_FLAG_SUBMITED))
                     {
@@ -1056,6 +1066,9 @@ USBPORT_QueueActiveUrbToEndpoint(IN PUSBPORT_ENDPOINT Endpoint,
                 Urb);
 
     Transfer = Urb->UrbControlTransfer.hca.Reserved8[0];
+
+    /* The caller took it off PendingTransferList and cleared the links. */
+    NT_ASSERT(!Transfer || Transfer->TransferLink.Flink == NULL);
 
     if (!Transfer)
     {

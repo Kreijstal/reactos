@@ -53,6 +53,7 @@ extern void func_TerminateProcess(void);
 extern void func_Toolhelp(void);
 extern void func_TunnelCache(void);
 extern void func_UEFIFirmware(void);
+extern void func_UsbConcurrentDevices(void);
 extern void func_WideCharToMultiByte(void);
 
 const struct test winetest_testlist[] =
@@ -108,6 +109,7 @@ const struct test winetest_testlist[] =
     { "Toolhelp",                    func_Toolhelp },
     { "TunnelCache",                 func_TunnelCache },
     { "UEFIFirmware",                func_UEFIFirmware },
+    { "UsbConcurrentDevices",        func_UsbConcurrentDevices },
     { "WideCharToMultiByte",         func_WideCharToMultiByte },
     { 0, 0 }
 };
