@@ -2466,6 +2466,7 @@ DxgkCbIndicateChildStatus(
 #endif
 
 static VOID
+NTAPI
 DxgkpTimedOpInterfaceNop(
     _In_ PVOID Context)
 {
