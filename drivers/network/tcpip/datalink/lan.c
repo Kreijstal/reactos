@@ -36,6 +36,13 @@ typedef struct _LAN_WQ_ITEM {
     BOOLEAN LegacyReceive;
 } LAN_WQ_ITEM, *PLAN_WQ_ITEM;
 
+/* An NDIS request issued by NDISCall and the event its issuer waits on */
+typedef struct _LAN_REQUEST {
+    NDIS_REQUEST Request;
+    KEVENT Event;
+    NDIS_STATUS Status;
+} LAN_REQUEST, *PLAN_REQUEST;
+
 typedef struct _RECONFIGURE_CONTEXT {
     ULONG State;
     PLAN_ADAPTER Adapter;
@@ -64,34 +71,42 @@ NDIS_STATUS NDISCall(
  *     Status of operation
  */
 {
-    NDIS_REQUEST Request;
+    LAN_REQUEST LanRequest;
+    PNDIS_REQUEST Request = &LanRequest.Request;
     NDIS_STATUS NdisStatus;
 
-    Request.RequestType = Type;
+    ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL);
+
+    RtlZeroMemory(&LanRequest, sizeof(LanRequest));
+    Request->RequestType = Type;
     if (Type == NdisRequestSetInformation) {
-        Request.DATA.SET_INFORMATION.Oid                     = OID;
-        Request.DATA.SET_INFORMATION.InformationBuffer       = Buffer;
-        Request.DATA.SET_INFORMATION.InformationBufferLength = Length;
+        Request->DATA.SET_INFORMATION.Oid                     = OID;
+        Request->DATA.SET_INFORMATION.InformationBuffer       = Buffer;
+        Request->DATA.SET_INFORMATION.InformationBufferLength = Length;
     } else {
-        Request.DATA.QUERY_INFORMATION.Oid                     = OID;
-        Request.DATA.QUERY_INFORMATION.InformationBuffer       = Buffer;
-        Request.DATA.QUERY_INFORMATION.InformationBufferLength = Length;
+        Request->DATA.QUERY_INFORMATION.Oid                     = OID;
+        Request->DATA.QUERY_INFORMATION.InformationBuffer       = Buffer;
+        Request->DATA.QUERY_INFORMATION.InformationBufferLength = Length;
     }
 
+    /* Each request has its own completion event: several threads may have
+     * requests pending on the adapter at once */
+    KeInitializeEvent(&LanRequest.Event, NotificationEvent, FALSE);
+
     if (Adapter->State != LAN_STATE_RESETTING) {
-        NdisRequest(&NdisStatus, Adapter->NdisHandle, &Request);
+        NdisRequest(&NdisStatus, Adapter->NdisHandle, Request);
     } else {
         NdisStatus = NDIS_STATUS_NOT_ACCEPTED;
     }
 
     /* Wait for NDIS to complete the request */
     if (NdisStatus == NDIS_STATUS_PENDING) {
-        KeWaitForSingleObject(&Adapter->Event,
+        KeWaitForSingleObject(&LanRequest.Event,
                               UserRequest,
                               KernelMode,
                               FALSE,
                               NULL);
-        NdisStatus = Adapter->NdisStatus;
+        NdisStatus = LanRequest.Status;
     }
 
     return NdisStatus;
@@ -320,14 +335,13 @@ VOID NTAPI ProtocolRequestComplete(
  *     Status         = Status of the operation
  */
 {
-    PLAN_ADAPTER Adapter = (PLAN_ADAPTER)BindingContext;
+    PLAN_REQUEST LanRequest = CONTAINING_RECORD(NdisRequest, LAN_REQUEST, Request);
 
     TI_DbgPrint(DEBUG_DATALINK, ("Called.\n"));
 
-    /* Save status of request and signal an event */
-    Adapter->NdisStatus = Status;
-
-    KeSetEvent(&Adapter->Event, 0, FALSE);
+    /* Every request comes from NDISCall: wake its issuer */
+    LanRequest->Status = Status;
+    KeSetEvent(&LanRequest->Event, IO_NO_INCREMENT, FALSE);
 }
 
 
@@ -430,18 +444,27 @@ VOID LanReceiveWorker( PVOID Context ) {
     }
 }
 
-VOID LanSubmitReceiveWork(
+static
+BOOLEAN
+LanSubmitReceiveWork(
     NDIS_HANDLE BindingContext,
     PNDIS_PACKET Packet,
     UINT BytesTransferred,
-    BOOLEAN LegacyReceive) {
+    BOOLEAN LegacyReceive)
+/*
+ * FUNCTION: Hands a received packet to LanReceiveWorker
+ * RETURNS:
+ *     TRUE if the worker now owns the packet, FALSE if it could not be
+ *     queued (the caller still owns the packet then)
+ */
+{
     PLAN_WQ_ITEM WQItem = ExAllocatePoolWithTag(NonPagedPool, sizeof(LAN_WQ_ITEM),
                                                 WQ_CONTEXT_TAG);
     PLAN_ADAPTER Adapter = (PLAN_ADAPTER)BindingContext;
 
     TI_DbgPrint(DEBUG_DATALINK,("called\n"));
 
-    if (!WQItem) return;
+    if (!WQItem) return FALSE;
 
     WQItem->Packet = Packet;
     WQItem->Adapter = Adapter;
@@ -449,7 +472,12 @@ VOID LanSubmitReceiveWork(
     WQItem->LegacyReceive = LegacyReceive;
 
     if (!ChewCreate( LanReceiveWorker, WQItem ))
+    {
         ExFreePoolWithTag(WQItem, WQ_CONTEXT_TAG);
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 VOID NTAPI ProtocolTransferDataComplete(
@@ -476,12 +504,13 @@ VOID NTAPI ProtocolTransferDataComplete(
     TransferDataCompleteCalled++;
     ASSERT(TransferDataCompleteCalled <= TransferDataCalled);
 
-    if( Status != NDIS_STATUS_SUCCESS ) return;
-
-    LanSubmitReceiveWork(BindingContext,
-                         Packet,
-                         BytesTransferred,
-                         TRUE);
+    /* The packet is ours (ProtocolReceive allocated it): free it if the
+     * transfer failed or it cannot be processed */
+    if (Status != NDIS_STATUS_SUCCESS ||
+        !LanSubmitReceiveWork(BindingContext, Packet, BytesTransferred, TRUE))
+    {
+        FreeNdisPacket(Packet);
+    }
 }
 
 INT NTAPI ProtocolReceivePacket(
@@ -495,10 +524,15 @@ INT NTAPI ProtocolReceivePacket(
         return 0;
     }
 
-    LanSubmitReceiveWork(BindingContext,
-                         NdisPacket,
-                         0, /* Unused */
-                         FALSE);
+    /* If it cannot be queued, hold no reference: the packet stays the
+     * miniport's and is dropped */
+    if (!LanSubmitReceiveWork(BindingContext,
+                              NdisPacket,
+                              0, /* Unused */
+                              FALSE))
+    {
+        return 0;
+    }
 
     /* Hold 1 reference on this packet */
     return 1;
@@ -1133,9 +1167,12 @@ VOID LANTransmit(
 		   ((PCHAR)LinkAddress)[5] & 0xff));
 	}
 
-    if (Adapter->MTU < Size) {
+    /* NdisPacket was completed above (and possibly freed): only XmitPacket
+     * may be touched from here on. Size includes the media header, MTU
+     * does not */
+    if (Adapter->MTU < Size - Adapter->HeaderSize) {
         /* This is NOT a pointer. MSDN explicitly says so. */
-        NDIS_PER_PACKET_INFO_FROM_PACKET(NdisPacket,
+        NDIS_PER_PACKET_INFO_FROM_PACKET(XmitPacket,
                                          TcpLargeSendPacketInfo) = (PVOID)((ULONG_PTR)Adapter->MTU);
     }
 
