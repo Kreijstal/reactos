@@ -46,27 +46,15 @@ typedef struct _XHCI_ENUMERATION_WORK_ITEM {
     ULONG PortNumber;
 } XHCI_ENUMERATION_WORK_ITEM, *PXHCI_ENUMERATION_WORK_ITEM;
 
-/* XHCI_PENDING_TRANSFER lives in usbxhcip.h so XHCI_CompleteTransfer can take a
+/* XHCI_PENDING_TRANSFER lives in usbxhcip.h so the event and poll paths can take a
  * snapshot of one by value-pointer. */
 
 static XHCI_PENDING_TRANSFER g_PendingTransfers[MAX_PENDING_TRANSFERS];
 static KSPIN_LOCK g_PendingTransfersLock;
 static BOOLEAN g_TransferTrackingInitialized = FALSE;
 
-/* Transfer events held back while an abort drives the controller from inside
- * a USBPORT callback.  See XHCI_BeginTransferEventDeferral. */
-#define MAX_DEFERRED_TRANSFER_EVENTS 32
-
-static XHCI_EVENT_TRB g_DeferredTransferEvents[MAX_DEFERRED_TRANSFER_EVENTS];
-static ULONG g_DeferredTransferEventCount = 0;
-static BOOLEAN g_DeferTransferEvents = FALSE;
-
-/* The flag and the queue are reached from two paths that USBPORT serialises
- * against different locks - XHCI_AbortTransfer runs under MiniportSpinLock
- * (usbport/endpoint.c), XHCI_ProcessEvent under MiniportInterruptsSpinLock
- * (usbport/usbport.c) - so USBPORT serialises nothing between them and they
- * need a lock of their own. */
-static KSPIN_LOCK g_DeferredTransferEventsLock;
+/* Orders completions recorded by the event side; under g_PendingTransfersLock. */
+static ULONG g_CompletionSeq = 0;
 
 static VOID
 XHCI_BuildControlTransferTrbs(
@@ -196,7 +184,6 @@ InitializeTransferTracking(VOID)
         return;
 
     KeInitializeSpinLock(&g_PendingTransfersLock);
-    KeInitializeSpinLock(&g_DeferredTransferEventsLock);
 
     for (i = 0; i < MAX_PENDING_TRANSFERS; i++)
     {
@@ -396,7 +383,9 @@ FindPendingTransferSnapshot(IN PHYSICAL_ADDRESS TrbPointer,
 
     for (i = 0; i < MAX_PENDING_TRANSFERS; i++)
     {
-        if (!g_PendingTransfers[i].InUse)
+        /* A completed TD has already left the ring: a second event naming
+         * one of its TRBs (Short Packet then IOC) belongs to nothing. */
+        if (!g_PendingTransfers[i].InUse || g_PendingTransfers[i].Completed)
             continue;
 
         /*
@@ -435,39 +424,7 @@ FindPendingTransferSnapshot(IN PHYSICAL_ADDRESS TrbPointer,
     return Found;
 }
 
-/* Retire whichever slot owns this completion TRB.  Callers hold a snapshot,
- * not a pointer into the table, so the lookup is redone under the lock. */
-VOID
-UnregisterPendingTransferByTrb(IN PHYSICAL_ADDRESS TrbPointer)
-{
-    ULONG i;
-    KIRQL OldIrql;
-
-    InitializeTransferTracking();
-
-    KeAcquireSpinLock(&g_PendingTransfersLock, &OldIrql);
-
-    for (i = 0; i < MAX_PENDING_TRANSFERS; i++)
-    {
-        ULONG Offset;
-
-        if (!g_PendingTransfers[i].InUse)
-            continue;
-
-        if (XHCI_TdTrbOffset(&g_PendingTransfers[i], TrbPointer, &Offset) ||
-            g_PendingTransfers[i].CompletionTrb.QuadPart == TrbPointer.QuadPart)
-        {
-            g_PendingTransfers[i].InUse = FALSE;
-            RtlZeroMemory(&g_PendingTransfers[i], sizeof(XHCI_PENDING_TRANSFER));
-            break;
-        }
-    }
-
-    KeReleaseSpinLock(&g_PendingTransfersLock, OldIrql);
-}
-
-/* Caller MUST hold g_PendingTransfersLock.  Use UnregisterPendingTransferByTrb
- * from unlocked context. */
+/* Caller MUST hold g_PendingTransfersLock. */
 VOID
 UnregisterPendingTransfer(IN PXHCI_PENDING_TRANSFER PendingTransfer)
 {
@@ -492,13 +449,16 @@ UnregisterPendingTransfer(IN PXHCI_PENDING_TRANSFER PendingTransfer)
  */
 ULONG
 NTAPI
-XHCI_ForgetPendingTransfer(IN PXHCI_TRANSFER XhciTransfer)
+XHCI_ForgetPendingTransfer(IN PXHCI_TRANSFER XhciTransfer,
+                           OUT PBOOLEAN AlreadyCompleted)
 {
     ULONG i;
     ULONG TrbCount = 0;
     KIRQL OldIrql;
 
     InitializeTransferTracking();
+
+    *AlreadyCompleted = FALSE;
 
     /* This is the abort side of the race the completion path snapshots against:
      * it must retire the slot under the lock, never underneath a live reader. */
@@ -509,7 +469,12 @@ XHCI_ForgetPendingTransfer(IN PXHCI_TRANSFER XhciTransfer)
         if (g_PendingTransfers[i].InUse &&
             g_PendingTransfers[i].XhciTransfer == XhciTransfer)
         {
-            TrbCount = g_PendingTransfers[i].TrbCount;
+            /* A TD whose event was already seen but which its endpoint's poll
+             * has not yet handed to USBPORT is off the ring already (the event
+             * side advanced the dequeue pointer past it): dropping the record
+             * is all the abort has to do, and USBPORT completes the URB. */
+            *AlreadyCompleted = g_PendingTransfers[i].Completed;
+            TrbCount = *AlreadyCompleted ? 0 : g_PendingTransfers[i].TrbCount;
             UnregisterPendingTransfer(&g_PendingTransfers[i]);
             break;
         }
@@ -686,81 +651,164 @@ XHCI_StalledTransferWatchdog(IN PXHCI_EXTENSION XhciExtension)
     }
 }
 
+static
 VOID
-NTAPI
-XHCI_BeginTransferEventDeferral(VOID)
+XHCI_RetireTdFromRing(IN PXHCI_PENDING_TRANSFER PendingTransfer);
+
+/*
+ * Event side: the controller has finished the TD Snapshot was taken from.
+ * Record the outcome in its slot and ask USBPORT to poll the endpoint.
+ *
+ * Nothing here may call back into USBPORT's transfer completion.  The event
+ * ring is drained from XHCI_InterruptDpc, where USBPORT holds only
+ * MiniportInterruptsSpinLock, and from XHCI_PollEndpoint of whichever endpoint
+ * USBPORT happens to be polling; USBPORT_MiniportCompleteTransfer unlinks the
+ * transfer from its endpoint's TransferList, which only that endpoint's
+ * EndpointSpinLock protects.  Completing inline raced every other user of the
+ * list (FlushPendingTransfers, MapTransfer, the abort walk) and corrupted it
+ * into a cycle that spun a CPU at DISPATCH_LEVEL for ever.  This is the usbport
+ * miniport contract the EHCI/OHCI/UHCI miniports follow: interrupts only
+ * invalidate endpoints, and completions are reported from PollEndpoint.
+ */
+static
+PXHCI_ENDPOINT
+XHCI_RecordTransferCompletion(IN PXHCI_PENDING_TRANSFER Snapshot,
+                              IN ULONG UsbdStatus,
+                              IN ULONG Length)
 {
+    PXHCI_ENDPOINT XhciEndpoint = NULL;
     KIRQL OldIrql;
-
-    KeAcquireSpinLock(&g_DeferredTransferEventsLock, &OldIrql);
-    g_DeferTransferEvents = TRUE;
-    KeReleaseSpinLock(&g_DeferredTransferEventsLock, OldIrql);
-}
-
-VOID
-NTAPI
-XHCI_EndTransferEventDeferral(IN PXHCI_EXTENSION XhciExtension)
-{
-    KIRQL OldIrql;
-    BOOLEAN NeedDrain;
-
-    KeAcquireSpinLock(&g_DeferredTransferEventsLock, &OldIrql);
-    g_DeferTransferEvents = FALSE;
-    NeedDrain = (g_DeferredTransferEventCount != 0);
-    KeReleaseSpinLock(&g_DeferredTransferEventsLock, OldIrql);
-
-    /*
-     * DO NOT request a DPC pass here to force the queue to drain.  Doing that
-     * was tried on ASUS boot 13 and made things strictly worse.
-     *
-     * The stranding it was meant to cure is real - boot 12 logged 0 replays,
-     * so events queued during an abort were genuinely never drained - but
-     * replaying them is not safe as this driver stands.  By the time a stranded
-     * event is replayed its transfer may already have been completed and freed
-     * down another path; XHCI_CompleteTransfer then completes it a second time,
-     * which frees a USBPORT_TRANSFER that is still linked on
-     * FdoExtension->DoneTransferList.  The list head is then left pointing at
-     * freed pool, and USBPORT_FlushDoneTransfers dies writing the Blink of a
-     * NULL Flink - c0000005 writing address 0x8, which is exactly how boot 13
-     * died 25 s in, having logged 2 replays just before.
-     *
-     * Draining is therefore left where it always was: the top of
-     * XHCI_ProcessEvent.  Making replay safe needs the retire path and the
-     * completion path to agree on who owns a transfer, which is a bigger change
-     * than a drain trigger.  NeedDrain is computed above purely to document
-     * that the queue can be non-empty here.
-     */
-    UNREFERENCED_PARAMETER(XhciExtension);
-    (VOID)NeedDrain;
-}
-
-VOID
-NTAPI
-XHCI_DrainDeferredTransferEvents(IN PXHCI_EXTENSION XhciExtension)
-{
-    XHCI_EVENT_TRB Events[MAX_DEFERRED_TRANSFER_EVENTS];
-    ULONG Count;
     ULONG i;
-    KIRQL OldIrql;
 
-    KeAcquireSpinLock(&g_DeferredTransferEventsLock, &OldIrql);
+    KeAcquireSpinLock(&g_PendingTransfersLock, &OldIrql);
 
-    if (g_DeferTransferEvents || g_DeferredTransferEventCount == 0)
+    for (i = 0; i < MAX_PENDING_TRANSFERS; i++)
     {
-        KeReleaseSpinLock(&g_DeferredTransferEventsLock, OldIrql);
-        return;
+        /* The same slot, still owned: an abort may have retired it since the
+         * snapshot was taken, and a new TD may have reused it. */
+        if (g_PendingTransfers[i].InUse &&
+            !g_PendingTransfers[i].Completed &&
+            g_PendingTransfers[i].XhciTransfer == Snapshot->XhciTransfer &&
+            g_PendingTransfers[i].FirstTrb.QuadPart == Snapshot->FirstTrb.QuadPart)
+        {
+            g_PendingTransfers[i].CompletedUsbdStatus = UsbdStatus;
+            g_PendingTransfers[i].CompletedLength = Length;
+            g_PendingTransfers[i].CompletionSeq = ++g_CompletionSeq;
+            g_PendingTransfers[i].Completed = TRUE;
+            XhciEndpoint = g_PendingTransfers[i].XhciEndpoint;
+
+            /* Take the TD's TRBs off the ring in the same step, under this
+             * lock: an abort that looks the slot up (XHCI_ForgetPendingTransfer)
+             * then either finds it gone before this or Completed with its TRBs
+             * already retired, and the poll that hands it to USBPORT cannot
+             * see it Completed while the dequeue pointer still stands in
+             * front of it. */
+            XHCI_RetireTdFromRing(&g_PendingTransfers[i]);
+            break;
+        }
     }
 
-    Count = g_DeferredTransferEventCount;
-    RtlCopyMemory(Events, g_DeferredTransferEvents, Count * sizeof(XHCI_EVENT_TRB));
-    g_DeferredTransferEventCount = 0;
+    KeReleaseSpinLock(&g_PendingTransfersLock, OldIrql);
 
-    KeReleaseSpinLock(&g_DeferredTransferEventsLock, OldIrql);
+    return XhciEndpoint;
+}
 
-    /* Replay outside the lock: XHCI_ProcessTransferEvent completes transfers,
-     * which calls back into USBPORT. */
-    for (i = 0; i < Count; i++)
-        XHCI_ProcessTransferEvent(XhciExtension, &Events[i]);
+VOID
+NTAPI
+XHCI_ForgetEndpointTransfers(IN PXHCI_ENDPOINT XhciEndpoint)
+{
+    KIRQL OldIrql;
+    ULONG i;
+    ULONG Dropped = 0;
+
+    InitializeTransferTracking();
+
+    KeAcquireSpinLock(&g_PendingTransfersLock, &OldIrql);
+
+    for (i = 0; i < MAX_PENDING_TRANSFERS; i++)
+    {
+        if (g_PendingTransfers[i].InUse &&
+            g_PendingTransfers[i].XhciEndpoint == XhciEndpoint)
+        {
+            UnregisterPendingTransfer(&g_PendingTransfers[i]);
+            Dropped++;
+        }
+    }
+
+    KeReleaseSpinLock(&g_PendingTransfersLock, OldIrql);
+
+    if (Dropped != 0)
+    {
+        DPRINT1("XHCI_ForgetEndpointTransfers: dropped %lu stale TD(s) of endpoint %p\n",
+                Dropped, XhciEndpoint);
+    }
+}
+
+VOID
+NTAPI
+XHCI_RetireCompletedTransfers(IN PXHCI_EXTENSION XhciExtension,
+                              IN PXHCI_ENDPOINT XhciEndpoint)
+{
+    extern USBPORT_REGISTRATION_PACKET RegPacket;
+    XHCI_PENDING_TRANSFER Snapshot;
+    KIRQL OldIrql;
+    ULONG i;
+    ULONG Oldest;
+
+    InitializeTransferTracking();
+
+    while (TRUE)
+    {
+        KeAcquireSpinLock(&g_PendingTransfersLock, &OldIrql);
+
+        Oldest = MAX_PENDING_TRANSFERS;
+
+        for (i = 0; i < MAX_PENDING_TRANSFERS; i++)
+        {
+            if (!g_PendingTransfers[i].InUse ||
+                !g_PendingTransfers[i].Completed ||
+                g_PendingTransfers[i].XhciEndpoint != XhciEndpoint)
+            {
+                continue;
+            }
+
+            /* Sequence numbers wrap; compare by difference. */
+            if (Oldest == MAX_PENDING_TRANSFERS ||
+                (LONG)(g_PendingTransfers[i].CompletionSeq -
+                       g_PendingTransfers[Oldest].CompletionSeq) < 0)
+            {
+                Oldest = i;
+            }
+        }
+
+        if (Oldest == MAX_PENDING_TRANSFERS)
+        {
+            KeReleaseSpinLock(&g_PendingTransfersLock, OldIrql);
+            return;
+        }
+
+        /* Retire the slot before USBPORT sees the completion: USBPORT may
+         * free the transfer (and the XHCI_TRANSFER inside it) right away. */
+        Snapshot = g_PendingTransfers[Oldest];
+        UnregisterPendingTransfer(&g_PendingTransfers[Oldest]);
+
+        KeReleaseSpinLock(&g_PendingTransfersLock, OldIrql);
+
+        NT_ASSERT(Snapshot.XhciTransfer != NULL);
+
+        Snapshot.XhciTransfer->USBDStatus = Snapshot.CompletedUsbdStatus;
+        Snapshot.XhciTransfer->TransferLen = Snapshot.CompletedLength;
+
+        DPRINT("XHCI_RetireCompletedTransfers: transfer %p status 0x%x length %lu\n",
+               Snapshot.XhciTransfer, Snapshot.CompletedUsbdStatus,
+               Snapshot.CompletedLength);
+
+        RegPacket.UsbPortCompleteTransfer(XhciExtension,
+                                          XhciEndpoint,
+                                          Snapshot.XhciTransfer->TransferParameters,
+                                          Snapshot.CompletedUsbdStatus,
+                                          Snapshot.CompletedLength);
+    }
 }
 
 // Command tracking helper functions
@@ -2406,7 +2454,7 @@ XHCI_SubmitIsochronousTransfer(IN PXHCI_EXTENSION XhciExtension,
 }
 
 // Event processing functions
-VOID
+PXHCI_ENDPOINT
 NTAPI
 XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
                          IN PXHCI_EVENT_TRB EventTrb)
@@ -2419,50 +2467,10 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
     PXHCI_PENDING_TRANSFER PendingTransfer = &Snapshot;
     ULONG CompletionCode, TransferLength, SlotId, EndpointId;
     ULONG TrbOffset = 0;
+    ULONG UsbdStatus;
+    PXHCI_ENDPOINT CompletedEndpoint = NULL;
     
     DPRINT("XHCI_ProcessTransferEvent: Processing transfer completion event\n");
-
-    /* Re-test the flag under the lock rather than acting on the value read
-     * outside it: the abort that set it runs on another processor under a
-     * different USBPORT lock and can clear it at any instant.  Queuing an event
-     * after deferral has ended would leave it sitting behind a drain that has
-     * already run. */
-    if (g_DeferTransferEvents)
-    {
-        KIRQL OldIrql;
-        BOOLEAN Deferred = FALSE;
-        BOOLEAN QueueFull = FALSE;
-
-        KeAcquireSpinLock(&g_DeferredTransferEventsLock, &OldIrql);
-
-        if (g_DeferTransferEvents)
-        {
-            Deferred = TRUE;
-
-            if (g_DeferredTransferEventCount < MAX_DEFERRED_TRANSFER_EVENTS)
-            {
-                g_DeferredTransferEvents[g_DeferredTransferEventCount++] = *EventTrb;
-            }
-            else
-            {
-                QueueFull = TRUE;
-            }
-        }
-
-        KeReleaseSpinLock(&g_DeferredTransferEventsLock, OldIrql);
-
-        if (QueueFull)
-        {
-            /* Outside the lock: a serial line costs milliseconds and this is
-             * the event path. */
-            DPRINT1("XHCI_ProcessTransferEvent: deferred event queue full, event lost\n");
-        }
-
-        /* Deferral ended while we were arriving - fall through and complete the
-         * event inline, exactly as if it had been seen a moment later. */
-        if (Deferred)
-            return;
-    }
 
     // Extract event data
     TrbPointer.LowPart = EventTrb->TransferEventTRB.TRBPtrLo;
@@ -2500,20 +2508,19 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
     if (FindPendingTransferSnapshot(TrbPointer, &Snapshot, &TrbOffset) &&
         PendingTransfer->XhciTransfer && PendingTransfer->XhciEndpoint)
     {
-        // Complete the transfer
-        DPRINT("XHCI_ProcessTransferEvent: Found pending transfer, completing\n");
+        DPRINT("XHCI_ProcessTransferEvent: Found pending transfer\n");
         
         // Update transfer status based on completion code
         switch (CompletionCode)
         {
             case SUCCESS:
-                PendingTransfer->XhciTransfer->USBDStatus = USBD_STATUS_SUCCESS;
+                UsbdStatus = USBD_STATUS_SUCCESS;
                 break;
             case SHORT_PACKET:
-                PendingTransfer->XhciTransfer->USBDStatus = USBD_STATUS_SUCCESS; // Short packet is usually OK
+                UsbdStatus = USBD_STATUS_SUCCESS; // Short packet is usually OK
                 break;
             case STALL_ERROR:
-                PendingTransfer->XhciTransfer->USBDStatus = USBD_STATUS_STALL_PID;
+                UsbdStatus = USBD_STATUS_STALL_PID;
                 /* A STALL completion leaves the xHCI endpoint Halted.  Keep
                  * that hardware state until USBPORT asks us to clear the
                  * stall; merely resetting a USB data-toggle bit is not enough
@@ -2522,14 +2529,14 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
                     USBPORT_ENDPOINT_HALT;
                 break;
             case TRB_ERROR:
-                PendingTransfer->XhciTransfer->USBDStatus = USBD_STATUS_XACT_ERROR;
+                UsbdStatus = USBD_STATUS_XACT_ERROR;
                 DPRINT("XHCI_ProcessTransferEvent: TRB_ERROR detected (code=5)\n");
                 break;
             case DATA_BUFFER_ERROR:
-                PendingTransfer->XhciTransfer->USBDStatus = USBD_STATUS_DATA_BUFFER_ERROR;
+                UsbdStatus = USBD_STATUS_DATA_BUFFER_ERROR;
                 break;
             default:
-                PendingTransfer->XhciTransfer->USBDStatus = USBD_STATUS_XACT_ERROR;
+                UsbdStatus = USBD_STATUS_XACT_ERROR;
                 DPRINT("XHCI_ProcessTransferEvent: Unknown completion code %d\n", CompletionCode);
                 break;
         }
@@ -2567,26 +2574,21 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
         if (ActualTransferred > PendingTransfer->RequestedLength)
             ActualTransferred = PendingTransfer->RequestedLength;
 
-        PendingTransfer->XhciTransfer->TransferLen = ActualTransferred;
-        
         DPRINT("XHCI_ProcessTransferEvent: Final - Requested=%d, NotTransferred=%d, ActualTransferred=%d, Status=0x%x\n",
-                PendingTransfer->RequestedLength, TransferLength, ActualTransferred, 
-                PendingTransfer->XhciTransfer->USBDStatus);
-        
-        DPRINT("XHCI_ProcessTransferEvent: About to notify USBPORT with length %d\n", ActualTransferred);
-        
-        // Mark transfer as completed and notify USB port driver
-        XHCI_CompleteTransfer(XhciExtension, SlotId, EndpointId, TrbPointer, ActualTransferred,
-                             PendingTransfer->XhciTransfer->USBDStatus, PendingTransfer);
-        
-        // Remove from tracking after completion
-        UnregisterPendingTransferByTrb(TrbPointer);
+                PendingTransfer->RequestedLength, TransferLength, ActualTransferred,
+                UsbdStatus);
+
+        CompletedEndpoint = XHCI_RecordTransferCompletion(PendingTransfer,
+                                                          UsbdStatus,
+                                                          ActualTransferred);
     }
     else
     {
         InterlockedIncrement(&XhciDbgStats.TransferEventNoMatch);
         DPRINT("XHCI_ProcessTransferEvent: No pending transfer found for TRB 0x%I64x\n", TrbPointer.QuadPart);
     }
+
+    return CompletedEndpoint;
 }
 
 VOID
@@ -2670,28 +2672,14 @@ XHCI_ProcessCommandCompletion(IN PXHCI_EXTENSION XhciExtension,
     HcResourcesVA->CommandRing.dequeue_pointer = NewDequeue;
 }
 
+/* Caller holds XhciExtension->EventRingLock (XHCI_ProcessEvent), which is
+ * also what an abort's dequeue-pointer update runs under, and
+ * g_PendingTransfersLock. */
+static
 VOID
-NTAPI
-XHCI_CompleteTransfer(IN PXHCI_EXTENSION XhciExtension,
-                     IN ULONG SlotId,
-                     IN ULONG EndpointId,
-                     IN PHYSICAL_ADDRESS TrbPointer,
-                     IN ULONG TransferLength,
-                     IN ULONG USBDStatus,
-                     IN PXHCI_PENDING_TRANSFER PendingTransfer)
+XHCI_RetireTdFromRing(IN PXHCI_PENDING_TRANSFER PendingTransfer)
 {
-    extern USBPORT_REGISTRATION_PACKET RegPacket;
-
-    DPRINT("XHCI_CompleteTransfer: Slot=%d, EP=%d, TRB=0x%I64x, Length=%d, Status=0x%x\n",
-            SlotId, EndpointId, TrbPointer.QuadPart, TransferLength, USBDStatus);
-
-    /* Works on the caller's snapshot; deliberately does NOT look the slot up
-     * again.  A second lookup would miss an abort that landed in between and
-     * skip the transfer ring dequeue advance below. */
-    if (PendingTransfer && PendingTransfer->XhciTransfer && PendingTransfer->XhciEndpoint)
     {
-        DPRINT("XHCI_CompleteTransfer: Notifying USB port driver about transfer completion\n");
-        
         /*
          * Retire this TD's TRBs from the transfer ring.
          *
@@ -2772,22 +2760,11 @@ XHCI_CompleteTransfer(IN PXHCI_EXTENSION XhciExtension,
             }
             
             // Log final ring state after update for debugging
-            DPRINT("XHCI_CompleteTransfer: Final ring state - enqueue=%p, dequeue=%p, used=%d, producer_cycle=%d, consumer_cycle=%d\n",
+            DPRINT("XHCI_RetireTdFromRing: Final ring state - enqueue=%p, dequeue=%p, used=%d, producer_cycle=%d, consumer_cycle=%d\n",
                     TransferRing->enqueue_pointer, TransferRing->dequeue_pointer, 
                     TransferRing->UsedTrbs,
                     TransferRing->ProducerCycleState, TransferRing->ConsumerCycleState);
         }
-        
-        // Notify USB port driver about transfer completion
-        RegPacket.UsbPortCompleteTransfer(XhciExtension,
-                                          PendingTransfer->XhciEndpoint,
-                                          PendingTransfer->XhciTransfer->TransferParameters,
-                                          USBDStatus,
-                                          TransferLength);
-    }
-    else
-    {
-        DPRINT("XHCI_CompleteTransfer: ERROR - Could not find transfer context for completion\n");
     }
 }
 

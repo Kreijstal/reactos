@@ -165,7 +165,10 @@ XHCI_RingDoorbell(IN PXHCI_EXTENSION XhciExtension,
 
 /* Event processing functions ***************************************************************************/
 
-VOID
+/* Records the TD's outcome in its tracking slot; never calls back into
+ * USBPORT.  Returns the endpoint whose TD completed, or NULL if the event
+ * matched nothing. */
+PXHCI_ENDPOINT
 NTAPI
 XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
                          IN PXHCI_EVENT_TRB EventTrb);
@@ -186,6 +189,13 @@ typedef struct _XHCI_PENDING_TRANSFER {
     ULONG TrbCount;                   // Number of TRBs that belong to the transfer TD
     ULONG RequestedLength;            // Original request length for proper transfer length calculation
     ULONGLONG SubmitTime;             // KeQueryInterruptTime() when the TD was handed to the controller
+    /* Set by the event side once the controller has finished the TD and its
+     * TRBs have left the ring; the slot then waits for XHCI_PollEndpoint of
+     * XhciEndpoint to hand the result to USBPORT. */
+    ULONG CompletedUsbdStatus;
+    ULONG CompletedLength;
+    ULONG CompletionSeq;              // event order, so an endpoint's TDs retire in ring order
+    BOOLEAN Completed;
     BOOLEAN InUse;
 } XHCI_PENDING_TRANSFER, *PXHCI_PENDING_TRANSFER;
 
@@ -200,45 +210,28 @@ XHCI_TdTrbOffset(IN PXHCI_PENDING_TRANSFER Entry,
                  IN PHYSICAL_ADDRESS TrbPA,
                  OUT PULONG Offset);
 
-/* PendingTransfer is the caller's private snapshot of the tracking slot, not a
- * pointer into g_PendingTransfers -- see FindPendingTransferSnapshot.  Passing
- * it in keeps the whole completion on one consistent copy; looking the slot up
- * a second time here would miss an abort that landed in between and silently
- * skip the transfer ring dequeue advance. */
-VOID
-NTAPI
-XHCI_CompleteTransfer(IN PXHCI_EXTENSION XhciExtension,
-                     IN ULONG SlotId,
-                     IN ULONG EndpointId,
-                     IN PHYSICAL_ADDRESS TrbPointer,
-                     IN ULONG TransferLength,
-                     IN ULONG USBDStatus,
-                     IN PXHCI_PENDING_TRANSFER PendingTransfer);
-
 /*
- * Transfer events must not be handed back to USBPORT while a miniport entry
- * point that USBPORT called from the middle of its own transfer-list walk is
- * still on the stack.  These bracket such a window; events seen inside it are
- * queued and replayed by XHCI_DrainDeferredTransferEvents on the next pass
- * over the event ring made from a re-entrant-safe context.
+ * Hand every TD of XhciEndpoint that the controller has finished to USBPORT,
+ * in the order the events arrived.  USBPORT's completion callback unlinks the
+ * transfer from Endpoint->TransferList, which USBPORT protects with that
+ * endpoint's EndpointSpinLock, so this may only run where USBPORT holds it:
+ * from XHCI_PollEndpoint for this same endpoint.
  */
 VOID
 NTAPI
-XHCI_BeginTransferEventDeferral(VOID);
+XHCI_ForgetEndpointTransfers(IN PXHCI_ENDPOINT XhciEndpoint);
 
 VOID
 NTAPI
-XHCI_EndTransferEventDeferral(IN PXHCI_EXTENSION XhciExtension);
-
-VOID
-NTAPI
-XHCI_DrainDeferredTransferEvents(IN PXHCI_EXTENSION XhciExtension);
+XHCI_RetireCompletedTransfers(IN PXHCI_EXTENSION XhciExtension,
+                              IN PXHCI_ENDPOINT XhciEndpoint);
 
 /* Command and transfer tracking functions *************************************************************/
 
 ULONG
 NTAPI
-XHCI_ForgetPendingTransfer(IN PXHCI_TRANSFER XhciTransfer);
+XHCI_ForgetPendingTransfer(IN PXHCI_TRANSFER XhciTransfer,
+                           OUT PBOOLEAN AlreadyCompleted);
 
 VOID
 NTAPI

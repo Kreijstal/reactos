@@ -335,6 +335,13 @@ XHCI_CloseEndpoint(IN PVOID xhciExtension,
         CleanupSlotResources(XhciExtension, SlotId);
     }
     
+    /* USBPORT closes an endpoint only once it has no transfers left, so any
+     * tracking slot still naming it is stale -- typically a TD whose event
+     * was recorded but which no poll will now hand back.  Drop them before
+     * USBPORT frees this XHCI_ENDPOINT and may reuse the memory for another
+     * endpoint, whose poll would otherwise complete a freed transfer. */
+    XHCI_ForgetEndpointTransfers(XhciEndpoint);
+
     // Clean up the endpoint structure
     if (!IsListEmpty(&XhciEndpoint->ListTDs))
     {
@@ -349,6 +356,17 @@ MPSTATUS
 NTAPI
 XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
 {
+    return XHCI_ProcessEventForEndpoint(XhciExtension, NULL, FALSE);
+}
+
+MPSTATUS
+NTAPI
+XHCI_ProcessEventForEndpoint(IN PXHCI_EXTENSION XhciExtension,
+                             IN PXHCI_ENDPOINT PolledEndpoint,
+                             IN BOOLEAN FromInterruptDpc)
+{
+    PXHCI_ENDPOINT CompletedEndpoint;
+    ULONG OtherCompletions = 0;
 
     PXHCI_HC_RESOURCES HcResourcesVA;
     PHYSICAL_ADDRESS HcResourcesPA;
@@ -370,10 +388,6 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
 
     RunTimeRegisterBase = XhciExtension-> RunTimeRegisterBase;
     dequeue_pointer = HcResourcesVA-> EventRing.dequeue_pointer;
-
-    /* Replay anything an abort had to hold back.  No-op unless an abort is
-     * actually in flight, and never runs while one is on the stack. */
-    XHCI_DrainDeferredTransferEvents(XhciExtension);
 
     while (TRUE)
     {
@@ -401,7 +415,15 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
             case TRANSFER_EVENT:
                 DPRINT("XHCI_ProcessEvent: TRANSFER_EVENT\n");
                 InterlockedIncrement(&XhciDbgStats.TransferEvents);
-                XHCI_ProcessTransferEvent(XhciExtension, &eventTRB);
+                CompletedEndpoint = XHCI_ProcessTransferEvent(XhciExtension, &eventTRB);
+
+                /* Completions are reported to USBPORT only from that
+                 * endpoint's XHCI_PollEndpoint; ask for the poll. */
+                if (CompletedEndpoint != NULL && CompletedEndpoint != PolledEndpoint)
+                {
+                    RegPacket.UsbPortInvalidateEndpoint(XhciExtension, CompletedEndpoint);
+                    OtherCompletions++;
+                }
                 break;
             case COMMAND_COMPLETION_EVENT: 
                 DPRINT("XHCI_ProcessEvent: COMMAND_COMPLETION_EVENT\n");
@@ -478,6 +500,18 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
     XHCI_Write64bitReg(RunTimeRegisterBase + XHCI_ERSTDP, erstdp.AsULONGLONG);
 
     KeReleaseSpinLock(&XhciExtension->EventRingLock, OldIrql);
+
+    /*
+     * XHCI_InterruptDpc returns into USBPORT_IsrDpcHandler, which polls every
+     * active endpoint next.  Any other drainer (a poll of a different
+     * endpoint, a command wait, the controller check) may have taken the
+     * event the interrupt was raised for, so make sure such a pass follows.
+     */
+    if (OtherCompletions != 0 && !FromInterruptDpc)
+    {
+        RegPacket.UsbPortInvalidateController(XhciExtension,
+                                              USBPORT_INVALIDATE_CONTROLLER_SOFT_INTERRUPT);
+    }
 
     return MP_STATUS_SUCCESS;
 }
@@ -1293,7 +1327,7 @@ XHCI_InterruptDpc(IN PVOID xhciExtension,
             Iman.AsULONG, Iman.InterruptPending);
     
     // Process any pending events
-    XHCI_ProcessEvent(xhciExtension);
+    XHCI_ProcessEventForEndpoint(xhciExtension, NULL, TRUE);
     
     // Clear the interrupt pending bit now that we've processed events
     if (Iman.InterruptPending == 1)
@@ -1442,6 +1476,9 @@ XHCI_AbortTransfer(IN PVOID xhciExtension,
     ULONG DCI;
     ULONG TrbCount;
     ULONG ix;
+    ULONG CycleState;
+    BOOLEAN AlreadyCompleted;
+    KIRQL OldIrql;
 
     /*
      * This used to do nothing at all, which made aborting a pipe useless: the
@@ -1464,7 +1501,13 @@ XHCI_AbortTransfer(IN PVOID xhciExtension,
     /* Forget the transfer before touching the controller.  USBPORT completes
      * and frees the USBPORT_TRANSFER as soon as we return, so the Stopped
      * event the controller posts for this TD must no longer match anything. */
-    TrbCount = XHCI_ForgetPendingTransfer(XhciTransfer);
+    TrbCount = XHCI_ForgetPendingTransfer(XhciTransfer, &AlreadyCompleted);
+
+    /* The controller already finished this TD and its TRBs are off the ring;
+     * only its report to USBPORT was outstanding, and USBPORT now completes
+     * the URB as aborted instead. */
+    if (AlreadyCompleted)
+        return;
 
     SlotId = *(PULONG)&XhciEndpoint->FirstTD;
     if (SlotId == 0)
@@ -1487,19 +1530,21 @@ XHCI_AbortTransfer(IN PVOID xhciExtension,
     /*
      * USBPORT calls us from USBPORT_DmaEndpointPaused, which is walking
      * Endpoint->TransferList with EndpointSpinLock and MiniportSpinLock held.
-     * Stopping the endpoint makes the controller post a transfer event for the
-     * TD being retired, and completing that event inline would unlink and free
-     * the very list entry USBPORT is about to unlink itself.  Hold transfer
-     * events back for the duration of the abort.
+     * Stopping the endpoint drains the event ring while we wait for the
+     * command; that is safe because the event side never completes a transfer
+     * to USBPORT, it only records it for XHCI_PollEndpoint (see
+     * XHCI_RecordTransferCompletion).  A TD ahead of this one that finishes
+     * meanwhile has its TRBs taken off the ring before the walk below.
      */
-    XHCI_BeginTransferEventDeferral();
-
     XHCI_StopEndpoint(XhciExtension, SlotId, DCI);
 
     /* Retire the TD by moving the dequeue pointer past exactly its TRBs, the
      * same way a normal completion advances the ring.  TDs queued behind it
-     * are preserved. */
+     * are preserved.  The event side moves the same dequeue pointer under
+     * EventRingLock. */
     TransferRing = &XhciEndpoint->TransferRing;
+
+    KeAcquireSpinLock(&XhciExtension->EventRingLock, &OldIrql);
 
     for (ix = 0; ix < TrbCount; ix++)
     {
@@ -1519,19 +1564,20 @@ XHCI_AbortTransfer(IN PVOID xhciExtension,
     }
 
     DequeuePA = MmGetPhysicalAddress(TransferRing->dequeue_pointer);
+    CycleState = TransferRing->ConsumerCycleState;
+
+    KeReleaseSpinLock(&XhciExtension->EventRingLock, OldIrql);
 
     if (XHCI_SetTransferRingDequeuePointer(XhciExtension,
                                            SlotId,
                                            DCI,
                                            DequeuePA,
-                                           TransferRing->ConsumerCycleState) != MP_STATUS_SUCCESS)
+                                           CycleState) != MP_STATUS_SUCCESS)
     {
         /* Leave the endpoint marked so XHCI_SetEndpointState retries the
          * restart when USBPORT takes it out of the paused state. */
         XhciEndpoint->EndpointStatus = USBPORT_ENDPOINT_HALT;
     }
-
-    XHCI_EndTransferEventDeferral(XhciExtension);
 
     DPRINT("XHCI_AbortTransfer: retired %lu TRBs on slot %lu DCI %lu, dequeue 0x%I64x\n",
            TrbCount, SlotId, DCI, DequeuePA.QuadPart);
@@ -1693,8 +1739,14 @@ XHCI_PollEndpoint(IN PVOID xhciExtension,
         }
     }
 
-    if (XhciExtension)
-        XHCI_ProcessEvent(XhciExtension);
+    if (XhciExtension == NULL || XhciEndpoint == NULL)
+        return;
+
+    /* USBPORT holds this endpoint's EndpointSpinLock (and MiniportSpinLock)
+     * here, the only context in which its TransferList may be touched: this
+     * is where the endpoint's finished TDs are handed back. */
+    XHCI_ProcessEventForEndpoint(XhciExtension, XhciEndpoint, FALSE);
+    XHCI_RetireCompletedTransfers(XhciExtension, XhciEndpoint);
 }
 
 VOID
@@ -1888,7 +1940,7 @@ XHCI_SetEndpointDataToggle(IN PVOID xhciExtension,
     if (Status != MP_STATUS_SUCCESS)
         return;
 
-    /* XHCI_CompleteTransfer has already advanced the software dequeue past
+    /* The transfer event has already advanced the software dequeue past
      * the stalled TD.  Synchronize the hardware dequeue before the retry is
      * queued; XHCI_SubmitBulkTransfer will ring the doorbell afterwards. */
     DequeuePA = MmGetPhysicalAddress(XhciEndpoint->TransferRing.dequeue_pointer);

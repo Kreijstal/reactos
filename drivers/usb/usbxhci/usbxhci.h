@@ -149,6 +149,15 @@ NTAPI
 XHCI_ProcessEvent(
     IN PXHCI_EXTENSION XhciExtension);
 
+/* As XHCI_ProcessEvent, for XHCI_PollEndpoint: completions for PolledEndpoint
+ * are retired by the caller, so only other endpoints need a poll requested. */
+MPSTATUS
+NTAPI
+XHCI_ProcessEventForEndpoint(
+    IN PXHCI_EXTENSION XhciExtension,
+    IN PXHCI_ENDPOINT PolledEndpoint,
+    IN BOOLEAN FromInterruptDpc);
+
 // Forward declarations for device context setup functions
 MPSTATUS
 NTAPI
