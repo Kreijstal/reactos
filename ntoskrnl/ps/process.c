@@ -657,6 +657,23 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
                                                  ImageFileName);
         if (!NT_SUCCESS(Status)) goto CleanupWithRef;
 
+#if defined(_M_AMD64)
+        /*
+         * Like Windows, only native processes have permanent DEP. A WoW64
+         * process gets the execute options of the NX policy, which its
+         * 32-bit ntdll sets (LdrpInitializeProcess); KeInitializeProcess
+         * made them permanent before the image machine was known.
+         */
+        if (SectionObject->u.Flags.Image &&
+            ((PMM_IMAGE_SECTION_OBJECT)SectionObject->Segment)->ImageInformation.Machine !=
+            IMAGE_FILE_MACHINE_AMD64)
+        {
+            Process->Pcb.Flags.ExecuteDisable = FALSE;
+            Process->Pcb.Flags.DisableThunkEmulation = FALSE;
+            Process->Pcb.Flags.Permanent = FALSE;
+        }
+#endif
+
         //
         // We need a PEB
         //
