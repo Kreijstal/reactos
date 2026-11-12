@@ -6,6 +6,7 @@ add_message_headers(ANSI FormatMessage.mc)
 list(APPEND SOURCE
     ConsoleCP.c
     CreateProcess.c
+    CdRomMedia.c
     DefaultActCtx.c
     DeviceIoControl.c
     dosdev.c
