@@ -117,8 +117,48 @@ TestGetVolumeInformationW(VOID)
     ok(i >= Len, "Buffer has not been overrun\n");
 }
 
+/* The root of a volume named by its device, as mountvol and partition
+ * tools name volumes without a drive letter */
+static void TestGetVolumeInformationGlobalRoot(void)
+{
+    WCHAR Drive[] = L"C:", Device[MAX_PATH], Path[MAX_PATH + 32];
+    WCHAR FsName[MAX_PATH], FsName2[MAX_PATH];
+    DWORD Serial = 0, Serial2 = 0;
+    BOOL Ret;
+
+    GetWindowsDirectoryW(Path, _countof(Path));
+    Drive[0] = Path[0];
+    if (!QueryDosDeviceW(Drive, Device, _countof(Device)))
+    {
+        skip("QueryDosDeviceW(%ls) failed: %lu\n", Drive, GetLastError());
+        return;
+    }
+    _snwprintf(Path, _countof(Path), L"%ls\\", Drive);
+    Ret = GetVolumeInformationW(Path, NULL, 0, &Serial, NULL, NULL, FsName, _countof(FsName));
+    ok(Ret, "GetVolumeInformationW(%ls) failed: %lu\n", Path, GetLastError());
+
+    _snwprintf(Path, _countof(Path), L"\\\\?\\GLOBALROOT%ls\\", Device);
+    SetLastError(0xdeadbeef);
+    Ret = GetVolumeInformationW(Path, NULL, 0, &Serial2, NULL, NULL, FsName2, _countof(FsName2));
+    ok(Ret, "GetVolumeInformationW(%ls) failed: %lu\n", Path, GetLastError());
+    if (Ret)
+    {
+        ok(Serial2 == Serial, "Serial %lx, expected %lx\n", Serial2, Serial);
+        ok(!wcscmp(FsName2, FsName), "File system %ls, expected %ls\n", FsName2, FsName);
+    }
+
+    /* Not a root: a directory of the volume */
+    GetWindowsDirectoryW(FsName2, _countof(FsName2));
+    _snwprintf(Path, _countof(Path), L"\\\\?\\GLOBALROOT%ls%ls\\", Device, FsName2 + 2);
+    SetLastError(0xdeadbeef);
+    Ret = GetVolumeInformationW(Path, NULL, 0, NULL, NULL, NULL, NULL, 0);
+    ok(!Ret, "GetVolumeInformationW(%ls) succeeded\n", Path);
+    ok(GetLastError() == ERROR_DIR_NOT_ROOT, "Expected ERROR_DIR_NOT_ROOT, got %lu\n", GetLastError());
+}
+
 START_TEST(GetVolumeInformation)
 {
     TestGetVolumeInformationW();
     TestGetVolumeInformationA();
+    TestGetVolumeInformationGlobalRoot();
 }
