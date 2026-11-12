@@ -679,3 +679,60 @@ START_TEST(ren)
     DeleteFileA(Path);
     RemoveDirectoryA(Dir);
 }
+
+START_TEST(copy)
+{
+    CHAR TempPath[MAX_PATH], Dir[MAX_PATH], Src[MAX_PATH], Dst[MAX_PATH];
+    CHAR CommandLine[MAX_PATH * 4];
+    HANDLE hDst;
+    TEST_ENTRY Entry = { 0 };
+
+    if (!GetTempPathA(ARRAYSIZE(TempPath), TempPath))
+    {
+        skip("GetTempPathA failed: %lu\n", GetLastError());
+        return;
+    }
+    sprintf(Dir, "%scmd_copy_test", TempPath);
+    CreateDirectoryA(Dir, NULL);
+    sprintf(Src, "%s\\src.txt", Dir);
+    sprintf(Dst, "%s\\dst.txt", Dir);
+    ok(CreateTestFile(Src, FILE_ATTRIBUTE_NORMAL), "CreateFile(%s) failed: %lu\n", Src, GetLastError());
+
+    /* A copy that succeeds is a success for && and || */
+    Entry.bStdOutput = TRISTATE;
+    Entry.cmdline = CommandLine;
+    Entry.line = __LINE__;
+    Entry.dwExitCode = 1234;
+    sprintf(CommandLine, "cmd /c copy /y \"%s\" \"%s\" && exit 1234", Src, Dst);
+    DoTestEntry(&Entry);
+    Entry.line = __LINE__;
+    Entry.dwExitCode = 0;
+    sprintf(CommandLine, "cmd /c copy /y \"%s\" \"%s\" || exit 1234", Src, Dst);
+    DoTestEntry(&Entry);
+
+    /* A copy whose destination cannot be written (here: held open without
+     * sharing; a full volume takes the same path) is a failure for && and ||,
+     * not only for %ERRORLEVEL% */
+    hDst = CreateFileA(Dst, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    ok(hDst != INVALID_HANDLE_VALUE, "CreateFile(%s) failed: %lu\n", Dst, GetLastError());
+    if (hDst != INVALID_HANDLE_VALUE)
+    {
+        Entry.line = __LINE__;
+        Entry.dwExitCode = 1;
+        sprintf(CommandLine, "cmd /c copy /y \"%s\" \"%s\" && exit 1234", Src, Dst);
+        DoTestEntry(&Entry);
+        Entry.line = __LINE__;
+        Entry.dwExitCode = 1234;
+        sprintf(CommandLine, "cmd /c copy /y \"%s\" \"%s\" || exit 1234", Src, Dst);
+        DoTestEntry(&Entry);
+        Entry.line = __LINE__;
+        Entry.dwExitCode = 1;
+        sprintf(CommandLine, "cmd /c copy /y \"%s\" \"%s\"", Src, Dst);
+        DoTestEntry(&Entry);
+        CloseHandle(hDst);
+    }
+
+    DeleteFileA(Dst);
+    DeleteFileA(Src);
+    RemoveDirectoryA(Dir);
+}
