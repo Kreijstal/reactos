@@ -1616,10 +1616,10 @@ GDI_CleanupForProcess(struct _EPROCESS *Process)
         }
     }
 
-#if DBG
-    DbgGdiHTIntegrityCheck();
-#endif
-
+    /* No whole-table check here: the handle table is lock free and shared by
+       every process, so other processes insert and free entries while this
+       one exits. Only this process' own entries are stable now, and those
+       are checked below. */
     ppi = PsGetCurrentProcessWin32Process();
     DPRINT("Completed cleanup for process %p\n", Process->UniqueProcessId);
     if (ppi->GDIHandleCount != 0)
