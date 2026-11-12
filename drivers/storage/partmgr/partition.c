@@ -191,7 +191,6 @@ PartitionHandleStartDevice(
  *
  * @note    This should belong to volmgr.sys and act on a PVOLUME_EXTENSION.
  **/
-static
 CODE_SEG("PAGE")
 NTSTATUS
 VolumeDeleteMountPoints(
@@ -283,6 +282,41 @@ Quit:
     return Status;
 }
 
+/**
+ * @brief
+ * Removes the \Device\HarddiskN\PartitionM symbolic link of a partition.
+ **/
+CODE_SEG("PAGE")
+NTSTATUS
+PartitionDeleteSymlink(
+    _In_ PPARTITION_EXTENSION PartExt)
+{
+    NTSTATUS status;
+    WCHAR nameBuf[64];
+    UNICODE_STRING partitionSymlink;
+    PFDO_EXTENSION fdoExtension = PartExt->LowerDevice->DeviceExtension;
+
+    PAGED_CODE();
+
+    if (!PartExt->SymlinkCreated)
+        return STATUS_SUCCESS;
+
+    _swprintf(nameBuf, PartitionSymLinkFormat,
+        fdoExtension->DiskData.DeviceNumber, PartExt->DetectedNumber);
+
+    RtlInitUnicodeString(&partitionSymlink, nameBuf);
+
+    status = IoDeleteSymbolicLink(&partitionSymlink);
+    if (!NT_SUCCESS(status))
+    {
+        return status;
+    }
+    PartExt->SymlinkCreated = FALSE;
+
+    INFO("Symlink removed %wZ -> %wZ\n", &partitionSymlink, &PartExt->DeviceName);
+    return STATUS_SUCCESS;
+}
+
 CODE_SEG("PAGE")
 NTSTATUS
 PartitionHandleRemove(
@@ -294,26 +328,10 @@ PartitionHandleRemove(
     PAGED_CODE();
 
     // remove the symbolic link
-    if (PartExt->SymlinkCreated)
+    status = PartitionDeleteSymlink(PartExt);
+    if (!NT_SUCCESS(status))
     {
-        WCHAR nameBuf[64];
-        UNICODE_STRING partitionSymlink;
-        PFDO_EXTENSION fdoExtension = PartExt->LowerDevice->DeviceExtension;
-
-        _swprintf(nameBuf, PartitionSymLinkFormat,
-            fdoExtension->DiskData.DeviceNumber, PartExt->DetectedNumber);
-
-        RtlInitUnicodeString(&partitionSymlink, nameBuf);
-
-        status = IoDeleteSymbolicLink(&partitionSymlink);
-
-        if (!NT_SUCCESS(status))
-        {
-            return status;
-        }
-        PartExt->SymlinkCreated = FALSE;
-
-        INFO("Symlink removed %wZ -> %wZ\n", &partitionSymlink, &PartExt->DeviceName);
+        return status;
     }
 
     // release device interfaces
@@ -330,17 +348,15 @@ PartitionHandleRemove(
 
     if (PartExt->VolumeInterfaceName.Buffer)
     {
-        /* Notify MountMgr to delete all associated mount points.
-         * MountMgr does not automatically remove these in order to support
-         * drive letter persistence for online/offline volume transitions,
-         * or volumes arrival/removal on removable devices. */
-        status = VolumeDeleteMountPoints(PartExt);
-        if (!NT_SUCCESS(status))
-        {
-            ERR("VolumeDeleteMountPoints(%wZ) failed with status 0x%08lx\n",
-                &PartExt->DeviceName, status);
-            /* Failure isn't major, continue proceeding with volume removal */
-        }
+        /*
+         * No synchronous call into MountMgr here: this runs for the removal
+         * IRPs, which a file system mounted on the volume forwards while
+         * holding its volume locks, and MountMgr may itself be waiting for
+         * them (opening the volume's remote database). The mount points of
+         * a deleted partition are deleted when the layout drops it, see
+         * PartMgrUpdatePartitionDevices; a volume that merely goes away
+         * keeps its drive letter, as on Windows.
+         */
 
         /* Notify MountMgr of volume removal */
         status = IoSetDeviceInterfaceState(&PartExt->VolumeInterfaceName, FALSE);

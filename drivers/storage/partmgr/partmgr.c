@@ -312,10 +312,39 @@ PartMgrUpdatePartitionDevices(
             curEntry = prevEntry;
             partExt->Attached = FALSE;
 
+            /*
+             * The partition is deleted: delete its mount points (drive
+             * letter) now, from the thread that changes the layout, as
+             * Windows' disk management does before it deletes a partition.
+             * MountMgr does not delete them on its own, to keep the drive
+             * letter of a volume that only goes offline.
+             */
+            if (partExt->VolumeInterfaceName.Buffer)
+            {
+                status = VolumeDeleteMountPoints(partExt);
+                if (!NT_SUCCESS(status))
+                {
+                    ERR("VolumeDeleteMountPoints(%wZ) failed with status 0x%08lx\n",
+                        &partExt->DeviceName, status);
+                }
+            }
+
             // enumerated PDOs will receive IRP_MN_REMOVE_DEVICE
             if (!partExt->IsEnumerated)
             {
                 PartitionHandleRemove(partExt, TRUE);
+            }
+            else
+            {
+                /*
+                 * The partition is gone from the disk now, but PnP removes
+                 * its device only later. Its \Device\HarddiskN\PartitionM
+                 * name belongs to the new layout already, so drop it now:
+                 * otherwise an open by that name still reaches (and mounts)
+                 * the old volume, and the late removal deletes the link of
+                 * a new partition that got the same number.
+                 */
+                PartitionDeleteSymlink(partExt);
             }
         }
 
