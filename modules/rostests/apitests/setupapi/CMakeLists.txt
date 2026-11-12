@@ -10,6 +10,7 @@ list(APPEND SOURCE
     SetupDiInstallClassExA.c
     SetupDiGetActualModelsSection.c
     SetupInstallServicesFromInfSectionEx.c
+    StorageControllers.c
     SwDevice.c
     testlist.c)
 

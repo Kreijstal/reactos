@@ -110,8 +110,9 @@ PortFdoStartMiniport(
 
     DPRINT("PortFdoStartDevice(%p)\n", DeviceExtension);
 
-    /* Get the interface type of the lower device */
-    InterfaceType = GetBusInterface(DeviceExtension->LowerDevice);
+    /* Get the interface type of the bus. Device properties belong to the PDO;
+     * the next lower device can be a filter (e.g. ACPI) that has none. */
+    InterfaceType = GetBusInterface(DeviceExtension->PhysicalDevice);
     if (InterfaceType == InterfaceTypeUndefined)
         return STATUS_NO_SUCH_DEVICE;
 
