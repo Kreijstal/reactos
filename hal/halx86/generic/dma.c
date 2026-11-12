@@ -153,7 +153,21 @@ static DMA_OPERATIONS HalpDmaOperations = {
 };
 #endif
 
-#define MAX_MAP_REGISTERS 64
+/*
+ * Capacity of the master adapter's map register table, i.e. the most the
+ * shared map buffer pool can ever grow to (one page per register).  The
+ * buffers themselves are only allocated on demand by HalpGrowMapBuffers.
+ *
+ * This used to be 64 (256 KB).  With memory above 4 GB every in-flight
+ * transfer of every 32-bit bus master holds registers from this one pool -- a
+ * NIC's transmit ring keeps them until its packets are sent -- so a fixed
+ * 64-entry table ran out and a 16-register disk request then waited for a
+ * growth that could never happen.  Windows has no such ceiling: it allocates
+ * map buffer pages as they are needed (HalpDmaGrowScatterMapBuffers ->
+ * MmAllocatePagesForMdl).  4096 registers bound the pool at 16 MB of bounce
+ * memory while costing only the 64 KB table and a 512-byte bitmap up front.
+ */
+#define MAX_MAP_REGISTERS 4096
 
 #define TAG_DMA ' AMD'
 
