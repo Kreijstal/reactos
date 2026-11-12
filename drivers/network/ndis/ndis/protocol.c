@@ -385,6 +385,7 @@ proSendPacketToMiniport(PLOGICAL_ADAPTER Adapter, PNDIS_PACKET Packet)
 #else
    KIRQL RaiseOldIrql;
    NDIS_STATUS NdisStatus;
+   BOOLEAN Queued;
 
    NDIS_DbgPrint(MAX_TRACE, ("Called.\n"));
 
@@ -413,7 +414,7 @@ proSendPacketToMiniport(PLOGICAL_ADAPTER Adapter, PNDIS_PACKET Packet)
    {
         /* Serialized miniports are called at DISPATCH_LEVEL, one call at a time */
         KeRaiseIrql(DISPATCH_LEVEL, &RaiseOldIrql);
-        NdisStatus = MiniSendSerialized(Adapter, Packet, FALSE);
+        NdisStatus = MiniSendSerialized(Adapter, Packet, FALSE, &Queued);
         KeLowerIrql(RaiseOldIrql);
    }
    else if(Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendPacketsHandler)
@@ -432,7 +433,7 @@ proSendPacketToMiniport(PLOGICAL_ADAPTER Adapter, PNDIS_PACKET Packet)
    }
 
    if (NdisStatus != NDIS_STATUS_PENDING) {
-       MiniWorkItemComplete(Adapter, NdisWorkItemSend);
+       MiniKickWorker(Adapter);
    }
 
    return NdisStatus;
@@ -661,6 +662,12 @@ ProTransferData(
     ASSERT(Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.TransferDataHandler);
 
     KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+
+    /* The receive context is only valid during the indication, and a
+     * serialized miniport indicates from one of its serialized handlers:
+     * this processor owns the miniport already */
+    ASSERT(!MiniIsSerialized(Adapter) ||
+           (Adapter->SerialOwned && Adapter->SerialOwnerCpu == NdisCurrentProcessorIndex()));
 
     Status = (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.TransferDataHandler)(
         Packet,

@@ -50,13 +50,12 @@ VOID NTAPI HandleDeferredProcessing(
        * concurrently with its MiniportSend: if a send (or anything else
        * serialized) is in progress, its owner runs the handler when done */
       KeAcquireSpinLockAtDpcLevel(&Adapter->SerialLock);
-      if (Adapter->SerialOwned)
+      if (!MiniTakeSerialization(Adapter))
       {
           Adapter->SerialDpcDeferred = TRUE;
           KeReleaseSpinLockFromDpcLevel(&Adapter->SerialLock);
           return;
       }
-      Adapter->SerialOwned = TRUE;
       KeReleaseSpinLockFromDpcLevel(&Adapter->SerialLock);
 
       MiniRunHandleInterrupt(Adapter);

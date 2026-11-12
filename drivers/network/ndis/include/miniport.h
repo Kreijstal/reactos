@@ -110,14 +110,26 @@ typedef struct _LOGICAL_ADAPTER
                                                            framework context here) */
 
     /* Serialization of a serialized (non-NDIS_ATTRIBUTE_DESERIALIZE) miniport:
-     * NDIS never runs two of its MiniportSend(Packets)/MiniportHandleInterrupt
-     * at once. Calls that find it busy are deferred to the owner (see
-     * MiniAcquireSerialization / MiniReleaseSerialization). */
+     * NDIS never runs two of its MiniportXxx handlers (Send(Packets),
+     * HandleInterrupt, Query/SetInformation, Reset, ReturnPacket,
+     * CheckForHang) at once. Calls that find it busy are deferred to the
+     * owner (see MiniTakeSerialization / MiniReleaseSerialization).
+     * Protected by SerialLock */
     KSPIN_LOCK                  SerialLock;
     BOOLEAN                     SerialOwned;            /* A MiniportXxx call is in progress */
     BOOLEAN                     SerialDpcDeferred;      /* HandleInterrupt to run on release */
     BOOLEAN                     SerialSendDeferred;     /* Sends were queued, kick the worker on release */
     BOOLEAN                     SerialRequestDeferred;  /* PendingRequest to issue on release */
+    BOOLEAN                     SerialResetDeferred;    /* MiniportReset to run on release */
+    ULONG                       SerialOwnerCpu;         /* Processor of the owner (at DISPATCH_LEVEL) */
+    PNDIS_PACKET                SerialReturnHead;       /* Packets to give back to MiniportReturnPacket */
+    PNDIS_PACKET                SerialReturnTail;       /* on release, linked by MINI_RETURN_LINK */
+
+    /* MiniportWorker services the work queue, one run at a time. Protected
+     * by NdisMiniportBlock.Lock */
+    PIO_WORKITEM                WorkerItem;
+    BOOLEAN                     WorkerQueued;           /* Queued or running */
+    BOOLEAN                     WorkerRerun;            /* Kicked while queued or running */
 
     /* Requests waiting for the one in progress (PendingRequest) to finish,
      * oldest first. Protected by NdisMiniportBlock.Lock */
@@ -126,6 +138,34 @@ typedef struct _LOGICAL_ADAPTER
 } LOGICAL_ADAPTER, *PLOGICAL_ADAPTER;
 
 #define GET_LOGICAL_ADAPTER(Handle)((PLOGICAL_ADAPTER)Handle)
+
+/* A received packet waiting to be returned to a busy serialized miniport:
+ * WrapperReservedEx belongs to NDIS in both MiniportReserved layouts */
+#define MINI_RETURN_LINK(Packet) (*(PNDIS_PACKET *)(Packet)->WrapperReservedEx)
+
+/*
+ * Makes the caller the owner of a serialized miniport, if nobody is.
+ * Called at DISPATCH_LEVEL with SerialLock held: a caller that does not get
+ * the miniport leaves its work to the owner under the same lock hold.
+ */
+FORCEINLINE
+BOOLEAN
+MiniTakeSerialization(
+    PLOGICAL_ADAPTER Adapter)
+{
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+
+    if (Adapter->SerialOwned)
+        return FALSE;
+
+    Adapter->SerialOwned = TRUE;
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    Adapter->SerialOwnerCpu = KeGetCurrentProcessorIndex();
+#else
+    Adapter->SerialOwnerCpu = KeGetCurrentProcessorNumber();
+#endif
+    return TRUE;
+}
 
 extern LIST_ENTRY MiniportListHead;
 extern KSPIN_LOCK MiniportListLock;
@@ -223,9 +263,8 @@ MiniDoAddressingReset(
     PLOGICAL_ADAPTER Adapter);
 
 VOID
-MiniWorkItemComplete(
-    PLOGICAL_ADAPTER     Adapter,
-    NDIS_WORK_ITEM_TYPE  WorkItemType);
+MiniKickWorker(
+    PLOGICAL_ADAPTER Adapter);
 
 BOOLEAN
 MiniIsSerialized(
@@ -243,6 +282,7 @@ NDIS_STATUS
 MiniSendSerialized(
     PLOGICAL_ADAPTER Adapter,
     PNDIS_PACKET     Packet,
-    BOOLEAN          Requeue);
+    BOOLEAN          Requeue,
+    PBOOLEAN         Queued);
 
 /* EOF */
