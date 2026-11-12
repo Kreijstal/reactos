@@ -19,9 +19,15 @@
  * Override DbgPrint(), used by the debugger banner DPRINTs below,
  * because KdInitSystem() can be called under the debugger lock by
  * KdEnableDebugger(WithLock)().
+ * KdpDprintf() sends unconditionally, so skip the banner lines once the
+ * transport has found no debugger (KdpPrint() does the same for DbgPrint):
+ * otherwise every line runs the full retry budget of the transport, minutes
+ * on a serial port with nothing attached.
  */
-#define DbgPrint(fmt, ...) (KdpDprintf(fmt, ##__VA_ARGS__), 0)
-#define DbgPrintEx(cmpid, lvl, fmt, ...) (KdpDprintf(fmt, ##__VA_ARGS__), 0)
+#define DbgPrint(fmt, ...) \
+    (KdDebuggerNotPresent ? 0 : (KdpDprintf(fmt, ##__VA_ARGS__), 0))
+#define DbgPrintEx(cmpid, lvl, fmt, ...) \
+    (KdDebuggerNotPresent ? 0 : (KdpDprintf(fmt, ##__VA_ARGS__), 0))
 
 /* UTILITY FUNCTIONS *********************************************************/
 
