@@ -18,6 +18,14 @@
  * concurrently with its MiniportHandleInterrupt: e1000's transmit ring
  * wedged, every later send was queued for good, the pool ran dry and every
  * further echo failed with ERROR_NO_SYSTEM_RESOURCES (or timed out).
+ *
+ * Two floods run at once, with different sizes and contents: every raw ICMP
+ * address file receives every ICMP datagram, and tcpip handed one request's
+ * replies to the other (and late replies to the next request), which then
+ * returned a reply of the wrong size, or crashed on a request that had
+ * already ended. And tcpip gave its datagrams only two distinct IP
+ * identifications: the gateway reassembled fragments of different requests
+ * into one, and most echoes of the two floods went unanswered.
  */
 #define FLOOD_COUNT        2500
 #define FLOOD_SIZE         32000
@@ -119,7 +127,9 @@ SendEchoEx(HANDLE hIcmp, IPAddr Address, PVOID Data, WORD Size, PIP_OPTION_INFOR
         return FALSE;
     }
 
-    if (EchoReply->DataSize != Size)
+    /* The reply must answer this very request */
+    if (EchoReply->DataSize != Size ||
+        (Size > 0 && (!EchoReply->Data || memcmp(EchoReply->Data, Data, Size) != 0)))
     {
         *Error = ERROR_INVALID_DATA;
         return FALSE;
@@ -178,10 +188,9 @@ QueryThread(PVOID Context)
     return 0;
 }
 
-/* A second sender keeps sends overlapping the receive interrupt handling
+/* Another sender keeps sends overlapping the receive interrupt handling
  * on other processors: single-frame UDP datagrams to the subnet broadcast
- * address (a second ICMP sender would also receive the first one's
- * replies). Paced, so that it cannot by itself queue more sends than the
+ * address. Paced, so that it cannot by itself queue more sends than the
  * adapter drains and run tcpip's packet pool dry */
 #define UDP_SIZE 1024
 static volatile LONG StopUdp;
@@ -223,12 +232,14 @@ Cleanup:
     return 0;
 }
 
-#define FLOOD_THREADS 1
+#define FLOOD_THREADS 2
 
 typedef struct _FLOOD
 {
     IPAddr Gateway;
-    DWORD Sent, Replies, NoResources, OtherFailures, Consecutive, LastError;
+    WORD Size;
+    UCHAR Pattern;
+    DWORD Sent, Replies, NoResources, WrongReplies, OtherFailures, Consecutive, LastError;
 } FLOOD, *PFLOOD;
 
 static
@@ -240,23 +251,23 @@ FloodThread(PVOID Context)
     HANDLE hIcmp;
     PUCHAR Data;
     PVOID Reply;
-    DWORD ReplySize = sizeof(ICMP_ECHO_REPLY) + FLOOD_SIZE + 8, Error, i;
+    DWORD ReplySize = sizeof(ICMP_ECHO_REPLY) + Flood->Size + 8, Error, i;
 
     hIcmp = IcmpCreateFile();
-    Data = malloc(FLOOD_SIZE);
+    Data = malloc(Flood->Size);
     Reply = malloc(ReplySize);
     if (hIcmp == INVALID_HANDLE_VALUE || !Data || !Reply)
     {
         Flood->LastError = GetLastError();
         goto Cleanup;
     }
-    for (i = 0; i < FLOOD_SIZE; i++)
-        Data[i] = (UCHAR)('a' + i % 23);
+    for (i = 0; i < Flood->Size; i++)
+        Data[i] = (UCHAR)(Flood->Pattern + i % 23);
 
     for (Flood->Sent = 0; Flood->Sent < FLOOD_COUNT; )
     {
         Flood->Sent++;
-        if (SendEcho(hIcmp, Flood->Gateway, Data, FLOOD_SIZE, Reply, ReplySize, FLOOD_TIMEOUT, &Error))
+        if (SendEcho(hIcmp, Flood->Gateway, Data, Flood->Size, Reply, ReplySize, FLOOD_TIMEOUT, &Error))
         {
             Flood->Replies++;
             Flood->Consecutive = 0;
@@ -266,6 +277,8 @@ FloodThread(PVOID Context)
         Flood->LastError = Error;
         if (Error == ERROR_NO_SYSTEM_RESOURCES)
             Flood->NoResources++;
+        else if (Error == ERROR_INVALID_DATA)
+            Flood->WrongReplies++;
         else
             Flood->OtherFailures++;
 
@@ -359,6 +372,8 @@ START_TEST(IcmpFlood)
     for (t = 0; t < FLOOD_THREADS; t++)
     {
         Floods[t].Gateway = Gateway;
+        Floods[t].Size = FLOOD_SIZE - (WORD)t * 1000;
+        Floods[t].Pattern = (UCHAR)('a' + t);
         hFloodThreads[t] = CreateThread(NULL, 0, FloodThread, &Floods[t], 0, NULL);
         ok(hFloodThreads[t] != NULL, "CreateThread failed: %lu\n", GetLastError());
     }
@@ -371,9 +386,9 @@ START_TEST(IcmpFlood)
     }
     for (t = 0; t < FLOOD_THREADS; t++)
     {
-        trace("Flood %lu: %lu of %lu echoes of %u bytes answered in %lu ms (%lu out of resources, %lu other failures, last error %lu)\n",
-              t, Floods[t].Replies, Floods[t].Sent, FLOOD_SIZE, GetTickCount() - Start,
-              Floods[t].NoResources, Floods[t].OtherFailures, Floods[t].LastError);
+        trace("Flood %lu: %lu of %lu echoes of %u bytes answered in %lu ms (%lu out of resources, %lu wrong replies, %lu other failures, last error %lu)\n",
+              t, Floods[t].Replies, Floods[t].Sent, Floods[t].Size, GetTickCount() - Start,
+              Floods[t].NoResources, Floods[t].WrongReplies, Floods[t].OtherFailures, Floods[t].LastError);
     }
 
     if (hUdpThread)
@@ -402,6 +417,8 @@ START_TEST(IcmpFlood)
            t, Floods[t].Sent, Floods[t].Consecutive, Floods[t].LastError);
         ok(Floods[t].NoResources == 0, "Flood %lu: %lu echoes failed with ERROR_NO_SYSTEM_RESOURCES\n",
            t, Floods[t].NoResources);
+        ok(Floods[t].WrongReplies == 0, "Flood %lu: %lu echoes returned a reply to another request\n",
+           t, Floods[t].WrongReplies);
         ok(Floods[t].Replies >= Floods[t].Sent - Floods[t].Sent / 100, "Flood %lu: only %lu of %lu echoes were answered\n",
            t, Floods[t].Replies, Floods[t].Sent);
     }
