@@ -246,7 +246,9 @@ TestSparse(
     ok_eq_hex(Status, STATUS_SUCCESS);
     ok_eq_ulong(Count, 2UL);
     ok_eq_longlong(Ranges[0].FileOffset.QuadPart, 0LL);
-    ok_eq_longlong(Ranges[0].Length.QuadPart, (LONGLONG)(2 * UNIT));
+    /* The write allocated whole compression units (16 clusters) past 64K */
+    ok_eq_longlong(Ranges[0].Length.QuadPart,
+                   (LONGLONG)((68 * KB + 16 * ClusterSize - 1) / (16 * ClusterSize) * (16 * ClusterSize)));
     ok_eq_longlong(Ranges[1].FileOffset.QuadPart, (LONGLONG)(1 * MB));
 
     /* A hole fill in the middle of the hole (test_sparse_write). */
