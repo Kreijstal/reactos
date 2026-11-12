@@ -16,6 +16,8 @@
 #undef UNIMPLEMENTED
 #include <reactos/debug.h>
 
+static volatile LONG IPv4NextId;
+
 NTSTATUS AddGenericHeaderIPv4(
     PADDRESS_FILE AddrFile,
     PIP_ADDRESS RemoteAddress,
@@ -66,8 +68,10 @@ NTSTATUS AddGenericHeaderIPv4(
     IPHeader->Tos = 0;
     /* Length of header and data */
     IPHeader->TotalLength = WH2N((USHORT)IPPacket->TotalSize);
-    /* Identification */
-    IPHeader->Id = (USHORT)Random();
+    /* Identification: unique among the datagrams in flight to a host, or
+     * the receiver reassembles fragments of different datagrams into one
+     * (RFC 791). Random() only alternates between two values */
+    IPHeader->Id = WH2N((USHORT)InterlockedIncrement(&IPv4NextId));
     /* One fragment at offset 0 */
     IPHeader->FlagsFragOfs = 0;
     /* Time-to-Live */
