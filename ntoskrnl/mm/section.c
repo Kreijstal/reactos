@@ -2366,6 +2366,7 @@ MmQuerySectionView(PMEMORY_AREA MemoryArea,
     PMM_REGION Region;
     PVOID RegionBaseAddress;
     PMM_SECTION_SEGMENT Segment;
+    ULONG_PTR RegionEnd;
 
     Region = MmFindRegion((PVOID)MA_GetStartingAddress(MemoryArea),
                           &MemoryArea->SectionData.RegionListHead,
@@ -2375,14 +2376,59 @@ MmQuerySectionView(PMEMORY_AREA MemoryArea,
         return STATUS_UNSUCCESSFUL;
     }
 
+    /* Like Windows, the region starts at the queried page and runs up to
+     * the first page whose attributes differ. */
+    RegionEnd = (ULONG_PTR)RegionBaseAddress + Region->Length;
+
     if (MemoryArea->VadNode.u.VadFlags.VadType == VadImageMap)
     {
+        PMM_IMAGE_SECTION_OBJECT ImageSectionObject;
+        PMEMORY_AREA NextArea;
+        PMM_REGION NextRegion;
+        PVOID NextRegionBase;
+
         Segment = MemoryArea->SectionData.Segment;
+        ImageSectionObject = ImageSectionObjectFromSegment(Segment);
         Info->AllocationBase = (PUCHAR)MA_GetStartingAddress(MemoryArea) - Segment->Image.VirtualAddress;
         Info->Type = MEM_IMAGE;
         /* Windows always reports PAGE_EXECUTE_WRITECOPY as the allocation
          * protection for image mappings, independent of the per-page protection. */
         Info->AllocationProtect = PAGE_EXECUTE_WRITECOPY;
+
+        /* An image view is one allocation on Windows (one VAD), but RosMm maps
+         * each image segment as its own memory area. Continue the region into
+         * the following segments of the same view while the protection
+         * matches, so that e.g. a read-only header followed by a read-only
+         * section is reported as one region. The caller holds the address
+         * space lock, and we are attached to the target process. */
+        while (RegionEnd == MA_GetEndingAddress(MemoryArea))
+        {
+            NextArea = MmLocateMemoryAreaByAddress(MmGetCurrentAddressSpace(), (PVOID)RegionEnd);
+            if ((NextArea == NULL) ||
+                (NextArea->Type != MEMORY_AREA_SECTION_VIEW) ||
+                (NextArea->VadNode.u.VadFlags.VadType != VadImageMap))
+            {
+                break;
+            }
+
+            Segment = NextArea->SectionData.Segment;
+            if ((ImageSectionObjectFromSegment(Segment) != ImageSectionObject) ||
+                ((PUCHAR)MA_GetStartingAddress(NextArea) - Segment->Image.VirtualAddress != Info->AllocationBase))
+            {
+                break;
+            }
+
+            NextRegion = MmFindRegion((PVOID)MA_GetStartingAddress(NextArea),
+                                      &NextArea->SectionData.RegionListHead,
+                                      (PVOID)RegionEnd, &NextRegionBase);
+            NT_ASSERT(NextRegion != NULL);
+            NT_ASSERT((ULONG_PTR)NextRegionBase == RegionEnd);
+            if (NextRegion->Protect != Region->Protect)
+                break;
+
+            MemoryArea = NextArea;
+            RegionEnd += NextRegion->Length;
+        }
     }
     else
     {
@@ -2390,8 +2436,8 @@ MmQuerySectionView(PMEMORY_AREA MemoryArea,
         Info->Type = MEM_MAPPED;
         Info->AllocationProtect = MmProtectToValue[MemoryArea->VadNode.u.VadFlags.Protection];
     }
-    Info->BaseAddress = RegionBaseAddress;
-    Info->RegionSize = Region->Length;
+    Info->BaseAddress = PAGE_ALIGN(Address);
+    Info->RegionSize = RegionEnd - (ULONG_PTR)Info->BaseAddress;
     Info->State = MEM_COMMIT;
     Info->Protect = Region->Protect;
 
