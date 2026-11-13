@@ -5,6 +5,7 @@ list(APPEND SOURCE
     SetupCopyOEMInf.c
     devclass.c
     DevQuery.c
+    InfCacheRefresh.c
     SetupDiCreateDeviceInfo.c
     SetupDiDeviceProperty.c
     SetupDiInstallClassExA.c
