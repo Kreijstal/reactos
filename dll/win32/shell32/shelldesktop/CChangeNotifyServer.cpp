@@ -72,8 +72,16 @@ public:
     END_MSG_MAP()
 
 private:
+    struct PENDING_DELIVERY
+    {
+        HANDLE hTicket;
+        DWORD dwOwnerPID;
+    };
+
     UINT m_nNextRegID;
     CSimpleArray<CWatchItem*> m_items;
+    BOOL m_bDelivering;
+    CSimpleArray<PENDING_DELIVERY> m_pending;
 
     BOOL AddItem(CWatchItem *pItem);
     BOOL RemoveItemsByRegID(UINT nRegID);
@@ -88,6 +96,7 @@ private:
 
 CChangeNotifyServer::CChangeNotifyServer()
     : m_nNextRegID(INVALID_REG_ID)
+    , m_bDelivering(FALSE)
 {
 }
 
@@ -304,11 +313,54 @@ LRESULT CChangeNotifyServer::OnDeliverNotification(UINT uMsg, WPARAM wParam, LPA
     HANDLE hTicket = (HANDLE)wParam;
     DWORD dwOwnerPID = (DWORD)lParam;
 
+    // DeliverNotification sends the notification to each client window. While
+    // this thread waits in SendMessageW it handles the messages sent to it,
+    // including the next CN_DELIVER_NOTIFICATION, so a burst of notifications
+    // (the drive folder's workers send one per drive and detail as they finish)
+    // nested one delivery inside the other until the user callback for the
+    // next level failed with STATUS_STACK_OVERFLOW and its notification was
+    // dropped: drives in a freshly opened "My Computer" kept "Local Disk"
+    // instead of their labels. Queue a notification that arrives during a
+    // delivery and send it once that delivery is done, in order. Only a
+    // SHCNF_FLUSH sender waits for its delivery, so that one is delivered now.
+    if (m_bDelivering)
+    {
+        LPDELITICKET pTicket = (LPDELITICKET)SHLockSharedEx(hTicket, dwOwnerPID, FALSE);
+        BOOL bFlush = pTicket && pTicket->dwMagic == DELITICKET_MAGIC &&
+                      (pTicket->uFlags & (SHCNF_FLUSH | SHCNF_FLUSHNOWAIT)) == SHCNF_FLUSH;
+        if (pTicket)
+            SHUnlockShared(pTicket);
+
+        if (!bFlush)
+        {
+            PENDING_DELIVERY Pending = { hTicket, dwOwnerPID };
+            if (m_pending.Add(Pending))
+                return TRUE;
+        }
+
+        BOOL ret = DeliverNotification(hTicket, dwOwnerPID);
+        SHFreeShared(hTicket, dwOwnerPID);
+        return ret;
+    }
+
+    m_bDelivering = TRUE;
+
     // do delivery
     BOOL ret = DeliverNotification(hTicket, dwOwnerPID);
 
     // free the ticket
     SHFreeShared(hTicket, dwOwnerPID);
+
+    // deliver what was queued meanwhile; more may be queued while doing so
+    while (m_pending.GetSize() > 0)
+    {
+        PENDING_DELIVERY Pending = m_pending[0];
+        m_pending.RemoveAt(0);
+        DeliverNotification(Pending.hTicket, Pending.dwOwnerPID);
+        SHFreeShared(Pending.hTicket, Pending.dwOwnerPID);
+    }
+
+    m_bDelivering = FALSE;
     return ret;
 }
 
@@ -335,6 +387,11 @@ LRESULT CChangeNotifyServer::OnRemoveByPID(UINT uMsg, WPARAM wParam, LPARAM lPar
 
 LRESULT CChangeNotifyServer::OnDestroy(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
 {
+    // WM_DESTROY is sent, so it can arrive in the middle of a delivery
+    for (INT i = 0; i < m_pending.GetSize(); ++i)
+        SHFreeShared(m_pending[i].hTicket, m_pending[i].dwOwnerPID);
+    m_pending.RemoveAll();
+
     DestroyAllItems();
     CDirectoryWatcher::RequestAllWatchersTermination();
     return 0;
