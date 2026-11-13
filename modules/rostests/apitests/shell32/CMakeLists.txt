@@ -36,6 +36,7 @@ list(APPEND SOURCE
     RegenerateUserEnvironment.cpp
     SHAppBarMessage.cpp
     SHChangeNotify.cpp
+    StartMenu.cpp
     SHCreateDataObject.cpp
     SHCreateFileDataObject.cpp
     SHCreateFileExtractIconW.cpp
