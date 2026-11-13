@@ -2334,16 +2334,60 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
     /* Check if this is a ROSMM VAD */
     if (MI_IS_ROSMM_VAD(Vad))
     {
+        PMEMORY_AREA MemoryArea, LastArea;
+        ULONG_PTR AreaEnd, Current;
+
         /* Not too shabby hack */
         ASSERT(((PMEMORY_AREA)Vad)->Type == MEMORY_AREA_SECTION_VIEW);
-        *NumberOfBytesToProtect = PAGE_ROUND_UP((ULONG_PTR)(*BaseAddress) + (*NumberOfBytesToProtect)) - PAGE_ROUND_DOWN(*BaseAddress);
-        *BaseAddress = (PVOID)PAGE_ROUND_DOWN(*BaseAddress);
-        Status = MmProtectSectionView(AddressSpace,
-                                      (PMEMORY_AREA)Vad,
-                                      *BaseAddress,
-                                      *NumberOfBytesToProtect,
-                                      NewAccessProtection,
-                                      OldAccessProtection);
+
+        /*
+         * The node found overlaps the range, but need not contain its start.
+         * Like Windows, the whole range must lie within one allocation. For
+         * a data view that is its memory area; an image view is one VAD on
+         * Windows, while RosMm maps each segment of it as a memory area of
+         * its own, so a range may run across the segments of one image view
+         * (e.g. the BaseAddress and RegionSize VirtualQuery reports for an
+         * image, which merges segments of the same protection).
+         */
+        MemoryArea = MmLocateMemoryAreaByAddress(AddressSpace, (PVOID)StartingAddress);
+        if ((MemoryArea == NULL) || (MemoryArea->Type != MEMORY_AREA_SECTION_VIEW))
+        {
+            DPRINT("Range start is not in a section view\n");
+            Status = STATUS_CONFLICTING_ADDRESSES;
+            goto FailPath;
+        }
+
+        for (LastArea = MemoryArea;
+             MA_GetEndingAddress(LastArea) <= EndingAddress;
+             LastArea = MmGetNextImageViewArea(AddressSpace, LastArea))
+        {
+            if (MmGetNextImageViewArea(AddressSpace, LastArea) == NULL)
+            {
+                DPRINT("Range runs past the end of the view\n");
+                Status = STATUS_CONFLICTING_ADDRESSES;
+                goto FailPath;
+            }
+        }
+
+        *NumberOfBytesToProtect = EndingAddress + 1 - StartingAddress;
+        *BaseAddress = (PVOID)StartingAddress;
+
+        /* Change each segment; the old protection is that of the first page */
+        for (Current = StartingAddress; ; MemoryArea = MmGetNextImageViewArea(AddressSpace, MemoryArea))
+        {
+            ASSERT(MemoryArea != NULL);
+            AreaEnd = min(MA_GetEndingAddress(MemoryArea), EndingAddress + 1);
+            Status = MmProtectSectionView(AddressSpace,
+                                          MemoryArea,
+                                          (PVOID)Current,
+                                          AreaEnd - Current,
+                                          NewAccessProtection,
+                                          (Current == StartingAddress) ? OldAccessProtection : NULL);
+            if (!NT_SUCCESS(Status) || (MemoryArea == LastArea))
+                break;
+            Current = AreaEnd;
+        }
+
         MmUnlockAddressSpace(AddressSpace);
         return Status;
     }
