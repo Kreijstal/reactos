@@ -167,40 +167,6 @@ InfCacheGetPaths(
     return TRUE;
 }
 
-static BOOL
-InfCacheIsCurrent(IN LPCWSTR InfDir, IN LPCWSTR CacheFile)
-{
-    WIN32_FILE_ATTRIBUTE_DATA CacheAttrs;
-    WIN32_FIND_DATAW FindData;
-    WCHAR Pattern[MAX_PATH];
-    HANDLE FindHandle;
-    BOOL Current = TRUE;
-
-    if (!GetFileAttributesExW(CacheFile, GetFileExInfoStandard, &CacheAttrs))
-        return FALSE;
-
-    if (lstrlenW(InfDir) + 6 > MAX_PATH)
-        return FALSE;
-    strcpyW(Pattern, InfDir);
-    strcatW(Pattern, L"*.inf");
-
-    FindHandle = FindFirstFileW(Pattern, &FindData);
-    if (FindHandle == INVALID_HANDLE_VALUE)
-        return FALSE;
-
-    do
-    {
-        if (CompareFileTime(&FindData.ftLastWriteTime, &CacheAttrs.ftLastWriteTime) > 0)
-        {
-            Current = FALSE;
-            break;
-        }
-    } while (FindNextFileW(FindHandle, &FindData));
-
-    FindClose(FindHandle);
-    return Current;
-}
-
 static LPWSTR
 InfCacheNextField(IN OUT LPWSTR *Cursor)
 {
@@ -967,6 +933,122 @@ InfCacheGetStringField(
     return Result;
 }
 
+/*
+ * Adds the cache entries of one INF file. Returns FALSE only when memory runs
+ * out; an INF that cannot be opened or has no usable [Version] adds nothing.
+ */
+static BOOL
+InfCacheScanInf(
+    IN LPCWSTR FullInfFileName,
+    IN LPCWSTR FileName,
+    IN OUT PLIST_ENTRY CacheList)
+{
+    struct InfFileDetails *InfFileDetails;
+    INFCONTEXT ContextManufacturer, ContextDevice;
+    GUID ClassGuid;
+    LPWSTR ProviderName = NULL;
+    FILETIME DriverDate;
+    DWORDLONG DriverVersion = 0;
+    DWORD RequiredSize;
+    BOOL Result;
+    BOOL Ret = TRUE;
+
+    InfFileDetails = CreateInfFileDetails(FullInfFileName);
+    if (InfFileDetails == NULL)
+        return TRUE;
+
+    if (!GetVersionInformationFromInfFile(InfFileDetails->hInf,
+                                          &ClassGuid,
+                                          &ProviderName,
+                                          &DriverDate,
+                                          &DriverVersion))
+    {
+        DereferenceInfFile(InfFileDetails);
+        return TRUE;
+    }
+
+    Result = SetupFindFirstLineW(InfFileDetails->hInf, INF_MANUFACTURER, NULL, &ContextManufacturer);
+    while (Result && Ret)
+    {
+        LPWSTR ManufacturerName = NULL;
+        WCHAR ManufacturerSection[LINE_LEN + 1];
+
+        if (!InfCacheGetStringField(&ContextManufacturer, 0, &ManufacturerName))
+            goto next_manufacturer;
+
+        if (!SetupGetStringFieldW(&ContextManufacturer,
+                                  1,
+                                  ManufacturerSection,
+                                  LINE_LEN,
+                                  &RequiredSize))
+        {
+            goto next_manufacturer;
+        }
+        ManufacturerSection[RequiredSize] = UNICODE_NULL;
+
+        if (!SetupDiGetActualSectionToInstallW(InfFileDetails->hInf,
+                                               ManufacturerSection,
+                                               ManufacturerSection,
+                                               LINE_LEN,
+                                               NULL,
+                                               NULL))
+        {
+            goto next_manufacturer;
+        }
+
+        Result = SetupFindFirstLineW(InfFileDetails->hInf,
+                                     ManufacturerSection,
+                                     NULL,
+                                     &ContextDevice);
+        while (Result && Ret)
+        {
+            DWORD FieldCount = SetupGetFieldCount(&ContextDevice);
+            DWORD FieldIndex;
+            LPWSTR SectionName = NULL;
+            LPWSTR DriverDescription = NULL;
+
+            if (InfCacheGetStringField(&ContextDevice, 1, &SectionName) &&
+                InfCacheGetStringField(&ContextDevice, 0, &DriverDescription))
+            {
+                for (FieldIndex = 2; FieldIndex <= FieldCount; ++FieldIndex)
+                {
+                    LPWSTR MatchingId = NULL;
+
+                    if (!InfCacheGetStringField(&ContextDevice, FieldIndex, &MatchingId))
+                        continue;
+
+                    Ret = InfCacheAddEntry(CacheList,
+                                           FileName,
+                                           SectionName,
+                                           DriverDescription,
+                                           ProviderName,
+                                           ManufacturerName,
+                                           MatchingId,
+                                           &ClassGuid,
+                                           DriverDate,
+                                           DriverVersion,
+                                           FieldIndex);
+                    HeapFree(GetProcessHeap(), 0, MatchingId);
+                    if (!Ret)
+                        break;
+                }
+            }
+
+            HeapFree(GetProcessHeap(), 0, SectionName);
+            HeapFree(GetProcessHeap(), 0, DriverDescription);
+            Result = SetupFindNextLine(&ContextDevice, &ContextDevice);
+        }
+
+next_manufacturer:
+        HeapFree(GetProcessHeap(), 0, ManufacturerName);
+        Result = SetupFindNextLine(&ContextManufacturer, &ContextManufacturer);
+    }
+
+    HeapFree(GetProcessHeap(), 0, ProviderName);
+    DereferenceInfFile(InfFileDetails);
+    return Ret;
+}
+
 static BOOL
 InfCacheBuild(
     IN LPCWSTR InfDir,
@@ -1018,119 +1100,9 @@ InfCacheBuild(
 
     for (FileName = (LPCWSTR)Buffer; *FileName; FileName += strlenW(FileName) + 1)
     {
-        struct InfFileDetails *InfFileDetails;
-        INFCONTEXT ContextManufacturer, ContextDevice;
-        GUID ClassGuid;
-        LPWSTR ProviderName = NULL;
-        FILETIME DriverDate;
-        DWORDLONG DriverVersion = 0;
-
         strcpyW(pFullFilename, FileName);
-        InfFileDetails = CreateInfFileDetails(FullInfFileName);
-        if (InfFileDetails == NULL)
-            continue;
-
-        if (!GetVersionInformationFromInfFile(InfFileDetails->hInf,
-                                              &ClassGuid,
-                                              &ProviderName,
-                                              &DriverDate,
-                                              &DriverVersion))
-        {
-            DereferenceInfFile(InfFileDetails);
-            continue;
-        }
-
-        Result = SetupFindFirstLineW(InfFileDetails->hInf, INF_MANUFACTURER, NULL, &ContextManufacturer);
-        while (Result)
-        {
-            LPWSTR ManufacturerName = NULL;
-            WCHAR ManufacturerSection[LINE_LEN + 1];
-
-            if (!InfCacheGetStringField(&ContextManufacturer, 0, &ManufacturerName))
-                goto next_manufacturer;
-
-            if (!SetupGetStringFieldW(&ContextManufacturer,
-                                      1,
-                                      ManufacturerSection,
-                                      LINE_LEN,
-                                      &RequiredSize))
-            {
-                goto next_manufacturer;
-            }
-            ManufacturerSection[RequiredSize] = UNICODE_NULL;
-
-            if (!SetupDiGetActualSectionToInstallW(InfFileDetails->hInf,
-                                                   ManufacturerSection,
-                                                   ManufacturerSection,
-                                                   LINE_LEN,
-                                                   NULL,
-                                                   NULL))
-            {
-                goto next_manufacturer;
-            }
-
-            Result = SetupFindFirstLineW(InfFileDetails->hInf,
-                                         ManufacturerSection,
-                                         NULL,
-                                         &ContextDevice);
-            while (Result)
-            {
-                DWORD FieldCount = SetupGetFieldCount(&ContextDevice);
-                DWORD FieldIndex;
-                LPWSTR SectionName = NULL;
-                LPWSTR DriverDescription = NULL;
-
-                if (!InfCacheGetStringField(&ContextDevice, 1, &SectionName) ||
-                    !InfCacheGetStringField(&ContextDevice, 0, &DriverDescription))
-                {
-                    HeapFree(GetProcessHeap(), 0, SectionName);
-                    HeapFree(GetProcessHeap(), 0, DriverDescription);
-                    goto next_device;
-                }
-
-                for (FieldIndex = 2; FieldIndex <= FieldCount; ++FieldIndex)
-                {
-                    LPWSTR MatchingId = NULL;
-
-                    if (InfCacheGetStringField(&ContextDevice, FieldIndex, &MatchingId))
-                    {
-                        if (!InfCacheAddEntry(CacheList,
-                                              FileName,
-                                              SectionName,
-                                              DriverDescription,
-                                              ProviderName,
-                                              ManufacturerName,
-                                              MatchingId,
-                                              &ClassGuid,
-                                              DriverDate,
-                                              DriverVersion,
-                                              FieldIndex))
-                        {
-                            HeapFree(GetProcessHeap(), 0, MatchingId);
-                            HeapFree(GetProcessHeap(), 0, SectionName);
-                            HeapFree(GetProcessHeap(), 0, DriverDescription);
-                            HeapFree(GetProcessHeap(), 0, ManufacturerName);
-                            HeapFree(GetProcessHeap(), 0, ProviderName);
-                            DereferenceInfFile(InfFileDetails);
-                            goto done;
-                        }
-                        HeapFree(GetProcessHeap(), 0, MatchingId);
-                    }
-                }
-
-next_device:
-                HeapFree(GetProcessHeap(), 0, SectionName);
-                HeapFree(GetProcessHeap(), 0, DriverDescription);
-                Result = SetupFindNextLine(&ContextDevice, &ContextDevice);
-            }
-
-next_manufacturer:
-            HeapFree(GetProcessHeap(), 0, ManufacturerName);
-            Result = SetupFindNextLine(&ContextManufacturer, &ContextManufacturer);
-        }
-
-        HeapFree(GetProcessHeap(), 0, ProviderName);
-        DereferenceInfFile(InfFileDetails);
+        if (!InfCacheScanInf(FullInfFileName, FileName, CacheList))
+            goto done;
     }
 
     Ret = TRUE;
@@ -1143,6 +1115,129 @@ done:
     return Ret;
 }
 
+/* Removes the entries of FileName. FileName may be the name of one of them. */
+static VOID
+InfCacheRemoveInf(
+    IN OUT PLIST_ENTRY CacheList,
+    IN LPCWSTR FileName)
+{
+    PLIST_ENTRY Entry, Next;
+    LPWSTR Owned = NULL;
+
+    for (Entry = CacheList->Flink; Entry != CacheList; Entry = Next)
+    {
+        struct InfCacheEntry *CacheEntry = CONTAINING_RECORD(Entry, struct InfCacheEntry, ListEntry);
+
+        Next = Entry->Flink;
+        if (strcmpiW(CacheEntry->InfFile, FileName) != 0)
+            continue;
+
+        RemoveEntryList(Entry);
+        if (CacheEntry->InfFile == FileName)
+            Owned = CacheEntry->InfFile;
+        else
+            MyFree(CacheEntry->InfFile);
+        MyFree(CacheEntry->SectionName);
+        MyFree(CacheEntry->DriverDescription);
+        MyFree(CacheEntry->ProviderName);
+        MyFree(CacheEntry->ManufacturerName);
+        MyFree(CacheEntry->MatchingId);
+        MyFree(CacheEntry);
+    }
+
+    MyFree(Owned);
+}
+
+/*
+ * Brings a loaded cache up to date with the INF directory, one INF at a time:
+ * an INF written after the cache file is scanned again, the entries of an INF
+ * that is gone are dropped, and every other INF keeps its cached entries.
+ *
+ * A single new or updated INF (a driver install, a deployed file) therefore
+ * costs one INF scan instead of a scan of the whole directory. That matters
+ * where the cache cannot be rewritten (a read-only system volume, a live CD):
+ * there the refresh is repeated by every process that builds a driver list,
+ * i.e. by every device installation.
+ */
+static BOOL
+InfCacheRefresh(
+    IN LPCWSTR InfDir,
+    IN const FILETIME *CacheTime,
+    IN OUT PLIST_ENTRY CacheList,
+    OUT PBOOL Changed)
+{
+    WIN32_FIND_DATAW FindData;
+    WCHAR FullInfFileName[MAX_PATH];
+    LPWSTR pFullFilename;
+    PLIST_ENTRY Entry, Next;
+    LPCWSTR Present = NULL;
+    HANDLE FindHandle;
+    BOOL Ret = TRUE;
+
+    *Changed = FALSE;
+
+    if (lstrlenW(InfDir) + 6 > ARRAYSIZE(FullInfFileName))
+        return FALSE;
+    strcpyW(FullInfFileName, InfDir);
+    pFullFilename = &FullInfFileName[lstrlenW(FullInfFileName)];
+
+    /* Drop the entries of INF files that no longer exist. The entries of one
+     * INF are contiguous, so each INF is looked up once. */
+    for (Entry = CacheList->Flink; Entry != CacheList; Entry = Next)
+    {
+        struct InfCacheEntry *CacheEntry = CONTAINING_RECORD(Entry, struct InfCacheEntry, ListEntry);
+
+        Next = Entry->Flink;
+        if (Present != NULL && strcmpiW(Present, CacheEntry->InfFile) == 0)
+            continue;
+
+        if (lstrlenW(InfDir) + lstrlenW(CacheEntry->InfFile) < ARRAYSIZE(FullInfFileName))
+        {
+            strcpyW(pFullFilename, CacheEntry->InfFile);
+            if (GetFileAttributesW(FullInfFileName) != INVALID_FILE_ATTRIBUTES)
+            {
+                Present = CacheEntry->InfFile;
+                continue;
+            }
+        }
+
+        TRACE("INF cache: dropping %s\n", debugstr_w(CacheEntry->InfFile));
+        InfCacheRemoveInf(CacheList, CacheEntry->InfFile);
+        *Changed = TRUE;
+        /* The removal may have freed Next; start over (Present stays valid,
+         * its entries are kept) */
+        Next = CacheList->Flink;
+    }
+
+    strcpyW(pFullFilename, L"*.inf");
+    FindHandle = FindFirstFileW(FullInfFileName, &FindData);
+    if (FindHandle == INVALID_HANDLE_VALUE)
+        return GetLastError() == ERROR_FILE_NOT_FOUND;
+
+    do
+    {
+        if (FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            continue;
+        if (CompareFileTime(&FindData.ftLastWriteTime, CacheTime) <= 0)
+            continue;
+        if (lstrlenW(InfDir) + lstrlenW(FindData.cFileName) >= ARRAYSIZE(FullInfFileName))
+            continue;
+
+        TRACE("INF cache: rescanning %s\n", debugstr_w(FindData.cFileName));
+        InfCacheRemoveInf(CacheList, FindData.cFileName);
+        strcpyW(pFullFilename, FindData.cFileName);
+        if (!InfCacheScanInf(FullInfFileName, FindData.cFileName, CacheList))
+        {
+            Ret = FALSE;
+            break;
+        }
+        *Changed = TRUE;
+    } while (FindNextFileW(FindHandle, &FindData));
+
+    FindClose(FindHandle);
+    return Ret;
+}
+
 static BOOL
 InfCacheLoadOrBuild(
     OUT PLIST_ENTRY CacheList,
@@ -1150,16 +1245,26 @@ InfCacheLoadOrBuild(
     IN DWORD InfDirCch)
 {
     WCHAR CacheFile[MAX_PATH];
+    WIN32_FILE_ATTRIBUTE_DATA CacheAttrs;
+    BOOL Changed;
 
     InfCacheInit(CacheList);
     if (!InfCacheGetPaths(InfDir, InfDirCch, CacheFile, ARRAYSIZE(CacheFile)))
         return FALSE;
 
-    if (InfCacheIsCurrent(InfDir, CacheFile) && InfCacheLoad(CacheFile, CacheList))
-        return TRUE;
+    if (GetFileAttributesExW(CacheFile, GetFileExInfoStandard, &CacheAttrs) &&
+        InfCacheLoad(CacheFile, CacheList))
+    {
+        if (InfCacheRefresh(InfDir, &CacheAttrs.ftLastWriteTime, CacheList, &Changed))
+        {
+            if (Changed)
+                InfCacheSave(CacheFile, CacheList);
+            return TRUE;
+        }
 
-    InfCacheFree(CacheList);
-    InfCacheInit(CacheList);
+        InfCacheFree(CacheList);
+        InfCacheInit(CacheList);
+    }
 
     if (!InfCacheBuild(InfDir, CacheList))
         return FALSE;
