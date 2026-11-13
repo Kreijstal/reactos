@@ -518,7 +518,9 @@ static HRESULT GetMergedFolder(int folder1, int folder2, IShellFolder ** ppsfSta
 
     *ppsfStartMenu = NULL;
 
-    hr = SHGetSpecialFolderLocation(NULL, folder1, &pidlUserStartMenu);
+    /* Like Windows, create the per-user folder if it does not exist yet: a
+     * profile without a Start Menu folder still gets a start menu. */
+    hr = SHGetFolderLocation(NULL, folder1 | CSIDL_FLAG_CREATE, NULL, 0, &pidlUserStartMenu);
     if (FAILED(hr))
     {
         WARN("Failed to get the USER start menu folder. Trying to run with just the COMMON one.\n");
@@ -636,7 +638,7 @@ RSHELL_CStartMenu_CreateInstance(REFIID riid, void **ppv)
 
     /* psf is a merged folder, so now we want to get the pidl of the programs item from the merged folder */
     {
-        hr = SHGetSpecialFolderLocation(NULL, CSIDL_PROGRAMS, &pidlProgramsAbsolute);
+        hr = SHGetFolderLocation(NULL, CSIDL_PROGRAMS | CSIDL_FLAG_CREATE, NULL, 0, &pidlProgramsAbsolute);
         if (FAILED_UNEXPECTEDLY(hr))
         {
             WARN("USER Programs folder not found\n");
