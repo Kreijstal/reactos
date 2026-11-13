@@ -1585,6 +1585,13 @@ MmQuerySectionView(
     PSIZE_T ResultLength
 );
 
+PMEMORY_AREA
+NTAPI
+MmGetNextImageViewArea(
+    PMMSUPPORT AddressSpace,
+    PMEMORY_AREA MemoryArea
+);
+
 NTSTATUS
 NTAPI
 MmProtectSectionView(

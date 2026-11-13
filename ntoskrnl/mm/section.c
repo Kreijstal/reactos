@@ -2297,6 +2297,47 @@ MmAccessFaultSectionView(PMMSUPPORT AddressSpace,
     return STATUS_SUCCESS;
 }
 
+/*
+ * An image view is one allocation on Windows (one VAD), but RosMm maps each
+ * segment of an image view as a memory area of its own. Return the memory area
+ * that continues the image view of MemoryArea right after its end, or NULL
+ * if the view ends there. The caller holds the address space lock.
+ */
+PMEMORY_AREA
+NTAPI
+MmGetNextImageViewArea(PMMSUPPORT AddressSpace,
+                       PMEMORY_AREA MemoryArea)
+{
+    PMEMORY_AREA NextArea;
+    PMM_SECTION_SEGMENT Segment, NextSegment;
+
+    ASSERT(MemoryArea->Type == MEMORY_AREA_SECTION_VIEW);
+
+    if (MemoryArea->VadNode.u.VadFlags.VadType != VadImageMap)
+        return NULL;
+
+    NextArea = MmLocateMemoryAreaByAddress(AddressSpace, (PVOID)MA_GetEndingAddress(MemoryArea));
+    if ((NextArea == NULL) ||
+        (NextArea->Type != MEMORY_AREA_SECTION_VIEW) ||
+        (NextArea->VadNode.u.VadFlags.VadType != VadImageMap))
+    {
+        return NULL;
+    }
+
+    /* Same image section, mapped at the same base */
+    Segment = MemoryArea->SectionData.Segment;
+    NextSegment = NextArea->SectionData.Segment;
+    if ((ImageSectionObjectFromSegment(NextSegment) != ImageSectionObjectFromSegment(Segment)) ||
+        (MA_GetStartingAddress(NextArea) - NextSegment->Image.VirtualAddress !=
+         MA_GetStartingAddress(MemoryArea) - Segment->Image.VirtualAddress))
+    {
+        return NULL;
+    }
+
+    ASSERT(MA_GetStartingAddress(NextArea) == MA_GetEndingAddress(MemoryArea));
+    return NextArea;
+}
+
 NTSTATUS
 NTAPI
 MmProtectSectionView(PMMSUPPORT AddressSpace,
@@ -2308,7 +2349,6 @@ MmProtectSectionView(PMMSUPPORT AddressSpace,
 {
     PMM_REGION Region;
     NTSTATUS Status;
-    ULONG_PTR MaxLength;
 
     ASSERT(MemoryArea->Type == MEMORY_AREA_SECTION_VIEW);
 
@@ -2317,9 +2357,9 @@ MmProtectSectionView(PMMSUPPORT AddressSpace,
         return STATUS_UNSUCCESSFUL;
     }
 
-    MaxLength = MA_GetEndingAddress(MemoryArea) - (ULONG_PTR)BaseAddress;
-    if (Length > MaxLength)
-        Length = (ULONG)MaxLength;
+    /* The caller splits a range at the memory areas it crosses */
+    ASSERT((ULONG_PTR)BaseAddress >= MA_GetStartingAddress(MemoryArea));
+    ASSERT(Length <= MA_GetEndingAddress(MemoryArea) - (ULONG_PTR)BaseAddress);
 
     Region = MmFindRegion((PVOID)MA_GetStartingAddress(MemoryArea),
                           &MemoryArea->SectionData.RegionListHead,
@@ -2382,13 +2422,11 @@ MmQuerySectionView(PMEMORY_AREA MemoryArea,
 
     if (MemoryArea->VadNode.u.VadFlags.VadType == VadImageMap)
     {
-        PMM_IMAGE_SECTION_OBJECT ImageSectionObject;
         PMEMORY_AREA NextArea;
         PMM_REGION NextRegion;
         PVOID NextRegionBase;
 
         Segment = MemoryArea->SectionData.Segment;
-        ImageSectionObject = ImageSectionObjectFromSegment(Segment);
         Info->AllocationBase = (PUCHAR)MA_GetStartingAddress(MemoryArea) - Segment->Image.VirtualAddress;
         Info->Type = MEM_IMAGE;
         /* Windows always reports PAGE_EXECUTE_WRITECOPY as the allocation
@@ -2403,20 +2441,9 @@ MmQuerySectionView(PMEMORY_AREA MemoryArea,
          * space lock, and we are attached to the target process. */
         while (RegionEnd == MA_GetEndingAddress(MemoryArea))
         {
-            NextArea = MmLocateMemoryAreaByAddress(MmGetCurrentAddressSpace(), (PVOID)RegionEnd);
-            if ((NextArea == NULL) ||
-                (NextArea->Type != MEMORY_AREA_SECTION_VIEW) ||
-                (NextArea->VadNode.u.VadFlags.VadType != VadImageMap))
-            {
+            NextArea = MmGetNextImageViewArea(MmGetCurrentAddressSpace(), MemoryArea);
+            if (NextArea == NULL)
                 break;
-            }
-
-            Segment = NextArea->SectionData.Segment;
-            if ((ImageSectionObjectFromSegment(Segment) != ImageSectionObject) ||
-                ((PUCHAR)MA_GetStartingAddress(NextArea) - Segment->Image.VirtualAddress != Info->AllocationBase))
-            {
-                break;
-            }
 
             NextRegion = MmFindRegion((PVOID)MA_GetStartingAddress(NextArea),
                                       &NextArea->SectionData.RegionListHead,
