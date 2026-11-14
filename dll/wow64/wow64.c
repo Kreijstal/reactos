@@ -1552,8 +1552,8 @@ Wow64InitThread(PCONTEXT pContext)
     PPEB32 WowPeb = NULL;
     PTEB Teb = NtCurrentTeb();
 
-    /* The kernel reserves one native TEB page followed by one TEB32 page. */
-    WowTeb = (PTEB32)((ULONG_PTR)Teb + PAGE_SIZE);
+    /* The kernel puts the TEB32 on the first page after the native TEB */
+    WowTeb = PS_GET_TEB32_FROM_TEB(Teb);
 
     DPRINT1("WOW64 TEB %p, TEB %p\n", WowTeb, Teb);
 

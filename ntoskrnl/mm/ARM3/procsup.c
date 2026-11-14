@@ -926,6 +926,20 @@ MmCreateTeb(IN PEPROCESS Process,
         //
         Teb->StaticUnicodeString.MaximumLength = sizeof(Teb->StaticUnicodeBuffer);
         Teb->StaticUnicodeString.Buffer = Teb->StaticUnicodeBuffer;
+
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED) && (NTDDI_VERSION >= NTDDI_WIN10)
+        //
+        // A WOW64 thread's TEB32 follows it (MiCreatePebOrTeb made room),
+        // tell both of them where the other one is
+        //
+        if (Process->Wow64Process)
+        {
+            PTEB32 Teb32 = PS_GET_TEB32_FROM_TEB(Teb);
+
+            Teb->WowTebOffset = (LONG)((ULONG_PTR)Teb32 - (ULONG_PTR)Teb);
+            Teb32->WowTebOffset = (ULONG)-Teb->WowTebOffset;
+        }
+#endif
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
