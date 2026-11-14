@@ -1,0 +1,218 @@
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+STRINGTABLE
+BEGIN
+    IDS_BANNER "\n-------------------------------------------------------------------------------\n\
+   ROBOCOPY     ::     Robust File Copy for Windows                              \n\
+-------------------------------------------------------------------------------\n\n"
+
+    IDS_HDR_STARTED   "  Started : %ls\n"
+    IDS_HDR_SOURCE    "   Source : %ls\n"
+    IDS_HDR_DEST      "     Dest : %ls\n"
+    IDS_HDR_SOURCE_ERR "   Source - %ls\n"
+    IDS_HDR_DEST_ERR  "     Dest - %ls\n"
+    IDS_HDR_FILES     "\n    Files : "
+    IDS_HDR_EXC_FILES "\nExc Files : "
+    IDS_HDR_EXC_DIRS  "\n Exc Dirs : "
+    IDS_HDR_OPTIONS   "\n  Options : %ls\n\n------------------------------------------------------------------------------\n\n"
+
+    IDS_SUM_COLUMNS "\n------------------------------------------------------------------------------\n\n\
+               Total    Copied   Skipped  Mismatch    FAILED    Extras\n"
+    IDS_SUM_DIRS      "    Dirs : %9ls %9ls %9ls %9ls %9ls %9ls\n"
+    IDS_SUM_FILES     "   Files : %9ls %9ls %9ls %9ls %9ls %9ls\n"
+    IDS_SUM_BYTES     "   Bytes : %9ls %9ls %9ls %9ls %9ls %9ls\n"
+    IDS_SUM_TIMES     "   Times : %9ls %9ls                     %9ls %9ls\n"
+    IDS_SUM_SPEED_BYTES "\n\n   Speed : %19I64u Bytes/sec.\n"
+    IDS_SUM_SPEED_MB  "   Speed : %19ls MegaBytes/min.\n"
+    IDS_SUM_ENDED     "   Ended : %ls\n\n"
+
+    IDS_CLS_NEWFILE   "    New File  "
+    IDS_CLS_NEWER     "    Newer     "
+    IDS_CLS_OLDER     "    Older     "
+    IDS_CLS_CHANGED   "    Changed   "
+    IDS_CLS_SAME      "    Same      "
+    IDS_CLS_TWEAKED   "    Tweaked   "
+    IDS_CLS_EXTRAFILE "  *EXTRA File "
+    IDS_CLS_MISMATCH  "  *Mismatch   "
+    IDS_CLS_V_SAME    "      same    "
+    IDS_CLS_V_NEWER   "      newer   "
+    IDS_CLS_V_OLDER   "      older   "
+    IDS_CLS_V_CHANGED "      changed "
+    IDS_CLS_V_TWEAKED "      tweaked "
+    IDS_CLS_V_NAMED   "      named   "
+    IDS_CLS_V_ATTRIB  "      attrib  "
+    IDS_CLS_V_LARGE   "      large   "
+    IDS_CLS_V_SMALL   "      small   "
+    IDS_CLS_V_TOOOLD  "      too old "
+    IDS_CLS_V_TOONEW  "      too new "
+    IDS_CLS_V_LONELY  "      lonely  "
+    IDS_CLS_V_JUNCTION "      junction"
+
+    IDS_DCLS_NEWDIR   "  New Dir "
+    IDS_DCLS_EXTRADIR "  *EXTRA Dir"
+    IDS_DCLS_MISMATCH "  *Mismatch"
+    IDS_DCLS_EXCLUDED "  *EXCLUDED"
+
+    IDS_ERR_INVALID_PARAM "ERROR : Invalid Parameter #%d : ""%ls""\n\n"
+    IDS_ERR_NO_SOURCE "ERROR : No Source Directory Specified.\n\n"
+    IDS_ERR_NO_DEST   "ERROR : No Destination Directory Specified.\n\n"
+    IDS_ERR_FORMAT    "%ls ERROR %lu (0x%08lX) %ls %ls\n%ls\n"
+    IDS_ERR_RETRY_WAIT "Waiting %lu seconds..."
+    IDS_ERR_RETRYING  " Retrying...\n"
+    IDS_ERR_RETRY_LIMIT "ERROR: RETRY LIMIT EXCEEDED.\n\n"
+    IDS_ERR_JOB_FILE  "ERROR : Cannot read job file ""%ls"".\n\n"
+    IDS_ERR_LOG_FILE  "ERROR : Cannot open log file ""%ls"".\n\n"
+    IDS_ERR_OUTOFMEMORY "ERROR : Not enough memory.\n\n"
+
+    IDS_CTX_ACCESS_SRC      "Accessing Source Directory"
+    IDS_CTX_ACCESS_DST      "Accessing Destination Directory"
+    IDS_CTX_CREATE_DST      "Creating Destination Directory"
+    IDS_CTX_COPY_FILE       "Copying File"
+    IDS_CTX_DELETE_EXTRA    "Deleting Extra File"
+    IDS_CTX_DELETE_EXTRADIR "Deleting Extra Directory"
+    IDS_CTX_DELETE_SRC      "Deleting Source File"
+    IDS_CTX_SCAN_SRC        "Scanning Source Directory"
+    IDS_CTX_SCAN_DST        "Scanning Destination Directory"
+    IDS_CTX_SET_ATTR        "Changing File Attributes"
+    IDS_CTX_SET_TIME        "Copying Timestamps of"
+    IDS_CTX_REMOVE_SRCDIR   "Removing Source Directory"
+    IDS_CTX_CREATE_DIR      "Creating Directory"
+
+    IDS_SAVED_JOB "Job File Saved : %ls\n\n"
+
+    IDS_SIMPLE_USAGE "       Simple Usage :: ROBOCOPY source destination /MIR\n\n\
+             source :: Source Directory (drive:\\path or \\\\server\\share\\path).\n\
+        destination :: Destination Dir  (drive:\\path or \\\\server\\share\\path).\n\
+               /MIR :: Mirror a complete directory tree.\n\n\
+    For more usage information run ROBOCOPY /?\n\n\n\
+****  /MIR can DELETE files as well as copy them !\n"
+
+    IDS_USAGE "              Usage :: ROBOCOPY source destination [file [file]...] [options]\n\n\
+             source :: Source Directory (drive:\\path or \\\\server\\share\\path).\n\
+        destination :: Destination Dir  (drive:\\path or \\\\server\\share\\path).\n\
+               file :: File(s) to copy (names/wildcards: default is ""*.*"").\n\n\
+::\n\
+:: Copy options :\n\
+::\n\
+                 /S :: copy Subdirectories, but not empty ones.\n\
+                 /E :: copy subdirectories, including Empty ones.\n\
+             /LEV:n :: only copy the top n LEVels of the source directory tree.\n\n\
+                 /Z :: copy files in restartable mode (accepted, copies normally).\n\
+                 /B :: copy files in Backup mode (accepted, copies normally).\n\
+                /ZB :: use restartable mode; if access denied use Backup mode.\n\
+                 /J :: copy using unbuffered I/O (accepted).\n\
+            /EFSRAW :: copy all encrypted files in EFS RAW mode (accepted).\n\n"
+
+    IDS_USAGE1 "  /COPY:copyflag[s] :: what to COPY for files (default is /COPY:DAT).\n\
+                       (copyflags : D=Data, A=Attributes, T=Timestamps, X=Skip alt data streams).\n\
+                       (S=Security=NTFS ACLs, O=Owner info, U=aUditing info are accepted).\n\n\
+               /SEC :: copy files with SECurity (equivalent to /COPY:DATS).\n\
+           /COPYALL :: COPY ALL file info (equivalent to /COPY:DATSOU).\n\
+            /NOCOPY :: COPY NO file info (useful with /PURGE).\n\
+            /SECFIX :: FIX file SECurity on all files, even skipped files.\n\
+            /TIMFIX :: FIX file TIMes on all files, even skipped files.\n\n\
+             /PURGE :: delete dest files/dirs that no longer exist in source.\n\
+               /MIR :: MIRror a directory tree (equivalent to /E plus /PURGE).\n\n\
+               /MOV :: MOVe files (delete from source after copying).\n\
+              /MOVE :: MOVE files AND dirs (delete from source after copying).\n\n\
+     /A+:[RASHCNET] :: add the given Attributes to copied files.\n\
+     /A-:[RASHCNET] :: remove the given Attributes from copied files.\n\n\
+            /CREATE :: CREATE directory tree and zero-length files only.\n\
+               /FAT :: create destination files using 8.3 FAT file names only (accepted).\n\
+               /256 :: turn off very long path (> 256 characters) support (accepted).\n\n\
+             /MON:n :: MONitor source; run again when more than n changes seen (accepted).\n\
+             /MOT:m :: MOnitor source; run again in m minutes Time, if changed (accepted).\n\n\
+      /RH:hhmm-hhmm :: Run Hours - times when new copies may be started (accepted).\n\
+                /PF :: check run hours on a Per File (not per pass) basis (accepted).\n\n\
+             /IPG:n :: Inter-Packet Gap (ms), to free bandwidth on slow lines (accepted).\n\n\
+                /SL :: copy symbolic links versus the target (accepted).\n\n\
+            /MT[:n] :: do multi-threaded copies with n threads (default 8; copies\n\
+                       are performed sequentially).\n\
+       /DCOPY:copyflag[s] :: what to COPY for directories (default is /DCOPY:DA).\n\
+                       (copyflags : D=Data, A=Attributes, T=Timestamps, E=EAs, X=Skip alt data streams).\n\
+           /NODCOPY :: COPY NO directory info (by default /DCOPY:DA is done).\n\
+         /NOOFFLOAD :: copy files without using the Windows Copy Offload mechanism.\n\n"
+
+    IDS_USAGE2 "::\n\
+:: File Selection Options :\n\
+::\n\
+                 /A :: copy only files with the Archive attribute set.\n\
+                 /M :: copy only files with the Archive attribute and reset it.\n\
+    /IA:[RASHCNETO] :: Include only files with any of the given Attributes set.\n\
+    /XA:[RASHCNETO] :: eXclude files with any of the given Attributes set.\n\n\
+ /XF file [file]... :: eXclude Files matching given names/paths/wildcards.\n\
+ /XD dirs [dirs]... :: eXclude Directories matching given names/paths.\n\n\
+                /XC :: eXclude Changed files.\n\
+                /XN :: eXclude Newer files.\n\
+                /XO :: eXclude Older files.\n\
+                /XX :: eXclude eXtra files and directories.\n\
+                /XL :: eXclude Lonely files and directories.\n\
+                /IS :: Include Same files.\n\
+                /IT :: Include Tweaked files.\n\
+                /IM :: Include Modified files (differing change times).\n\n\
+             /MAX:n :: MAXimum file size - exclude files bigger than n bytes.\n\
+             /MIN:n :: MINimum file size - exclude files smaller than n bytes.\n\n\
+          /MAXAGE:n :: MAXimum file AGE - exclude files older than n days/date.\n\
+          /MINAGE:n :: MINimum file AGE - exclude files newer than n days/date.\n\
+          /MAXLAD:n :: MAXimum Last Access Date - exclude files unused since n.\n\
+          /MINLAD:n :: MINimum Last Access Date - exclude files used since n.\n\
+                       (If n < 1900 then n = n days, else n = YYYYMMDD date).\n\n\
+                /XJ :: eXclude Junction points and symbolic links.\n\
+               /FFT :: assume FAT File Times (2-second granularity).\n\
+               /DST :: compensate for one-hour DST time differences.\n\
+               /XJD :: eXclude Junction points and symbolic links for Directories.\n\
+               /XJF :: eXclude symbolic links for Files.\n\n"
+
+    IDS_USAGE3 "::\n\
+:: Retry Options :\n\
+::\n\
+               /R:n :: number of Retries on failed copies: default 1 million.\n\
+               /W:n :: Wait time between retries: default is 30 seconds.\n\
+               /REG :: Save /R:n and /W:n in the Registry as default settings (accepted).\n\
+               /TBD :: wait for sharenames To Be Defined (accepted).\n\
+              /LFSM :: operate in low free space mode (accepted).\n\n\
+::\n\
+:: Logging Options :\n\
+::\n\
+                 /L :: List only - don't copy, timestamp or delete any files.\n\
+                 /X :: report all eXtra files, not just those selected.\n\
+                 /V :: produce Verbose output, showing skipped files.\n\
+                /TS :: include source file Time Stamps in the output.\n\
+                /FP :: include Full Pathname of files in the output.\n\
+             /BYTES :: Print sizes as bytes.\n\n\
+                /NS :: No Size - don't log file sizes.\n\
+                /NC :: No Class - don't log file classes.\n\
+               /NFL :: No File List - don't log file names.\n\
+               /NDL :: No Directory List - don't log directory names.\n\n\
+                /NP :: No Progress - don't display percentage copied.\n\
+               /ETA :: show Estimated Time of Arrival of copied files (accepted).\n\n\
+          /LOG:file :: output status to LOG file (overwrite existing log).\n\
+         /LOG+:file :: output status to LOG file (append to existing log).\n\n\
+       /UNILOG:file :: output status to LOG file as UNICODE (overwrite existing log).\n\
+      /UNILOG+:file :: output status to LOG file as UNICODE (append to existing log).\n\n\
+               /TEE :: output to console window, as well as the log file.\n\n\
+               /NJH :: No Job Header.\n\
+               /NJS :: No Job Summary.\n\n\
+           /UNICODE :: output status as UNICODE.\n\n"
+
+    IDS_USAGE4 "::\n\
+:: Job Options :\n\
+::\n\
+       /JOB:jobname :: take parameters from the named JOB file.\n\
+      /SAVE:jobname :: SAVE parameters to the named job file\n\
+              /QUIT :: QUIT after processing command line (to view parameters).\n\
+              /NOSD :: NO Source Directory is specified.\n\
+              /NODD :: NO Destination Directory is specified.\n\
+                /IF :: Include the following Files.\n\n\
+::\n\
+:: Exit codes :\n\
+::\n\
+                  0 :: No files were copied; source and destination are in sync.\n\
+                  1 :: One or more files were copied successfully.\n\
+                  2 :: Extra files or directories were detected in the destination.\n\
+                  4 :: Mismatched files or directories were detected.\n\
+                  8 :: Some files or directories could not be copied.\n\
+                 16 :: Serious error; no files were copied (usage error or fatal\n\
+                       access error on the source or destination directories).\n\
+                       Values are combined, e.g. 3 = copied files plus extras.\n"
+END
