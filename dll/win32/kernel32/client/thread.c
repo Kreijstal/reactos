@@ -966,6 +966,93 @@ SetThreadIdealProcessor(IN HANDLE hThread,
     return (DWORD)Status;
 }
 
+#if (_WIN32_WINNT >= 0x0601)
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+GetThreadIdealProcessorEx(
+    _In_ HANDLE hThread,
+    _Out_ PPROCESSOR_NUMBER lpIdealProcessor)
+{
+    NTSTATUS Status;
+
+    Status = NtQueryInformationThread(hThread,
+                                      ThreadIdealProcessorEx,
+                                      lpIdealProcessor,
+                                      sizeof(*lpIdealProcessor),
+                                      NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetThreadIdealProcessorEx(
+    _In_ HANDLE hThread,
+    _In_ PPROCESSOR_NUMBER lpIdealProcessor,
+    _Out_opt_ PPROCESSOR_NUMBER lpPreviousIdealProcessor)
+{
+    PROCESSOR_NUMBER ProcessorNumber;
+    NTSTATUS Status;
+
+    /* The kernel returns the previous ideal processor in the same buffer */
+    ProcessorNumber = *lpIdealProcessor;
+    Status = NtSetInformationThread(hThread,
+                                    ThreadIdealProcessorEx,
+                                    &ProcessorNumber,
+                                    sizeof(ProcessorNumber));
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    if (lpPreviousIdealProcessor)
+        *lpPreviousIdealProcessor = ProcessorNumber;
+
+    return TRUE;
+}
+#endif /* _WIN32_WINNT >= 0x0601 */
+
+#if (_WIN32_WINNT >= 0x0600)
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+QueryThreadCycleTime(
+    _In_ HANDLE ThreadHandle,
+    _Out_ PULONG64 CycleTime)
+{
+    THREAD_CYCLE_TIME_INFORMATION CycleTimeInfo;
+    NTSTATUS Status;
+
+    Status = NtQueryInformationThread(ThreadHandle,
+                                      ThreadCycleTime,
+                                      &CycleTimeInfo,
+                                      sizeof(CycleTimeInfo),
+                                      NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    *CycleTime = CycleTimeInfo.AccumulatedCycles;
+    return TRUE;
+}
+#endif /* _WIN32_WINNT >= 0x0600 */
+
 /*
  * @implemented
  */

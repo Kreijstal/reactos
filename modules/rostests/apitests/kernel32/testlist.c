@@ -51,6 +51,7 @@ extern void func_SetUnhandledExceptionFilter(void);
 extern void func_SuspendThread(void);
 extern void func_SystemFirmware(void);
 extern void func_TerminateProcess(void);
+extern void func_ThreadProcessor(void);
 extern void func_Toolhelp(void);
 extern void func_TunnelCache(void);
 extern void func_UEFIFirmware(void);
@@ -110,6 +111,7 @@ const struct test winetest_testlist[] =
     { "SuspendThread",               func_SuspendThread },
     { "SystemFirmware",              func_SystemFirmware },
     { "TerminateProcess",            func_TerminateProcess },
+    { "ThreadProcessor",             func_ThreadProcessor },
     { "Toolhelp",                    func_Toolhelp },
     { "TunnelCache",                 func_TunnelCache },
     { "UEFIFirmware",                func_UEFIFirmware },
