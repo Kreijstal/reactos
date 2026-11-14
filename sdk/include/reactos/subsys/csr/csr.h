@@ -72,39 +72,16 @@ CsrCaptureMessageBufferNative(
     CsrCaptureMessageBuffer(CaptureBuffer, MessageBuffer, MessageLength, CapturedData);
 }
 
-__attribute__((unused)) static
-ULONG
-CsrAllocateMessagePointer32(
-    _Inout_ PCSR_CAPTURE_BUFFER CaptureBuffer,
-    _In_ ULONG MessageLength,
-    _Out_ PVOID* CapturedData)
-{
-    LPC_PVOID Temp;
-    ULONG Result;
-    
-    Result = CsrAllocateMessagePointer(CaptureBuffer, MessageLength, &Temp);
-    ASSERT((((ULONGLONG)Temp) & 0xFFFFFFFF00000000ULL) == 0);
-    
-    *CapturedData = (PVOID)(ULONG_PTR)Temp;
-    return Result;
-}
-
-__attribute__((unused)) static
-VOID
-CsrCaptureMessageBuffer32(
-    _Inout_ PCSR_CAPTURE_BUFFER CaptureBuffer,
-    _In_opt_ PVOID MessageBuffer,
-    _In_ ULONG MessageLength,
-    _Out_ PVOID* CapturedData)
-{
-    LPC_PVOID Temp;
-    CsrCaptureMessageBuffer(CaptureBuffer, MessageBuffer, MessageLength, &Temp);
-    ASSERT((((ULONGLONG)Temp) & 0xFFFFFFFF00000000ULL) == 0);
-    *CapturedData = (PVOID)(ULONG_PTR)Temp;
-}
-
-#define CsrAllocateMessagePointer CsrAllocateMessagePointer32
-#define CsrCaptureMessageBuffer CsrCaptureMessageBuffer32
+/*
+ * Every message pointer field is an LPC_PVOID (64 bits wide) under
+ * USE_LPC6432, and CsrClientCallServer relocates the field whose address
+ * was registered in the capture buffer: always register the message field
+ * itself, never a copy of it.
+ */
+#define CsrAllocateMessagePointer(CaptureBuffer, MessageLength, CapturedData) \
+    CsrAllocateMessagePointerNative((CaptureBuffer), (MessageLength), (LPC_PVOID*)(CapturedData))
+#define CsrCaptureMessageBuffer(CaptureBuffer, MessageBuffer, MessageLength, CapturedData) \
+    CsrCaptureMessageBufferNative((CaptureBuffer), (MessageBuffer), (MessageLength), (LPC_PVOID*)(CapturedData))
 
 #else
     
