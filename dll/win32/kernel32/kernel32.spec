@@ -322,8 +322,8 @@
 @ stdcall FindFirstVolumeMountPointA(str ptr long)
 @ stdcall FindFirstVolumeMountPointW(wstr ptr long)
 @ stdcall FindFirstVolumeW(ptr long)
-@ stub -version=0x600+ FindNLSString
-@ stub -version=0x600+ FindNLSStringEx
+@ stdcall -version=0x600+ FindNLSString(long long wstr long wstr long ptr)
+@ stdcall -version=0x600+ FindNLSStringEx(wstr long wstr long wstr long ptr ptr ptr long)
 @ stdcall FindNextChangeNotification(long)
 @ stdcall FindNextFileA(long ptr)
 @ stdcall -version=0x600+ FindNextFileNameW(ptr ptr ptr)
@@ -337,6 +337,7 @@
 @ stdcall FindResourceExA(long str str long)
 @ stdcall FindResourceExW(long wstr wstr long)
 @ stdcall FindResourceW(long wstr wstr)
+@ stdcall -version=0x601+ FindStringOrdinal(long wstr long wstr long long)
 @ stdcall FindVolumeClose(ptr)
 @ stdcall FindVolumeMountPointClose(ptr)
 @ stdcall FlsAlloc(ptr)

@@ -74,6 +74,7 @@
 @ stdcall CreateThreadpoolTimer(ptr ptr ptr)
 @ stdcall CreateThreadpoolWait(ptr ptr ptr)
 @ stdcall CreateThreadpoolWork(ptr ptr ptr)
+@ stdcall FindStringOrdinal(long ptr long ptr long long)
 @ stdcall FreeLibraryWhenCallbackReturns(ptr ptr) ntdll_vista.TpCallbackUnloadDllOnCompletion
 @ stdcall GetNamedPipeClientProcessId(ptr ptr)
 @ stdcall GetProductInfo(long long long long ptr) ntdll_vista.RtlGetProductInfo
