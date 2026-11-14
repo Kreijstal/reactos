@@ -1503,7 +1503,7 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
                                         'tCmM');
     if (!ControlArea)
     {
-        ExFreePoolWithTag(Segment, 'tSmM');
+        ExFreePoolWithTag(NewSegment, 'tSmM');
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
