@@ -10,10 +10,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#define WIN32_NO_STATUS
 #include <windef.h>
 #include <winbase.h>
 #include <wincon.h>
+#include <winnt.h>
 #include <strsafe.h>
+#define NTOS_MODE_USER
+#include <ndk/iofuncs.h>
+#include <ndk/rtlfuncs.h>
 
 #include <conutils.h>
 
@@ -27,6 +32,43 @@
 #define ALL_FILES_PATTERN   L"*.*" // It may also be possible to use L"*" (shorter)
 
 CON_SCREEN StdOutScreen = INIT_CON_SCREEN(StdOut);
+
+/* /L: operate on a symbolic link or junction itself instead of its target */
+static BOOL bLinkItself = FALSE;
+
+/**
+ * @brief   Tells whether the enumerated entry is a symbolic link or a
+ *          junction (a name surrogate), whose attributes ATTRIB reads and
+ *          changes on the target unless /L is given.
+ **/
+static BOOL
+IsLinkToFollow(
+    _In_ PWIN32_FIND_DATAW pFindData)
+{
+    if (bLinkItself)
+        return FALSE;
+    if (!(pFindData->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+        return FALSE;
+    /* For a reparse point, dwReserved0 holds the reparse tag */
+    return IsReparseTagNameSurrogate(pFindData->dwReserved0);
+}
+
+/**
+ * @brief   Opens the target of a symbolic link or junction.
+ **/
+static HANDLE
+OpenLinkTarget(
+    _In_ PCWSTR pszFullName,
+    _In_ DWORD dwAccess)
+{
+    return CreateFileW(pszFullName,
+                       dwAccess,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL,
+                       OPEN_EXISTING,
+                       FILE_FLAG_BACKUP_SEMANTICS,
+                       NULL);
+}
 
 static VOID
 ErrorMessage(
@@ -73,6 +115,23 @@ PrintAttributes(
 
     UNREFERENCED_PARAMETER(Context);
 
+    if (IsLinkToFollow(pFindData))
+    {
+        BY_HANDLE_FILE_INFORMATION Info;
+        HANDLE hFile = OpenLinkTarget(pszFullName, FILE_READ_ATTRIBUTES);
+
+        if (hFile == INVALID_HANDLE_VALUE)
+        {
+            ErrorMessage(GetLastError(), pszFullName);
+            return TRUE;
+        }
+        if (GetFileInformationByHandle(hFile, &Info))
+            dwAttributes = Info.dwFileAttributes;
+        else
+            ErrorMessage(GetLastError(), pszFullName);
+        CloseHandle(hFile);
+    }
+
     ConPrintf(StdOut,
 #ifdef EXTENDED_ATTRIBUTES
               L"%c  %c%c%c  %c    %s\n",
@@ -109,9 +168,47 @@ ChangeAttributes(
 {
     PATTRIBS_MASKS AttribsMasks = (PATTRIBS_MASKS)Context;
     DWORD dwAttributes;
+    BY_HANDLE_FILE_INFORMATION Info;
+    FILE_BASIC_INFORMATION BasicInfo;
+    IO_STATUS_BLOCK IoStatusBlock;
+    NTSTATUS Status;
+    HANDLE hFile;
 
-    dwAttributes = ((pFindData->dwFileAttributes & ~AttribsMasks->dwMask) | AttribsMasks->dwAttrib);
-    return SetFileAttributesW(pszFullName, dwAttributes);
+    if (!IsLinkToFollow(pFindData))
+    {
+        /* SetFileAttributesW() opens a reparse point itself, not its target */
+        dwAttributes = ((pFindData->dwFileAttributes & ~AttribsMasks->dwMask) | AttribsMasks->dwAttrib);
+        return SetFileAttributesW(pszFullName, dwAttributes);
+    }
+
+    /* Change the attributes of the target of the link */
+    hFile = OpenLinkTarget(pszFullName, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES);
+    if (hFile == INVALID_HANDLE_VALUE)
+    {
+        ErrorMessage(GetLastError(), pszFullName);
+        return FALSE;
+    }
+    if (!GetFileInformationByHandle(hFile, &Info))
+    {
+        ErrorMessage(GetLastError(), pszFullName);
+        CloseHandle(hFile);
+        return FALSE;
+    }
+
+    /* Zero times are left unchanged; FILE_ATTRIBUTE_NORMAL stands for "none" */
+    RtlZeroMemory(&BasicInfo, sizeof(BasicInfo));
+    BasicInfo.FileAttributes = ((Info.dwFileAttributes & ~AttribsMasks->dwMask) | AttribsMasks->dwAttrib);
+    BasicInfo.FileAttributes &= FILE_ATTRIBUTE_VALID_SET_FLAGS;
+    if (!BasicInfo.FileAttributes)
+        BasicInfo.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    Status = NtSetInformationFile(hFile, &IoStatusBlock, &BasicInfo, sizeof(BasicInfo), FileBasicInformation);
+    CloseHandle(hFile);
+    if (!NT_SUCCESS(Status))
+    {
+        ErrorMessage(RtlNtStatusToDosError(Status), pszFullName);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 
@@ -333,6 +430,8 @@ int wmain(int argc, WCHAR *argv[])
                 dwEnumFlags |= ENUM_RECURSE;
             else if (_wcsicmp(argv[i], L"/d") == 0)
                 dwEnumFlags |= ENUM_DIRECTORIES;
+            else if (_wcsicmp(argv[i], L"/l") == 0)
+                bLinkItself = TRUE;
             else
             {
                 /* Unknown option */
