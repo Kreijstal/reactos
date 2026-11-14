@@ -5964,6 +5964,27 @@ NtfsCopyFoundName(PINDEX_ENTRY_ATTRIBUTE IndexEntry,
     RtlCopyMemory(OutFoundName, &IndexEntry->FileName, min(IndexEntry->KeyLength, NTFS_FOUND_NAME_SIZE));
 }
 
+/* TRUE when a directory scan that resumes after ResumeAfter has already gone
+ * past IndexEntry: its key collates at or before the last name returned. The
+ * index is in this order (CollateFileNames, case variants ordered among
+ * themselves), so everything in the entry's sub-node, which sorts before the
+ * entry, has been gone past as well. */
+static
+BOOLEAN
+NtfsIndexEntryIsBeforeResume(PINDEX_ENTRY_ATTRIBUTE IndexEntry,
+                             PUNICODE_STRING ResumeAfter)
+{
+    UNICODE_STRING EntryName;
+
+    if (ResumeAfter == NULL || (IndexEntry->Flags & NTFS_INDEX_ENTRY_END))
+        return FALSE;
+
+    EntryName.Buffer = IndexEntry->FileName.Name;
+    EntryName.Length = EntryName.MaximumLength = IndexEntry->FileName.NameLength * sizeof(WCHAR);
+
+    return CollateFileNames(&EntryName, ResumeAfter, TRUE) <= 0;
+}
+
 NTSTATUS
 BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                           PFILE_RECORD_HEADER MftRecord,
@@ -5972,6 +5993,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                           PNTFS_ATTR_CONTEXT IndexAllocationContext,
                           PRTL_BITMAP Bitmap,
                           ULONGLONG VCN,
+                          PUNICODE_STRING ResumeAfter,
                           PULONG StartEntry,
                           PULONG CurrentEntry,
                           BOOLEAN DirSearch,
@@ -6086,6 +6108,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                                                IndexAllocationContext,
                                                Bitmap,
                                                GetIndexEntryVCN(IndexEntry),
+                                               ResumeAfter,
                                                StartEntry,
                                                CurrentEntry,
                                                DirSearch,
@@ -6106,8 +6129,10 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
     IndexEntry = FirstEntry;
     while (IndexEntry <= LastEntry)
     {
-        // Does IndexEntry have a sub-node?
-        if (IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE)
+        BOOLEAN Passed = NtfsIndexEntryIsBeforeResume(IndexEntry, ResumeAfter);
+
+        // Does IndexEntry have a sub-node? A scan resuming past the entry is past its sub-node too.
+        if ((IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE) && !Passed)
         {
             if (!(IndexRecord->Header.Flags & INDEX_NODE_LARGE) || !IndexAllocationContext)
             {
@@ -6122,6 +6147,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                                                    IndexAllocationContext,
                                                    Bitmap,
                                                    GetIndexEntryVCN(IndexEntry),
+                                                   ResumeAfter,
                                                    StartEntry,
                                                    CurrentEntry,
                                                    DirSearch,
@@ -6143,6 +6169,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
         // If we've found a file whose index is greater than or equal to StartEntry that matches the search criteria
         if ((IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK) >= NTFS_FILE_FIRST_USER_FILE &&
             *CurrentEntry >= *StartEntry &&
+            !Passed &&
             (!DirSearch || IndexEntry->FileName.NameType != NTFS_FILE_NAME_DOS) &&
             CompareFileName(Vcb, FileName, IndexEntry, DirSearch, CaseSensitive))
         {
@@ -6172,6 +6199,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
                    PINDEX_ENTRY_ATTRIBUTE FirstEntry,
                    PINDEX_ENTRY_ATTRIBUTE LastEntry,
                    PUNICODE_STRING FileName,
+                   PUNICODE_STRING ResumeAfter,
                    PULONG StartEntry,
                    PULONG CurrentEntry,
                    BOOLEAN DirSearch,
@@ -6278,6 +6306,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
                                                IndexAllocationContext,
                                                &Bitmap,
                                                GetIndexEntryVCN(IndexEntry),
+                                               ResumeAfter,
                                                StartEntry,
                                                CurrentEntry,
                                                DirSearch,
@@ -6306,8 +6335,10 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
     IndexEntry = FirstEntry;
     while (IndexEntry <= LastEntry)
     {
-        // Does IndexEntry have a sub-node?
-        if (IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE)
+        BOOLEAN Passed = NtfsIndexEntryIsBeforeResume(IndexEntry, ResumeAfter);
+
+        // Does IndexEntry have a sub-node? A scan resuming past the entry is past its sub-node too.
+        if ((IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE) && !Passed)
         {
             if (!(IndexRecord->Header.Flags & INDEX_ROOT_LARGE) || !IndexAllocationContext)
             {
@@ -6322,6 +6353,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
                                                    IndexAllocationContext,
                                                    &Bitmap,
                                                    GetIndexEntryVCN(IndexEntry),
+                                                   ResumeAfter,
                                                    StartEntry,
                                                    CurrentEntry,
                                                    DirSearch,
@@ -6354,6 +6386,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
         // If we've found a file whose index is greater than or equal to StartEntry that matches the search criteria
         if ((IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK) >= NTFS_FILE_FIRST_USER_FILE &&
             *CurrentEntry >= *StartEntry &&
+            !Passed &&
             (!DirSearch || IndexEntry->FileName.NameType != NTFS_FILE_NAME_DOS) &&
             CompareFileName(Vcb, FileName, IndexEntry, DirSearch, CaseSensitive))
         {
@@ -6389,15 +6422,20 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
     return STATUS_OBJECT_PATH_NOT_FOUND;
 }
 
+/* Looks FileName up in the $I30 index of MFTIndex. A DirSearch takes FileName as
+ * a pattern and returns the first match at or after ordinal *FirstEntry, or, when
+ * ResumeAfter is given, the first match collating after that name. */
+static
 NTSTATUS
-NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
-                  ULONGLONG MFTIndex,
-                  PUNICODE_STRING FileName,
-                  PULONG FirstEntry,
-                  BOOLEAN DirSearch,
-                  BOOLEAN CaseSensitive,
-                  ULONGLONG *OutMFTIndex,
-                  PFILENAME_ATTRIBUTE OutFoundName)
+NtfsSearchDirectoryIndex(PDEVICE_EXTENSION Vcb,
+                         ULONGLONG MFTIndex,
+                         PUNICODE_STRING FileName,
+                         PUNICODE_STRING ResumeAfter,
+                         PULONG FirstEntry,
+                         BOOLEAN DirSearch,
+                         BOOLEAN CaseSensitive,
+                         ULONGLONG *OutMFTIndex,
+                         PFILENAME_ATTRIBUTE OutFoundName)
 {
     PFILE_RECORD_HEADER MftRecord;
     PNTFS_ATTR_CONTEXT IndexRootCtx;
@@ -6463,6 +6501,7 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
                                 IndexEntry,
                                 IndexEntryEnd,
                                 FileName,
+                                ResumeAfter,
                                 FirstEntry,
                                 &CurrentEntry,
                                 DirSearch,
@@ -6474,6 +6513,20 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
 
     return Status;
+}
+
+NTSTATUS
+NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
+                  ULONGLONG MFTIndex,
+                  PUNICODE_STRING FileName,
+                  PULONG FirstEntry,
+                  BOOLEAN DirSearch,
+                  BOOLEAN CaseSensitive,
+                  ULONGLONG *OutMFTIndex,
+                  PFILENAME_ATTRIBUTE OutFoundName)
+{
+    return NtfsSearchDirectoryIndex(Vcb, MFTIndex, FileName, NULL, FirstEntry, DirSearch,
+                                    CaseSensitive, OutMFTIndex, OutFoundName);
 }
 
 NTSTATUS
@@ -6608,28 +6661,44 @@ NtfsDumpFileRecord(PDEVICE_EXTENSION Vcb,
     NtfsDumpFileAttributes(Vcb, FileRecord);
 }
 
+/**
+* @name NtfsFindFileAfter
+*
+* Finds the next entry of directory CurrentMFTIndex that matches SearchPattern and
+* reads its file record. With ResumeAfter, the entry is the first match whose name
+* collates after ResumeAfter, the last name the scan returned: like Windows NTFS, a
+* scan resumes by name, so entries removed from the index meanwhile, and the nodes
+* that merge or shrink with them, never make it skip one that is still there.
+* Without ResumeAfter, it is the first match at or after ordinal *FirstEntry.
+*/
 NTSTATUS
-NtfsFindFileAt(PDEVICE_EXTENSION Vcb,
-               PUNICODE_STRING SearchPattern,
-               PULONG FirstEntry,
-               PFILE_RECORD_HEADER *FileRecord,
-               PULONGLONG MFTIndex,
-               ULONGLONG CurrentMFTIndex,
-               BOOLEAN CaseSensitive,
-               PFILENAME_ATTRIBUTE OutFoundName)
+NtfsFindFileAfter(PDEVICE_EXTENSION Vcb,
+                  PUNICODE_STRING SearchPattern,
+                  PUNICODE_STRING ResumeAfter,
+                  PULONG FirstEntry,
+                  PFILE_RECORD_HEADER *FileRecord,
+                  PULONGLONG MFTIndex,
+                  ULONGLONG CurrentMFTIndex,
+                  BOOLEAN CaseSensitive,
+                  PFILENAME_ATTRIBUTE OutFoundName)
 {
     NTSTATUS Status;
 
-    DPRINT("NtfsFindFileAt(%p, %wZ, %lu, %p, %p, %I64x, %s)\n",
+    DPRINT("NtfsFindFileAfter(%p, %wZ, %wZ, %lu, %p, %p, %I64x, %s)\n",
            Vcb,
            SearchPattern,
+           ResumeAfter,
            *FirstEntry,
            FileRecord,
            MFTIndex,
            CurrentMFTIndex,
            (CaseSensitive ? "TRUE" : "FALSE"));
 
-    Status = NtfsFindMftRecord(Vcb, CurrentMFTIndex, SearchPattern, FirstEntry, TRUE, CaseSensitive, &CurrentMFTIndex, OutFoundName);
+    /* Only an ordinal scan has a meaningful starting ordinal */
+    ASSERT(ResumeAfter == NULL || *FirstEntry == 0);
+
+    Status = NtfsSearchDirectoryIndex(Vcb, CurrentMFTIndex, SearchPattern, ResumeAfter, FirstEntry,
+                                      TRUE, CaseSensitive, &CurrentMFTIndex, OutFoundName);
     if (!NT_SUCCESS(Status))
     {
         DPRINT("NtfsFindFileAt: NtfsFindMftRecord() failed with status 0x%08lx\n", Status);
@@ -6654,6 +6723,20 @@ NtfsFindFileAt(PDEVICE_EXTENSION Vcb,
     *MFTIndex = CurrentMFTIndex;
 
     return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NtfsFindFileAt(PDEVICE_EXTENSION Vcb,
+               PUNICODE_STRING SearchPattern,
+               PULONG FirstEntry,
+               PFILE_RECORD_HEADER *FileRecord,
+               PULONGLONG MFTIndex,
+               ULONGLONG CurrentMFTIndex,
+               BOOLEAN CaseSensitive,
+               PFILENAME_ATTRIBUTE OutFoundName)
+{
+    return NtfsFindFileAfter(Vcb, SearchPattern, NULL, FirstEntry, FileRecord, MFTIndex,
+                             CurrentMFTIndex, CaseSensitive, OutFoundName);
 }
 
 

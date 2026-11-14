@@ -261,6 +261,11 @@ typedef struct
     ULONG Entry;
     /* for DirectoryControl */
     PWCHAR DirectorySearchPattern;
+    /* for DirectoryControl: the last name the scan returned, which the next
+     * query resumes after (NTFS_MAX_NAME_LENGTH characters, allocated with the
+     * first one); ResumeNameLength 0 when there is none yet */
+    PWCHAR ResumeName;
+    USHORT ResumeNameLength;
     ULONG LastCluster;
     ULONG LastOffset;
     ULONG Flags;
@@ -2173,6 +2178,17 @@ NtfsFindFileAt(PDEVICE_EXTENSION Vcb,
                ULONGLONG CurrentMFTIndex,
                BOOLEAN CaseSensitive,
                PFILENAME_ATTRIBUTE OutFoundName);
+
+NTSTATUS
+NtfsFindFileAfter(PDEVICE_EXTENSION Vcb,
+                  PUNICODE_STRING SearchPattern,
+                  PUNICODE_STRING ResumeAfter,
+                  PULONG FirstEntry,
+                  PFILE_RECORD_HEADER *FileRecord,
+                  PULONGLONG MFTIndex,
+                  ULONGLONG CurrentMFTIndex,
+                  BOOLEAN CaseSensitive,
+                  PFILENAME_ATTRIBUTE OutFoundName);
 
 NTSTATUS
 NtfsIsDirectoryEmpty(
