@@ -272,6 +272,16 @@
 @ stdcall EnumerateLocalComputerNamesW(ptr long wstr ptr)
 @ stdcall EraseTape(ptr long long)
 @ stdcall EscapeCommFunction(long long)
+# Event provider API: kernelbase in Windows, which kernel32 stands in for (api-ms-win-eventing-provider-l1-1-0)
+@ stdcall -version=0x600+ EventActivityIdControl(long ptr) ntdll.EtwEventActivityIdControl
+@ stdcall -version=0x600+ EventEnabled(int64 ptr) ntdll.EtwEventEnabled
+@ stdcall -version=0x600+ EventProviderEnabled(int64 long int64) ntdll.EtwEventProviderEnabled
+@ stdcall -version=0x600+ EventRegister(ptr ptr ptr ptr) ntdll.EtwEventRegister
+@ stdcall -version=0x600+ EventSetInformation(int64 long ptr long) ntdll.EtwEventSetInformation
+@ stdcall -version=0x600+ EventUnregister(int64) ntdll.EtwEventUnregister
+@ stdcall -version=0x600+ EventWrite(int64 ptr long ptr) ntdll.EtwEventWrite
+@ stdcall -version=0x600+ EventWriteString(int64 long int64 wstr) ntdll.EtwEventWriteString
+@ stdcall -version=0x600+ EventWriteTransfer(int64 ptr ptr ptr long ptr) ntdll.EtwEventWriteTransfer
 @ stdcall ExitProcess(long) ; FIXME: ntdll.RtlExitUserProcess
 @ stdcall ExitThread(long) ; FIXME: ntdll.RtlExitUserThread
 @ stdcall ExitVDM(long long)
