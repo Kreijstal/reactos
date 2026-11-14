@@ -1424,6 +1424,10 @@ RtlpRestoreContextInternal(
  * Nothing between this and RtlpRestoreContextInternal uses VEX encodings,
  * which keeps the restored upper register halves intact.
  */
+#ifdef __clang__
+/* clang-cl's own _xrstor64 needs the target feature */
+__attribute__((__target__("xsave")))
+#endif
 static
 VOID
 RtlpRestoreExtendedState(
