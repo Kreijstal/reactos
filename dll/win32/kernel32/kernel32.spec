@@ -104,6 +104,7 @@
 @ stdcall -stub -version=0x600+ ConvertSystemTimeToCalDateTime(ptr long ptr)
 @ stdcall ConvertThreadToFiber(ptr)
 @ stdcall ConvertThreadToFiberEx(ptr long)
+@ stdcall -version=0x601+ CopyContext(ptr long ptr)
 @ stdcall CopyFileA(str str long)
 @ stdcall -version=0x602+ CopyFile2(wstr wstr ptr)
 @ stdcall CopyFileExA(str str ptr ptr ptr long)
@@ -475,6 +476,7 @@
 @ stub -version=0x600+ GetDurationFormat
 @ stub -version=0x600+ GetDurationFormatEx
 @ stdcall -version=0x600+ GetDynamicTimeZoneInformation(ptr)
+@ stdcall -version=0x601+ -ret64 GetEnabledXStateFeatures()
 @ stdcall GetEnvironmentStrings()
 @ stdcall GetEnvironmentStringsA() GetEnvironmentStrings
 @ stdcall GetEnvironmentStringsW()
@@ -523,6 +525,9 @@
 @ stdcall GetLocaleInfoA(long long ptr long)
 @ stdcall -version=0x600+ GetLocaleInfoEx(wstr long ptr long)
 @ stdcall GetLocaleInfoW(long long ptr long)
+@ stdcall -version=0x601+ GetXStateFeaturesMask(ptr ptr)
+@ stdcall -version=0x601+ InitializeContext(ptr long ptr ptr)
+@ stdcall -version=0xA00+ InitializeContext2(ptr long ptr ptr int64)
 @ stdcall -version=0x600+ IsValidLocaleName(wstr)
 @ stdcall GetLogicalDriveStringsA(long ptr)
 @ stdcall GetLogicalDriveStringsW(long ptr)
@@ -819,6 +824,7 @@
 @ stdcall LCMapStringA(long long str long ptr long)
 @ stdcall -version=0x600+ LCMapStringEx(long long wstr long ptr long ptr ptr long)
 @ stdcall LCMapStringW(long long wstr long ptr long)
+@ stdcall -version=0x601+ LocateXStateFeature(ptr long ptr)
 @ stdcall LZClose(long)
 @ stdcall LZCloseFile(long)
 @ stdcall LZCopy(long long)
@@ -1176,6 +1182,7 @@
 @ stdcall SetWaitableTimer(long ptr long ptr ptr long)
 @ stdcall -version=0x602+ SetWaitableTimerEx(ptr ptr long ptr ptr ptr long)
 @ stdcall SetupComm(long long long)
+@ stdcall -version=0x601+ SetXStateFeaturesMask(ptr int64)
 @ stdcall ShowConsoleCursor(long long)
 @ stdcall SignalObjectAndWait(long long long long)
 @ stdcall SizeofResource(long long)
