@@ -274,10 +274,66 @@ TestBigPoolExpansion(VOID)
     }
 }
 
+#ifdef _WIN64
+/*
+ * Paged pool is indexed by page; a big allocation that starts 4 GB or more
+ * into paged pool must still be returned at its own address. A 4 GB paged
+ * pool allocation (the prototype PTEs of a 2 TB pagefile-backed section, as
+ * CoreCLR creates for its W^X double mapping) pushes the next big allocation
+ * past that point. Neither allocation is touched, so only page tables get
+ * materialized.
+ */
+static
+VOID
+TestPagedPoolAboveFourGigabytes(VOID)
+{
+    const SIZE_T LowSize = 4ULL * 1024 * 1024 * 1024;
+    const SIZE_T HighSize = 1ULL * 1024 * 1024 * 1024;
+    PUCHAR Low, High;
+    BOOLEAN Disjoint;
+
+    Low = ExAllocatePoolWithTag(PagedPool, LowSize, 'LHmK');
+    if (!Low)
+    {
+        skip(FALSE, "Paged pool too small for a 4 GB allocation\n");
+        return;
+    }
+
+    High = ExAllocatePoolWithTag(PagedPool, HighSize, 'HHmK');
+    if (!High)
+    {
+        skip(FALSE, "Paged pool too small for 5 GB of allocations\n");
+        ExFreePoolWithTag(Low, 'LHmK');
+        return;
+    }
+
+    trace("Low %p-%p High %p-%p\n", Low, Low + LowSize - 1, High, High + HighSize - 1);
+    Disjoint = (High >= Low + LowSize) || (High + HighSize <= Low);
+    ok(Disjoint, "Big paged pool allocation %p overlaps the one at %p\n", High, Low);
+    if (!Disjoint)
+    {
+        /* High's pages are not where it was returned; freeing it would
+         * release pages of Low. Leak it and stop here. */
+        return;
+    }
+
+    High[0] = 0x5A;
+    High[HighSize - 1] = 0xA5;
+    ok_eq_uint(High[0], 0x5A);
+    ok_eq_uint(High[HighSize - 1], 0xA5);
+
+    ExFreePoolWithTag(High, 'HHmK');
+    ExFreePoolWithTag(Low, 'LHmK');
+}
+#endif // _WIN64
+
 START_TEST(ExPools)
 {
     PoolsTest();
     TestPoolTags();
     TestPoolQuota();
     TestBigPoolExpansion();
+#ifdef _WIN64
+    TestPagedPoolAboveFourGigabytes();
+#endif
 }

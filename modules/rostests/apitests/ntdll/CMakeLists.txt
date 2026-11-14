@@ -64,6 +64,7 @@ list(APPEND SOURCE
     NtGetCurrentProcessorNumberEx.c
     NtImpersonateAnonymousToken.c
     NtLoadUnloadKey.c
+    NtCreateSectionHuge.c
     NtMapViewOfSection.c
     NtMutant.c
     NtNotifyChangeMultipleKeys.c
