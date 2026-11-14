@@ -100,6 +100,11 @@ NtfsCloseFile(PDEVICE_EXTENSION DeviceExt,
         ExFreePool(Ccb->DirectorySearchPattern);
     }
 
+    if (Ccb->ResumeName)
+    {
+        ExFreePoolWithTag(Ccb->ResumeName, TAG_NTFS);
+    }
+
     ExFreePool(Ccb);
 
     return STATUS_SUCCESS;

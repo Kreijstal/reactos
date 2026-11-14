@@ -452,12 +452,27 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
     if (Stack->Flags & SL_INDEX_SPECIFIED)
     {
         Ccb->Entry = FileIndex;
+        Ccb->ResumeNameLength = 0;
         SetFlag(Ccb->Flags, CCB_RETURNED_DOT | CCB_RETURNED_DOTDOT);
     }
     else if (First || (Stack->Flags & SL_RESTART_SCAN))
     {
         Ccb->Entry = 0;
+        Ccb->ResumeNameLength = 0;
         ClearFlag(Ccb->Flags, CCB_RETURNED_DOT | CCB_RETURNED_DOTDOT);
+    }
+
+    if (Ccb->ResumeName == NULL)
+    {
+        Ccb->ResumeName = ExAllocatePoolWithTag(NonPagedPool,
+                                                NTFS_MAX_NAME_LENGTH * sizeof(WCHAR),
+                                                TAG_NTFS);
+        if (Ccb->ResumeName == NULL)
+        {
+            ExReleaseResourceLite(&Fcb->MainResource);
+            ExReleaseResourceLite(&DeviceExtension->DirResource);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
     }
 
     /* The volume root has no parent and does not enumerate pseudoentries. */
@@ -523,19 +538,28 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
         }
         else
         {
-            UNICODE_STRING EntryName;
+            UNICODE_STRING EntryName, ResumeAfter;
+            ULONG Ordinal;
+
+            /* Go on after the last name returned, as Windows does: files deleted
+             * since, which reshape the index, must not make the scan skip any.
+             * Only a scan that has returned no name yet starts at an ordinal. */
+            ResumeAfter.Buffer = Ccb->ResumeName;
+            ResumeAfter.Length = ResumeAfter.MaximumLength = Ccb->ResumeNameLength;
+            Ordinal = Ccb->ResumeNameLength ? 0 : Ccb->Entry;
 
             /* The index has one entry per name; a DOS-only name is skipped by the
              * search, and every other entry is reported under the name it holds,
              * which for a file with several links is that link's */
-            Status = NtfsFindFileAt(DeviceExtension,
-                                    &Pattern,
-                                    &Ccb->Entry,
-                                    &FileRecord,
-                                    &MFTRecord,
-                                    Fcb->MFTIndex,
-                                    BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
-                                    FoundName);
+            Status = NtfsFindFileAfter(DeviceExtension,
+                                       &Pattern,
+                                       Ccb->ResumeNameLength ? &ResumeAfter : NULL,
+                                       &Ordinal,
+                                       &FileRecord,
+                                       &MFTRecord,
+                                       Fcb->MFTIndex,
+                                       BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                       FoundName);
             if (!NT_SUCCESS(Status))
             {
                 Status = (First ? STATUS_NO_SUCH_FILE : STATUS_NO_MORE_FILES);
@@ -563,7 +587,10 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
                 break;
             }
 
-            Ccb->Entry++;
+            /* Returned: the next entry is the one after this name */
+            ASSERT(FoundName->NameLength > 0 && FoundName->NameLength <= NTFS_MAX_NAME_LENGTH);
+            RtlCopyMemory(Ccb->ResumeName, FoundName->Name, FoundName->NameLength * sizeof(WCHAR));
+            Ccb->ResumeNameLength = FoundName->NameLength * sizeof(WCHAR);
         }
 
         Buffer0 = (PFILE_NAMES_INFORMATION)Entry;
