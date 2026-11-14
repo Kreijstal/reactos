@@ -5378,6 +5378,11 @@ static DWORD collided_exception_handler(EXCEPTION_RECORD *rec, EXCEPTION_REGISTR
             ok(rec->ExceptionCode == STATUS_UNWIND, "got %#lx.\n", rec->ExceptionCode);
             ok(rec->ExceptionFlags == (EXCEPTION_UNWINDING | EXCEPTION_COLLIDED_UNWIND), "got %#lx.\n", rec->ExceptionFlags);
             ok(frame == nested_exception_initial_frame, "got %p, expected %p.\n", frame, nested_exception_initial_frame);
+#ifdef __REACTOS__
+            /* The handler of a collided unwind sees the context that gets restored, like every unwind handler */
+            ok(((DISPATCHER_CONTEXT *)dispatcher)->ContextRecord == context, "got %p, expected %p.\n",
+               ((DISPATCHER_CONTEXT *)dispatcher)->ContextRecord, context);
+#endif
             break;
         case 5:
             /* EXCEPTION_COLLIDED_UNWIND cleared for the following frames. */

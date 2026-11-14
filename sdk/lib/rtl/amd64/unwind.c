@@ -947,6 +947,7 @@ RtlpUnwindInternal(
                        already copied the original dispatcher context, we now
                        need to copy back the original context. */
                     UnwindContext = *ContextRecord = *DispatcherContext.ContextRecord;
+                    HandlerContext = UnwindContext;
 
                     /* The original context was from "before" the unwind, so we
                        need to do an additional virtual unwind to restore the
@@ -974,8 +975,13 @@ RtlpUnwindInternal(
                     }
                     _SEH2_END;
 
-                    /* Restore the context pointer and establisher frame. */
-                    DispatcherContext.ContextRecord = &UnwindContext;
+                    /* Restore the context pointer and establisher frame. Like
+                       for the first call, the handler of an unwind sees the
+                       context that gets restored, so whatever it sets up for
+                       the target (the C++ landing pad selector in Rdx) is
+                       not lost. */
+                    DispatcherContext.ContextRecord =
+                        (HandlerType == UNW_FLAG_UHANDLER) ? ContextRecord : &HandlerContext;
                     EstablisherFrame = DispatcherContext.EstablisherFrame;
 
                     /* Set the exception flags to indicate that we collided
