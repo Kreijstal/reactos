@@ -2780,10 +2780,11 @@ BOOL CNG_ImportPubKey(CERT_PUBLIC_KEY_INFO *pubKeyInfo, BCRYPT_KEY_HANDLE *key)
     return FALSE;
 }
 
-static BOOL CNG_PrepareSignatureECC(BYTE *encoded_sig, DWORD encoded_size, BYTE **sig_value, DWORD *sig_len)
+static BOOL CNG_PrepareSignatureECC(const CERT_PUBLIC_KEY_INFO *key_info, BYTE *encoded_sig, DWORD encoded_size,
+    BYTE **sig_value, DWORD *sig_len)
 {
     CERT_ECC_SIGNATURE *ecc_sig;
-    DWORD size, r_size, s_size, r_offset, s_offset;
+    DWORD size, r_size, s_size, r_offset, s_offset, field_size;
     BYTE *reversed_sig;
     int i;
 
@@ -2804,13 +2805,19 @@ static BOOL CNG_PrepareSignatureECC(BYTE *encoded_sig, DWORD encoded_size, BYTE 
     }
     CryptMemFree(reversed_sig);
 
-    if (!(r_size = ecc_sig->r.cbData) || !(s_size = ecc_sig->s.cbData))
+    /* BCryptVerifySignature takes r and s as two big-endian integers of the
+     * curve's field size each (r || s). The DER INTEGERs drop leading zero
+     * bytes, so each half is left-padded to the size of one public key
+     * coordinate (the key is an uncompressed point: 04 || X || Y). */
+    field_size = (key_info->PublicKey.cbData - 1) / 2;
+    if (!ecc_sig->r.cbData || !ecc_sig->s.cbData ||
+        ecc_sig->r.cbData > field_size || ecc_sig->s.cbData > field_size)
     {
         LocalFree(ecc_sig);
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
-    r_size = s_size = max( r_size, s_size );
+    r_size = s_size = field_size;
 
     *sig_len = r_size + s_size;
     if (!(*sig_value = CryptMemAlloc(*sig_len)))
@@ -2855,17 +2862,40 @@ static BOOL CNG_PrepareSignatureRSA(BYTE *encoded_sig, DWORD encoded_size, BYTE 
     return TRUE;
 }
 
-BOOL cng_prepare_signature(const char *alg_oid, BYTE *encoded_sig, DWORD encoded_sig_len,
+BOOL cng_prepare_signature(const CERT_PUBLIC_KEY_INFO *key_info, BYTE *encoded_sig, DWORD encoded_sig_len,
     BYTE **sig_value, DWORD *sig_len)
 {
+    const char *alg_oid = key_info->Algorithm.pszObjId;
+
     if (!strcmp(alg_oid, szOID_ECC_PUBLIC_KEY))
-        return CNG_PrepareSignatureECC(encoded_sig, encoded_sig_len, sig_value, sig_len);
+        return CNG_PrepareSignatureECC(key_info, encoded_sig, encoded_sig_len, sig_value, sig_len);
     if (!strcmp(alg_oid, szOID_RSA_RSA))
         return CNG_PrepareSignatureRSA(encoded_sig, encoded_sig_len, sig_value, sig_len);
 
     FIXME("Unsupported public key type: %s\n", debugstr_a(alg_oid));
     SetLastError(NTE_BAD_ALGID);
     return FALSE;
+}
+
+/* Verifies a prepared (big-endian) signature over hash_value with a key
+ * imported by CNG_ImportPubKey. BCryptVerifySignature needs to be told the
+ * padding scheme of an RSA signature: with no padding info it rejects an RSA
+ * key with STATUS_INVALID_PARAMETER, exactly as Windows bcrypt does. X.509
+ * and CMS RSA signatures (rsaEncryption / sha*WithRSAEncryption) are
+ * PKCS #1 v1.5, whose DigestInfo names the hash algorithm. hash_alg may be
+ * NULL when the caller does not know it, which makes the DigestInfo hash
+ * OID optional. ECDSA and DSA signatures take no padding. */
+NTSTATUS cng_verify_signature(BCRYPT_KEY_HANDLE key, const CERT_PUBLIC_KEY_INFO *key_info, const WCHAR *hash_alg,
+    BYTE *hash_value, DWORD hash_len, BYTE *sig_value, DWORD sig_len)
+{
+    if (!strcmp(key_info->Algorithm.pszObjId, szOID_RSA_RSA))
+    {
+        BCRYPT_PKCS1_PADDING_INFO pad = { hash_alg };
+
+        return BCryptVerifySignature(key, &pad, hash_value, hash_len, sig_value, sig_len, BCRYPT_PAD_PKCS1);
+    }
+
+    return BCryptVerifySignature(key, NULL, hash_value, hash_len, sig_value, sig_len, 0);
 }
 
 static BOOL CNG_PrepareCertSignature(CERT_PUBLIC_KEY_INFO *pubKeyInfo, const CERT_SIGNED_CONTENT_INFO *signedCert,
@@ -2879,7 +2909,7 @@ static BOOL CNG_PrepareCertSignature(CERT_PUBLIC_KEY_INFO *pubKeyInfo, const CER
 
     /* Pass the signature value through in its original (certificate) byte
      * order; both the ECDSA and the RSA path reverse it internally. */
-    return cng_prepare_signature(pubKeyInfo->Algorithm.pszObjId,
+    return cng_prepare_signature(pubKeyInfo,
             signedCert->Signature.pbData, signedCert->Signature.cbData,
             sig_value, sig_len);
 }
@@ -2902,7 +2932,8 @@ static BOOL CNG_VerifySignature(HCRYPTPROV_LEGACY hCryptProv, DWORD dwCertEncodi
             ret = CNG_PrepareCertSignature(pubKeyInfo, signedCert, &sig_value, &sig_len);
             if (ret)
             {
-                status = BCryptVerifySignature(key, NULL, hash_value, hash_len, sig_value, sig_len, 0);
+                status = cng_verify_signature(key, pubKeyInfo, info->pwszCNGAlgid,
+                                              hash_value, hash_len, sig_value, sig_len);
                 if (status)
                 {
                     FIXME("Failed to verify signature: %08lx\n", status);

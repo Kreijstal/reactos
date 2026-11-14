@@ -3328,9 +3328,9 @@ static BOOL cng_verify_msg_signature(CMSG_CMS_SIGNER_INFO *signer, HCRYPTHASH ha
 
     if (!CryptImportPublicKeyInfoEx2(X509_ASN_ENCODING, key_info, 0, NULL, &key)) return FALSE;
     if (!extract_hash(hash, &hash_value, &hash_len)) goto done;
-    if (!cng_prepare_signature(key_info->Algorithm.pszObjId, signer->EncryptedHash.pbData,
+    if (!cng_prepare_signature(key_info, signer->EncryptedHash.pbData,
             signer->EncryptedHash.cbData, &sig_value, &sig_len)) goto done;
-    status = BCryptVerifySignature(key, NULL, hash_value, hash_len, sig_value, sig_len, 0);
+    status = cng_verify_signature(key, key_info, NULL, hash_value, hash_len, sig_value, sig_len);
     if (status)
     {
         FIXME("Failed to verify signature: %08lx.\n", status);
