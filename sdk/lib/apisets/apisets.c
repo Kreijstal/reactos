@@ -28,6 +28,26 @@ WORD ExtensionSize = sizeof(L".dll") - sizeof(WCHAR);
 //    );
 
 
+/* Cuts the trailing "-<version>" off an apiset name */
+static
+VOID
+ApiSetBaseLength(
+    _Inout_ PUNICODE_STRING Name)
+{
+    USHORT Index = Name->Length / sizeof(WCHAR);
+
+    while (Index > 0)
+    {
+        Index--;
+        if (Name->Buffer[Index] == L'-')
+        {
+            Name->Length = Index * sizeof(WCHAR);
+            return;
+        }
+    }
+}
+
+
 NTSTATUS
 ApiSetResolveToHost(
     _In_ DWORD ApisetVersion,
@@ -58,41 +78,61 @@ ApiSetResolveToHost(
     if (!_wcsnicmp(Extension, L".dll", ExtensionSize / sizeof(WCHAR)))
         Tmp.Length -= ExtensionSize;
 
-    // Binary search the apisets
-    // Ideally we should use bsearch here, but that drags in another dependency and we do not want that here.
-    LONG UBnd = g_ApisetsCount - 1;
-    LONG LBnd = 0;
-    while (LBnd <= UBnd)
-    {
-        LONG Index = (UBnd - LBnd) / 2 + LBnd;
+    DWORD VersionMask = ApisetVersion | (ApisetVersion - 1);
+    const ROS_APISET *Match = NULL;
 
-        LONG result = RtlCompareUnicodeString(&Tmp, &g_Apisets[Index].Name, TRUE);
-        if (result == 0)
+    /* An exact name wins. Win10/11 inherit every downlevel apiset name as a
+     * forwarder alias, so match an entry if the requested version or any
+     * older bit is set on it. The auto-generated table only marks the
+     * highest Windows release that exposes a given name in its
+     * apisetschema, but the real schema contains all earlier names as
+     * downlevel aliases pointing at the same host DLL. */
+    for (LONG Index = 0; Index < g_ApisetsCount; Index++)
+    {
+        if (RtlEqualUnicodeString(&Tmp, &g_Apisets[Index].Name, TRUE) &&
+            (g_Apisets[Index].dwOsVersions & VersionMask))
         {
-            /* Win10/11 inherit every downlevel apiset name as a forwarder
-             * alias, so match this entry if the requested version or any
-             * older bit is set on it. The auto-generated table only marks
-             * the highest Windows release that exposes a given name in its
-             * apisetschema, but the real schema contains all earlier names
-             * as downlevel aliases pointing at the same host DLL. */
-            DWORD VersionMask = ApisetVersion | (ApisetVersion - 1);
-            if (g_Apisets[Index].dwOsVersions & VersionMask)
-            {
-                // Return a static string (does not have to be freed)
-                *Resolved = TRUE;
-                *Output = g_Apisets[Index].Target;
-            }
-            return STATUS_SUCCESS;
-        }
-        else if (result < 0)
-        {
-            UBnd = Index - 1;
-        }
-        else
-        {
-            LBnd = Index + 1;
+            Match = &g_Apisets[Index];
+            break;
         }
     }
+
+    /* Like Windows, the version after the last hyphen does not take part
+     * in the lookup otherwise: "api-ms-win-core-file-l1-1-0" resolves
+     * through the schema entry for "api-ms-win-core-file-l1-1", whatever
+     * minor version the system ships. Prefer the entry of the version we
+     * run as, then any older one. */
+    if (Match == NULL)
+    {
+        UNICODE_STRING Base = Tmp;
+        ApiSetBaseLength(&Base);
+
+        for (LONG Index = 0; Index < g_ApisetsCount; Index++)
+        {
+            UNICODE_STRING EntryBase = g_Apisets[Index].Name;
+            ApiSetBaseLength(&EntryBase);
+
+            if (!RtlEqualUnicodeString(&Base, &EntryBase, TRUE))
+                continue;
+
+            if (g_Apisets[Index].dwOsVersions & ApisetVersion)
+            {
+                Match = &g_Apisets[Index];
+                break;
+            }
+            if (!Match && (g_Apisets[Index].dwOsVersions & VersionMask))
+                Match = &g_Apisets[Index];
+        }
+    }
+
+    if (Match)
+    {
+        // Return a static string (does not have to be freed)
+        *Resolved = TRUE;
+        *Output = Match->Target;
+        return STATUS_SUCCESS;
+    }
+
     *Resolved = FALSE;
     return STATUS_SUCCESS;
 }
