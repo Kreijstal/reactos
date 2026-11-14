@@ -1179,14 +1179,14 @@ LdrpApplyFileNameRedirection(
 NTSYSAPI
 NTSTATUS
 NTAPI
-RtlWow64EnableFsRedirection(IN BOOLEAN Wow64FsDisableRedirection)
+RtlWow64EnableFsRedirection(IN BOOLEAN Wow64FsEnableRedirection)
 {
 #ifdef BUILD_WOW6432
     PVOID Prev;
-    
-    /* Negated to match dll\kernel32\client\utils.c implementation of 
-     * Wow64DisableWow64FsRedirection */
-    return RtlWow64EnableFsRedirectionEx((PVOID)!Wow64FsDisableRedirection, &Prev);
+
+    /* Despite its name, RtlWow64EnableFsRedirectionEx takes the "disabled"
+     * value (Wow64DisableWow64FsRedirection passes TRUE) */
+    return RtlWow64EnableFsRedirectionEx((PVOID)(ULONG_PTR)!Wow64FsEnableRedirection, &Prev);
 #else
     return STATUS_NOT_IMPLEMENTED;
 #endif
@@ -1210,7 +1210,7 @@ RtlWow64EnableFsRedirectionEx(IN PVOID Wow64FsEnableRedirection,
         *OldFsRedirectionLevel = (PVOID)__readgsdword(Offset);
     }
     
-    DPRINT1("Setting offset %X (prev: %X) to %X\n", Offset, __readgsdword(Offset), Wow64FsEnableRedirection);
+    DPRINT("Setting offset %X (prev: %X) to %X\n", Offset, __readgsdword(Offset), Wow64FsEnableRedirection);
     
     __writegsdword(Offset, (ULONG)Wow64FsEnableRedirection);
     return STATUS_SUCCESS;

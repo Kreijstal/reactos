@@ -1602,7 +1602,8 @@ Wow64InitThread(PCONTEXT pContext)
     NtCurrentTeb()->TlsSlots[WOW64_TLS_TEMPLIST] = NULL;
     NtCurrentTeb()->TlsSlots[WOW64_TLS_APCLIST] = NULL;
     NtCurrentTeb()->TlsSlots[WOW64_TLS_USERCALLBACKDATA] = NULL;
-    NtCurrentTeb()->TlsSlots[WOW64_TLS_FILESYSREDIR] = (PVOID)TRUE;
+    /* Non-zero disables the file system redirection (RtlWow64EnableFsRedirectionEx) */
+    NtCurrentTeb()->TlsSlots[WOW64_TLS_FILESYSREDIR] = NULL;
 
     /* Point the 32-bit syscall dispatch (fs:[0xC0]) at the heaven's-gate thunk.
        The guest ntdll stub does `call dword ptr fs:[0xC0]` in compat mode, so this

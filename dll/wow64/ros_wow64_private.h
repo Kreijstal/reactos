@@ -384,7 +384,8 @@ RedirectPath(const WOW64_PATH_REDIRECTION* Redirection,
 
 static BOOLEAN GetFileRedirect(OBJECT_ATTRIBUTES* attr)
 {
-    if (PtrToUlong(NtCurrentTeb()->TlsSlots[WOW64_TLS_FILESYSREDIR]) == 0)
+    /* The guest's Wow64DisableWow64FsRedirection stores non-zero here */
+    if (PtrToUlong(NtCurrentTeb()->TlsSlots[WOW64_TLS_FILESYSREDIR]) != 0)
     {
         return FALSE;
     }
