@@ -34,29 +34,41 @@ wow64_NtRaiseException(UINT* pArgs)
     PEXCEPTION_RECORD32 pRecord32 = get_ptr(&pArgs);
     PI386_CONTEXT pContext32 = get_ptr(&pArgs);
     BOOLEAN FirstChance = get_ulong(&pArgs);
-    
-    __debugbreak();
-    
     EXCEPTION_RECORD Record;
     CONTEXT Context;
+    ULONG i;
 
     Record.ExceptionCode = pRecord32->ExceptionCode;
     Record.ExceptionFlags = pRecord32->ExceptionFlags;
     Record.ExceptionRecord = UlongToPtr(pRecord32->ExceptionRecord);
     Record.ExceptionAddress = UlongToPtr(pRecord32->ExceptionAddress);
     Record.NumberParameters = pRecord32->NumberParameters;
-    
-    Wow64CopyContext32To64(&Context, pContext32);
-    
-    for (int i = 0; i < EXCEPTION_MAXIMUM_PARAMETERS; i++)
+    for (i = 0; i < EXCEPTION_MAXIMUM_PARAMETERS; i++)
     {
         Record.ExceptionInformation[i] = pRecord32->ExceptionInformation[i];
     }
 
-    if (FirstChance == FALSE)
+    /* The guest context goes to the kernel as a compatibility-mode (CS 0x23)
+       context, the same shape a fault taken in 32-bit code has: the kernel
+       reports the exception to the debugger, then hands it to the native
+       KiUserExceptionDispatcher, which passes it on to the guest's
+       KiUserExceptionDispatcher (LdrpTryWow64Exception). A second chance
+       (raised by the guest dispatcher when no 32-bit handler took it) goes
+       to the debugger and the exception port, as for a native process. */
+    Wow64CopyContext32To64(&Context, pContext32);
+
+    /* The guest context only carries floating point state if it says so,
+       don't let the zeroed native one load over the thread's */
+    if (!(pContext32->ContextFlags & (WOW64_CONTEXT_FLOATING_POINT & ~WOW64_CONTEXT_i386)) &&
+        !(pContext32->ContextFlags & (WOW64_CONTEXT_EXTENDED_REGISTERS & ~WOW64_CONTEXT_i386)))
     {
-        DPRINT1("Unhandled 32-bit exception in a WOW64 process.\n");
-        __debugbreak();
+        Context.ContextFlags &= ~(CONTEXT_FLOATING_POINT & ~CONTEXT_AMD64);
+    }
+
+    if (!FirstChance)
+    {
+        DPRINT1("WOW64: unhandled 32-bit exception %08lx at %08lx\n",
+                pRecord32->ExceptionCode, pRecord32->ExceptionAddress);
     }
 
     return NtRaiseException(&Record, &Context, FirstChance);
