@@ -517,9 +517,7 @@ Wow64FixupNativeEntrypoint(HANDLE hProcess, PCONTEXT pContext)
     ULONG_PTR NtHeaders;
     WORD OptionalHeaderMagic;
     DWORD EntrypointRva;
-    
-    __debugbreak();
-    
+
     /* Get the remote PEB */
     Status = NtQueryInformationProcess(hProcess, 
                                        ProcessBasicInformation, 
