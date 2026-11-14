@@ -630,25 +630,24 @@ MiSegmentDelete(IN PSEGMENT Segment)
     /* Lock the PFN database */
     OldIrql = MiAcquirePfnLock();
 
-    /* Check if the master PTE is invalid */
-    PteForProto = MiAddressToPte(PointerPte);
-    if (!PteForProto->u.Hard.Valid)
-    {
-        /* Fault it in */
-        MiMakeSystemAddressValidPfn(PointerPte, OldIrql);
-    }
-
     /* Loop all the segment PTEs */
     while (PointerPte < LastPte)
     {
         /* Check if it's time to switch master PTEs if we passed a PDE boundary */
-        if (MiIsPteOnPdeBoundary(PointerPte) &&
-            (PointerPte != Subsection->SubsectionBase))
+        if (MiIsPteOnPdeBoundary(PointerPte) ||
+            (PointerPte == Subsection->SubsectionBase))
         {
             /* Check if the master PTE is invalid */
             PteForProto = MiAddressToPte(PointerPte);
             if (!PteForProto->u.Hard.Valid)
             {
+                /* A page of prototype PTEs nobody ever wrote holds nothing to clean up */
+                if (MiIsPrototypePtePageDemandZero(PointerPte))
+                {
+                    PointerPte = (PMMPTE)PAGE_ALIGN((PUCHAR)PointerPte + PAGE_SIZE);
+                    continue;
+                }
+
                 /* Fault it in */
                 MiMakeSystemAddressValidPfn(PointerPte, OldIrql);
             }
@@ -1455,7 +1454,7 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
 {
     ULONGLONG SizeLimit;
     PFN_COUNT PteCount;
-    PMMPTE PointerPte;
+    PMMPTE PointerPte, LastPte;
     MMPTE TempPte;
     PCONTROL_AREA ControlArea;
     PSEGMENT NewSegment;
@@ -1556,12 +1555,40 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
     /* The template PTE itself for the segment should also have the mask set */
     NewSegment->SegmentPteTemplate.u.Soft.Protection = ProtectionMask;
 
-    /* Write out the prototype PTEs, for now they're simply demand zero */
+    if (TempPte.u.Long != 0)
+    {
+        /* Write out the committed prototype PTEs, they're simply demand zero */
 #ifdef _WIN64
-    RtlFillMemoryUlonglong(PointerPte, PteCount * sizeof(MMPTE), TempPte.u.Long);
+        RtlFillMemoryUlonglong(PointerPte, PteCount * sizeof(MMPTE), TempPte.u.Long);
 #else
-    RtlFillMemoryUlong(PointerPte, PteCount * sizeof(MMPTE), TempPte.u.Long);
+        RtlFillMemoryUlong(PointerPte, PteCount * sizeof(MMPTE), TempPte.u.Long);
 #endif
+    }
+    else if (BYTE_OFFSET(NewSegment) != 0)
+    {
+        /* A small segment comes from a pool block that held other data */
+        RtlZeroMemory(PointerPte, PteCount * sizeof(MMPTE));
+    }
+    else
+    {
+        /*
+         * A reserved segment spanning whole pages comes straight from paged
+         * pool pages that are still demand-zero: its prototype PTEs already
+         * read as zero (not committed). Zero only those sharing the first page
+         * with the segment header, and leave the rest untouched, so that a
+         * huge SEC_RESERVE section (CoreCLR reserves 2 TB, 4 GB of prototype
+         * PTEs) costs no memory until its pages are committed.
+         */
+        LastPte = min(PointerPte + PteCount,
+                      (PMMPTE)PAGE_ALIGN((PUCHAR)NewSegment + PAGE_SIZE));
+        RtlZeroMemory(PointerPte, (LastPte - PointerPte) * sizeof(MMPTE));
+#if DBG
+        for (; LastPte < PointerPte + PteCount; LastPte += PAGE_SIZE / sizeof(MMPTE))
+        {
+            ASSERT(MiIsPrototypePtePageDemandZero(LastPte));
+        }
+#endif
+    }
     return STATUS_SUCCESS;
 }
 
@@ -2099,7 +2126,7 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
                 ProtoPte = MiProtoPteToPte(&PteContents);
 
                 /* We don't support anything else atm */
-                ASSERT(ProtoPte->u.Long == 0);
+                ASSERT(MiIsPrototypePtePageDemandZero(ProtoPte) || (ProtoPte->u.Long == 0));
             }
         }
 
@@ -2171,6 +2198,15 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
         PMMPTE LastProto = Proto + Sub->PtesInSubsection;
         for (; Proto < LastProto; Proto++)
         {
+            /* Skip pages of prototype PTEs nobody ever wrote (reserved, never
+               committed): reading them would fault in paged pool at DISPATCH_LEVEL */
+            if ((MiIsPteOnPdeBoundary(Proto) || (Proto == Sub->SubsectionBase)) &&
+                MiIsPrototypePtePageDemandZero(Proto))
+            {
+                Proto = (PMMPTE)PAGE_ALIGN((PUCHAR)Proto + PAGE_SIZE) - 1;
+                continue;
+            }
+
             if (Proto->u.Hard.Valid)
             {
                 PMMPFN ProtoPfn = MiGetPfnEntry(PFN_FROM_PTE(Proto));

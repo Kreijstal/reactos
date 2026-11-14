@@ -3025,6 +3025,31 @@ UserFault:
         }
     }
 
+    /*
+     * MiDispatchFault reads the prototype PTE under the PFN lock, so the paged
+     * pool page holding it must be resident. It is not when nobody has written
+     * that part of the prototype PTE array yet (a reserved range of a
+     * pagefile-backed section). Paged pool cannot be faulted in while the
+     * working set lock is held: drop it, bring the page in and let the access
+     * fault again.
+     */
+    if ((ProtoPte) && !(MiAddressToPte(ProtoPte)->u.Hard.Valid))
+    {
+        MiUnlockProcessWorkingSet(CurrentProcess, CurrentThread);
+        ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
+
+        Status = MmAccessFault(FALSE, ProtoPte, KernelMode, NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            KeBugCheckEx(KERNEL_DATA_INPAGE_ERROR,
+                         4,
+                         Status,
+                         (ULONG_PTR)CurrentProcess,
+                         (ULONG_PTR)ProtoPte);
+        }
+        return STATUS_SUCCESS;
+    }
+
     /* Dispatch the fault */
     Status = MiDispatchFault(FaultCode,
                              Address,
