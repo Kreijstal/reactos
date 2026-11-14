@@ -1299,6 +1299,60 @@ SetupNls(PPEB Peb,
     RtlCopyMemory(&UnicodeCopy, Peb->UnicodeCaseTableData, sizeof(UnicodeCopy));
 }
 
+/*
+ * The 32-bit ntdll's system call stubs (mov eax, <number>) must use the
+ * numbering Wow64SystemServiceEx() dispatches by: both come from
+ * ntoskrnl/include/sysfuncs.h, whose NTDDI-gated entries shift every later
+ * number, so a guest built for another REACTOS_TARGET_NT than this host sends
+ * each call to a different service (NtQueryVirtualMemory to NtQueryValueKey).
+ * Check stubs at both ends of the table, past the gated entries and the WoW64
+ * services after it; a mismatch is a broken build, not something a process
+ * can run with.
+ */
+static
+NTSTATUS
+Wow64CheckSystemCallNumbers(PVOID NtDll32Base)
+{
+    static const struct
+    {
+        ANSI_STRING Name;
+        ULONG Number;
+    } Stubs[] =
+    {
+        { RTL_CONSTANT_STRING("NtAcceptConnectPort"), NumAcceptConnectPort },
+        { RTL_CONSTANT_STRING("NtQueryVirtualMemory"), NumQueryVirtualMemory },
+        { RTL_CONSTANT_STRING("NtYieldExecution"), NumYieldExecution },
+        /* Appended by ntoskrnl/ntdll.S after the whole table */
+        { RTL_CONSTANT_STRING("NtWow64ReadVirtualMemory64"), NumWow64ReadVirtualMemory64 },
+    };
+    NTSTATUS Status;
+    PUCHAR Code;
+    ULONG Number, i;
+
+    for (i = 0; i < _countof(Stubs); i++)
+    {
+        Status = LdrGetProcedureAddress(NtDll32Base, (PANSI_STRING)&Stubs[i].Name, 0, (PVOID*)&Code);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("WOW64: 32-bit ntdll.dll has no %Z: 0x%08lx\n", &Stubs[i].Name, Status);
+            return Status;
+        }
+
+        /* mov eax, imm32 */
+        Number = (Code[0] == 0xB8) ? *(ULONG UNALIGNED *)&Code[1] : MAXULONG;
+        if (Number != Stubs[i].Number)
+        {
+            DPRINT1("WOW64: 32-bit ntdll.dll issues %Z as system call 0x%lx, this host dispatches 0x%lx: "
+                    "the WoW64 guest was built for another REACTOS_TARGET_NT\n",
+                    &Stubs[i].Name, Number, Stubs[i].Number);
+            ASSERT(Number == Stubs[i].Number);
+            return STATUS_INVALID_IMAGE_FORMAT;
+        }
+    }
+
+    return STATUS_SUCCESS;
+}
+
 static
 VOID
 Wow64InitSysWow64Paths(VOID)
@@ -1344,6 +1398,10 @@ Wow64InitProcess(PCONTEXT pContext)
         DPRINT1("WOW64: 32-bit ntdll.dll could not be loaded: 0x%08lx\n", Status);
         return Status;
     }
+
+    Status = Wow64CheckSystemCallNumbers(NtDll32);
+    if (!NT_SUCCESS(Status))
+        return Status;
 
     Status = NtQueryInformationProcess(NtCurrentProcess(),
                                        ProcessWow64Information,
