@@ -1150,4 +1150,95 @@ RaiseFailFastException(IN PEXCEPTION_RECORD ExceptionRecord OPTIONAL,
 }
 #endif
 
+#if (_WIN32_WINNT >= 0x0601)
+
+/*
+ * Runtime exception modules registered for Windows Error Reporting. The list
+ * is per process and, like the Windows one, guarded by the PEB lock. ReactOS
+ * has no error reporting service to call the modules back yet; registration
+ * still keeps the documented contract (duplicates, limit, errors).
+ */
+#define BASEP_WER_MAX_RUNTIME_EXCEPTION_MODULES 16
+
+typedef struct _BASEP_WER_RUNTIME_DLL
+{
+    struct _BASEP_WER_RUNTIME_DLL *Next;
+    PVOID Context;
+    WCHAR CallbackDllPath[ANYSIZE_ARRAY];
+} BASEP_WER_RUNTIME_DLL, *PBASEP_WER_RUNTIME_DLL;
+
+static PBASEP_WER_RUNTIME_DLL BasepWerRuntimeDlls;
+
+/*
+ * @implemented
+ */
+HRESULT
+WINAPI
+WerRegisterRuntimeExceptionModule(
+    _In_ PCWSTR pwszOutOfProcessCallbackDll,
+    _In_ PVOID pContext)
+{
+    PBASEP_WER_RUNTIME_DLL Entry, Current, Last;
+    SIZE_T PathSize;
+    ULONG Count;
+    HRESULT hr;
+
+    if (pwszOutOfProcessCallbackDll == NULL)
+        return E_INVALIDARG;
+
+    PathSize = (wcslen(pwszOutOfProcessCallbackDll) + 1) * sizeof(WCHAR);
+    Entry = RtlAllocateHeap(RtlGetProcessHeap(),
+                            HEAP_ZERO_MEMORY,
+                            FIELD_OFFSET(BASEP_WER_RUNTIME_DLL, CallbackDllPath) + PathSize);
+    if (Entry == NULL)
+        return E_OUTOFMEMORY;
+
+    Entry->Context = pContext;
+    RtlCopyMemory(Entry->CallbackDllPath, pwszOutOfProcessCallbackDll, PathSize);
+
+    hr = S_OK;
+    RtlAcquirePebLock();
+
+    Count = 0;
+    Last = NULL;
+    for (Current = BasepWerRuntimeDlls; Current != NULL; Current = Current->Next)
+    {
+        /* Registering the same module and context again is not an error */
+        if ((Current->Context == pContext) &&
+            (wcscmp(Current->CallbackDllPath, pwszOutOfProcessCallbackDll) == 0))
+        {
+            break;
+        }
+
+        Count++;
+        Last = Current;
+    }
+
+    if (Current != NULL)
+    {
+        /* Already registered, the new entry is not needed */
+    }
+    else if (Count >= BASEP_WER_MAX_RUNTIME_EXCEPTION_MODULES)
+    {
+        hr = HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+    }
+    else
+    {
+        if (Last)
+            Last->Next = Entry;
+        else
+            BasepWerRuntimeDlls = Entry;
+        Entry = NULL;
+    }
+
+    RtlReleasePebLock();
+
+    if (Entry != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Entry);
+
+    return hr;
+}
+
+#endif /* _WIN32_WINNT >= 0x0601 */
+
 /* EOF */
