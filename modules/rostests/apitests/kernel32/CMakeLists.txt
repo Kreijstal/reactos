@@ -12,6 +12,7 @@ list(APPEND SOURCE
     dosdev.c
     EnumSystemCodePages.c
     FindActCtxSectionStringW.c
+    DeleteWhileEnum.c
     FindFiles.c
     FLS.c
     FormatMessage.c
