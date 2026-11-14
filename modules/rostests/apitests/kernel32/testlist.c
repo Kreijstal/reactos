@@ -11,6 +11,7 @@ extern void func_DeviceIoControl(void);
 extern void func_dosdev(void);
 extern void func_EnumSystemCodePages(void);
 extern void func_FindActCtxSectionStringW(void);
+extern void func_DeleteWhileEnum(void);
 extern void func_FindFiles(void);
 extern void func_FLS(void);
 extern void func_FormatMessage(void);
@@ -71,6 +72,7 @@ const struct test winetest_testlist[] =
     { "dosdev",                      func_dosdev },
     { "EnumSystemCodePages",         func_EnumSystemCodePages },
     { "FindActCtxSectionStringW",    func_FindActCtxSectionStringW },
+    { "DeleteWhileEnum",             func_DeleteWhileEnum },
     { "FindFiles",                   func_FindFiles },
     { "FLS",                         func_FLS },
     { "FormatMessage",               func_FormatMessage },
