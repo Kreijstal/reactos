@@ -23,8 +23,10 @@
 #include "wine/unixlib.h"
 
 BOOL CNG_ImportPubKey(CERT_PUBLIC_KEY_INFO *pubKeyInfo, BCRYPT_KEY_HANDLE *key);
-BOOL cng_prepare_signature(const char *alg_oid, BYTE *encoded_sig, DWORD encoded_sig_len,
+BOOL cng_prepare_signature(const CERT_PUBLIC_KEY_INFO *key_info, BYTE *encoded_sig, DWORD encoded_sig_len,
     BYTE **sig_value, DWORD *sig_len);
+NTSTATUS cng_verify_signature(BCRYPT_KEY_HANDLE key, const CERT_PUBLIC_KEY_INFO *key_info, const WCHAR *hash_alg,
+    BYTE *hash_value, DWORD hash_len, BYTE *sig_value, DWORD sig_len);
 
 /* a few asn.1 tags we need */
 #define ASN_BOOL            (ASN_UNIVERSAL | ASN_PRIMITIVE | 0x01)
