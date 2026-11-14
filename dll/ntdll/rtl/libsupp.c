@@ -1301,4 +1301,41 @@ RtlGetTickCount(VOID)
     return KiTickCountToMs(TickCount);
 }
 
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_WIN10)
+
+/*
+ * Process-wide placeholder compatibility mode (PHCM_*): how cloud file
+ * placeholders are presented to this process. Windows keeps the value in
+ * the PEB; ReactOS has no cloud files filter reading it, so the process
+ * keeps it here with the same semantics.
+ */
+static CHAR RtlpProcessPlaceholderCompatibilityMode;
+
+#define PHCM_MAX_MODE                   3
+#define PHCM_ERROR_INVALID_PARAMETER    (-1)
+
+CHAR
+NTAPI
+RtlQueryProcessPlaceholderCompatibilityMode(VOID)
+{
+    return RtlpProcessPlaceholderCompatibilityMode;
+}
+
+CHAR
+NTAPI
+RtlSetProcessPlaceholderCompatibilityMode(
+    _In_ CHAR Mode)
+{
+    CHAR Previous;
+
+    if ((UCHAR)Mode > PHCM_MAX_MODE)
+        return PHCM_ERROR_INVALID_PARAMETER;
+
+    Previous = RtlpProcessPlaceholderCompatibilityMode;
+    RtlpProcessPlaceholderCompatibilityMode = Mode;
+    return Previous;
+}
+
+#endif /* DLL_EXPORT_VERSION >= _WIN32_WINNT_WIN10 */
+
 /* EOF */
