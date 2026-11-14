@@ -346,7 +346,7 @@
 @ stdcall FlushConsoleInputBuffer(long)
 @ stdcall FlushFileBuffers(long)
 @ stdcall FlushInstructionCache(long long long)
-@ stub -version=0x600+ FlushProcessWriteBuffers
+@ stdcall -version=0x600+ FlushProcessWriteBuffers() ntdll.NtFlushProcessWriteBuffers
 @ stdcall FlushViewOfFile(ptr long)
 @ stdcall FoldStringA(long str long ptr long)
 @ stdcall FoldStringW(long wstr long ptr long)
@@ -525,6 +525,8 @@
 @ stdcall GetLocaleInfoA(long long ptr long)
 @ stdcall -version=0x600+ GetLocaleInfoEx(wstr long ptr long)
 @ stdcall GetLocaleInfoW(long long ptr long)
+@ stdcall -version=0x601+ GetNumaProcessorNodeEx(ptr ptr)
+@ stdcall -version=0x601+ GetThreadIdealProcessorEx(long ptr)
 @ stdcall -version=0x601+ GetXStateFeaturesMask(ptr ptr)
 @ stdcall -version=0x601+ InitializeContext(ptr long ptr ptr)
 @ stdcall -version=0xA00+ InitializeContext2(ptr long ptr ptr int64)
@@ -591,7 +593,6 @@
 @ stdcall GetPrivateProfileStructW(wstr wstr ptr long wstr)
 @ stdcall GetProcAddress(long str)
 @ stdcall GetProcessAffinityMask(long ptr ptr)
-@ stdcall -stub -version=0x601+ GetProcessGroupAffinity(ptr ptr ptr)
 @ stdcall GetProcessDEPPolicy(ptr ptr ptr)
 @ stdcall -version=0x601+ GetProcessGroupAffinity(long ptr ptr)
 @ stdcall GetProcessHandleCount(long ptr)
@@ -948,7 +949,7 @@
 @ stdcall QueryPerformanceFrequency(ptr)
 @ stub -version=0x600+ QueryProcessAffinityUpdateMode
 @ stub -version=0x600+ QueryProcessCycleTime
-@ stub -version=0x600+ QueryThreadCycleTime
+@ stdcall -version=0x600+ QueryThreadCycleTime(long ptr)
 @ stdcall -version=0x601+ QueryUnbiasedInterruptTime(ptr)
 @ stdcall QueueUserAPC(ptr long long)
 @ stdcall QueueUserWorkItem(ptr ptr long)
@@ -1152,6 +1153,7 @@
 @ stdcall SetThreadContext(long ptr)
 @ stdcall -version=0x602+ SetThreadDescription(ptr wstr)
 @ stdcall -version=0x602+ GetThreadDescription(ptr ptr)
+@ stdcall -version=0x601+ SetThreadIdealProcessorEx(long ptr ptr)
 @ stdcall -stub -version=0x602+ SetThreadInformation(ptr long ptr long)
 @ stdcall -stub -version=0x602+ GetThreadInformation(ptr long ptr long)
 @ stdcall -version=0x600+ SetThreadErrorMode(long ptr)

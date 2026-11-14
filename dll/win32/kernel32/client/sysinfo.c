@@ -428,6 +428,61 @@ GetNumaProcessorNode(IN UCHAR Processor,
     return TRUE;
 }
 
+#if (_WIN32_WINNT >= 0x0601)
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+GetNumaProcessorNodeEx(
+    _In_ PPROCESSOR_NUMBER Processor,
+    _Out_ PUSHORT NodeNumber)
+{
+    NTSTATUS Status;
+    SYSTEM_NUMA_INFORMATION NumaInformation;
+    ULONG Length;
+    ULONG Node;
+    ULONGLONG Proc;
+
+    /* A group holds at most 64 processors; only group 0 exists here */
+    if ((Processor->Group != 0) ||
+        (Processor->Number >= 64) ||
+        (Processor->Reserved != 0))
+    {
+        *NodeNumber = MAXUSHORT;
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    Status = NtQuerySystemInformation(SystemNumaProcessorMap,
+                                      &NumaInformation,
+                                      sizeof(NumaInformation),
+                                      &Length);
+    if (!NT_SUCCESS(Status))
+    {
+        *NodeNumber = MAXUSHORT;
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    Proc = 1ULL << Processor->Number;
+    for (Node = 0;
+         (Node <= NumaInformation.HighestNodeNumber) && (Node < MAXIMUM_NUMA_NODES);
+         Node++)
+    {
+        if (NumaInformation.ActiveProcessorsAffinityMask[Node] & Proc)
+        {
+            *NodeNumber = (USHORT)Node;
+            return TRUE;
+        }
+    }
+
+    *NodeNumber = MAXUSHORT;
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return FALSE;
+}
+#endif /* _WIN32_WINNT >= 0x0601 */
+
 /*
  * @implemented
  */

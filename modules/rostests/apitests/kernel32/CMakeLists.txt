@@ -54,6 +54,7 @@ list(APPEND SOURCE
     SuspendThread.c
     SystemFirmware.c
     TerminateProcess.c
+    ThreadProcessor.c
     Toolhelp.c
     TunnelCache.c
     UEFIFirmware.c
