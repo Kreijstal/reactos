@@ -2788,6 +2788,51 @@ PspContextToWow64Context(
 }
 #endif
 
+/*
+ * The TEB keeps a copy of the thread's ideal processor that user mode reads
+ * directly. The TEB belongs to the thread's process, so attach to it when
+ * the request comes from another process.
+ */
+static
+VOID
+PspUpdateTebIdealProcessor(
+    _In_ PETHREAD Thread)
+{
+    PEPROCESS Process = THREAD_TO_PROCESS(Thread);
+    KAPC_STATE ApcState;
+    BOOLEAN Attached = FALSE;
+    PTEB Teb;
+
+    Teb = Thread->Tcb.Teb;
+    if (!Teb || !ExAcquireRundownProtection(&Thread->RundownProtect))
+        return;
+
+    if (Process != PsGetCurrentProcess())
+    {
+        KeStackAttachProcess(&Process->Pcb, &ApcState);
+        Attached = TRUE;
+    }
+
+    _SEH2_TRY
+    {
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+        Teb->CurrentIdealProcessor.Group = 0;
+        Teb->CurrentIdealProcessor.Number = Thread->Tcb.IdealProcessor;
+#endif
+        Teb->IdealProcessor = Thread->Tcb.IdealProcessor;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        NOTHING;
+    }
+    _SEH2_END;
+
+    if (Attached)
+        KeUnstackDetachProcess(&ApcState);
+
+    ExReleaseRundownProtection(&Thread->RundownProtect);
+}
+
 NTSTATUS
 NTAPI
 NtSetInformationThread(
@@ -3246,8 +3291,8 @@ NtSetInformationThread(
             }
             _SEH2_END;
 
-            /* Validate it */
-            if (IdealProcessor >= MAXIMUM_PROCESSORS)
+            /* Validate it, MAXIMUM_PROCESSORS only queries the current one */
+            if (IdealProcessor > MAXIMUM_PROCESSORS)
             {
                 /* Fail */
                 Status = STATUS_INVALID_PARAMETER;
@@ -3264,20 +3309,12 @@ NtSetInformationThread(
             if (!NT_SUCCESS(Status))
                 break;
 
-            /* Set the ideal */
-            KeSetIdealProcessorThread(&Thread->Tcb, (CCHAR)IdealProcessor);
-            Status = STATUS_SUCCESS;
+            /* Set the ideal, the previous one is returned as the status */
+            Status = (NTSTATUS)KeSetIdealProcessorThread(&Thread->Tcb,
+                                                         (CCHAR)IdealProcessor);
 
-            /* Get the TEB and protect the thread */
-            Teb = Thread->Tcb.Teb;
-            if (Teb && ExAcquireRundownProtection(&Thread->RundownProtect))
-            {
-                /* Save the ideal processor */
-                Teb->IdealProcessor = Thread->Tcb.IdealProcessor;
-
-                /* Release rundown protection */
-                ExReleaseRundownProtection(&Thread->RundownProtect);
-            }
+            /* Update the copy in the TEB */
+            PspUpdateTebIdealProcessor(Thread);
 
             /* Dereference the thread */
             ObDereferenceObject(Thread);
@@ -3287,6 +3324,14 @@ NtSetInformationThread(
         case ThreadIdealProcessorEx:
         {
             PROCESSOR_NUMBER ProcessorNumber;
+            UCHAR PreviousIdealProcessor;
+
+            /* Check buffer length */
+            if (ThreadInformationLength != sizeof(PROCESSOR_NUMBER))
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
 
             _SEH2_TRY
             {
@@ -3316,10 +3361,28 @@ NtSetInformationThread(
             if (!NT_SUCCESS(Status))
                 break;
 
-            KeSetIdealProcessorThread(&Thread->Tcb,
-                                      (CCHAR)ProcessorNumber.Number);
+            PreviousIdealProcessor =
+                KeSetIdealProcessorThread(&Thread->Tcb,
+                                          (CCHAR)ProcessorNumber.Number);
+
+            /* Keep the TEB copy the thread reads its ideal processor from */
+            PspUpdateTebIdealProcessor(Thread);
+
             ObDereferenceObject(Thread);
-            Status = STATUS_SUCCESS;
+
+            /* Like Windows, return the previous ideal processor in the buffer */
+            _SEH2_TRY
+            {
+                ((PPROCESSOR_NUMBER)ThreadInformation)->Group = 0;
+                ((PPROCESSOR_NUMBER)ThreadInformation)->Number = PreviousIdealProcessor;
+                ((PPROCESSOR_NUMBER)ThreadInformation)->Reserved = 0;
+                Status = STATUS_SUCCESS;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
             break;
         }
 
