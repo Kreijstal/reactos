@@ -1315,7 +1315,7 @@ static LONG CRYPT_OpenParentStore(DWORD dwFlags,
 BOOL WINAPI CertEnumSystemStore(DWORD dwFlags, void *pvSystemStoreLocationPara,
     void *pvArg, PFN_CERT_ENUM_SYSTEM_STORE pfnEnum)
 {
-    BOOL ret = FALSE;
+    BOOL ret = FALSE, root_listed = FALSE;
     LONG rc;
     HKEY key;
     CERT_SYSTEM_STORE_INFO info = { sizeof(info) };
@@ -1323,7 +1323,7 @@ BOOL WINAPI CertEnumSystemStore(DWORD dwFlags, void *pvSystemStoreLocationPara,
     TRACE("(%08lx, %p, %p, %p)\n", dwFlags, pvSystemStoreLocationPara, pvArg,
         pfnEnum);
 
-    rc = CRYPT_OpenParentStore(dwFlags, pvArg, &key);
+    rc = CRYPT_OpenParentStore(dwFlags, pvSystemStoreLocationPara, &key);
     if (!rc)
     {
         DWORD index = 0;
@@ -1336,17 +1336,23 @@ BOOL WINAPI CertEnumSystemStore(DWORD dwFlags, void *pvSystemStoreLocationPara,
             rc = RegEnumKeyExW(key, index++, name, &size, NULL, NULL, NULL,
                 NULL);
             if (!rc)
+            {
+                if (!lstrcmpiW(name, L"Root"))
+                    root_listed = TRUE;
                 ret = pfnEnum(name, dwFlags, &info, NULL, pvArg);
+            }
         } while (ret && !rc);
         if (ret && rc != ERROR_NO_MORE_ITEMS)
             SetLastError(rc);
+        RegCloseKey(key);
     }
     else
         SetLastError(rc);
-    /* Include root store for the local machine location (it isn't in the
-     * registry)
-     */
-    if (ret && (dwFlags & CERT_SYSTEM_STORE_LOCATION_MASK) ==
+    /* The local machine always has a root store, even before its registry
+     * key exists (CRYPT_ImportSystemRootCertsToReg creates it on first open).
+     * List it exactly once, as Windows does: callers such as the PowerShell
+     * certificate provider index the stores by name. */
+    if (ret && !root_listed && (dwFlags & CERT_SYSTEM_STORE_LOCATION_MASK) ==
      CERT_SYSTEM_STORE_LOCAL_MACHINE)
         ret = pfnEnum(L"Root", dwFlags, &info, NULL, pvArg);
     return ret;
