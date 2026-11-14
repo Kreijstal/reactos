@@ -452,7 +452,7 @@ DeviceEventWorker(HWND hwnd, WPARAM wParam, LPARAM lParam, DWORD Data, ULONG_PTR
     USER_API_MESSAGE ApiMessage;
     PUSER_DEVICE_EVENT_MSG pusem = &ApiMessage.Data.DeviceEventMsg;
 
-    pusem->hwnd = hwnd;
+    pusem->hwnd = TO_LPC_HANDLE(hwnd);
     pusem->wParam = wParam;
     pusem->lParam = lParam;
     pusem->Data = Data;

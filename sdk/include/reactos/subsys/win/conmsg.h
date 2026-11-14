@@ -338,7 +338,7 @@ typedef struct _CONSOLE_SETCURSOR
 {
     LPC_HANDLE  ConsoleHandle;
     LPC_HANDLE  OutputHandle;
-    HCURSOR CursorHandle;
+    LPC_PTRTYPE(HCURSOR) CursorHandle;
 } CONSOLE_SETCURSOR, *PCONSOLE_SETCURSOR;
 
 typedef struct _CONSOLE_GETSETCURSORINFO
@@ -443,6 +443,20 @@ typedef struct _CONSOLE_SETFONT
 
 
 
+/* CONSOLE_GRAPHICS_BUFFER_INFO as it travels in the message */
+#ifdef USE_LPC6432
+typedef struct _CONSOLE_GRAPHICS_BUFFER_INFO_MSG
+{
+    DWORD      dwBitMapInfoLength;
+    LPC_PVOID  lpBitMapInfo;
+    DWORD      dwUsage;
+    LPC_HANDLE hMutex;
+    LPC_PVOID  lpBitMap;
+} CONSOLE_GRAPHICS_BUFFER_INFO_MSG;
+#else
+typedef CONSOLE_GRAPHICS_BUFFER_INFO CONSOLE_GRAPHICS_BUFFER_INFO_MSG;
+#endif
+
 typedef struct _CONSOLE_CREATESCREENBUFFER
 {
     LPC_HANDLE ConsoleHandle;
@@ -455,7 +469,7 @@ typedef struct _CONSOLE_CREATESCREENBUFFER
      * This structure holds the initialization information
      * for graphics screen buffers.
      */
-    CONSOLE_GRAPHICS_BUFFER_INFO GraphicsBufferInfo;
+    CONSOLE_GRAPHICS_BUFFER_INFO_MSG GraphicsBufferInfo;
     LPC_HANDLE hMutex;
     LPC_PVOID  lpBitMap;
     LPC_HANDLE OutputHandle;     /* Handle to newly created screen buffer */
@@ -695,7 +709,7 @@ typedef struct _CONSOLE_MENUCONTROL
     LPC_HANDLE OutputHandle;
     ULONG  CmdIdLow;
     ULONG  CmdIdHigh;
-    HMENU  MenuHandle;
+    LPC_PTRTYPE(HMENU) MenuHandle;
 } CONSOLE_MENUCONTROL, *PCONSOLE_MENUCONTROL;
 
 typedef struct _CONSOLE_SETMENUCLOSE
@@ -902,7 +916,7 @@ typedef struct _CONSOLE_REGISTERCONSOLEIME
     LPC_PTRTYPE(HWND) hWnd;
     DWORD dwThreadId;
     DWORD cbDesktop;
-    LPWSTR pDesktop;
+    LPC_PTRTYPE(LPWSTR) pDesktop;
     DWORD dwAttachToThreadId;
 } CONSOLE_REGISTERCONSOLEIME, *PCONSOLE_REGISTERCONSOLEIME;
 

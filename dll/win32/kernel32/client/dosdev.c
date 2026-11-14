@@ -242,6 +242,7 @@ DefineDosDeviceW(
     PCSR_CAPTURE_BUFFER CaptureBuffer;
     UNICODE_STRING NtTargetPathU;
     UNICODE_STRING DeviceNameU;
+    UNICODE_STRING CapturedString;
     HANDLE hUser32;
     DEV_BROADCAST_VOLUME dbcv;
     DWORD dwRecipients;
@@ -326,8 +327,12 @@ DefineDosDeviceW(
                                                                                  DeviceNameU.MaximumLength,
                                                                                  (PVOID*)&DefineDosDeviceRequest->DeviceName.Buffer);
     
-    /* And copy it while upcasing it */
-    RtlUpcaseUnicodeString(&DefineDosDeviceRequest->DeviceName, &DeviceNameU, FALSE);
+    /* And copy it while upcasing it (the message string may be a 64-bit one) */
+    CapturedString.Length = 0;
+    CapturedString.MaximumLength = DefineDosDeviceRequest->DeviceName.MaximumLength;
+    CapturedString.Buffer = (PWSTR)(ULONG_PTR)DefineDosDeviceRequest->DeviceName.Buffer;
+    RtlUpcaseUnicodeString(&CapturedString, &DeviceNameU, FALSE);
+    DefineDosDeviceRequest->DeviceName.Length = CapturedString.Length;
 
     /* If we have a target path, copy it too, and free it if allocated */
     if (NtTargetPathU.Length != 0)
@@ -336,7 +341,11 @@ DefineDosDeviceW(
                                                                                      NtTargetPathU.MaximumLength,
                                                                                      (PVOID*)&DefineDosDeviceRequest->TargetPath.Buffer);
         
-        RtlCopyUnicodeString(&DefineDosDeviceRequest->TargetPath, &NtTargetPathU);
+        CapturedString.Length = 0;
+        CapturedString.MaximumLength = DefineDosDeviceRequest->TargetPath.MaximumLength;
+        CapturedString.Buffer = (PWSTR)(ULONG_PTR)DefineDosDeviceRequest->TargetPath.Buffer;
+        RtlCopyUnicodeString(&CapturedString, &NtTargetPathU);
+        DefineDosDeviceRequest->TargetPath.Length = CapturedString.Length;
 
         if (!(dwFlags & DDD_RAW_TARGET_PATH))
         {
@@ -346,7 +355,9 @@ DefineDosDeviceW(
     /* Otherwise, null initialize the string */
     else
     {
-        RtlInitUnicodeString(&DefineDosDeviceRequest->TargetPath, NULL);
+        DefineDosDeviceRequest->TargetPath.Length = 0;
+        DefineDosDeviceRequest->TargetPath.MaximumLength = 0;
+        DefineDosDeviceRequest->TargetPath.Buffer = 0;
     }
 
     /* Finally,  call the server */

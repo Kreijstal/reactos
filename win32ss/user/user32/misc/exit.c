@@ -214,7 +214,7 @@ EndTask(HWND hWnd,
     UNREFERENCED_PARAMETER(fShutDown);
 
     // EndTaskRequest->LastError = ERROR_SUCCESS;
-    EndTaskRequest->WndHandle = hWnd;
+    EndTaskRequest->WndHandle = TO_LPC_HANDLE(hWnd);
     EndTaskRequest->Force = fForce;
 
     CsrClientCallServer((PCSR_API_MESSAGE)&ApiMessage,
