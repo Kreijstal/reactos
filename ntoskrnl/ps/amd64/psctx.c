@@ -13,6 +13,27 @@
 #define NDEBUG
 #include <debug.h>
 
+/*
+ * XSAVEC. Not _xsavec64: clang declares it only with the xsavec target
+ * feature, which the kernel is not built with, and then calls it as an
+ * external function.
+ */
+FORCEINLINE
+VOID
+PspXSaveC64(
+    _Out_ PVOID Buffer,
+    _In_ ULONG64 Mask)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    __asm__ __volatile__("xsavec64 %0"
+                         : "=m" (*(PUCHAR)Buffer)
+                         : "a" ((ULONG)Mask), "d" ((ULONG)(Mask >> 32))
+                         : "memory");
+#else
+    _xsavec64(Buffer, Mask);
+#endif
+}
+
 /* FUNCTIONS ******************************************************************/
 
 static
@@ -268,7 +289,7 @@ PspGetThreadXStateContext(
         }
         else
         {
-            _xsavec64(XStateArea, Mask & SharedUserData->XState.EnabledFeatures);
+            PspXSaveC64(XStateArea, Mask & SharedUserData->XState.EnabledFeatures);
         }
     }
     else
