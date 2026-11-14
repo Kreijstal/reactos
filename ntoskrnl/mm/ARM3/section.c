@@ -721,6 +721,13 @@ MiSegmentDelete(IN PSEGMENT Segment)
     /* Release the PFN lock */
     MiReleasePfnLock(OldIrql);
 
+    /* Give back the commitment of every page that was committed in it */
+    if (Segment->NumberOfCommittedPages)
+    {
+        InterlockedExchangeAddSizeT(&MmSharedCommit, -(SSIZE_T)Segment->NumberOfCommittedPages);
+        MiReleaseCommitment(Segment->NumberOfCommittedPages);
+    }
+
     /* Free the structures */
     ExFreePool(ControlArea);
     ExFreePool(Segment);
@@ -1335,6 +1342,14 @@ MiMapViewOfDataSection(
         LastPte = PointerPte + BYTES_TO_PAGES(CommitSize);
         TempPte = Segment->SegmentPteTemplate;
 
+        /* Charge the pages against the commit limit, the excess is given back below */
+        if (!MiChargeCommitment(QuotaCharge, FALSE))
+        {
+            ExFreePoolWithTag(Vad, 'ldaV');
+            MiDereferenceControlArea(ControlArea);
+            return STATUS_COMMITMENT_LIMIT;
+        }
+
         /* Acquire the commit lock and loop all prototype PTEs to be committed */
         KeAcquireGuardedMutex(&MmSectionCommitMutex);
         while (PointerPte < LastPte)
@@ -1360,9 +1375,11 @@ MiMapViewOfDataSection(
         QuotaCharge -= QuotaExcess;
         Segment->NumberOfCommittedPages += QuotaCharge;
         ASSERT(Segment->NumberOfCommittedPages <= Segment->TotalNumberOfPtes);
+        InterlockedExchangeAddSizeT(&MmSharedCommit, QuotaCharge);
 
         /* Now that we're done, release the lock */
         KeReleaseGuardedMutex(&MmSectionCommitMutex);
+        if (QuotaExcess) MiReleaseCommitment(QuotaExcess);
     }
 
     /* Is it SEC_BASED, or did the caller manually specify an address? */
@@ -1384,12 +1401,10 @@ MiMapViewOfDataSection(
     Status = PsChargeProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
     if (!NT_SUCCESS(Status))
     {
+        /* The prototype PTEs committed above stay committed (and charged)
+           in the segment until it is deleted */
         ExFreePoolWithTag(Vad, 'ldaV');
         MiDereferenceControlArea(ControlArea);
-
-        KeAcquireGuardedMutex(&MmSectionCommitMutex);
-        Segment->NumberOfCommittedPages -= QuotaCharge;
-        KeReleaseGuardedMutex(&MmSectionCommitMutex);
         return Status;
     }
 
@@ -1409,12 +1424,10 @@ MiMapViewOfDataSection(
                            AllocationType);
     if (!NT_SUCCESS(Status))
     {
+        /* The prototype PTEs committed above stay committed (and charged)
+           in the segment until it is deleted */
         ExFreePoolWithTag(Vad, 'ldaV');
         MiDereferenceControlArea(ControlArea);
-
-        KeAcquireGuardedMutex(&MmSectionCommitMutex);
-        Segment->NumberOfCommittedPages -= QuotaCharge;
-        KeReleaseGuardedMutex(&MmSectionCommitMutex);
 
         PsReturnProcessNonPagedPoolQuota(PsGetCurrentProcess(), sizeof(MMVAD_LONG));
         return Status;
@@ -1482,8 +1495,17 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
     /* Calculate how many Prototype PTEs will be needed */
     PteCount = (PFN_COUNT)((MaximumSize + PAGE_SIZE - 1) >> PAGE_SHIFT);
 
-    /* For commited memory, we must have a valid protection mask */
-    if (AllocationAttributes & SEC_COMMIT) ASSERT(ProtectionMask != 0);
+    /* A committed section promises all of its pages up front, a reserved one
+       none: those are charged when they get committed through a view */
+    if (AllocationAttributes & SEC_COMMIT)
+    {
+        /* For commited memory, we must have a valid protection mask */
+        ASSERT(ProtectionMask != 0);
+        if (!MiChargeCommitment(PteCount, FALSE))
+        {
+            return STATUS_COMMITMENT_LIMIT;
+        }
+    }
 
     /* The segment contains all the Prototype PTEs, allocate it in paged pool */
     NewSegment = ExAllocatePoolWithTag(PagedPool,
@@ -1492,6 +1514,7 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
                                        'tSmM');
     if (!NewSegment)
     {
+        if (AllocationAttributes & SEC_COMMIT) MiReleaseCommitment(PteCount);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     *Segment = NewSegment;
@@ -1503,6 +1526,7 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
     if (!ControlArea)
     {
         ExFreePoolWithTag(NewSegment, 'tSmM');
+        if (AllocationAttributes & SEC_COMMIT) MiReleaseCommitment(PteCount);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -1550,6 +1574,7 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
 
         /* For accounting, also mark these pages as being committed */
         NewSegment->NumberOfCommittedPages = PteCount;
+        InterlockedExchangeAddSizeT(&MmSharedCommit, PteCount);
     }
 
     /* The template PTE itself for the segment should also have the mask set */
@@ -3146,6 +3171,14 @@ MmCommitSessionMappedView(IN PVOID MappedBase,
         KeReleaseGuardedMutexUnsafe(&MmSectionCommitMutex);
         KeReleaseGuardedMutex(Session->SystemSpaceViewLockPointer);
         return STATUS_SUCCESS;
+    }
+
+    /* Charge the pages that are about to be committed against the commit limit */
+    if (!MiChargeCommitment(QuotaCharge, FALSE))
+    {
+        KeReleaseGuardedMutexUnsafe(&MmSectionCommitMutex);
+        KeReleaseGuardedMutex(Session->SystemSpaceViewLockPointer);
+        return STATUS_COMMITMENT_LIMIT;
     }
 
     /* Pick the segment and template PTE */
