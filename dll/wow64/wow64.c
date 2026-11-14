@@ -1530,6 +1530,10 @@ Wow64Trampoline(PCONTEXT pContext)
     pSavedCtx = (PCONTEXT)NtCurrentTeb()->TlsSlots[WOW64_TLS_WOW64INFO];
     NtCurrentTeb()->TlsSlots[WOW64_TLS_WOW64INFO] = NULL;
 
+    /* The 32-bit loader has loaded kernel32 now, perhaps not where the
+       translation found its start thunks */
+    pSavedCtx->Rip = Wow64RebaseEntrypoints32(NtCurrentPeb32(), (ULONG)pSavedCtx->Rip);
+
     /* LdrInitializeThunk returned after init -- transfer to the
        application entry point via NtContinue. */
     NtContinue(pSavedCtx, FALSE);
