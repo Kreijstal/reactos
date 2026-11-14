@@ -26,6 +26,7 @@ list(APPEND SOURCE
     GetModuleFileName.c
     GetOverlappedResultEx.c
     GetVolumeInformation.c
+    ILOnlyImage.c
     InitOnce.c
     interlck.c
     IsDBCSLeadByteEx.c
