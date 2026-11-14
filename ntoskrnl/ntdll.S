@@ -49,7 +49,20 @@
  * the 64-bit host (Wow64SystemServiceEx) can reach native NtReadVirtualMemory
  * with a full 64-bit address.  They MUST follow the standard table in the same
  * order as the dll/wow64/sysfuncnum.h enum so the service numbers match.
+ * That enum counts the whole of sysfuncs.h, the NT6 entries ntdll_nt6.S emits
+ * included, so skip their numbers here first.
  */
+#undef SVC_
+#undef SVC_WRAP_
+#undef SYSFUNCS_NT5_ONLY
+#define SYSFUNCS_NT6_ONLY
+#define SVC_(name, argcount) SyscallId = SyscallId + 1
+#define SVC_WRAP_(name, argcount) SyscallId = SyscallId + 1
+#include <sysfuncs.h>
+#undef SVC_
+#undef SVC_WRAP_
+#undef SYSFUNCS_NT6_ONLY
+
     STUB_U Wow64AllocateVirtualMemory64, 7
     STUB_U Wow64ReadVirtualMemory64, 7
     STUB_U Wow64WriteVirtualMemory64, 7
