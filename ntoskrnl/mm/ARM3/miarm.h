@@ -1018,6 +1018,27 @@ MI_IS_MAPPED_PTE(PMMPTE PointerPte)
 
 #endif
 
+//
+// The prototype PTEs of a pagefile-backed section live in paged pool, whose
+// pages stay demand-zero until something writes to them (paged pool is never
+// paged out). A page of prototype PTEs that is still demand-zero has never
+// been written: every prototype PTE in it is zero (reserved, not committed),
+// and reading one would only materialize a zero page - for a huge SEC_RESERVE
+// section, gigabytes of them. Walkers of the prototype PTE array use this to
+// skip such pages without touching them.
+//
+FORCEINLINE
+BOOLEAN
+MiIsPrototypePtePageDemandZero(IN PMMPTE PrototypePte)
+{
+    MMPTE TempPte = *MiAddressToPte(PrototypePte);
+
+    return ((TempPte.u.Hard.Valid == 0) &&
+            (TempPte.u.Soft.Prototype == 0) &&
+            (TempPte.u.Soft.Transition == 0) &&
+            (TempPte.u.Soft.PageFileHigh == 0));
+}
+
 FORCEINLINE
 VOID
 MI_MAKE_TRANSITION_PTE(_Out_ PMMPTE NewPte,
