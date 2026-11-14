@@ -221,6 +221,15 @@
 @ stdcall EnumServicesStatusW(long long long ptr long ptr ptr ptr)
 @ stdcall -version=0x502 EnumerateTraceGuids(ptr long ptr) ntdll.EtwEnumerateTraceGuids
 @ stdcall -stub -version=0x600+ EnumerateTraceGuids(ptr long ptr) # EtwEnumerateTraceGuids
+@ stdcall -version=0x600+ EventActivityIdControl(long ptr) ntdll.EtwEventActivityIdControl
+@ stdcall -version=0x600+ EventEnabled(int64 ptr) ntdll.EtwEventEnabled
+@ stdcall -version=0x600+ EventProviderEnabled(int64 long int64) ntdll.EtwEventProviderEnabled
+@ stdcall -version=0x600+ EventRegister(ptr ptr ptr ptr) ntdll.EtwEventRegister
+@ stdcall -version=0x600+ EventSetInformation(int64 long ptr long) ntdll.EtwEventSetInformation
+@ stdcall -version=0x600+ EventUnregister(int64) ntdll.EtwEventUnregister
+@ stdcall -version=0x600+ EventWrite(int64 ptr long ptr) ntdll.EtwEventWrite
+@ stdcall -version=0x600+ EventWriteString(int64 long int64 wstr) ntdll.EtwEventWriteString
+@ stdcall -version=0x600+ EventWriteTransfer(int64 ptr ptr ptr long ptr) ntdll.EtwEventWriteTransfer
 @ stdcall EqualDomainSid(ptr ptr ptr)
 @ stdcall EqualPrefixSid(ptr ptr)
 @ stdcall EqualSid(ptr ptr)
