@@ -50,6 +50,7 @@ extern void func_NtFilterToken(void);
 extern void func_NtFreeVirtualMemory(void);
 extern void func_NtImpersonateAnonymousToken(void);
 extern void func_NtLoadUnloadKey(void);
+extern void func_NtCreateSectionHuge(void);
 extern void func_NtMapViewOfSection(void);
 extern void func_NtMutant(void);
 extern void func_NtNotifyChangeMultipleKeys(void);
@@ -193,6 +194,7 @@ const struct test winetest_testlist[] =
     { "NtFreeVirtualMemory",            func_NtFreeVirtualMemory },
     { "NtImpersonateAnonymousToken",    func_NtImpersonateAnonymousToken },
     { "NtLoadUnloadKey",                func_NtLoadUnloadKey },
+    { "NtCreateSectionHuge",            func_NtCreateSectionHuge },
     { "NtMapViewOfSection",             func_NtMapViewOfSection },
     { "NtMutant",                       func_NtMutant },
     { "NtNotifyChangeMultipleKeys",     func_NtNotifyChangeMultipleKeys },
