@@ -120,6 +120,7 @@ extern void func_RtlMemIoResource(void);
 extern void func_RtlMemoryStream(void);
 extern void func_RtlMultipleAllocateHeap(void);
 extern void func_RtlNtPathNameToDosPathName(void);
+extern void func_RtlPlaceholderCompatibilityMode(void);
 extern void func_RtlpApplyLengthFunction(void);
 extern void func_RtlpEnsureBufferSize(void);
 extern void func_RtlQueryEnvironmentVariable(void);
@@ -261,6 +262,7 @@ const struct test winetest_testlist[] =
     { "RtlMemoryStream",                func_RtlMemoryStream },
     { "RtlMultipleAllocateHeap",        func_RtlMultipleAllocateHeap },
     { "RtlNtPathNameToDosPathName",     func_RtlNtPathNameToDosPathName },
+    { "RtlPlaceholderCompatibilityMode", func_RtlPlaceholderCompatibilityMode },
     { "RtlpApplyLengthFunction",        func_RtlpApplyLengthFunction },
     { "RtlpEnsureBufferSize",           func_RtlpEnsureBufferSize },
     { "RtlQueryEnvironmentVariable",    func_RtlQueryEnvironmentVariable },
