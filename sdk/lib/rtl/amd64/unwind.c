@@ -1416,6 +1416,32 @@ VOID
 RtlpRestoreContextInternal(
     _In_ PCONTEXT ContextRecord);
 
+/*
+ * Loads the extended (non-legacy) state of a CONTEXT_XSTATE context. The
+ * XSAVE image is the XState chunk preceded by a legacy region that belongs
+ * to the CONTEXT itself; restoring the AVX component may reload MXCSR from
+ * that region, so it temporarily holds the context's MXCSR, like Windows.
+ * Nothing between this and RtlpRestoreContextInternal uses VEX encodings,
+ * which keeps the restored upper register halves intact.
+ */
+static
+VOID
+RtlpRestoreExtendedState(
+    _In_ PCONTEXT ContextRecord)
+{
+    PCONTEXT_EX ContextEx = (PCONTEXT_EX)(ContextRecord + 1);
+    PXSAVE_AREA XSaveArea;
+    ULONG SavedMxCsr;
+
+    XSaveArea = (PXSAVE_AREA)((PUCHAR)ContextEx + ContextEx->XState.Offset -
+                              sizeof(XSAVE_FORMAT));
+    SavedMxCsr = XSaveArea->LegacyState.MxCsr;
+    XSaveArea->LegacyState.MxCsr = ContextRecord->MxCsr;
+    _xrstor64(XSaveArea,
+              SharedUserData->XState.EnabledVolatileFeatures & ~XSTATE_MASK_LEGACY);
+    XSaveArea->LegacyState.MxCsr = SavedMxCsr;
+}
+
 VOID
 RtlRestoreContext(
     _In_ PCONTEXT ContextRecord,
@@ -1458,6 +1484,13 @@ RtlRestoreContext(
             ContextRecord->Xmm14 = *(M128A*)&JumpBuffer->Xmm14;
             ContextRecord->Xmm15 = *(M128A*)&JumpBuffer->Xmm15;
         }
+    }
+
+    /* User mode contexts (RPL 3 code selector) can carry extended state */
+    if ((ContextRecord->SegCs & 1) &&
+        ((ContextRecord->ContextFlags & CONTEXT_XSTATE) == CONTEXT_XSTATE))
+    {
+        RtlpRestoreExtendedState(ContextRecord);
     }
 
     RtlpRestoreContextInternal(ContextRecord);
