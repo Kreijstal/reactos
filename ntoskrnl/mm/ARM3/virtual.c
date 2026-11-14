@@ -1684,8 +1684,40 @@ MiQueryAddressState(IN PVOID Va,
             /* The PTE is valid, so it's not zeroed out */
             DemandZeroPte = FALSE;
 
+            /* A view PTE pointing at a prototype PTE: the page is committed
+               only if the prototype PTE is. A fault on a reserved page of a
+               SEC_RESERVE view leaves such a PTE behind */
+            if ((TempPte.u.Hard.Valid == 0) &&
+                (TempPte.u.Soft.Prototype == 1) &&
+                (Vad->u.VadFlags.PrivateMemory == 0) &&
+                (Vad->ControlArea))
+            {
+                ASSERT(Vad->u.VadFlags.VadType != VadImageMap);
+                if (TempPte.u.Soft.PageFileHigh == MI_PTE_LOOKUP_NEEDED)
+                    ProtoPte = MI_GET_PROTOTYPE_PTE_FOR_VPN(Vad, (ULONG_PTR)Va >> PAGE_SHIFT);
+                else
+                    ProtoPte = MiProtoPteToPte(&TempPte);
+
+                /* The working set lock is held: paged pool cannot be faulted
+                   in, and it is never paged out once written */
+                if (MiIsPrototypePtePageDemandZero(ProtoPte))
+                {
+                    TempProtoPte.u.Long = 0;
+                }
+                else
+                {
+                    ASSERT(MiAddressToPte(ProtoPte)->u.Hard.Valid == 1);
+                    TempProtoPte = *ProtoPte;
+                }
+
+                if (TempProtoPte.u.Long != 0)
+                {
+                    State = MEM_COMMIT;
+                    Protect = MiGetPageProtection(PointerPte);
+                }
+            }
             /* Is it a decommited, invalid, or faulted PTE? */
-            if ((TempPte.u.Soft.Protection == MM_DECOMMIT) &&
+            else if ((TempPte.u.Soft.Protection == MM_DECOMMIT) &&
                 (TempPte.u.Hard.Valid == 0) &&
                 ((TempPte.u.Soft.Prototype == 0) ||
                  (TempPte.u.Soft.PageFileHigh == MI_PTE_LOOKUP_NEEDED)))
@@ -1738,10 +1770,15 @@ MiQueryAddressState(IN PVOID Va,
                                                     (ULONG_PTR)Va >> PAGE_SHIFT);
             if (ProtoPte)
             {
-                /* We should unlock the working set, but it's not being held! */
+                /* A page of prototype PTEs nobody wrote has nothing committed in
+                   it. Don't touch it: the working set lock is held, so paged
+                   pool cannot be faulted in here */
+                if (MiIsPrototypePtePageDemandZero(ProtoPte))
+                    TempProtoPte.u.Long = 0;
+                else
+                    TempProtoPte = *ProtoPte;
 
                 /* Is the prototype PTE actually valid (committed)? */
-                TempProtoPte = *ProtoPte;
                 if (TempProtoPte.u.Long)
                 {
                     /* Unless this is a memory-mapped file, handle it like private VAD */
