@@ -345,11 +345,283 @@ Close:
     }
 }
 
+/* The prototype PTEs of a reserved section are left unwritten in paged pool
+ * pages nobody has touched yet; the first commit (or access) in a 2 MB chunk
+ * of the section brings in the page holding its 512 prototype PTEs. That page
+ * must read as zero (reserved): a page recycled from the free list still
+ * holds whatever its last owner wrote. Feed the free list with pages that
+ * read like committed prototype PTEs right before each first touch, from
+ * several threads at once, and check that nothing but the committed page of
+ * each chunk shows up as committed. */
+#define FRESH_SECTION_SIZE  0x1000000000ULL       /* 64 GB */
+#define FRESH_VIEW_SIZE     0x80000000ULL         /* 2 GB = 1024 chunks */
+#define FRESH_CHUNK         0x200000ULL           /* covered by one page of prototype PTEs */
+#define FRESH_CHUNKS        (FRESH_VIEW_SIZE / FRESH_CHUNK)
+#define FRESH_COMMIT_CHUNKS (FRESH_CHUNKS / 2)    /* commit in the first half, read in the second */
+#define FRESH_THREADS       4
+#define FRESH_DIRTY_SIZE    (8 * 0x100000)
+/* A demand-zero PTE with PAGE_READWRITE protection: a committed prototype PTE */
+#define FRESH_GARBAGE       0x80ULL
+
+typedef struct _FRESH_CONTEXT
+{
+    PUCHAR View;
+    ULONG Index;
+    ULONG CommitFailures;
+    ULONG MissingFaults;
+} FRESH_CONTEXT, *PFRESH_CONTEXT;
+
+static
+VOID
+DirtyFreePages(VOID)
+{
+    NTSTATUS Status;
+    PVOID Address = NULL;
+    SIZE_T Size = FRESH_DIRTY_SIZE;
+    PULONGLONG Pointer;
+    SIZE_T i;
+
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &Size,
+                                     MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!NT_SUCCESS(Status))
+        return;
+    for (Pointer = Address, i = 0; i < FRESH_DIRTY_SIZE / sizeof(ULONGLONG); i++)
+        Pointer[i] = FRESH_GARBAGE;
+    Size = 0;
+    NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, MEM_RELEASE);
+}
+
+static
+ULONG
+NTAPI
+FreshPrototypePteThread(PVOID Parameter)
+{
+    PFRESH_CONTEXT Context = Parameter;
+    ULONG Chunk;
+    NTSTATUS Status;
+    PVOID Address;
+    SIZE_T Size;
+    UCHAR Value;
+
+    /* Chunk 0 shares its page of prototype PTEs with the segment header */
+    for (Chunk = 1 + Context->Index; Chunk < FRESH_CHUNKS; Chunk += FRESH_THREADS)
+    {
+        DirtyFreePages();
+        Address = Context->View + Chunk * FRESH_CHUNK;
+        if (Chunk < FRESH_COMMIT_CHUNKS)
+        {
+            Size = PAGE_SIZE;
+            Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &Size,
+                                             MEM_COMMIT, PAGE_READWRITE);
+            if (!NT_SUCCESS(Status))
+                Context->CommitFailures++;
+        }
+        else
+        {
+            /* The first access to a chunk brings in its prototype PTEs, and
+               must still find the page reserved */
+            if (ReadByte(Address, &Value))
+                Context->MissingFaults++;
+        }
+    }
+    RtlExitUserThread(STATUS_SUCCESS);
+    return 0;
+}
+
+static
+VOID
+TestFreshPrototypePtePages(VOID)
+{
+    NTSTATUS Status;
+    HANDLE Section, Threads[FRESH_THREADS];
+    FRESH_CONTEXT Contexts[FRESH_THREADS];
+    LARGE_INTEGER SectionOffset;
+    MEMORY_BASIC_INFORMATION Info;
+    PUCHAR View = NULL, Address;
+    SIZE_T Size = FRESH_VIEW_SIZE;
+    ULONG i, Chunk, CommitFailures = 0, MissingFaults = 0, BadCommitted = 0, BadReserved = 0, BadData = 0;
+    UCHAR Value;
+
+    Status = CreateReserveSection(&Section, FRESH_SECTION_SIZE);
+    if (IsOutOfPrototypePtes(Status))
+    {
+        skip("64 GB section needs more paged pool (0x%lx)\n", Status);
+        return;
+    }
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    SectionOffset.QuadPart = 0;
+    Status = NtMapViewOfSection(Section, NtCurrentProcess(), (PVOID*)&View, 0, 0, &SectionOffset,
+                                &Size, ViewUnmap, 0, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        NtClose(Section);
+        return;
+    }
+
+    for (i = 0; i < FRESH_THREADS; i++)
+    {
+        Contexts[i].View = View;
+        Contexts[i].Index = i;
+        Contexts[i].CommitFailures = 0;
+        Contexts[i].MissingFaults = 0;
+        Status = RtlCreateUserThread(NtCurrentProcess(), NULL, FALSE, 0, 0, 0,
+                                     FreshPrototypePteThread, &Contexts[i], &Threads[i], NULL);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            Threads[i] = NULL;
+    }
+    for (i = 0; i < FRESH_THREADS; i++)
+    {
+        if (!Threads[i])
+            continue;
+        NtWaitForSingleObject(Threads[i], FALSE, NULL);
+        NtClose(Threads[i]);
+        CommitFailures += Contexts[i].CommitFailures;
+        MissingFaults += Contexts[i].MissingFaults;
+    }
+
+    for (Chunk = 1; Chunk < FRESH_CHUNKS; Chunk++)
+    {
+        Address = View + Chunk * FRESH_CHUNK;
+        if (Chunk < FRESH_COMMIT_CHUNKS)
+        {
+            /* The committed page is a zero page and holds data */
+            Status = NtQueryVirtualMemory(NtCurrentProcess(), Address, MemoryBasicInformation,
+                                          &Info, sizeof(Info), NULL);
+            if (!NT_SUCCESS(Status) || (Info.State != MEM_COMMIT) || (Info.RegionSize != PAGE_SIZE))
+                BadCommitted++;
+            Value = 0xFF;
+            if (!ReadByte(Address, &Value) || (Value != 0))
+                BadData++;
+            _SEH2_TRY
+            {
+                Address[1] = 0x42;
+                if (Address[1] != 0x42)
+                    BadData++;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                BadData++;
+            }
+            _SEH2_END;
+            Address += PAGE_SIZE;
+        }
+
+        /* Everything else in the chunk is still reserved */
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), Address, MemoryBasicInformation,
+                                      &Info, sizeof(Info), NULL);
+        if (!NT_SUCCESS(Status) || (Info.State != MEM_RESERVE))
+            BadReserved++;
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), View + (Chunk + 1) * FRESH_CHUNK - PAGE_SIZE,
+                                      MemoryBasicInformation, &Info, sizeof(Info), NULL);
+        if (!NT_SUCCESS(Status) || (Info.State != MEM_RESERVE))
+            BadReserved++;
+    }
+
+    ok(CommitFailures == 0, "%lu of %lu commits failed\n", CommitFailures, (ULONG)FRESH_COMMIT_CHUNKS - 1);
+    ok(MissingFaults == 0, "%lu of %lu reads of a reserved page did not fault\n",
+       MissingFaults, (ULONG)(FRESH_CHUNKS - FRESH_COMMIT_CHUNKS));
+    ok(BadCommitted == 0, "%lu committed pages are not committed alone\n", BadCommitted);
+    ok(BadData == 0, "%lu committed pages do not read back zero or written data\n", BadData);
+    ok(BadReserved == 0, "%lu reserved pages read as committed\n", BadReserved);
+
+    NtUnmapViewOfSection(NtCurrentProcess(), View);
+    NtClose(Section);
+}
+
+/* Every page committed in a section is charged once and given back when the
+ * section goes away: creating, committing and closing sections over and over
+ * must not eat into the commit limit */
+#define CHARGE_ROUNDS       16
+#define CHARGE_SECTION_SIZE (64 * 0x100000)
+#define CHARGE_COMMIT_PAGES 1024
+static
+VOID
+TestCommitChargeReturned(VOID)
+{
+    NTSTATUS Status;
+    SYSTEM_PERFORMANCE_INFORMATION Before, After;
+    LARGE_INTEGER SectionOffset, MaximumSize;
+    HANDLE Section;
+    PUCHAR View;
+    PVOID Address;
+    SIZE_T Size, i;
+    ULONG Round;
+
+    if (!QueryPerformance(&Before))
+        return;
+    for (Round = 0; Round < CHARGE_ROUNDS; Round++)
+    {
+        /* Reserved, committed through a view (twice), touched */
+        Status = CreateReserveSection(&Section, CHARGE_SECTION_SIZE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            return;
+        View = NULL;
+        Size = 0;
+        SectionOffset.QuadPart = 0;
+        Status = NtMapViewOfSection(Section, NtCurrentProcess(), (PVOID*)&View, 0, 0, &SectionOffset,
+                                    &Size, ViewUnmap, 0, PAGE_READWRITE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            Address = View + 4 * 0x100000;
+            Size = CHARGE_COMMIT_PAGES * PAGE_SIZE;
+            Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &Size, MEM_COMMIT, PAGE_READWRITE);
+            ok_ntstatus(Status, STATUS_SUCCESS);
+            Address = View + 4 * 0x100000;
+            Size = CHARGE_COMMIT_PAGES * PAGE_SIZE;
+            Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &Size, MEM_COMMIT, PAGE_READWRITE);
+            ok_ntstatus(Status, STATUS_SUCCESS);
+            if (NT_SUCCESS(Status))
+            {
+                for (i = 0; i < CHARGE_COMMIT_PAGES; i++)
+                    View[4 * 0x100000 + i * PAGE_SIZE] = (UCHAR)i;
+            }
+            NtUnmapViewOfSection(NtCurrentProcess(), View);
+        }
+        NtClose(Section);
+
+        /* Committed at creation, mapped, touched */
+        MaximumSize.QuadPart = CHARGE_COMMIT_PAGES * PAGE_SIZE;
+        Status = NtCreateSection(&Section, SECTION_ALL_ACCESS, NULL, &MaximumSize,
+                                 PAGE_READWRITE, SEC_COMMIT, NULL);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            return;
+        View = NULL;
+        Size = 0;
+        Status = NtMapViewOfSection(Section, NtCurrentProcess(), (PVOID*)&View, 0, 0, NULL,
+                                    &Size, ViewUnmap, 0, PAGE_READWRITE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            for (i = 0; i < CHARGE_COMMIT_PAGES; i++)
+                View[i * PAGE_SIZE] = (UCHAR)i;
+            NtUnmapViewOfSection(NtCurrentProcess(), View);
+        }
+        NtClose(Section);
+    }
+    if (!QueryPerformance(&After))
+        return;
+
+    trace("%u rounds: committed pages %lu -> %lu\n", CHARGE_ROUNDS, Before.CommittedPages, After.CommittedPages);
+    ok((LONG)(After.CommittedPages - Before.CommittedPages) < CHARGE_COMMIT_PAGES / 2,
+       "%u rounds of %u committed section pages left %ld pages charged\n",
+       CHARGE_ROUNDS, 2 * CHARGE_COMMIT_PAGES, (LONG)(After.CommittedPages - Before.CommittedPages));
+}
+
 START_TEST(NtCreateSectionHuge)
 {
     /* First, while paged pool has no multi-GB holes yet */
     TestSecondSectionAboveFourGigabytes();
     TestReserveConsumesNothing();
+    TestFreshPrototypePtePages();
+    TestCommitChargeReturned();
     TestDoubleMapping(0x40000000ULL);      /* 1 GB */
     TestDoubleMapping(0x1000000000ULL);    /* 64 GB */
     TestDoubleMapping(0x10000000000ULL);   /* 1 TB */
