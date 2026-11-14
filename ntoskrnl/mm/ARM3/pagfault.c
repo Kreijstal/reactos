@@ -729,6 +729,19 @@ MiResolveDemandZeroFault(IN PVOID Address,
             NeedZero = TRUE;
         }
 
+        /*
+         * Paged pool pages that nobody wrote yet hold the prototype PTEs of
+         * the reserved part of a pagefile-backed section: MiCreatePagingFileMap
+         * leaves them unwritten, and MiIsPrototypePtePageDemandZero takes such
+         * a page to hold only zero (reserved) prototype PTEs. The first access
+         * to one, a commit through a view or a fault on the view, must then
+         * find zeroes, not what the page's last owner left in it.
+         */
+        if ((Address >= MmPagedPoolStart) && (Address <= MmPagedPoolEnd))
+        {
+            NeedZero = TRUE;
+        }
+
         /* Hardcode unknown color */
         Color = 0xFFFFFFFF;
     }
