@@ -25,6 +25,7 @@ extern void func_GetLocaleInfo(void);
 extern void func_GetModuleFileName(void);
 extern void func_GetOverlappedResultEx(void);
 extern void func_GetVolumeInformation(void);
+extern void func_ILOnlyImage(void);
 extern void func_InitOnce(void);
 extern void func_interlck(void);
 extern void func_IsDBCSLeadByteEx(void);
@@ -82,6 +83,7 @@ const struct test winetest_testlist[] =
     { "GetModuleFileName",           func_GetModuleFileName },
     { "GetOverlappedResultEx",       func_GetOverlappedResultEx },
     { "GetVolumeInformation",        func_GetVolumeInformation },
+    { "ILOnlyImage",                 func_ILOnlyImage },
     { "InitOnce",                    func_InitOnce },
     { "interlck",                    func_interlck },
     { "IsDBCSLeadByteEx",            func_IsDBCSLeadByteEx },

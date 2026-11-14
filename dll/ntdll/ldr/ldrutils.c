@@ -762,6 +762,86 @@ LdrpResolveDllName(PWSTR DllPath,
     return TRUE;
 }
 
+#ifdef _WIN64
+/*
+ * An IL-only image built for any CPU carries a PE32 header. Like Windows,
+ * a 64-bit process converts that header in place to PE32+ so the rest of
+ * the loader, and the runtime, see a native header.
+ */
+static
+NTSTATUS
+LdrpCorFixupImage(
+    _In_ PVOID ImageBase)
+{
+    PIMAGE_NT_HEADERS32 NtHeaders32;
+    PIMAGE_NT_HEADERS64 NtHeaders64;
+    PIMAGE_COR20_HEADER CorHeader;
+    PUCHAR SectionsEnd;
+    PVOID ProtectBase;
+    SIZE_T ProtectSize;
+    ULONG CorSize, OldProtect;
+    NTSTATUS Status;
+
+    NtHeaders32 = (PIMAGE_NT_HEADERS32)RtlImageNtHeader(ImageBase);
+    NtHeaders64 = (PIMAGE_NT_HEADERS64)NtHeaders32;
+    CorHeader = RtlImageDirectoryEntryToData(ImageBase,
+                                             TRUE,
+                                             IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR,
+                                             &CorSize);
+
+    if ((NtHeaders32->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) ||
+        (NtHeaders32->FileHeader.Machine != IMAGE_FILE_MACHINE_I386) ||
+        (CorHeader->Flags & COMIMAGE_FLAGS_32BITREQUIRED))
+    {
+        /* Nothing to convert, the image must be one this system runs */
+        if ((NtHeaders32->FileHeader.Machine < SharedUserData->ImageNumberLow) ||
+            (NtHeaders32->FileHeader.Machine > SharedUserData->ImageNumberHigh))
+        {
+            return STATUS_INVALID_IMAGE_FORMAT;
+        }
+        return STATUS_SUCCESS;
+    }
+
+    /* The longer optional header must still fit in the header page */
+    SectionsEnd = (PUCHAR)IMAGE_FIRST_SECTION(NtHeaders32) +
+                  NtHeaders32->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER);
+    if ((ULONG_PTR)(SectionsEnd - (PUCHAR)ImageBase) + 0x10 > PAGE_SIZE)
+        return STATUS_INVALID_IMAGE_FORMAT;
+
+    ProtectBase = ImageBase;
+    ProtectSize = PAGE_SIZE;
+    Status = NtProtectVirtualMemory(NtCurrentProcess(),
+                                    &ProtectBase,
+                                    &ProtectSize,
+                                    PAGE_READWRITE,
+                                    &OldProtect);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* Move the data directories and section table up, then widen the fields
+       in front of them, from the last one backwards */
+    RtlMoveMemory(NtHeaders64->OptionalHeader.DataDirectory,
+                  NtHeaders32->OptionalHeader.DataDirectory,
+                  SectionsEnd - (PUCHAR)NtHeaders32->OptionalHeader.DataDirectory);
+    NtHeaders64->OptionalHeader.NumberOfRvaAndSizes = NtHeaders32->OptionalHeader.NumberOfRvaAndSizes;
+    NtHeaders64->OptionalHeader.LoaderFlags = NtHeaders32->OptionalHeader.LoaderFlags;
+    NtHeaders64->OptionalHeader.SizeOfHeapCommit = NtHeaders32->OptionalHeader.SizeOfHeapCommit;
+    NtHeaders64->OptionalHeader.SizeOfHeapReserve = NtHeaders32->OptionalHeader.SizeOfHeapReserve;
+    NtHeaders64->OptionalHeader.SizeOfStackCommit = NtHeaders32->OptionalHeader.SizeOfStackCommit;
+    NtHeaders64->OptionalHeader.SizeOfStackReserve = NtHeaders32->OptionalHeader.SizeOfStackReserve;
+    NtHeaders64->OptionalHeader.ImageBase = NtHeaders32->OptionalHeader.ImageBase;
+    NtHeaders64->FileHeader.SizeOfOptionalHeader += 0x10;
+    NtHeaders64->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+
+    NtProtectVirtualMemory(NtCurrentProcess(),
+                           &ProtectBase,
+                           &ProtectSize,
+                           OldProtect,
+                           &OldProtect);
+    return STATUS_SUCCESS;
+}
+#endif /* _WIN64 */
+
 PVOID
 NTAPI
 LdrpFetchAddressOfEntryPoint(IN PVOID ImageBase)
@@ -1017,6 +1097,9 @@ LdrpMapDll(IN PWSTR SearchPath OPTIONAL,
     PVOID ViewBase = NULL;
     PVOID ArbitraryUserPointer;
     PIMAGE_NT_HEADERS NtHeaders;
+    PIMAGE_COR20_HEADER CorHeader;
+    ULONG CorHeaderSize;
+    BOOLEAN IsIlOnly;
     NTSTATUS HardErrorStatus, Status;
     BOOLEAN OverlapDllFound = FALSE;
     ULONG_PTR ImageBase, ImageEnd;
@@ -1196,7 +1279,26 @@ SkipCheck:
         return STATUS_INVALID_IMAGE_FORMAT;
     }
 
-    // FIXME: .NET support is missing
+    /* An IL-only .NET image is mapped for the runtime: no entry point, no
+       fixups, no imports to snap, like Windows does it */
+    CorHeader = RtlImageDirectoryEntryToData(ViewBase,
+                                             TRUE,
+                                             IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR,
+                                             &CorHeaderSize);
+    IsIlOnly = (CorHeader != NULL) && (CorHeader->Flags & COMIMAGE_FLAGS_ILONLY);
+#ifdef _WIN64
+    if (IsIlOnly)
+    {
+        NTSTATUS FixupStatus = LdrpCorFixupImage(ViewBase);
+        if (!NT_SUCCESS(FixupStatus))
+        {
+            NtUnmapViewOfSection(NtCurrentProcess(), ViewBase);
+            NtClose(SectionHandle);
+            return FixupStatus;
+        }
+        NtHeaders = RtlImageNtHeader(ViewBase);
+    }
+#endif
 
     /* Allocate an entry */
     if (!(LdrEntry = LdrpAllocateDataTableEntry(ViewBase)))
@@ -1214,6 +1316,11 @@ SkipCheck:
     LdrEntry->FullDllName = FullDllName;
     LdrEntry->BaseDllName = BaseDllName;
     LdrEntry->EntryPoint = LdrpFetchAddressOfEntryPoint(LdrEntry->DllBase);
+    if (CorHeader)
+    {
+        LdrEntry->Flags |= LDRP_COR_IMAGE;
+        if (IsIlOnly) LdrEntry->EntryPoint = NULL;
+    }
 
     /* Show debug message */
     if (ShowSnaps)
@@ -1304,8 +1411,13 @@ SkipCheck:
     /* Return it for the caller */
     *DataTableEntry = LdrEntry;
 
-    /* Check if we loaded somewhere else */
-    if (Status == STATUS_IMAGE_NOT_AT_BASE)
+    /* Check if we loaded somewhere else, IL-only images are not fixed up */
+    if (Status == STATUS_IMAGE_NOT_AT_BASE && IsIlOnly)
+    {
+        LdrEntry->Flags |= LDRP_IMAGE_NOT_AT_BASE;
+        Status = STATUS_SUCCESS;
+    }
+    else if (Status == STATUS_IMAGE_NOT_AT_BASE)
     {
         /* Write the flag */
         LdrEntry->Flags |= LDRP_IMAGE_NOT_AT_BASE;
