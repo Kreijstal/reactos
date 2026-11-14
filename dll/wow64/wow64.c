@@ -704,6 +704,7 @@ Wow64SystemServiceEx(ULONG syscallNum,
         WINE_WOW_IMPL_CASE(AllocateVirtualMemory);
         WINE_WOW_IMPL_CASE(AreMappedFilesTheSame);
         WINE_WOW_IMPL_CASE(FlushInstructionCache);
+        WINE_WOW_IMPL_CASE(FlushProcessWriteBuffers);
         WINE_WOW_IMPL_CASE(FlushVirtualMemory);
         WINE_WOW_IMPL_CASE(FreeVirtualMemory);
         WINE_WOW_IMPL_CASE(GetWriteWatch);
