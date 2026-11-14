@@ -2,6 +2,7 @@
 #include <apitest.h>
 
 extern void func_attrib(void);
+extern void func_attrib_link(void);
 extern void func_cd(void);
 extern void func_copy(void);
 extern void func_echo(void);
@@ -15,6 +16,7 @@ extern void func_robocopy(void);
 const struct test winetest_testlist[] =
 {
     { "attrib", func_attrib },
+    { "attrib_link", func_attrib_link },
     { "cd", func_cd },
     { "copy", func_copy },
     { "echo", func_echo },

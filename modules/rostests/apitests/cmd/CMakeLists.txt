@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    attrib_link.c
     cmd.c
     fc.c
     robocopy.c
