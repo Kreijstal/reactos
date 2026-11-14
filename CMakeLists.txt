@@ -476,17 +476,29 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
             endif()
             list(APPEND _wow64_env --modify "PATH=path_list_prepend:${_wow64_mingw32_bin}")
         endif()
-        if(NOT EXISTS "${REACTOS_WOW64_GUEST_DIR}/CMakeCache.txt")
-            message(STATUS "WoW64: configuring guest tree in ${REACTOS_WOW64_GUEST_DIR}")
+        # The guest MUST be configured with this build's REACTOS_TARGET_NT: its
+        # ntdll's syscall numbers come from ntoskrnl/include/sysfuncs.h, whose
+        # NTDDI-gated entries (NtOpenKeyEx, ...) shift every later number, and
+        # wow64.dll dispatches by the host's numbering (see ntoskrnl/ntdll.S).
+        # A 0x502 guest on a 0x0A00 host sends NtQueryVirtualMemory to
+        # NtQueryValueKey and no 32-bit process gets past LdrpInit.
+        set(_wow64_guest_nt "")
+        if(EXISTS "${REACTOS_WOW64_GUEST_DIR}/CMakeCache.txt")
+            file(STRINGS "${REACTOS_WOW64_GUEST_DIR}/CMakeCache.txt" _wow64_guest_nt
+                 REGEX "^REACTOS_TARGET_NT:")
+            string(REGEX REPLACE "^[^=]*=" "" _wow64_guest_nt "${_wow64_guest_nt}")
+        endif()
+        if(NOT _wow64_guest_nt STREQUAL REACTOS_TARGET_NT)
+            message(STATUS "WoW64: configuring guest tree in ${REACTOS_WOW64_GUEST_DIR} "
+                           "(REACTOS_TARGET_NT ${REACTOS_TARGET_NT})")
             # Configure the guest with the same toolchain file as this build.
-            # The guest keeps its own default REACTOS_TARGET_NT: the 32-bit
-            # user image does not have to match the host kernel's NT persona.
             execute_process(
                 COMMAND ${_wow64_env} ${CMAKE_COMMAND}
                         -S ${REACTOS_SOURCE_DIR} -B ${REACTOS_WOW64_GUEST_DIR}
                         -G ${CMAKE_GENERATOR}
                         -DCMAKE_TOOLCHAIN_FILE=${_wow64_toolchain}
                         -DARCH=i386 -DSARCH=wow64
+                        -DREACTOS_TARGET_NT=${REACTOS_TARGET_NT}
                         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
                 RESULT_VARIABLE _wow64_guest_status)
             if(NOT _wow64_guest_status EQUAL 0)
