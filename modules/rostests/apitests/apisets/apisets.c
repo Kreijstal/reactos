@@ -76,6 +76,20 @@ START_TEST(apisets)
     test_single(&Heap1);
     test_single(&Heap2);
 
+    // The last version number does not take part in the lookup
+    UNICODE_STRING File1 = RTL_CONSTANT_STRING(L"api-ms-win-core-file-l1-1-0.dll");
+    UNICODE_STRING Threads1 = RTL_CONSTANT_STRING(L"api-ms-win-core-processthreads-l1-1-0.dll");
+    UNICODE_STRING Threads9 = RTL_CONSTANT_STRING(L"api-ms-win-core-processthreads-l1-1-9");
+    // PowerShell's SendInput and SendMessageTimeout imports
+    UNICODE_STRING Keyboard1 = RTL_CONSTANT_STRING(L"ext-ms-win-ntuser-keyboard-l1-2-1.dll");
+    UNICODE_STRING Window0 = RTL_CONSTANT_STRING(L"ext-ms-win-rtcore-ntuser-window-ext-l1-1-0.dll");
+
+    test_single(&File1);
+    test_single(&Threads1);
+    test_single(&Threads9);
+    test_single(&Keyboard1);
+    test_single(&Window0);
+
     // Walk the entire table, to ensure we can find each entry
     for (DWORD n = 0; n < g_ApisetsCount; ++n)
     {
@@ -88,8 +102,10 @@ START_TEST(apisets)
     UNICODE_STRING Fail1 = RTL_CONSTANT_STRING(L"");
     UNICODE_STRING Fail2 = RTL_CONSTANT_STRING(L"api-");
     UNICODE_STRING Fail3 = RTL_CONSTANT_STRING(L"ext");
+    UNICODE_STRING Fail4 = RTL_CONSTANT_STRING(L"api-ms-win-core-processthreads-l1-2-0.dll");
 
     fail_single(&Fail1);
     fail_single(&Fail2);
     fail_single(&Fail3);
+    fail_single(&Fail4);
 }
