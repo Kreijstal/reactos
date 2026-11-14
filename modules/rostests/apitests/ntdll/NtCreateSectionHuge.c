@@ -8,9 +8,9 @@
 
 #define VIEW_SIZE 0x10000
 
-/* ReactOS still materializes the prototype PTEs of a pagefile-backed section
- * up front, so the largest sections only fit when paged pool is big enough
- * (about 8 GB of RAM for 2 TB). Windows creates them on any machine. */
+/* The prototype PTEs of a pagefile-backed section take paged pool address
+ * space, so on ReactOS the largest sections only fit when paged pool is big
+ * enough (about 8 GB of RAM for 2 TB). Windows creates them on any machine. */
 static
 BOOLEAN
 IsOutOfPrototypePtes(NTSTATUS Status)
@@ -190,10 +190,166 @@ TestSecondSectionAboveFourGigabytes(VOID)
     NtClose(First);
 }
 
+static
+BOOLEAN
+QueryPerformance(PSYSTEM_PERFORMANCE_INFORMATION Info)
+{
+    NTSTATUS Status;
+
+    Status = NtQuerySystemInformation(SystemPerformanceInformation, Info, sizeof(*Info), NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    return NT_SUCCESS(Status);
+}
+
+static
+VOID
+CheckState(PVOID Address, ULONG ExpectedState, SIZE_T ExpectedSize)
+{
+    NTSTATUS Status;
+    MEMORY_BASIC_INFORMATION Info;
+
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), Address, MemoryBasicInformation,
+                                  &Info, sizeof(Info), NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    ok(Info.State == ExpectedState, "%p: State 0x%lx, expected 0x%lx\n", Address, Info.State, ExpectedState);
+    ok(Info.RegionSize == ExpectedSize, "%p: RegionSize 0x%Ix, expected 0x%Ix\n",
+       Address, Info.RegionSize, ExpectedSize);
+}
+
+/* Reserving pages commits nothing: Windows creates a 2 TB SEC_RESERVE section
+ * (CoreCLR's W^X double mapping, in every .NET process) without consuming
+ * memory or commit, and charges commit only for pages committed in a view. */
+#define RESERVE_SIZE  0x20000000000ULL     /* 2 TB */
+#define COMMIT_OFFSET 0x10000000000ULL     /* 1 TB in */
+#define COMMIT_PAGES  256
+#define COMMIT_VIEW_SIZE (4 * COMMIT_PAGES * PAGE_SIZE)
+#define MB_IN_PAGES(Mb) ((Mb) * (0x100000 / PAGE_SIZE))
+static
+VOID
+TestReserveConsumesNothing(VOID)
+{
+    NTSTATUS Status;
+    HANDLE Section;
+    SYSTEM_PERFORMANCE_INFORMATION Base, Before, After;
+    LARGE_INTEGER Start, End, Frequency, SectionOffset;
+    ULONGLONG Milliseconds;
+    PUCHAR Rw = NULL, Ro = NULL;
+    PVOID Address;
+    SIZE_T Size;
+    UCHAR Value = 0;
+
+    if (!QueryPerformance(&Base))
+        return;
+    NtQueryPerformanceCounter(&Start, &Frequency);
+    Status = CreateReserveSection(&Section, RESERVE_SIZE);
+    NtQueryPerformanceCounter(&End, NULL);
+    if (IsOutOfPrototypePtes(Status))
+    {
+        skip("2 TB section needs more paged pool (0x%lx)\n", Status);
+        return;
+    }
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status) || !QueryPerformance(&After))
+        return;
+
+    Milliseconds = (End.QuadPart - Start.QuadPart) * 1000 / Frequency.QuadPart;
+    trace("2 TB SEC_RESERVE section: %I64u ms, available pages %lu -> %lu, committed pages %lu -> %lu\n",
+          Milliseconds, Base.AvailablePages, After.AvailablePages, Base.CommittedPages, After.CommittedPages);
+    ok((LONG)(Base.AvailablePages - After.AvailablePages) < (LONG)MB_IN_PAGES(64),
+       "Reserving 2 TB consumed %ld pages of RAM\n", (LONG)(Base.AvailablePages - After.AvailablePages));
+    ok((LONG)(After.CommittedPages - Base.CommittedPages) < (LONG)MB_IN_PAGES(64),
+       "Reserving 2 TB charged %ld pages of commit\n", (LONG)(After.CommittedPages - Base.CommittedPages));
+    ok(Milliseconds < 500, "Reserving 2 TB took %I64u ms\n", Milliseconds);
+
+    /* Map a view 1 TB in: nothing in it is committed yet */
+    SectionOffset.QuadPart = COMMIT_OFFSET;
+    Size = COMMIT_VIEW_SIZE;
+    Status = NtMapViewOfSection(Section, NtCurrentProcess(), (PVOID*)&Rw, 0, 0, &SectionOffset,
+                                &Size, ViewUnmap, 0, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        goto Close;
+    CheckState(Rw, MEM_RESERVE, COMMIT_VIEW_SIZE);
+    ok(!ReadByte(Rw, &Value), "Reading a reserved page did not fault\n");
+
+    /* Committing pages through the view charges them */
+    QueryPerformance(&Before);
+    Address = Rw;
+    Size = COMMIT_PAGES * PAGE_SIZE;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &Size, MEM_COMMIT, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    QueryPerformance(&After);
+    ok((LONG)(After.CommittedPages - Before.CommittedPages) >= COMMIT_PAGES / 2,
+       "Committing %u section pages charged %ld pages\n", COMMIT_PAGES,
+       (LONG)(After.CommittedPages - Before.CommittedPages));
+    CheckState(Rw, MEM_COMMIT, COMMIT_PAGES * PAGE_SIZE);
+    CheckState(Rw + COMMIT_PAGES * PAGE_SIZE, MEM_RESERVE, COMMIT_VIEW_SIZE - COMMIT_PAGES * PAGE_SIZE);
+    if (!NT_SUCCESS(Status))
+        goto Unmap;
+    Rw[0] = 0x11;
+    Rw[(COMMIT_PAGES - 1) * PAGE_SIZE + 5] = 0x22;
+    ok(!ReadByte(&Rw[COMMIT_PAGES * PAGE_SIZE], &Value), "Reading past the committed pages did not fault\n");
+
+    /* A second view sees the same pages, and committing them again is free */
+    Size = COMMIT_VIEW_SIZE;
+    Status = NtMapViewOfSection(Section, NtCurrentProcess(), (PVOID*)&Ro, 0, 0, &SectionOffset,
+                                &Size, ViewUnmap, 0, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        CheckState(Ro, MEM_COMMIT, COMMIT_PAGES * PAGE_SIZE);
+        ok(ReadByte(&Ro[0], &Value) && (Value == 0x11), "Second view page 0 reads 0x%x\n", Value);
+        Value = 0;
+        ok(ReadByte(&Ro[(COMMIT_PAGES - 1) * PAGE_SIZE + 5], &Value) && (Value == 0x22),
+           "Second view last page reads 0x%x\n", Value);
+
+        QueryPerformance(&Before);
+        Address = Ro;
+        Size = COMMIT_PAGES * PAGE_SIZE;
+        Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &Size, MEM_COMMIT, PAGE_READWRITE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        QueryPerformance(&After);
+        ok((LONG)(After.CommittedPages - Before.CommittedPages) < COMMIT_PAGES / 2,
+           "Committing committed pages again charged %ld pages\n",
+           (LONG)(After.CommittedPages - Before.CommittedPages));
+
+        /* Section pages cannot be decommitted, only unmapped */
+        Address = Ro;
+        Size = PAGE_SIZE;
+        Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, MEM_DECOMMIT);
+        ok_ntstatus(Status, STATUS_UNABLE_TO_DELETE_SECTION);
+        ok(ReadByte(&Rw[0], &Value) && (Value == 0x11), "Page 0 reads 0x%x after decommit\n", Value);
+
+        NtUnmapViewOfSection(NtCurrentProcess(), Ro);
+    }
+
+Unmap:
+    NtUnmapViewOfSection(NtCurrentProcess(), Rw);
+Close:
+    QueryPerformance(&Before);
+    NtClose(Section);
+
+    /* Deleting the section gives back everything it held */
+    if (QueryPerformance(&After))
+    {
+        trace("Closed: available pages %lu -> %lu, committed pages %lu -> %lu\n",
+              Before.AvailablePages, After.AvailablePages, Before.CommittedPages, After.CommittedPages);
+        ok((LONG)(Base.CommittedPages - After.CommittedPages) > -(LONG)MB_IN_PAGES(16),
+           "Section teardown left %ld pages of commit charged\n",
+           (LONG)(After.CommittedPages - Base.CommittedPages));
+        ok((LONG)(Base.AvailablePages - After.AvailablePages) < (LONG)MB_IN_PAGES(64),
+           "Section teardown left %ld pages of RAM in use\n",
+           (LONG)(Base.AvailablePages - After.AvailablePages));
+    }
+}
+
 START_TEST(NtCreateSectionHuge)
 {
     /* First, while paged pool has no multi-GB holes yet */
     TestSecondSectionAboveFourGigabytes();
+    TestReserveConsumesNothing();
     TestDoubleMapping(0x40000000ULL);      /* 1 GB */
     TestDoubleMapping(0x1000000000ULL);    /* 64 GB */
     TestDoubleMapping(0x10000000000ULL);   /* 1 TB */
