@@ -264,6 +264,15 @@ NTSTATUS WINAPI wow64_NtFlushInstructionCache( UINT *args )
 
 
 /**********************************************************************
+ *           wow64_NtFlushProcessWriteBuffers
+ */
+NTSTATUS WINAPI wow64_NtFlushProcessWriteBuffers( UINT *args )
+{
+    return NtFlushProcessWriteBuffers();
+}
+
+
+/**********************************************************************
  *           wow64_NtFlushVirtualMemory
  */
 NTSTATUS WINAPI wow64_NtFlushVirtualMemory( UINT *args )
