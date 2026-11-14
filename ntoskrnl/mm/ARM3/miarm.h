@@ -1021,11 +1021,12 @@ MI_IS_MAPPED_PTE(PMMPTE PointerPte)
 //
 // The prototype PTEs of a pagefile-backed section live in paged pool, whose
 // pages stay demand-zero until something writes to them (paged pool is never
-// paged out). A page of prototype PTEs that is still demand-zero has never
-// been written: every prototype PTE in it is zero (reserved, not committed),
-// and reading one would only materialize a zero page - for a huge SEC_RESERVE
-// section, gigabytes of them. Walkers of the prototype PTE array use this to
-// skip such pages without touching them.
+// paged out), and the first access to one gets a zeroed page (unlike other
+// system pages, see MiResolveDemandZeroFault). A page of prototype PTEs that
+// is still demand-zero has never been written: every prototype PTE in it is
+// zero (reserved, not committed), and reading one would only materialize a
+// zero page - for a huge SEC_RESERVE section, gigabytes of them. Walkers of
+// the prototype PTE array use this to skip such pages without touching them.
 //
 FORCEINLINE
 BOOLEAN
