@@ -205,8 +205,10 @@ BOOL WINAPI RegisterClientPFN(VOID)
   pfnClientWorker.pfnGhostWndProc     = GhostWndProc_common;
   pfnClientWorker.pfnCtfHookProc      = User32DefWindowProc;
 
-#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
-    /* Register the PFNs with ntdll */
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA) && !defined(BUILD_WOW6432)
+    /* Register the PFNs with ntdll. Not under WoW64: there PFNCLIENT has the
+     * host's 64-bit layout (ntuser.h), which ntdll's 32-bit table does not, and
+     * wow64win keeps the 32-bit procedures itself (NtUserInitializeClientPfnArrays). */
     Status = RtlInitializeNtUserPfn(&pfnClientA,
                                     sizeof(pfnClientA),
                                     &pfnClientW,
