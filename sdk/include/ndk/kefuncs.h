@@ -524,6 +524,15 @@ NtDelayExecution(
     _In_ LARGE_INTEGER *Interval
 );
 
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtFlushProcessWriteBuffers(
+    VOID
+);
+#endif
+
 NTSYSCALLAPI
 ULONG
 NTAPI
