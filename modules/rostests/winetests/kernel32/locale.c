@@ -7220,12 +7220,7 @@ static void test_FindNLSStringEx(void)
     };
     unsigned int i;
 
-#if defined(__REACTOS__) && DLL_EXPORT_VERSION >= 0x600
-    /* FIXME: FindNLSStringEx is a STUB on ReactOS! */
-    if (is_reactos() || !pFindNLSStringEx)
-#else
     if (!pFindNLSStringEx)
-#endif
     {
         win_skip("FindNLSStringEx is not available.\n");
         return;

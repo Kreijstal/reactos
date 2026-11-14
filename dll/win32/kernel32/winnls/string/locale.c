@@ -4216,6 +4216,153 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
     return CSTR_EQUAL;
 }
 
+#if (WINVER >= 0x0600)
+
+/* Shortest prefix of src that compares equal to value, or -1 */
+static INT find_nls_match_length(LPCWSTR locale, DWORD flags, LPCWSTR src, INT srclen,
+                                 LPCWSTR value, INT valuelen, BOOL *failed)
+{
+    INT len, ret;
+
+    for (len = 0; len <= srclen; len++)
+    {
+        ret = CompareStringEx(locale, flags, src, len, value, valuelen, NULL, NULL, 0);
+        if (!ret)
+        {
+            *failed = TRUE;
+            return -1;
+        }
+        if (ret == CSTR_EQUAL)
+            return len;
+    }
+    return -1;
+}
+
+/******************************************************************************
+ *           FindNLSStringEx    (KERNEL32.@)
+ *
+ * Finds value in src under the comparison rules of the flags. A match is a
+ * substring of src that CompareStringEx considers equal to value, so its
+ * length can differ from the length of value; it is returned in *found.
+ */
+INT WINAPI FindNLSStringEx(LPCWSTR locale, DWORD flags, LPCWSTR src, INT srclen,
+                           LPCWSTR value, INT valuelen, LPINT found,
+                           LPNLSVERSIONINFO version, LPVOID reserved, LPARAM handle)
+{
+    DWORD find = flags & (FIND_STARTSWITH | FIND_ENDSWITH | FIND_FROMSTART | FIND_FROMEND);
+    DWORD compare = flags & ~(FIND_STARTSWITH | FIND_ENDSWITH | FIND_FROMSTART | FIND_FROMEND);
+    BOOL failed = FALSE;
+    INT start, len;
+
+    if (version) FIXME("unexpected version parameter\n");
+    if (reserved) FIXME("unexpected reserved value\n");
+    if (handle) FIXME("unexpected handle\n");
+
+    if (!src || !srclen || srclen < -1 || !value || !valuelen || valuelen < -1)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return -1;
+    }
+
+    /* The comparison rules come from a locale that must exist */
+    if (locale != LOCALE_NAME_USER_DEFAULT && !LocaleNameToLCID(locale, 0))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return -1;
+    }
+
+    if (find != FIND_STARTSWITH && find != FIND_ENDSWITH &&
+        find != FIND_FROMSTART && find != FIND_FROMEND)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return -1;
+    }
+
+    if (srclen == -1) srclen = strlenW(src);
+    if (valuelen == -1) valuelen = strlenW(value);
+
+    switch (find)
+    {
+        case FIND_STARTSWITH:
+            len = find_nls_match_length(locale, compare, src, srclen, value, valuelen, &failed);
+            if (len >= 0)
+            {
+                if (found) *found = len;
+                SetLastError(ERROR_SUCCESS);
+                return 0;
+            }
+            break;
+
+        case FIND_ENDSWITH:
+            for (start = srclen; start >= 0 && !failed; start--)
+            {
+                INT ret = CompareStringEx(locale, compare, src + start, srclen - start,
+                                          value, valuelen, NULL, NULL, 0);
+                if (!ret)
+                    failed = TRUE;
+                else if (ret == CSTR_EQUAL)
+                {
+                    if (found) *found = srclen - start;
+                    SetLastError(ERROR_SUCCESS);
+                    return start;
+                }
+            }
+            break;
+
+        case FIND_FROMSTART:
+            for (start = 0; start < srclen && !failed; start++)
+            {
+                len = find_nls_match_length(locale, compare, src + start, srclen - start,
+                                            value, valuelen, &failed);
+                if (len >= 0)
+                {
+                    if (found) *found = len;
+                    SetLastError(ERROR_SUCCESS);
+                    return start;
+                }
+            }
+            break;
+
+        case FIND_FROMEND:
+            for (start = srclen - 1; start >= 0 && !failed; start--)
+            {
+                len = find_nls_match_length(locale, compare, src + start, srclen - start,
+                                            value, valuelen, &failed);
+                if (len >= 0)
+                {
+                    if (found) *found = len;
+                    SetLastError(ERROR_SUCCESS);
+                    return start;
+                }
+            }
+            break;
+    }
+
+    /* CompareStringEx set the error if the flags were bad */
+    if (!failed)
+        SetLastError(ERROR_SUCCESS);
+    return -1;
+}
+
+/******************************************************************************
+ *           FindNLSString    (KERNEL32.@)
+ */
+INT WINAPI FindNLSString(LCID lcid, DWORD flags, LPCWSTR src, INT srclen,
+                         LPCWSTR value, INT valuelen, LPINT found)
+{
+    WCHAR locale[LOCALE_NAME_MAX_LENGTH];
+
+    if (!LCIDToLocaleName(lcid, locale, ARRAY_SIZE(locale), 0))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return -1;
+    }
+
+    return FindNLSStringEx(locale, flags, src, srclen, value, valuelen, found, NULL, NULL, 0);
+}
+
+#endif /* WINVER >= 0x0600 */
+
 /******************************************************************************
  *           CompareStringA    (KERNEL32.@)
  *
