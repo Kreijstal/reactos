@@ -49,7 +49,9 @@ list(APPEND SOURCE
 # exports as -version=0x600+; below that the PS_ATTRIBUTE_LIST and
 # THREAD_CREATE_FLAGS_* it is written against do not exist either.
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
-    list(APPEND SOURCE rtl/thread.c)
+    list(APPEND SOURCE
+        etw/event.c
+        rtl/thread.c)
 endif()
 
 if(ARCH STREQUAL "i386")
