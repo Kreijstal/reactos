@@ -169,6 +169,12 @@ PspGetContextThreadInternal(IN PETHREAD Thread,
     GetSetContext.Context.ContextFlags = Flags;
     GetSetContext.Mode = ContextMode;
 
+#ifdef _M_AMD64
+    /* Set up the exchange of the extended state */
+    Status = PspCaptureXStateContext(&GetSetContext, ThreadContext, PreviousMode, FALSE);
+    if (!NT_SUCCESS(Status)) return Status;
+#endif
+
     /* Check if we're running in the same thread */
     if (Thread == PsGetCurrentThread())
     {
@@ -232,6 +238,13 @@ PspGetContextThreadInternal(IN PETHREAD Thread,
         Status = _SEH2_GetExceptionCode();
     }
     _SEH2_END;
+
+#ifdef _M_AMD64
+    /* Hand the extended state to the caller */
+    if (NT_SUCCESS(Status))
+        Status = PspReturnXStateContext(&GetSetContext, ThreadContext);
+    PspFreeXStateContext(&GetSetContext);
+#endif
 
     /* Return status */
     return Status;
@@ -309,6 +322,12 @@ PspSetContextThreadInternal(IN PETHREAD Thread,
     GetSetContext.Context.ContextFlags = Flags;
     GetSetContext.Mode = ContextMode;
 
+#ifdef _M_AMD64
+    /* Capture the extended state to restore */
+    Status = PspCaptureXStateContext(&GetSetContext, ThreadContext, PreviousMode, TRUE);
+    if (!NT_SUCCESS(Status)) return Status;
+#endif
+
     /* Check if we're running in the same thread */
     if (Thread == PsGetCurrentThread())
     {
@@ -360,6 +379,10 @@ PspSetContextThreadInternal(IN PETHREAD Thread,
                                            NULL);
         }
     }
+
+#ifdef _M_AMD64
+    PspFreeXStateContext(&GetSetContext);
+#endif
 
     /* Return status */
     return Status;

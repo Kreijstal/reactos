@@ -134,6 +134,14 @@ typedef struct _GET_SET_CTX_CONTEXT
     KEVENT Event;
     KPROCESSOR_MODE Mode;
     CONTEXT Context;
+#ifdef _M_AMD64
+    /* Kernel copy of the XSAVE image for a CONTEXT_XSTATE request, and the
+       caller's XState chunk it is exchanged with */
+    PXSAVE_AREA XStateArea;
+    ULONG XStateAreaLength;
+    PXSAVE_AREA_HEADER CallerXState;
+    ULONG CallerXStateLength;
+#endif
 } GET_SET_CTX_CONTEXT, *PGET_SET_CTX_CONTEXT;
 
 //
@@ -572,6 +580,27 @@ PspGetOrSetContextKernelRoutine(
     IN OUT PVOID* SystemArgument1,
     IN OUT PVOID* SystemArgument2
 );
+
+#ifdef _M_AMD64
+NTSTATUS
+NTAPI
+PspCaptureXStateContext(
+    _Inout_ PGET_SET_CTX_CONTEXT GetSetContext,
+    _In_ PCONTEXT ThreadContext,
+    _In_ KPROCESSOR_MODE PreviousMode,
+    _In_ BOOLEAN SetContext);
+
+NTSTATUS
+NTAPI
+PspReturnXStateContext(
+    _Inout_ PGET_SET_CTX_CONTEXT GetSetContext,
+    _In_ PCONTEXT ThreadContext);
+
+VOID
+NTAPI
+PspFreeXStateContext(
+    _Inout_ PGET_SET_CTX_CONTEXT GetSetContext);
+#endif
 
 BOOLEAN
 NTAPI

@@ -2849,6 +2849,108 @@ RtlInitializeContext(
     _In_ PVOID StackBase
 );
 
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+
+//
+// Extended (XSTATE) Context Functions
+//
+NTSYSAPI
+ULONG64
+NTAPI
+RtlGetEnabledExtendedFeatures(
+    _In_ ULONG64 FeatureMask);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlGetExtendedContextLength(
+    _In_ ULONG ContextFlags,
+    _Out_ PULONG ContextLength);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlInitializeExtendedContext(
+    _Out_ PVOID Context,
+    _In_ ULONG ContextFlags,
+    _Out_ PCONTEXT_EX *ContextEx);
+
+NTSYSAPI
+PVOID
+NTAPI
+RtlLocateExtendedFeature(
+    _In_ PCONTEXT_EX ContextEx,
+    _In_ ULONG FeatureId,
+    _Out_opt_ PULONG Length);
+
+NTSYSAPI
+PVOID
+NTAPI
+RtlLocateLegacyContext(
+    _In_ PCONTEXT_EX ContextEx,
+    _Out_opt_ PULONG Length);
+
+NTSYSAPI
+ULONG64
+NTAPI
+RtlGetExtendedFeaturesMask(
+    _In_ PCONTEXT_EX ContextEx);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlSetExtendedFeaturesMask(
+    _Inout_ PCONTEXT_EX ContextEx,
+    _In_ ULONG64 FeatureMask);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlCopyExtendedContext(
+    _Out_ PCONTEXT_EX Destination,
+    _In_ ULONG ContextFlags,
+    _In_ PCONTEXT_EX Source);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlCopyContext(
+    _Inout_ PCONTEXT Destination,
+    _In_ ULONG ContextFlags,
+    _In_ PCONTEXT Source);
+
+#endif /* NTDDI_VERSION >= NTDDI_WIN7 */
+
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlGetExtendedContextLength2(
+    _In_ ULONG ContextFlags,
+    _Out_ PULONG ContextLength,
+    _In_ ULONG64 XStateCompactionMask);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlInitializeExtendedContext2(
+    _Out_ PVOID Context,
+    _In_ ULONG ContextFlags,
+    _Out_ PCONTEXT_EX *ContextEx,
+    _In_ ULONG64 XStateCompactionMask);
+
+NTSYSAPI
+PVOID
+NTAPI
+RtlLocateExtendedFeature2(
+    _In_ PCONTEXT_EX ContextEx,
+    _In_ ULONG FeatureId,
+    _In_ PXSTATE_CONFIGURATION XStateConfig,
+    _Out_opt_ PULONG Length);
+
+#endif /* NTDDI_VERSION >= NTDDI_WIN10 */
+
 #ifdef _M_AMD64
 typedef struct _WOW64_CONTEXT *PWOW64_CONTEXT;
 

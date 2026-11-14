@@ -150,6 +150,12 @@ elseif(ARCH STREQUAL "amd64")
         amd64/unwind.c
         amd64/stubs.c
         mem.c)
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+        # RtlRestoreContext restores the XSTATE of a context with XRSTOR.
+        # Clang gets the target feature from the intrinsic's attribute; an
+        # option would make the source mismatch the precompiled header.
+        set_source_files_properties(amd64/unwind.c PROPERTIES COMPILE_OPTIONS "-mxsave")
+    endif()
 elseif(ARCH STREQUAL "arm")
     list(APPEND ASM_SOURCE arm/debug_asm.S)
     list(APPEND SOURCE
@@ -193,7 +199,8 @@ list(APPEND SOURCE_VISTA
     unicode_vista.c
     utf8.c
     waitaddr.c
-    wow64.c)
+    wow64.c
+    xstate.c)
 
 add_library(rtl_vista ${SOURCE_VISTA})
 target_compile_definitions(rtl_vista PRIVATE _WIN32_WINNT=0x600)

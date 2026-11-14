@@ -528,6 +528,23 @@ typedef VOID
 );
 
 //
+// Extended context layout that follows a CONTEXT carrying CONTEXT_XSTATE
+// Keep in sync with sdk/include/xdk/ketypes.h
+//
+typedef struct _CONTEXT_CHUNK
+{
+    LONG Offset;
+    ULONG Length;
+} CONTEXT_CHUNK, *PCONTEXT_CHUNK;
+
+typedef struct _CONTEXT_EX
+{
+    CONTEXT_CHUNK All;
+    CONTEXT_CHUNK Legacy;
+    CONTEXT_CHUNK XState;
+} CONTEXT_EX, *PCONTEXT_EX;
+
+//
 // System Time Structure
 //
 typedef struct _KSYSTEM_TIME
