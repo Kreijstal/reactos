@@ -214,6 +214,20 @@ PUBLIC KiUserExceptionDispatcher
 
 .NoWow64:
 
+    /* An exception taken in 32-bit (compatibility mode) code belongs to the
+       WoW64 guest. Its frames are 32-bit ones on the 32-bit stack and have no
+       native unwind data, so walking them with RtlDispatchException reads
+       garbage (and faults inside the unwinder). Hand it to the guest's
+       KiUserExceptionDispatcher instead; that does not return. */
+    cmp word ptr [rsp + CxSegCs], KGDT64_R3_CMCODE or RPL_MASK
+    jne .Native
+    lea rcx, [rsp]                        /* ContextRecord */
+    lea rdx, [rsp + CONTEXT_FRAME_LENGTH + CONTEXT_EX_LENGTH] /* ExceptionRecord */
+    call LdrpTryWow64Exception
+    or al, al
+    jnz Fine
+
+.Native:
     /* Dispatch the exception. RtlDispatchException(ExceptionRecord, ContextRecord)
        takes its arguments in rcx/rdx; both records live at fixed offsets in our
        frame. Load them from there rather than pushing the incoming pointers
@@ -227,7 +241,7 @@ PUBLIC KiUserExceptionDispatcher
 
     /* Check for success */
     or al, al
-    jz TryWow64
+    jz RaiseException
 
 Fine:
     /* We're fine, continue execution */
@@ -237,23 +251,17 @@ Fine:
 
     /* Exit */
     jmp Exit
-    
-TryWow64:
-    call LdrpTryWow64Exception
-
-    or al, al
-    jnz Fine
 
 RaiseException:
 
     /* Raise the exception */
-    lea rcx, [rsp + CONTEXT_FRAME_LENGTH] /* ExceptionRecord */
+    lea rcx, [rsp + CONTEXT_FRAME_LENGTH + CONTEXT_EX_LENGTH] /* ExceptionRecord */
     lea rdx, [rsp] /* ContextRecord */
     xor r8, r8
     call ZwRaiseException
 
 Exit:
-    lea rcx, [rsp + CONTEXT_FRAME_LENGTH] /* ExceptionRecord */
+    lea rcx, [rsp + CONTEXT_FRAME_LENGTH + CONTEXT_EX_LENGTH] /* ExceptionRecord */
     mov rdx, rax
     call KiUserExceptionDispatcherNested
     ret
