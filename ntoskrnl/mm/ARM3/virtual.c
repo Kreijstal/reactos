@@ -5680,6 +5680,19 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
         PointerPte = MI_GET_PROTOTYPE_PTE_FOR_VPN(FoundVad, StartingAddress >> PAGE_SHIFT);
         LastPte = MI_GET_PROTOTYPE_PTE_FOR_VPN(FoundVad, EndingAddress >> PAGE_SHIFT);
         QuotaCharge = (ULONG)(LastPte - PointerPte + 1);
+
+        //
+        // Charge the whole range against the commit limit up front, the pages
+        // that turn out to be committed already are given back below
+        //
+        if (!MiChargeCommitment(QuotaCharge, FALSE))
+        {
+            DPRINT1("Committing %lu section pages would exceed the commit limit "
+                    "(%Iu of %Iu charged)\n",
+                    QuotaCharge, MmTotalCommittedPages, MmTotalCommitLimit);
+            Status = STATUS_COMMITMENT_LIMIT;
+            goto FailPath;
+        }
         KeAcquireGuardedMutexUnsafe(&MmSectionCommitMutex);
 
         //
@@ -5709,7 +5722,9 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
         ASSERT(QuotaCharge >= QuotaFree);
         QuotaCharge -= QuotaFree;
         FoundVad->ControlArea->Segment->NumberOfCommittedPages += QuotaCharge;
+        InterlockedExchangeAddSizeT(&MmSharedCommit, QuotaCharge);
         KeReleaseGuardedMutexUnsafe(&MmSectionCommitMutex);
+        if (QuotaFree) MiReleaseCommitment(QuotaFree);
 
         //
         // We are done with committing the section pages
