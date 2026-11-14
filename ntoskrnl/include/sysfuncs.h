@@ -326,5 +326,6 @@
     SVC_(CreatePrivateNamespace, 4)
     SVC_(OpenPrivateNamespace, 4)
     SVC_(DeletePrivateNamespace, 1)
+    SVC_(FlushProcessWriteBuffers, 0)
 #endif
 #endif

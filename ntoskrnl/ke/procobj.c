@@ -986,4 +986,51 @@ KeRemoveSystemServiceTable(IN ULONG Index)
     /* Return success */
     return TRUE;
 }
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+
+static
+ULONG_PTR
+NTAPI
+KiFlushProcessWriteBuffersTarget(
+    _In_ ULONG_PTR Argument)
+{
+    UNREFERENCED_PARAMETER(Argument);
+
+    /* Interrupt delivery serializes the processor, the barrier drains the
+       store buffer of whatever thread was running on it */
+    KeMemoryBarrier();
+    return 0;
+}
+
+/*
+ * Makes every store done by any thread of the current process visible to
+ * all processors: each processor executes a serializing barrier before this
+ * returns. Processors that do not run a thread of the process get the
+ * barrier too, which is a superset of the guarantee.
+ */
+static
+VOID
+KiFlushProcessWriteBuffers(VOID)
+{
+    PAGED_CODE();
+
+    if (KeNumberProcessors > 1)
+        KeIpiGenericCall(KiFlushProcessWriteBuffersTarget, 0);
+    else
+        KeMemoryBarrier();
+}
+
+NTSTATUS
+NTAPI
+NtFlushProcessWriteBuffers(VOID)
+{
+    PAGED_CODE();
+
+    KiFlushProcessWriteBuffers();
+    return STATUS_SUCCESS;
+}
+
+#endif /* NTDDI_VERSION >= NTDDI_VISTA */
+
 /* EOF */
