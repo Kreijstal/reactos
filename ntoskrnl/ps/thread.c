@@ -71,6 +71,10 @@ PspUserThreadStartup(IN PKSTART_ROUTINE StartRoutine,
         /* Get the Locale ID and save Preferred Proc */
         Teb =  NtCurrentTeb();
         Teb->CurrentLocale = MmGetSessionLocaleId();
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+        Teb->CurrentIdealProcessor.Group = 0;
+        Teb->CurrentIdealProcessor.Number = Thread->Tcb.IdealProcessor;
+#endif
         Teb->IdealProcessor = Thread->Tcb.IdealProcessor;
     }
 
