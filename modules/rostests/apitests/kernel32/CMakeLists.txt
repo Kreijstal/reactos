@@ -61,6 +61,7 @@ list(APPEND SOURCE
     UsbDiskQueue.c
     WideCharToMultiByte.c
     WriteFile.c
+    XState.c
 )
 
 list(APPEND PCH_SKIP_SOURCE

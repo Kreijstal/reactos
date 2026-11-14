@@ -57,6 +57,7 @@ extern void func_UEFIFirmware(void);
 extern void func_UsbConcurrentDevices(void);
 extern void func_UsbDiskQueue(void);
 extern void func_WideCharToMultiByte(void);
+extern void func_XState(void);
 
 const struct test winetest_testlist[] =
 {
@@ -115,5 +116,6 @@ const struct test winetest_testlist[] =
     { "UsbConcurrentDevices",        func_UsbConcurrentDevices },
     { "UsbDiskQueue",                func_UsbDiskQueue },
     { "WideCharToMultiByte",         func_WideCharToMultiByte },
+    { "XState",                      func_XState },
     { 0, 0 }
 };

@@ -31,6 +31,7 @@ list(APPEND SOURCE
     client/atom.c
     client/atomansi.c
     client/compname.c
+    client/context.c
     client/debugger.c
     client/dep.c
     client/dosdev.c
