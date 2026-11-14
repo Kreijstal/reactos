@@ -206,10 +206,6 @@ CsrCaptureMessageBuffer(
     RtlMoveMemory((PVOID)(ULONG_PTR)*CapturedData, MessageBuffer, MessageLength);
 }
 
-#ifdef USE_LPC6432
-#define CsrAllocateMessagePointer CsrAllocateMessagePointer32
-#define CsrCaptureMessageBuffer CsrCaptureMessageBuffer32
-#endif
 
 /*
  * @implemented
@@ -236,6 +232,11 @@ CsrCaptureMessageString(
     _Out_ PSTRING CapturedString)
 {
     ASSERT(CapturedString != NULL);
+#ifdef USE_LPC6432
+    /* A STRING's 32-bit Buffer cannot hold the 64-bit pointer that
+       CsrClientCallServer writes back into a registered message field */
+    ASSERT(!"CsrCaptureMessageString used with USE_LPC6432");
+#endif
 
     /*
      * If we don't have a string, initialize an empty one,
