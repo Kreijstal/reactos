@@ -404,14 +404,14 @@ ConsoleMenuControl(HANDLE hConsoleOutput,
     MenuControlRequest->OutputHandle  = TO_LPC_HANDLE(hConsoleOutput);
     MenuControlRequest->CmdIdLow      = dwCmdIdLow;
     MenuControlRequest->CmdIdHigh     = dwCmdIdHigh;
-    MenuControlRequest->MenuHandle    = NULL;
+    MenuControlRequest->MenuHandle    = TO_LPC_HANDLE(NULL);
 
     CsrClientCallServer((PCSR_API_MESSAGE)&ApiMessage,
                         NULL,
                         CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepMenuControl),
                         sizeof(*MenuControlRequest));
 
-    return MenuControlRequest->MenuHandle;
+    return (HMENU)FROM_LPC_HANDLE(MenuControlRequest->MenuHandle);
 }
 
 
@@ -853,7 +853,7 @@ SetConsoleCursor(HANDLE  hConsoleOutput,
 
     SetCursorRequest->ConsoleHandle = TO_LPC_HANDLE(NtCurrentPeb()->ProcessParameters->ConsoleHandle);
     SetCursorRequest->OutputHandle  = TO_LPC_HANDLE(hConsoleOutput);
-    SetCursorRequest->CursorHandle  = hCursor;
+    SetCursorRequest->CursorHandle  = TO_LPC_HANDLE(hCursor);
 
     CsrClientCallServer((PCSR_API_MESSAGE)&ApiMessage,
                         NULL,
@@ -2350,7 +2350,10 @@ CreateConsoleScreenBuffer(DWORD dwDesiredAccess,
             return INVALID_HANDLE_VALUE;
         }
 
-        CreateScreenBufferRequest->GraphicsBufferInfo = *GraphicsBufferInfo;
+        CreateScreenBufferRequest->GraphicsBufferInfo.dwBitMapInfoLength = GraphicsBufferInfo->dwBitMapInfoLength;
+        CreateScreenBufferRequest->GraphicsBufferInfo.dwUsage = GraphicsBufferInfo->dwUsage;
+        CreateScreenBufferRequest->GraphicsBufferInfo.hMutex = TO_LPC_HANDLE(GraphicsBufferInfo->hMutex);
+        CreateScreenBufferRequest->GraphicsBufferInfo.lpBitMap = TO_LPC_HANDLE(GraphicsBufferInfo->lpBitMap);
 
         CaptureBuffer = CsrAllocateCaptureBuffer(1, GraphicsBufferInfo->dwBitMapInfoLength);
         if (CaptureBuffer == NULL)

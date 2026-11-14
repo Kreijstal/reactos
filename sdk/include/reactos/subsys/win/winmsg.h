@@ -55,7 +55,7 @@ typedef struct _USER_EXIT_REACTOS
 typedef struct _USER_END_TASK
 {
     DWORD LastError;
-    HWND  WndHandle;
+    LPC_PTRTYPE(HWND) WndHandle;
     BOOL  Force;
     BOOL  Success;
 } USER_END_TASK, *PUSER_END_TASK;
@@ -67,18 +67,18 @@ typedef struct _USER_LOGON
 
 typedef struct _USER_GET_THREAD_CONSOLE_DESKTOP
 {
-    ULONG_PTR ThreadId;
-    HDESK ConsoleDesktop;
+    LPC_ULONG_PTR ThreadId;
+    LPC_PTRTYPE(HDESK) ConsoleDesktop;
 } USER_GET_THREAD_CONSOLE_DESKTOP, *PUSER_GET_THREAD_CONSOLE_DESKTOP;
 
 typedef struct _USER_REGISTER_SERVICES_PROCESS
 {
-    ULONG_PTR ProcessId;
+    LPC_ULONG_PTR ProcessId;
 } USER_REGISTER_SERVICES_PROCESS, *PUSER_REGISTER_SERVICES_PROCESS;
 
 typedef struct _USER_REGISTER_LOGON_PROCESS
 {
-    ULONG_PTR ProcessId;
+    LPC_ULONG_PTR ProcessId;
     BOOL Register;
 } USER_REGISTER_LOGON_PROCESS, *PUSER_REGISTER_LOGON_PROCESS;
 
@@ -88,18 +88,18 @@ typedef struct _USER_CREATE_SYSTEM_THREAD
 } USER_CREATE_SYSTEM_THREAD, *PUSER_CREATE_SYSTEM_THREAD;
 
 typedef struct _USER_DEVICE_EVENT_MSG {
-    HWND hwnd;
-    WPARAM wParam;
-    LPARAM lParam;
+    LPC_PTRTYPE(HWND) hwnd;
+    LPC_ULONG_PTR wParam;
+    LPC_ULONG_PTR lParam;
     DWORD Data;
-    ULONG_PTR Result;
+    LPC_ULONG_PTR Result;
 } USER_DEVICE_EVENT_MSG, *PUSER_DEVICE_EVENT_MSG;
 
 typedef struct _USER_API_MESSAGE
 {
     PORT_MESSAGE Header;
 
-    PCSR_CAPTURE_BUFFER CsrCaptureData;
+    LPC_PTR(CSR_CAPTURE_BUFFER) CsrCaptureData;
     CSR_API_NUMBER ApiNumber;
     NTSTATUS Status;
     ULONG Reserved;

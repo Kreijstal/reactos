@@ -567,7 +567,7 @@ GetThreadDesktop(
     }
 
     return NtUserGetThreadDesktop(dwThreadId,
-                                  GetThreadConsoleDesktopRequest->ConsoleDesktop);
+                                  (HDESK)FROM_LPC_HANDLE(GetThreadConsoleDesktopRequest->ConsoleDesktop));
 }
 
 
