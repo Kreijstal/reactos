@@ -14,3 +14,7 @@ NTSTATUS
 Wow64TranslateEntrypoint64To32(IN  HANDLE hProcess,
                                OUT PI386_CONTEXT pContext32, 
                                IN  PCONTEXT pContext);
+
+ULONG
+Wow64RebaseEntrypoints32(IN PPEB32 Peb32,
+                         IN ULONG Eip);

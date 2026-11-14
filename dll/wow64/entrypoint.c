@@ -15,6 +15,7 @@ typedef struct _ENTRYPOINT_TRANSLATION
     ULONG_PTR   SymbolAddress64;
     ULONG       SymbolAddress32;
     NTSTATUS    (*ContextFixup)(HANDLE hProcess, PCONTEXT, PI386_CONTEXT, FIXUP);
+    ULONG       SymbolRva32;
 } ENTRYPOINT_TRANSLATION, *PENTRYPOINT_TRANSLATION;
 
 static
@@ -267,7 +268,10 @@ Wow64InitEntrypointTranslation(VOID)
                     pTranslation->SymbolName32, pTranslation->LibraryName32);
             continue;
         }
+        /* Where the probe mapping put the DLL; Wow64RebaseEntrypoints32() moves it
+         * to where the 32-bit loader puts it */
         pTranslation->SymbolAddress32 = PtrToUlong(Temp);
+        pTranslation->SymbolRva32 = (ULONG)((ULONG_PTR)Temp - (ULONG_PTR)Base32);
         
         Status = Wow64FindDllExport(Base64, 
                                     pTranslation->SymbolName64, 
@@ -304,6 +308,90 @@ Wow64InitEntrypointTranslation(VOID)
     }
     
     return Status;
+}
+
+/* The head of a 32-bit LDR_DATA_TABLE_ENTRY and PEB_LDR_DATA */
+typedef struct _WOW64_LDR_ENTRY32
+{
+    LIST_ENTRY32 InLoadOrderLinks;
+    LIST_ENTRY32 InMemoryOrderLinks;
+    LIST_ENTRY32 InInitializationOrderLinks;
+    ULONG DllBase;
+    ULONG EntryPoint;
+    ULONG SizeOfImage;
+    UNICODE_STRING32 FullDllName;
+    UNICODE_STRING32 BaseDllName;
+} WOW64_LDR_ENTRY32, *PWOW64_LDR_ENTRY32;
+
+typedef struct _WOW64_LDR_DATA32
+{
+    ULONG Length;
+    BOOLEAN Initialized;
+    ULONG SsHandle;
+    LIST_ENTRY32 InLoadOrderModuleList;
+} WOW64_LDR_DATA32, *PWOW64_LDR_DATA32;
+
+/* Base of a DLL the 32-bit loader of this process has loaded, 0 if none */
+static
+ULONG
+Wow64FindLoadedDll32(PPEB32 Peb32, LPCWSTR Name)
+{
+    PWOW64_LDR_DATA32 Ldr = UlongToPtr(Peb32->Ldr);
+    PWOW64_LDR_ENTRY32 Entry;
+    UNICODE_STRING Wanted, BaseName;
+    ULONG Head, Link;
+
+    if (Ldr == NULL)
+        return 0;
+
+    RtlInitUnicodeString(&Wanted, Name);
+    Head = PtrToUlong(&Ldr->InLoadOrderModuleList);
+    for (Link = Ldr->InLoadOrderModuleList.Flink; Link != Head; Link = Entry->InLoadOrderLinks.Flink)
+    {
+        Entry = UlongToPtr(Link);
+        BaseName.Length = Entry->BaseDllName.Length;
+        BaseName.MaximumLength = Entry->BaseDllName.MaximumLength;
+        BaseName.Buffer = UlongToPtr(Entry->BaseDllName.Buffer);
+        if (RtlEqualUnicodeString(&BaseName, &Wanted, TRUE))
+            return Entry->DllBase;
+    }
+
+    return 0;
+}
+
+/**
+ * The 32-bit addresses Wow64InitEntrypointTranslation() found are those of its
+ * own mapping of each DLL, before the 32-bit loader ran. The loader relocates a
+ * DLL whose preferred range is taken (a Debug kernel32 overlaps ntdll), so once
+ * it has loaded them, move every translation to the DLL as loaded, and return
+ * where Eip, if it is one of the old addresses, now is.
+ */
+ULONG
+Wow64RebaseEntrypoints32(IN PPEB32 Peb32,
+                         IN ULONG Eip)
+{
+    PENTRYPOINT_TRANSLATION pTranslation;
+    ULONG Base, Rebased = Eip;
+    SIZE_T i;
+
+    for (i = 0; i < _countof(EntrypointTranslations); i++)
+    {
+        pTranslation = &EntrypointTranslations[i];
+        if (pTranslation->SymbolAddress32 == 0)
+            continue;
+
+        Base = Wow64FindLoadedDll32(Peb32, pTranslation->LibraryName32);
+        /* The 32-bit process runs these as its first instructions */
+        ASSERT(Base != 0);
+        if (Base == 0)
+            continue;
+
+        if (Eip == pTranslation->SymbolAddress32)
+            Rebased = Base + pTranslation->SymbolRva32;
+        pTranslation->SymbolAddress32 = Base + pTranslation->SymbolRva32;
+    }
+
+    return Rebased;
 }
 
 NTSTATUS
