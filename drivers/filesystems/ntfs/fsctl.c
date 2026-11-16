@@ -290,6 +290,9 @@ NtfsGetVolumeData(PDEVICE_OBJECT DeviceObject,
         return Status;
     }
 
+    /* Non-resident $MFT attribute lists need the storage device during lookup. */
+    DeviceExt->StorageDevice = DeviceObject;
+
     Status = FindAttribute(DeviceExt,
                            DeviceExt->MasterFileTable,
                            AttributeData,
@@ -315,7 +318,6 @@ NtfsGetVolumeData(PDEVICE_OBJECT DeviceObject,
     }
 
     /* Read Volume File (MFT index 3) */
-    DeviceExt->StorageDevice = DeviceObject;
     Status = ReadFileRecord(DeviceExt,
                             NTFS_FILE_VOLUME,
                             VolumeRecord);
