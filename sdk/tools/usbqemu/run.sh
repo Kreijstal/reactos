@@ -14,7 +14,9 @@
 #
 # Environment: WORK (required), TMO hard timeout (1800 s), STALL (150),
 # KMSTALL (300), HOTPLUG=1 (once UsbDiskQueue starts: unplug the usb0 disk
-# while it is being read, re-plug it 5 s later, three times).
+# while it is being read, re-plug it 5 s later, three times), HOTPLUG_AFTER
+# (the serial marker that starts the unplugs instead, e.g. KMTCD-RUNLIST for
+# an idle disk).
 HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=${WORK:?set WORK}; I=$WORK/img
 ISO=$1; TAG=$2; SMP=$3; BOOT=$4; TMO=${TMO:-1800}
@@ -46,7 +48,7 @@ START=$(date +%s)
 alive() { kill -0 $QPID 2>/dev/null; }
 
 if [ -n "$HOTPLUG" ]; then
-  ( until cat "$O/com1.log" "$O/com2.log" 2>/dev/null | command grep -a -q 'KMTCD-BEGIN .*UsbDiskQueue'; do
+  ( until cat "$O/com1.log" "$O/com2.log" 2>/dev/null | command grep -a -q "${HOTPLUG_AFTER:-KMTCD-BEGIN .*UsbDiskQueue}"; do
       sleep 1; alive || exit 0; done
     sleep 2
     for c in 1 2 3; do
