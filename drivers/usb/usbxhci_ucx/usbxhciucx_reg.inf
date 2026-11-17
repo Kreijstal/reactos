@@ -1,0 +1,7 @@
+; xHCI controller driver, KMDF client of the UCX class extension
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\usbxhciucx","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\usbxhciucx","Group",0x00000000,"Boot Bus Extender"
+HKLM,"SYSTEM\CurrentControlSet\Services\usbxhciucx","ImagePath",0x00020000,"system32\drivers\usbxhciucx.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\usbxhciucx","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\usbxhciucx","Type",0x00010001,0x00000001

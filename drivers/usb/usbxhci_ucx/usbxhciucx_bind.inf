@@ -1,0 +1,8 @@
+; USB_XHCI_UCX=ON: bind xHCI controllers to usbxhciucx and their root hubs to
+; usbhub3. Processed after hivesys.inf, so these values replace its
+; usbxhci/usbhub entries.
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0C0330","Service",0x00000000,"usbxhciucx"
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0C0330","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#ROOT_HUB30","Service",0x00000000,"usbhub3"
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#ROOT_HUB30","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"

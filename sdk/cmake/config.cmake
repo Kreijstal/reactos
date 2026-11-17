@@ -131,6 +131,14 @@ option(ENABLE_IWLWIFI
        "Build and package the Intel Wireless (iwlwifi) miniport"
        OFF)
 
+# Two xHCI host controller drivers are built: usbxhci, a USBPORT miniport
+# (usbport.sys + usbhub.sys), and usbxhciucx, the KMDF client of the UCX class
+# extension (ucx01000.sys + usbhub3.sys) that Windows 8 and later use.  This
+# selects which one the images bind to PCI\CC_0C0330.
+option(USB_XHCI_UCX
+       "Bind xHCI controllers to the UCX stack (usbxhciucx + usbhub3) instead of usbport"
+       OFF)
+
 # The firmware blobs are ~15 MiB and are fetched from linux-firmware at
 # configure time, pinned by SHA-256, the same way DOWNLOAD_WINE_GECKO
 # fetches the Gecko MSI.  Nothing is committed to this tree.
