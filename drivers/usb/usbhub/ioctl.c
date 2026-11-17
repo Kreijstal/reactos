@@ -210,24 +210,27 @@ NTAPI
 USBH_PdoIoctlSubmitUrb(IN PUSBHUB_PORT_PDO_EXTENSION PortExtension,
                        IN PIRP Irp)
 {
-    PUSBHUB_FDO_EXTENSION HubExtension;
     PURB Urb;
+    PUSB_DEVICE_HANDLE DeviceHandle;
     NTSTATUS Status;
 
     DPRINT_IOCTL("USBH_PdoIoctlSubmitUrb ... \n");
 
-    HubExtension = PortExtension->HubExtension;
-
     Urb = URB_FROM_IRP(Irp);
+    DeviceHandle = PortExtension->DeviceHandle;
 
-    if (PortExtension->DeviceHandle == NULL)
+    if (DeviceHandle == NULL)
     {
-        Urb->UrbHeader.UsbdDeviceHandle = NULL;
-        Status = USBH_PassIrp(HubExtension->RootHubPdo2, Irp);
+        /* The device left the port (or is being reset) and its handle is
+         * gone. A NULL handle means the root hub to usbport, so passing the
+         * URB down would run the child's request against the root hub. */
+        Urb->UrbHeader.Status = USBD_STATUS_DEVICE_GONE;
+        Status = STATUS_DEVICE_NOT_CONNECTED;
+        USBH_CompleteIrp(Irp, Status);
     }
     else
     {
-        Urb->UrbHeader.UsbdDeviceHandle = PortExtension->DeviceHandle;
+        Urb->UrbHeader.UsbdDeviceHandle = DeviceHandle;
         Status = USBH_PdoUrbFilter(PortExtension, Irp);
     }
 
