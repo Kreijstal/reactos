@@ -569,6 +569,26 @@ PartitionHandlePnp(
         }
         case IRP_MN_REMOVE_DEVICE:
         {
+            PFDO_EXTENSION fdoExtension = partExt->LowerDevice->DeviceExtension;
+
+            /*
+             * A partition PnP removes along with its disk is still on the
+             * disk's list: unlink it before its device is deleted, so that the
+             * disk's own removal does not walk a deleted partition.
+             */
+            PartMgrAcquireLayoutLock(fdoExtension);
+            for (PSINGLE_LIST_ENTRY prevEntry = &fdoExtension->PartitionList;
+                 prevEntry->Next != NULL;
+                 prevEntry = prevEntry->Next)
+            {
+                if (prevEntry->Next == &partExt->ListEntry)
+                {
+                    prevEntry->Next = partExt->ListEntry.Next;
+                    break;
+                }
+            }
+            PartMgrReleaseLayoutLock(fdoExtension);
+
             status = PartitionHandleRemove(partExt, TRUE);
             break;
         }

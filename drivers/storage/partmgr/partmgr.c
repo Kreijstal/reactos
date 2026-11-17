@@ -1374,21 +1374,37 @@ FdoHandleSurpriseRemoval(
 {
     PAGED_CODE();
 
-    // all enumerated child devices should receive IRP_MN_REMOVE_DEVICE
-    // removing only non-enumerated ones here
-    for (PSINGLE_LIST_ENTRY curEntry = FdoExtension->PartitionList.Next;
-         curEntry != NULL;
-         curEntry = curEntry->Next)
+    /*
+     * All enumerated child devices receive their own IRP_MN_SURPRISE_REMOVAL
+     * and IRP_MN_REMOVE_DEVICE from PnP: remove only the non-enumerated ones
+     * here. Removing the enumerated ones as well (as this used to, against
+     * its own comment) deleted their device objects, and PnP's removal of
+     * them then ran PartitionHandleRemove a second time on a deleted device.
+     */
+    PartMgrAcquireLayoutLock(FdoExtension);
+
+    PSINGLE_LIST_ENTRY prevEntry = &FdoExtension->PartitionList;
+    PSINGLE_LIST_ENTRY curEntry = prevEntry->Next;
+    while (curEntry != NULL)
     {
         PPARTITION_EXTENSION partExt = CONTAINING_RECORD(curEntry,
                                                          PARTITION_EXTENSION,
                                                          ListEntry);
+        PSINGLE_LIST_ENTRY nextEntry = curEntry->Next;
 
-        if (partExt->IsEnumerated)
+        if (!partExt->IsEnumerated)
         {
+            prevEntry->Next = nextEntry;
             PartitionHandleRemove(partExt, TRUE);
         }
+        else
+        {
+            prevEntry = curEntry;
+        }
+        curEntry = nextEntry;
     }
+
+    PartMgrReleaseLayoutLock(FdoExtension);
 
     // Send the IRP down the stack
     IoSkipCurrentIrpStackLocation(Irp);
