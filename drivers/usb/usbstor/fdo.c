@@ -113,12 +113,21 @@ USBSTOR_FdoHandleRemoveDevice(
 
     DPRINT("Handling FDO removal %p\n", DeviceObject);
 
-    // FIXME: wait for devices finished processing
+    /* A surprise removal leaves the error recovery running: a reset work item
+     * queued by the last failed transfer (or the watchdog's abort) still
+     * issues URBs and reads InterfaceInformation, and IoFreeWorkItem below
+     * would free its queued IO_WORKITEM under the worker thread. Stop the
+     * watchdog from queueing more and wait for those already queued. */
+    IoStopTimer(DeviceObject);
+    NT_VERIFY(NT_SUCCESS(IoAcquireRemoveLock(&DeviceExtension->RemoveLock, Irp)));
+    IoReleaseRemoveLockAndWait(&DeviceExtension->RemoveLock, Irp);
+
     for (Index = 0; Index < USB_MAXCHILDREN; Index++)
     {
         if (DeviceExtension->ChildPDO[Index] != NULL)
         {
             DPRINT("Deleting PDO %p RefCount %x AttachedDevice %p \n", DeviceExtension->ChildPDO[Index], DeviceExtension->ChildPDO[Index]->ReferenceCount, DeviceExtension->ChildPDO[Index]->AttachedDevice);
+            USBSTOR_PdoWaitForRequests(DeviceExtension->ChildPDO[Index]);
             IoDeleteDevice(DeviceExtension->ChildPDO[Index]);
         }
     }

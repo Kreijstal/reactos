@@ -539,6 +539,18 @@ USBSTOR_PdoHandleDeviceRelations(
     return STATUS_SUCCESS;
 }
 
+/* Refuse new SRBs and wait for the ones in flight: called once, by whichever
+ * of the PDO's own REMOVE or its parent FDO's REMOVE unlinks it first. */
+VOID
+USBSTOR_PdoWaitForRequests(
+    IN PDEVICE_OBJECT PdoDevice)
+{
+    PPDO_DEVICE_EXTENSION PDODeviceExtension = PdoDevice->DeviceExtension;
+
+    NT_VERIFY(NT_SUCCESS(IoAcquireRemoveLock(&PDODeviceExtension->RemoveLock, PdoDevice)));
+    IoReleaseRemoveLockAndWait(&PDODeviceExtension->RemoveLock, PdoDevice);
+}
+
 NTSTATUS
 USBSTOR_PdoHandlePnp(
     IN PDEVICE_OBJECT DeviceObject,
@@ -614,6 +626,7 @@ USBSTOR_PdoHandlePnp(
 
            if (bDelete)
            {
+               USBSTOR_PdoWaitForRequests(DeviceObject);
                IoDeleteDevice(DeviceObject);
            }
            return STATUS_SUCCESS;
@@ -903,6 +916,7 @@ USBSTOR_CreatePDO(
     PDODeviceExtension->PDODeviceObject = &FDODeviceExtension->ChildPDO[LUN];
     PDODeviceExtension->Self = PDO;
     PDODeviceExtension->LUN = LUN;
+    IoInitializeRemoveLock(&PDODeviceExtension->RemoveLock, USB_STOR_TAG, 0, 0);
 
     PDO->Flags |= DO_DIRECT_IO;
 

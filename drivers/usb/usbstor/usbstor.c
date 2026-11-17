@@ -41,6 +41,7 @@ USBSTOR_AddDevice(
     DeviceExtension->LowerDeviceObject = IoAttachDeviceToDeviceStack(DeviceObject, PhysicalDeviceObject);
 
     KeInitializeSpinLock(&DeviceExtension->CommonLock);
+    IoInitializeRemoveLock(&DeviceExtension->RemoveLock, USB_STOR_TAG, 0, 0);
 
     IoInitializeTimer(DeviceObject, USBSTOR_TimerRoutine, (PVOID)DeviceExtension);
 

@@ -285,6 +285,8 @@ USBSTOR_ResetPipeWorkItemRoutine(
 
     // now resend the csw as the stall got cleared
     USBSTOR_SendCSWRequest(FDODeviceExtension, Context->Irp);
+
+    IoReleaseRemoveLock(&FDODeviceExtension->RemoveLock, FDODeviceExtension->ResetDeviceWorkItem);
 }
 
 VOID
@@ -342,6 +344,8 @@ USBSTOR_ResetDeviceWorkItemRoutine(
      * waits on IrpListHead (USBSTOR_QueueAddIrp), and only this point knows the
      * reset is over: start the oldest one. */
     USBSTOR_QueueStartListHead(FdoDevice);
+
+    IoReleaseRemoveLock(&FDODeviceExtension->RemoveLock, FDODeviceExtension->ResetDeviceWorkItem);
 }
 
 VOID
@@ -355,6 +359,11 @@ USBSTOR_QueueResetPipe(
     USBSTOR_Trace(UsbStorTraceQueueResetPipe,
                   (ULONG_PTR)FDODeviceExtension->ActiveSrb,
                   (ULONG_PTR)FDODeviceExtension->Flags);
+
+    /* A stalled CSW belongs to an IRP that is still in flight, and the FDO is
+     * not removed while one is, so the lock cannot be refused here. */
+    NT_VERIFY(NT_SUCCESS(IoAcquireRemoveLock(&FDODeviceExtension->RemoveLock,
+                                             FDODeviceExtension->ResetDeviceWorkItem)));
 
     IoQueueWorkItem(FDODeviceExtension->ResetDeviceWorkItem,
                     USBSTOR_ResetPipeWorkItemRoutine,
@@ -370,6 +379,13 @@ USBSTOR_QueueResetDevice(
     KIRQL OldIrql;
 
     DPRINT("USBSTOR_QueueResetDevice\n");
+
+    /* The device is being removed: there is nothing left to reset. */
+    if (!NT_SUCCESS(IoAcquireRemoveLock(&FDODeviceExtension->RemoveLock,
+                                        FDODeviceExtension->ResetDeviceWorkItem)))
+    {
+        return;
+    }
 
     KeAcquireSpinLock(&FDODeviceExtension->CommonLock, &OldIrql);
     FDODeviceExtension->Flags |= USBSTOR_FDO_FLAGS_DEVICE_RESETTING;
@@ -406,6 +422,7 @@ USBSTOR_TimerWorkerRoutine(
     {
         InterlockedExchange(&FDODeviceExtension->SrbErrorHandlingActive, FALSE);
         ExFreePoolWithTag(WorkItemData, USB_STOR_TAG);
+        IoReleaseRemoveLock(&FDODeviceExtension->RemoveLock, WorkItemData);
         return;
     }
 
@@ -460,6 +477,7 @@ USBSTOR_TimerWorkerRoutine(
     FDODeviceExtension->TimerTicksOnActiveSrb = 0;
 
     ExFreePoolWithTag(WorkItemData, USB_STOR_TAG);
+    IoReleaseRemoveLock(&FDODeviceExtension->RemoveLock, WorkItemData);
 }
 
 VOID
@@ -578,7 +596,14 @@ USBSTOR_TimerRoutine(
         WorkItemData = ExAllocatePoolWithTag(NonPagedPool,
                                              sizeof(ERRORHANDLER_WORKITEM_DATA),
                                              USB_STOR_TAG);
-        if (WorkItemData)
+        if (WorkItemData &&
+            !NT_SUCCESS(IoAcquireRemoveLock(&FDODeviceExtension->RemoveLock, WorkItemData)))
+        {
+            /* Being removed: the remove path stopped this timer. */
+            ExFreePoolWithTag(WorkItemData, USB_STOR_TAG);
+            InterlockedExchange(&FDODeviceExtension->SrbErrorHandlingActive, FALSE);
+        }
+        else if (WorkItemData)
         {
            // Initialize and queue the work item to handle the error
            ExInitializeWorkItem(&WorkItemData->WorkQueueItem,

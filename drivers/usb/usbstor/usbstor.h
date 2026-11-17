@@ -148,6 +148,10 @@ typedef struct
     ULONG TimerWorkQueueEnabled;                                                         // timer work queue enabled
     ULONG InstanceCount;                                                                 // pdo instance count
     KSPIN_LOCK CommonLock;
+    /* Held by every queued recovery work item (reset pipe/device, watchdog
+     * abort): IRP_MN_REMOVE_DEVICE waits for them before it frees anything
+     * they use, ResetDeviceWorkItem included. */
+    IO_REMOVE_LOCK RemoveLock;
     PIO_WORKITEM ResetDeviceWorkItem;
     ULONG Flags;
     IRP_CONTEXT CurrentIrpContext;
@@ -162,6 +166,10 @@ typedef struct
     PDEVICE_OBJECT LowerDeviceObject;                                                    // points to FDO
     PDEVICE_OBJECT *PDODeviceObject;                                                     // entry in pdo list
     PDEVICE_OBJECT Self;                                                                 // self
+    /* Held by every SRB from dispatch until it terminates. Once the PDO is
+     * removed, I/O still arriving through handles opened before the removal
+     * is refused here instead of reaching an FDO that is being torn down. */
+    IO_REMOVE_LOCK RemoveLock;
     // the whole structure is not stored
     UCHAR InquiryData[INQUIRYDATABUFFERSIZE];                                            // USB SCSI inquiry data
 }PDO_DEVICE_EXTENSION, *PPDO_DEVICE_EXTENSION;
@@ -339,6 +347,10 @@ USBSTOR_QueueNextRequest(
 VOID
 USBSTOR_QueueStartListHead(
     IN PDEVICE_OBJECT DeviceObject);
+
+VOID
+USBSTOR_PdoWaitForRequests(
+    IN PDEVICE_OBJECT PdoDevice);
 
 VOID
 USBSTOR_QueueTerminateRequest(

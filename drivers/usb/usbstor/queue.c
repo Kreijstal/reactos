@@ -125,12 +125,15 @@ USBSTOR_QueueAddIrp(
      * routine call here found its routine already taken. */
     if (Irp->Cancel)
     {
+        PDEVICE_OBJECT PdoDevice = IoStack->DeviceObject;
+
         KeReleaseSpinLockFromDpcLevel(&FDODeviceExtension->IrpListLock);
         IoReleaseCancelSpinLock(Irp->CancelIrql);
 
         Irp->IoStatus.Status = STATUS_CANCELLED;
         Irp->IoStatus.Information = 0;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        IoReleaseRemoveLock(&((PPDO_DEVICE_EXTENSION)PdoDevice->DeviceExtension)->RemoveLock, Irp);
         return TRUE;
     }
 
@@ -266,6 +269,10 @@ USBSTOR_QueueTerminateRequest(
     USBSTOR_Trace(UsbStorTraceTerminate,
                   (ULONG_PTR)Irp,
                   (ULONG_PTR)FDODeviceExtension->ActiveSrb);
+
+    /* Taken by the PDO's dispatch (USBSTOR_HandleInternalDeviceControl); the
+     * IRP was started from there, so its stack location is the PDO's. */
+    IoReleaseRemoveLock(&((PPDO_DEVICE_EXTENSION)IoStack->DeviceObject->DeviceExtension)->RemoveLock, Irp);
 }
 
 VOID
