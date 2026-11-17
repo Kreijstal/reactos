@@ -556,8 +556,14 @@ IopDereferenceDeviceObject(IN PDEVICE_OBJECT DeviceObject,
     if (ReferenceCount != 0)
         return;
 
-    /* A surprise-removed device may be waiting for its last handle to be closed */
-    if (ExtensionFlags & DOE_REMOVE_PENDING)
+    /*
+     * A surprise-removed device may be waiting for its last handle to be
+     * closed. Once its IRP_MN_REMOVE_DEVICE has been sent (DOE_REMOVE_PROCESSED)
+     * nothing waits any more, and the devices below this one may already be
+     * deleted: walking down to the base of the stack would touch freed
+     * device objects.
+     */
+    if ((ExtensionFlags & (DOE_REMOVE_PENDING | DOE_REMOVE_PROCESSED)) == DOE_REMOVE_PENDING)
         PiNotifyDeviceObjectClosed(DeviceObject);
 
     /* Check if we can unload it and it's safe to unload */
