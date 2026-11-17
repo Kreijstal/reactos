@@ -173,6 +173,78 @@ EmitLine(PCSTR Fmt, ...)
     LeaveCriticalSection(&g_SerialLock);
 }
 
+/* Optional RUN.LST on the control disk: one command line per line, run in
+ * order instead of the kmtest list, each bounded by KMTCD_COMMAND_TIMEOUT_MS
+ * and reported with the same KMTCD-BEGIN/KMTCD-END markers. "%D" expands to
+ * the control disk's drive letter and "%K" to the kmtest.exe path, so user-mode
+ * test programs carried on the control disk can run next to kmtests. */
+#define KMTCD_COMMAND_TIMEOUT_MS   (600 * 1000)
+
+static
+DWORD
+ReadCommandsFromControlDisk(_Out_writes_z_(Size) PSTR Buffer, _In_ DWORD Size,
+                            _Out_ PCHAR DriveLetter)
+{
+    DWORD Drives = GetLogicalDrives();
+    WCHAR Path[] = L"?:\\RUN.LST";
+    CHAR Letter;
+
+    *DriveLetter = 0;
+    for (Letter = 'C'; Letter <= 'Z'; ++Letter)
+    {
+        HANDLE File;
+        DWORD ReadBytes = 0;
+        BOOL Ok;
+
+        if (!(Drives & (1UL << (Letter - 'A'))))
+            continue;
+
+        Path[0] = (WCHAR)Letter;
+        File = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                           OPEN_EXISTING, 0, NULL);
+        if (File == INVALID_HANDLE_VALUE)
+            continue;
+
+        Ok = ReadFile(File, Buffer, Size - 1, &ReadBytes, NULL);
+        CloseHandle(File);
+        if (!Ok || ReadBytes == 0)
+            continue;
+
+        Buffer[ReadBytes] = '\0';
+        *DriveLetter = Letter;
+        return ReadBytes;
+    }
+    return 0;
+}
+
+static
+VOID
+ExpandCommand(_In_z_ PCSTR Line, _In_ CHAR DriveLetter,
+              _Out_writes_z_(Size) PWSTR CmdLine, _In_ DWORD Size)
+{
+    DWORD Out = 0;
+
+    for (; *Line && Out + MAX_PATH + 1 < Size; ++Line)
+    {
+        if (Line[0] == '%' && Line[1] == 'D')
+        {
+            CmdLine[Out++] = (WCHAR)DriveLetter;
+            ++Line;
+        }
+        else if (Line[0] == '%' && Line[1] == 'K')
+        {
+            wcscpy(&CmdLine[Out], g_KmtestExePath);
+            Out += (DWORD)wcslen(g_KmtestExePath);
+            ++Line;
+        }
+        else
+        {
+            CmdLine[Out++] = (WCHAR)(UCHAR)*Line;
+        }
+    }
+    CmdLine[Out] = L'\0';
+}
+
 /* Pipe-and-read the output of "kmtest.exe --list" into Buffer. Returns the
  * number of bytes read, or 0 on failure. The output is a header line
  * ("Valid test names:") plus indented test names. */
@@ -340,9 +412,30 @@ DrainPipeThread(_In_ LPVOID Parameter)
  * assertions is written to *OutFailures. */
 static
 DWORD
+RunCommandLine(_Inout_z_ PWSTR CmdLine, _In_z_ PCSTR TestName,
+               _In_ DWORD TimeoutMs, _Out_ PLONG OutFailures);
+
+static
+DWORD
 RunOneTest(_In_z_ PCSTR TestName, _Out_ PLONG OutFailures)
 {
     WCHAR CmdLine[MAX_PATH + 128];
+    int Written;
+
+    *OutFailures = 0;
+    Written = _snwprintf(CmdLine, sizeof(CmdLine) / sizeof(WCHAR) - 1,
+                         L"\"%s\" %hs", g_KmtestExePath, TestName);
+    if (Written < 0)
+        return (DWORD)-1;
+    CmdLine[Written] = L'\0';
+    return RunCommandLine(CmdLine, TestName, KMTCD_TEST_TIMEOUT_MS, OutFailures);
+}
+
+static
+DWORD
+RunCommandLine(_Inout_z_ PWSTR CmdLine, _In_z_ PCSTR TestName,
+               _In_ DWORD TimeoutMs, _Out_ PLONG OutFailures)
+{
     PROCESS_INFORMATION ProcInfo;
     STARTUPINFOW StartInfo;
     SECURITY_ATTRIBUTES SecAttrs;
@@ -352,16 +445,9 @@ RunOneTest(_In_z_ PCSTR TestName, _Out_ PLONG OutFailures)
     DWORD ExitCode = (DWORD)-1;
     DWORD WaitResult;
     BOOL ReaderDone = FALSE;
-    int Written;
     BOOL Ok;
 
     *OutFailures = 0;
-
-    Written = _snwprintf(CmdLine, sizeof(CmdLine) / sizeof(WCHAR) - 1,
-                         L"\"%s\" %hs", g_KmtestExePath, TestName);
-    if (Written < 0)
-        return ExitCode;
-    CmdLine[Written] = L'\0';
 
     SecAttrs.nLength = sizeof(SecAttrs);
     SecAttrs.bInheritHandle = TRUE;
@@ -398,11 +484,11 @@ RunOneTest(_In_z_ PCSTR TestName, _Out_ PLONG OutFailures)
     DrainCtx.Failures = 0;
     ReaderThread = CreateThread(NULL, 0, DrainPipeThread, &DrainCtx, 0, NULL);
 
-    WaitResult = WaitForSingleObject(ProcInfo.hProcess, KMTCD_TEST_TIMEOUT_MS);
+    WaitResult = WaitForSingleObject(ProcInfo.hProcess, TimeoutMs);
     if (WaitResult == WAIT_TIMEOUT)
     {
-        EmitLine("KMTCD-TIMEOUT %s after %u ms, terminating", TestName,
-                 KMTCD_TEST_TIMEOUT_MS);
+        EmitLine("KMTCD-TIMEOUT %s after %lu ms, terminating", TestName,
+                 TimeoutMs);
         TerminateProcess(ProcInfo.hProcess, WAIT_TIMEOUT);
 
         /* A thread parked in an uninterruptible kernel wait (e.g. a hard
@@ -532,6 +618,47 @@ main(void)
              g_SerialHandle != INVALID_HANDLE_VALUE,
              g_FilterTest[0] ? g_FilterTest : "<all>");
 
+    {
+        static CHAR Commands[8 * 1024];
+        CHAR DriveLetter;
+
+        if (ReadCommandsFromControlDisk(Commands, sizeof(Commands), &DriveLetter))
+        {
+            PCHAR Line = Commands;
+
+            EmitLine("KMTCD-RUNLIST drive=%c", DriveLetter);
+            while (*Line)
+            {
+                static WCHAR CmdLine[1024];
+                PCHAR End = strpbrk(Line, "\r\n");
+                DWORD ExitCode;
+                LONG Failures = 0;
+
+                if (End)
+                    *End = '\0';
+                if (*Line && *Line != ';')
+                {
+                    ExpandCommand(Line, DriveLetter, CmdLine, RTL_NUMBER_OF(CmdLine));
+                    EmitLine("KMTCD-BEGIN %s", Line);
+                    ExitCode = RunCommandLine(CmdLine, Line, KMTCD_COMMAND_TIMEOUT_MS, &Failures);
+                    EmitLine("KMTCD-END %s exit=%lu failures=%ld", Line, ExitCode, Failures);
+                    ++TestsRun;
+                    TotalAssertFailures += Failures;
+                    if (Failures > 0)
+                        ++TestsFailed;
+                    if (ExitCode != 0)
+                        ++TestsErrored;
+                }
+                if (!End)
+                    break;
+                Line = End + 1;
+                while (*Line == '\r' || *Line == '\n')
+                    ++Line;
+            }
+            goto Summary;
+        }
+    }
+
     Read = CaptureList(ListBuffer, sizeof(ListBuffer));
     if (Read == 0)
     {
@@ -601,6 +728,7 @@ main(void)
             ++TestsErrored;
     }
 
+Summary:
     /* tests_failed counts tests with >=1 failed ok() assertion (the real
      * pass/fail signal); errored counts tests kmtest.exe could not run at all
      * (non-zero Win32 exit, no assertions executed); assert_failures is the
