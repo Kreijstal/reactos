@@ -939,24 +939,12 @@ USBPORT_FlushPendingTransfers(IN PUSBPORT_ENDPOINT Endpoint)
 
         if (Irp)
         {
+            /* The cancel routine was taken back above, so no cancel ran or
+             * will run for this IRP, and every insert into and removal from
+             * PendingIrpTable happens under FlushPendingTransferSpinLock,
+             * which is held here: the IRP must still be in the table. */
             Irp = USBPORT_RemovePendingTransferIrp(FdoDevice, Irp);
-
-            if (!Irp)
-            {
-                /* The IRP was no longer in the pending table, so a cancel or
-                 * abort path has already claimed it and owns completing this
-                 * transfer.  That path clears the URB's back-pointer to
-                 * Transfer, so neither the transfer nor the URB may be touched
-                 * again here -- queueing the URB would dereference NULL. */
-                KeReleaseSpinLockFromDpcLevel(&Endpoint->EndpointSpinLock);
-                KeReleaseSpinLock(&FdoExtension->FlushPendingTransferSpinLock,
-                                  OldIrql);
-
-                DPRINT1("USBPORT_FlushPendingTransfers: Transfer %p already "
-                        "claimed elsewhere, not requeueing\n", Transfer);
-
-                goto Worker;
-            }
+            ASSERT(Irp != NULL);
         }
 
         KeReleaseSpinLockFromDpcLevel(&Endpoint->EndpointSpinLock);
@@ -1136,6 +1124,8 @@ USBPORT_QueuePendingTransferIrp(IN PIRP Irp)
     PUSBPORT_ENDPOINT Endpoint;
     PDEVICE_OBJECT FdoDevice;
     PUSBPORT_DEVICE_EXTENSION FdoExtension;
+    KIRQL OldIrql;
+    BOOLEAN IsCanceled = FALSE;
 
     DPRINT_CORE("USBPORT_QueuePendingTransferIrp: Irp - %p\n", Irp);
 
@@ -1150,17 +1140,35 @@ USBPORT_QueuePendingTransferIrp(IN PIRP Irp)
     Irp->IoStatus.Status = STATUS_PENDING;
     IoMarkIrpPending(Irp);
 
+    /* Publish the IRP in PendingIrpTable and the transfer on the endpoint's
+     * pending list before the cancel routine can see it, and do all of it
+     * under the locks the flush and cancel paths hold (FlushPendingTransfer
+     * then Endpoint). A cancel routine running on another processor then
+     * waits for the lock and finds both, and the flush can rely on a claimed
+     * cancel routine meaning the IRP is in the table. */
+    KeAcquireSpinLock(&FdoExtension->FlushPendingTransferSpinLock, &OldIrql);
+    KeAcquireSpinLockAtDpcLevel(&Endpoint->EndpointSpinLock);
+
+    USBPORT_InsertIrpInTable(FdoExtension->PendingIrpTable, Irp);
+    USBPORT_QueuePendingUrbToEndpoint(Endpoint, Urb);
+
     IoSetCancelRoutine(Irp, USBPORT_CancelPendingTransferIrp);
 
     if (Irp->Cancel && IoSetCancelRoutine(Irp, NULL))
     {
+        IsCanceled = TRUE;
+
+        USBPORT_RemovePendingTransferIrp(FdoDevice, Irp);
+        RemoveEntryList(&Transfer->TransferLink);
+        Transfer->TransferLink.Flink = NULL;
+        Transfer->TransferLink.Blink = NULL;
+    }
+
+    KeReleaseSpinLockFromDpcLevel(&Endpoint->EndpointSpinLock);
+    KeReleaseSpinLock(&FdoExtension->FlushPendingTransferSpinLock, OldIrql);
+
+    if (IsCanceled)
         USBPORT_CompleteTransfer(Urb, USBD_STATUS_CANCELED);
-    }
-    else
-    {
-        USBPORT_InsertIrpInTable(FdoExtension->PendingIrpTable, Irp);
-        USBPORT_QueuePendingUrbToEndpoint(Endpoint, Urb);
-    }
 }
 
 VOID
@@ -1172,6 +1180,7 @@ USBPORT_QueueTransferUrb(IN PURB Urb)
     PIRP Irp;
     PUSBPORT_DEVICE_HANDLE DeviceHandle;
     PUSBPORT_TRANSFER_PARAMETERS Parameters;
+    KIRQL OldIrql;
 
     DPRINT_CORE("USBPORT_QueueTransferUrb: Urb - %p\n", Urb);
 
@@ -1218,7 +1227,9 @@ USBPORT_QueueTransferUrb(IN PURB Urb)
     }
     else
     {
+        KeAcquireSpinLock(&Endpoint->EndpointSpinLock, &OldIrql);
         USBPORT_QueuePendingUrbToEndpoint(Endpoint, Urb);
+        KeReleaseSpinLock(&Endpoint->EndpointSpinLock, OldIrql);
     }
 
     DeviceHandle = Urb->UrbHeader.UsbdDeviceHandle;
