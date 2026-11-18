@@ -224,6 +224,6 @@ void NtfsChkBuildUpcase(WCHAR *Table, ULONG Entries)
     ULONG i;
 
     for (i = 0; i < Entries; ++i)
-        Table[i] = (WCHAR)(NtfsUpCaseTable[2 * i] |
-                           (NtfsUpCaseTable[2 * i + 1] << 8));
+        Table[i] = (WCHAR)(UPCASE_TABLE[2 * i] |
+                           (UPCASE_TABLE[2 * i + 1] << 8));
 }

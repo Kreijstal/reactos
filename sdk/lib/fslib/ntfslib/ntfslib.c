@@ -403,15 +403,15 @@ NtfsFormat(
     }
 
     // Get length info
-    Status = NtDeviceIoControlFile(DiskHandle,
+    Status = NtDeviceIoControlFile(DiskHandle, 
                                    NULL,
                                    NULL,
-                                   NULL,
-                                   &Iosb,
+                                   NULL, 
+                                   &Iosb, 
                                    IOCTL_DISK_GET_LENGTH_INFO,
-                                   NULL,
-                                   0,
-                                   &LengthInformation,
+                                   NULL, 
+                                   0, 
+                                   &LengthInformation, 
                                    sizeof(GET_LENGTH_INFORMATION));
     if (!NT_SUCCESS(Status))
     {
@@ -421,13 +421,13 @@ NtfsFormat(
     }
 
     // Get disk geometry
-    Status = NtDeviceIoControlFile(DiskHandle,
+    Status = NtDeviceIoControlFile(DiskHandle, 
                                    NULL,
-                                   NULL,
-                                   NULL,
+                                   NULL, 
+                                   NULL, 
                                    &Iosb,
                                    IOCTL_DISK_GET_DRIVE_GEOMETRY,
-                                   NULL,
+                                   NULL, 
                                    0,
                                    &DiskGeometry,
                                    sizeof(DiskGeometry));

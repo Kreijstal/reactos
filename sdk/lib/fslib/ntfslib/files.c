@@ -20,7 +20,7 @@
 #include "ntfslib.h"
 #include "upcase_data.h"
 #include "restart.h"
-#include "data.h"      /* ATTRIBUTES_TABLE, NtfsUpCaseTable */
+#include "data.h"      /* ATTRIBUTES_TABLE, UPCASE_TABLE */
 #include "refdata.h"   /* DefaultSds, RootSdValue, TxfDataValue, TopsData, ... */
 
 #define NDEBUG
@@ -1146,12 +1146,12 @@ WriteMetafiles(VOID)
         MkStdInfo(Val, FA_HIDDEN | FA_SYSTEM, Now, NTFS_SECURITY_ID);
         MkAddResident(&Rec, AttributeStandardInformation, NULL, 0, 0, Val, 72);
         Len = MkFileName(Val, MFT_REFERENCE(MREC_ROOT), FA_HIDDEN | FA_SYSTEM,
-                         sizeof(NtfsUpCaseTable), sizeof(NtfsUpCaseTable),
+                         sizeof(UPCASE_TABLE), sizeof(UPCASE_TABLE),
                          Now, L"$UpCase", FILE_NAME_WIN32_AND_DOS);
         MkAddResident(&Rec, AttributeFileName, NULL, 0, RA_INDEXED, Val, Len);
         Runs[0].Lcn = LAYOUT.UpCaseLcn; Runs[0].Len = LAYOUT.UpCaseClusters;
         MkAddNonResident(&Rec, AttributeData, NULL, 0, 0, Runs, 1, LAYOUT.UpCaseClusters - 1,
-                         (ULONGLONG)LAYOUT.UpCaseClusters * C, sizeof(NtfsUpCaseTable), sizeof(NtfsUpCaseTable));
+                         (ULONGLONG)LAYOUT.UpCaseClusters * C, sizeof(UPCASE_TABLE), sizeof(UPCASE_TABLE));
         MkAddResident(&Rec, AttributeData, L"$Info", 5, 0, UpCaseInfo, sizeof(UpCaseInfo));
         MkFinalize(&Rec);
 
@@ -1455,7 +1455,7 @@ WriteMetafiles(VOID)
     if (!NT_SUCCESS(Status)) { DPRINT1("ERROR: write $AttrDef (Status %lx)\n", Status); goto done; }
 
     /* $UpCase. */
-    Status = WriteRegion(LAYOUT.UpCaseLcn, LAYOUT.UpCaseClusters, &NtfsUpCaseTable, sizeof(NtfsUpCaseTable));
+    Status = WriteRegion(LAYOUT.UpCaseLcn, LAYOUT.UpCaseClusters, &UPCASE_TABLE, sizeof(UPCASE_TABLE));
     if (!NT_SUCCESS(Status)) { DPRINT1("ERROR: write $UpCase (Status %lx)\n", Status); goto done; }
 
     /* $Secure:$SDS - the 8 descriptors (16-byte aligned) with a duplicate copy

@@ -29,7 +29,7 @@ typedef struct
     WCHAR     Label[64];
     ULONG     Type;
     ULONG     DisplayRule;
-    ULONG     CollationRule;
+    ULONG     CollationRule; 
     ULONG     Flags;          // See ATTR_FLAG
     ULONGLONG MinimumSize;
     ULONGLONG MaximumSize;

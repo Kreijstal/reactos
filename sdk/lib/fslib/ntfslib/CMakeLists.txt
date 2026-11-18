@@ -1,14 +1,6 @@
-add_library(ntfslib
-    ntfslib.c
-    bootsect.c
-    files.c
-    restart.c
-    upcase_data.c
-    chkdskio.c
-    chkdsk.c
-    chkscan.c
-    chkrepair.c
-    chkutil.c)
+add_library(ntfslib ntfslib.c bootsect.c files.c ntfslib.h data.h refdata.h)
+# $LogFile restart pages, the shared $UpCase table and the offline checker
+target_sources(ntfslib PRIVATE restart.c upcase_data.c chkdskio.c chkdsk.c chkscan.c chkrepair.c chkutil.c)
 target_compile_definitions(ntfslib PRIVATE NTOS_MODE_USER=)
 add_dependencies(ntfslib psdk)
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")

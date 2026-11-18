@@ -504,7 +504,7 @@ typedef struct _INDEX_ENTRY_HEADER
 /* PROTOTYPES ****************************************************************/
 
 ULONG
-NTAPI NtGetTickCount(VOID);
+NTAPI NtGetTickCount(VOID); 
 
 // ntfslib.c
 
