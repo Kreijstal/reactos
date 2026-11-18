@@ -3,9 +3,13 @@ list(APPEND SOURCE
     processr.c
     misc.c
     pnp.c
-    pstate.c
-    cstate.c
     processr.h)
+
+if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
+    list(APPEND SOURCE
+        pstate.c
+        cstate.c)
+endif()
 
 add_library(processr MODULE ${SOURCE} processr.rc)
 set_module_type(processr kernelmodedriver)

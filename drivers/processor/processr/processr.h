@@ -88,6 +88,8 @@ ProcessorAcpiArgumentFits(
     _In_ PACPI_EVAL_OUTPUT_BUFFER Buffer,
     _In_ PACPI_METHOD_ARGUMENT Argument);
 
+#if defined(_M_IX86) || defined(_M_AMD64)
+
 /* cstate.c */
 
 VOID
@@ -132,5 +134,15 @@ ProcessorPerfInitialize(
 VOID
 ProcessorPerfStop(
     _In_opt_ PDEVICE_OBJECT DeviceObject);
+
+#else /* !(_M_IX86 || _M_AMD64) */
+
+/* Idle and performance state control (cstate.c, pstate.c) drive x86 MSRs,
+   CPUID and HLT; other architectures have no C-/P-state support here yet. */
+FORCEINLINE VOID ProcessorIdleInitialize(_In_ PDEVICE_OBJECT DeviceObject) { UNREFERENCED_PARAMETER(DeviceObject); }
+FORCEINLINE VOID ProcessorPerfInitialize(_In_ PDEVICE_OBJECT DeviceObject) { UNREFERENCED_PARAMETER(DeviceObject); }
+FORCEINLINE VOID ProcessorPerfStop(_In_opt_ PDEVICE_OBJECT DeviceObject) { UNREFERENCED_PARAMETER(DeviceObject); }
+
+#endif /* _M_IX86 || _M_AMD64 */
 
 #endif /* _PROCESSR_PCH_ */
