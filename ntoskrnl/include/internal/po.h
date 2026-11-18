@@ -298,6 +298,41 @@ PopInitShutdownList(
 );
 
 //
+// Power settings
+//
+CODE_SEG("INIT")
+VOID
+NTAPI
+PopInitializePowerSettings(
+    VOID
+);
+
+CODE_SEG("INIT")
+VOID
+NTAPI
+PopStartPowerSettingWorker(
+    VOID
+);
+
+VOID
+NTAPI
+PopSetPowerSource(
+    _In_ SYSTEM_POWER_CONDITION Source
+);
+
+VOID
+NTAPI
+PopRequestPowerSourceRefresh(
+    VOID
+);
+
+VOID
+NTAPI
+PopRefreshPowerSource(
+    VOID
+);
+
+//
 // I/O Routines
 //
 VOID

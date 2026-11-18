@@ -179,6 +179,8 @@ PopAddRemoveSysCapsCallback(IN PVOID NotificationStructure,
     if (Arrival && DeviceType == PolicyDeviceBattery)
     {
         PopCapabilities.SystemBatteriesPresent = TRUE;
+        /* The battery may say the system runs on DC */
+        PopRequestPowerSourceRefresh();
         return STATUS_SUCCESS;
     }
 

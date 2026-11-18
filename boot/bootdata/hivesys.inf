@@ -1522,6 +1522,24 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Calendars\Japanese\Eras","1926 12 25"
 HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Calendars\Japanese\Eras","1989 01 08",0x00000000,"平成_平_Heisei_H"
 HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Calendars\Japanese\Eras","2019 05 01",0x00000000,"令和_令_Reiwa_R"
 
+; Power scheme store: the power manager reports these values to PoRegisterPowerSettingCallback
+; clients (User\PowerSchemes\<scheme>\<subgroup>\<setting> overrides DefaultPowerSchemeValues)
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes","ActivePowerScheme",0x00000000,"381b4222-f694-41f0-9685-ff5bb260df2e"
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes\381b4222-f694-41f0-9685-ff5bb260df2e","FriendlyName",0x00000000,"Balanced"
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3","FriendlyName",0x00000000,"USB settings"
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3\0853a681-27c8-4100-a2fd-82013e970683","FriendlyName",0x00000000,"Hub Selective Suspend Timeout"
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3\0853a681-27c8-4100-a2fd-82013e970683","ValueMin",0x00010001,0
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3\0853a681-27c8-4100-a2fd-82013e970683","ValueMax",0x00010001,100000
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3\0853a681-27c8-4100-a2fd-82013e970683","ValueIncrement",0x00010001,1
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3\0853a681-27c8-4100-a2fd-82013e970683","ValueUnits",0x00000000,"Millisecond"
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3\0853a681-27c8-4100-a2fd-82013e970683\DefaultPowerSchemeValues\381b4222-f694-41f0-9685-ff5bb260df2e","ACSettingIndex",0x00010001,50
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3\0853a681-27c8-4100-a2fd-82013e970683\DefaultPowerSchemeValues\381b4222-f694-41f0-9685-ff5bb260df2e","DCSettingIndex",0x00010001,50
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3\48e6b7a6-50f5-4782-a5d4-53bb8f07e226","FriendlyName",0x00000000,"USB selective suspend setting"
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3\48e6b7a6-50f5-4782-a5d4-53bb8f07e226\PossibleValues\0","FriendlyName",0x00000000,"Disabled"
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3\48e6b7a6-50f5-4782-a5d4-53bb8f07e226\PossibleValues\1","FriendlyName",0x00000000,"Enabled"
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3\48e6b7a6-50f5-4782-a5d4-53bb8f07e226\DefaultPowerSchemeValues\381b4222-f694-41f0-9685-ff5bb260df2e","ACSettingIndex",0x00010001,1
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3\48e6b7a6-50f5-4782-a5d4-53bb8f07e226\DefaultPowerSchemeValues\381b4222-f694-41f0-9685-ff5bb260df2e","DCSettingIndex",0x00010001,1
+
 HKLM,"SYSTEM\CurrentControlSet\Control\PnP\Pci\CardList","Intel 82441FX",0x00030003,\
 01,00,00,00,86,80,37,12,00,00,00,00,00,00,00,00
 HKLM,"SYSTEM\CurrentControlSet\Control\PnP\Pci\CardList","Intel 82439HX",0x00030003,\

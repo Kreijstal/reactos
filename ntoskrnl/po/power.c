@@ -460,8 +460,12 @@ PoInitSystem(IN ULONG BootPhase)
                                                 PopAddRemoveSysCapsCallback,
                                                 (PVOID)(ULONG_PTR)PolicyDeviceBattery,
                                                 &NotificationEntry);
+        if (!NT_SUCCESS(Status))
+            return FALSE;
 
-        return NT_SUCCESS(Status);
+        /* Report power setting values to the callbacks registered so far */
+        PopStartPowerSettingWorker();
+        return TRUE;
     }
 
     /* Initialize the power capabilities */
@@ -503,6 +507,9 @@ PoInitSystem(IN ULONG BootPhase)
 
     KeInitializeGuardedMutex(&PopBatteryQueryLock);
     PopBatteryQueryValid = FALSE;
+
+    /* Power settings drivers can register for from now on */
+    PopInitializePowerSettings();
 
     return TRUE;
 }
@@ -928,6 +935,8 @@ PopQueryBatteryStateCached(
 {
     ULONGLONG Now, MaxAge;
     NTSTATUS Status;
+    BOOLEAN Fresh = FALSE;
+    BOOLEAN AcOnLine = FALSE;
 
     KeAcquireGuardedMutex(&PopBatteryQueryLock);
 
@@ -949,6 +958,8 @@ PopQueryBatteryStateCached(
         PopCachedBatteryStatus = Status;
         PopBatteryQueryTime = KeQueryInterruptTime();
         PopBatteryQueryValid = TRUE;
+        Fresh = NT_SUCCESS(Status);
+        AcOnLine = PopCachedBatteryState.AcOnLine;
     }
 
     Status = PopCachedBatteryStatus;
@@ -956,7 +967,29 @@ PopQueryBatteryStateCached(
         RtlCopyMemory(BatteryState, &PopCachedBatteryState, sizeof(*BatteryState));
 
     KeReleaseGuardedMutex(&PopBatteryQueryLock);
+
+    /* Each new battery state tells the power settings which source is in use */
+    if (Fresh)
+        PopSetPowerSource(AcOnLine ? PoAc : PoDc);
+
     return Status;
+}
+
+/* Called by the power setting worker: a system without a battery runs on AC */
+VOID
+NTAPI
+PopRefreshPowerSource(VOID)
+{
+    SYSTEM_BATTERY_STATE BatteryState;
+
+    PAGED_CODE();
+
+    /* A battery that just arrived must not be hidden by a cached failure */
+    KeAcquireGuardedMutex(&PopBatteryQueryLock);
+    PopBatteryQueryValid = FALSE;
+    KeReleaseGuardedMutex(&PopBatteryQueryLock);
+
+    PopQueryBatteryStateCached(&BatteryState);
 }
 
 

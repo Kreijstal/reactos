@@ -156,6 +156,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ob/ObType.cpp
     ntos_ob/ObTypes.cpp
     ntos_ob/ObWait.c
+    ntos_po/PoPowerSettingCallback.c
     ntos_ps/PsNotify.c
     ntos_ps/PsQuota.c
     ntos_se/SeHelpers.c
