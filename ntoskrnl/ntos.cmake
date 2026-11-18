@@ -501,3 +501,9 @@ endif()
 else()
     add_definitions(-D_WINKD_)
 endif()
+
+# The power framework (PoFx) is NT 6.2+; drivers built for older targets
+# link the ntoskrnl_vista stubs instead
+if(DLL_EXPORT_VERSION GREATER_EQUAL 0x602)
+    list(APPEND SOURCE ${REACTOS_SOURCE_DIR}/ntoskrnl/po/pofx.c)
+endif()

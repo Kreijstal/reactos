@@ -11,9 +11,13 @@ list(APPEND SOURCE
     io.c
     ioprop.c
     po.c
-    pofx.c
     ke.c
     ${REACTOS_SOURCE_DIR}/sdk/lib/rtl/utf8.c)
+
+# The kernel has the power framework from NT 6.2 on; these stubs would hide it
+if(DLL_EXPORT_VERSION LESS 0x602)
+    list(APPEND SOURCE pofx.c)
+endif()
 
 # IoOpenDriverRegistryKey is a Windows 10 1803 API
 set_source_files_properties(io.c PROPERTIES COMPILE_DEFINITIONS NTDDI_VERSION=0x0A000005)

@@ -317,6 +317,9 @@ PopSetSystemPowerStateTraverse(PDEVICE_NODE DeviceNode,
     PPOWER_STATE_TRAVERSE_CONTEXT PowerStateContext = Context;
     PDEVICE_OBJECT TopDeviceObject;
     NTSTATUS Status;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    BOOLEAN Sleep;
+#endif
 
     DPRINT("PopSetSystemPowerStateTraverse(%p, %p)\n", DeviceNode, Context);
 
@@ -336,6 +339,15 @@ PopSetSystemPowerStateTraverse(PDEVICE_NODE DeviceNode,
         return STATUS_SUCCESS;
     }
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* A device sees the system go to sleep in D0, with its PoFx components active */
+    Sleep = PowerStateContext->SystemPowerState > PowerSystemWorking &&
+            (PowerStateContext->PowerAction == PowerActionSleep ||
+             PowerStateContext->PowerAction == PowerActionHibernate);
+    if (Sleep)
+        PopFxActivateDeviceForSystemTransition(DeviceNode->PhysicalDeviceObject);
+#endif
+
     Status = PopSendSetSystemPowerState(TopDeviceObject,
                                         PowerStateContext->SystemPowerState,
                                         PowerStateContext->PowerAction);
@@ -343,6 +355,12 @@ PopSetSystemPowerStateTraverse(PDEVICE_NODE DeviceNode,
     {
         DPRINT1("Device '%wZ' failed IRP_MN_SET_POWER\n", &DeviceNode->InstancePath);
     }
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* The resume's PoFxReportDevicePoweredOn gives those activations back */
+    if (Sleep)
+        PopFxIncrementDeviceSleepCount(DeviceNode->PhysicalDeviceObject);
+#endif
 
     ObDereferenceObject(TopDeviceObject);
 
@@ -510,6 +528,11 @@ PoInitSystem(IN ULONG BootPhase)
 
     /* Power settings drivers can register for from now on */
     PopInitializePowerSettings();
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* And devices can register with the power framework */
+    PopFxInitialize();
+#endif
 
     return TRUE;
 }

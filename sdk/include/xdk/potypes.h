@@ -689,6 +689,10 @@ typedef PO_FX_DEVICE_V3 PO_FX_DEVICE, *PPO_FX_DEVICE;
 
 #define PO_FX_UNKNOWN_POWER                         0xFFFFFFFF
 
+/* PoFxActivateComponent and PoFxIdleComponent flags */
+#define PO_FX_FLAG_BLOCKING                         0x00000001
+#define PO_FX_FLAG_ASYNC_ONLY                       0x00000002
+
 #endif // NTDDI_WIN8
 
 $endif (_WDMDDK_)

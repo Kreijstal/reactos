@@ -298,6 +298,30 @@ PopInitShutdownList(
 );
 
 //
+// Power framework (PoFx)
+//
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+CODE_SEG("INIT")
+VOID
+NTAPI
+PopFxInitialize(
+    VOID
+);
+
+VOID
+NTAPI
+PopFxActivateDeviceForSystemTransition(
+    _In_ PDEVICE_OBJECT Pdo
+);
+
+VOID
+NTAPI
+PopFxIncrementDeviceSleepCount(
+    _In_ PDEVICE_OBJECT Pdo
+);
+#endif
+
+//
 // Power settings
 //
 CODE_SEG("INIT")
