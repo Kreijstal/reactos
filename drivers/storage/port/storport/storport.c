@@ -1956,7 +1956,7 @@ StorPortSetDeviceQueueDepth(
 
     DPRINT("Set Path %d Target %d Lun %d Queue depth to %d\n", PathId, TargetId, Lun, Depth);
 
-    return FALSE;
+    return TRUE;
 }
 
 
