@@ -24,8 +24,15 @@ $if (_WDMDDK_)
 #define PAUSE_PROCESSOR YieldProcessor();
 
 /* FIXME: Based on AMD64 but needed to compile apps */
+#ifdef __REACTOS__
+/* ReactOS: the ARM64 kernel was brought up with 32 KB stacks (x64 has
+   24 KB); 12 KB is the x86 value */
+#define KERNEL_STACK_SIZE                   0x8000
+#define KERNEL_LARGE_STACK_SIZE             0x12000
+#else
 #define KERNEL_STACK_SIZE                   12288
 #define KERNEL_LARGE_STACK_SIZE             61440
+#endif
 #define KERNEL_LARGE_STACK_COMMIT KERNEL_STACK_SIZE
 /* FIXME End */
 
