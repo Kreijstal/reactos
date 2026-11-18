@@ -57,6 +57,12 @@ int __cdecl __acrt_initialize_sse2(void)
 #pragma function(log2f)
 #pragma function(lrint)
 #pragma function(lrintf)
+#pragma function(copysign)
+#pragma function(copysignf)
+#pragma function(fmax)
+#pragma function(fmaxf)
+#pragma function(fmin)
+#pragma function(fminf)
 #endif
 
 double fma(double x, double y, double z)
@@ -92,4 +98,39 @@ long int lrintf(float x)
 {
     __debugbreak();
     return 0;
+}
+
+double copysign(double x, double y)
+{
+    return _copysign(x, y);
+}
+
+float copysignf(float x, float y)
+{
+    return (float)_copysign((double)x, (double)y);
+}
+
+/* C99 7.12.12.2/7.12.12.3: a NaN argument yields the other one */
+double fmax(double x, double y)
+{
+    if (x != x) return y;
+    if (y != y) return x;
+    return (x < y) ? y : x;
+}
+
+float fmaxf(float x, float y)
+{
+    return (float)fmax((double)x, (double)y);
+}
+
+double fmin(double x, double y)
+{
+    if (x != x) return y;
+    if (y != y) return x;
+    return (x < y) ? x : y;
+}
+
+float fminf(float x, float y)
+{
+    return (float)fmin((double)x, (double)y);
 }
