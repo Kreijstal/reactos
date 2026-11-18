@@ -97,7 +97,9 @@ KiTrapReturn:
     ldr     x16, [x20, #TfX16]
     b       3f
 1:
-    /* EL1 return path - falls through to common path */
+    /* EL1 return path: x18 is this processor's PCR, not the saved value
+       (the thread may have been switched to another processor meanwhile) */
+    mrs     x18, tpidr_el1
 3:
     /*
      * Restore KTHREAD.PreviousMode for ARM64 kernel Zw calls.  The SVC handler
@@ -187,7 +189,7 @@ KiTrapReturn:
     ldr     x26, [x27, #ExX26]
     ldr     x28, [x27, #ExX28]
     ldr     x29, [x27, #ExFp]
-    ldr     x30, [x27, #ExLr]
+    ldr     x30, [x27, #ExReturn]
     ldr     x27, [x27, #ExX27]   /* Load x27 LAST (clobbers pointer) */
     b       4f
 5:

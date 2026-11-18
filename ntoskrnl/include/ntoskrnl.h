@@ -22,6 +22,14 @@
 #define KeGetCurrentThread _KeGetCurrentThread
 #define RtlFillMemoryUlong _RtlFillMemoryUlong
 #endif
+#ifdef _M_ARM64
+#define KeGetCurrentThread _KeGetCurrentThread
+/* The XDK inlines these, ke/arm64/irql.c implements and exports them; keep
+   the inline copies out of its way (undone in internal/arm64/ke.h) */
+#define KeRaiseIrqlToDpcLevel _KeRaiseIrqlToDpcLevel
+#define KeRaiseIrqlToSynchLevel _KeRaiseIrqlToSynchLevel
+#define KeGetCurrentProcessorNumber _KeGetCurrentProcessorNumber
+#endif
 
 /* Version Data */
 #undef __MSVCRT__

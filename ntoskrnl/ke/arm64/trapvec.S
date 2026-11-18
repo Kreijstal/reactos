@@ -268,6 +268,7 @@ KiArm64SyncVectorCommon:
     str x16, [sp, #(ARM64_EARLY_STATE_REGS + 16 * 8)]
     str x17, [sp, #(ARM64_EARLY_STATE_REGS + 17 * 8)]
     str x18, [sp, #(ARM64_EARLY_STATE_REGS + 18 * 8)]
+    mrs x18, tpidr_el1           /* x18 is the PCR in kernel mode */
 
     /* Save x19-x27 (callee-saved, original - these were NOT touched by caller) */
     str x19, [sp, #(ARM64_EARLY_STATE_REGS + 19 * 8)]
@@ -665,6 +666,7 @@ KiArm64PermVectorIrqSp0_Handler:
     stp x14, x15, [sp, #0x70]
     stp x16, x17, [sp, #0x80]
     stp x18, x19, [sp, #0x90]
+    mrs x18, tpidr_el1           /* x18 is the PCR in kernel mode */
     ARM64_SAVE_NEON sp, ARM64_IRQ_NEON
     ARM64_SAVE_FP_CONTROL ARM64_IRQ_FPCR, ARM64_IRQ_FPSR
     dsb sy
@@ -729,6 +731,7 @@ KiArm64PermVectorFiqSp0_Handler:
     stp x14, x15, [sp, #0x70]
     stp x16, x17, [sp, #0x80]
     stp x18, x19, [sp, #0x90]
+    mrs x18, tpidr_el1           /* x18 is the PCR in kernel mode */
     ARM64_SAVE_NEON sp, ARM64_IRQ_NEON
     ARM64_SAVE_FP_CONTROL ARM64_IRQ_FPCR, ARM64_IRQ_FPSR
     dsb sy
@@ -786,6 +789,7 @@ KiArm64PermVectorIrqSpx_Handler:
     stp x14, x15, [sp, #0x70]
     stp x16, x17, [sp, #0x80]
     stp x18, x19, [sp, #0x90]
+    mrs x18, tpidr_el1           /* x18 is the PCR in kernel mode */
     ARM64_SAVE_NEON sp, ARM64_IRQ_NEON
     ARM64_SAVE_FP_CONTROL ARM64_IRQ_FPCR, ARM64_IRQ_FPSR
     dsb sy
@@ -843,6 +847,7 @@ KiArm64PermVectorFiqSpx_Handler:
     stp x14, x15, [sp, #0x70]
     stp x16, x17, [sp, #0x80]
     stp x18, x19, [sp, #0x90]
+    mrs x18, tpidr_el1           /* x18 is the PCR in kernel mode */
     ARM64_SAVE_NEON sp, ARM64_IRQ_NEON
     ARM64_SAVE_FP_CONTROL ARM64_IRQ_FPCR, ARM64_IRQ_FPSR
     dsb sy
@@ -915,6 +920,7 @@ KiArm64PermVectorIrqLowerA64_Handler:
     stp x14, x15, [sp, #0x70]
     stp x16, x17, [sp, #0x80]
     stp x18, x19, [sp, #0x90]
+    mrs x18, tpidr_el1           /* x18 is the PCR in kernel mode */
     mrs x9, sp_el0
     str x9, [sp, #0xD0]           /* Save user SP_EL0 after preserving x9 */
     ARM64_SAVE_NEON sp, ARM64_IRQ_NEON
@@ -977,6 +983,7 @@ KiArm64PermVectorFiqLowerA64_Handler:
     stp x14, x15, [sp, #0x70]
     stp x16, x17, [sp, #0x80]
     stp x18, x19, [sp, #0x90]
+    mrs x18, tpidr_el1           /* x18 is the PCR in kernel mode */
     mrs x9, sp_el0
     str x9, [sp, #0xD0]           /* Save user SP_EL0 after preserving x9 */
     ARM64_SAVE_NEON sp, ARM64_IRQ_NEON
@@ -1039,6 +1046,7 @@ KiArm64PermVectorIrqLowerA32_Handler:
     stp x14, x15, [sp, #0x70]
     stp x16, x17, [sp, #0x80]
     stp x18, x19, [sp, #0x90]
+    mrs x18, tpidr_el1           /* x18 is the PCR in kernel mode */
     mrs x9, sp_el0
     str x9, [sp, #0xD0]           /* Save user SP_EL0 after preserving x9 */
     ARM64_SAVE_NEON sp, ARM64_IRQ_NEON
@@ -1100,6 +1108,7 @@ KiArm64PermVectorFiqLowerA32_Handler:
     stp x14, x15, [sp, #0x70]
     stp x16, x17, [sp, #0x80]
     stp x18, x19, [sp, #0x90]
+    mrs x18, tpidr_el1           /* x18 is the PCR in kernel mode */
     mrs x9, sp_el0
     str x9, [sp, #0xD0]           /* Save user SP_EL0 after preserving x9 */
     ARM64_SAVE_NEON sp, ARM64_IRQ_NEON

@@ -6,22 +6,13 @@
 extern "C" {
 #endif
 
-extern KIRQL KeArm64CurrentIrql;
-
 FORCEINLINE
 VOID
 KeSetCurrentIrql(
     _In_ KIRQL NewIrql)
 {
-    PKIPCR Pcr = KeGetPcr();
-
-    if (Pcr != NULL)
-    {
-        Pcr->CurrentIrql = NewIrql;
-        return;
-    }
-
-    KeArm64CurrentIrql = NewIrql;
+    /* x18 holds the PCR from the first instruction of KiSystemStartup on */
+    KeGetPcr()->CurrentIrql = NewIrql;
 }
 
 #ifdef __cplusplus

@@ -1,6 +1,17 @@
 #include <asm.h>
 #include <ksarm64.h>
 
+/*
+ * The kernel callout frame: a KEXCEPTION_FRAME (WoA layout) followed by the
+ * state the callout must restore that the exception frame has no slot for.
+ * Keep in sync with KI_CALLOUT_FRAME in internal/arm64/ke.h.
+ */
+#define CoInitialStack          (KEXCEPTION_FRAME_LENGTH + 0x00)
+#define CoCallbackStack         (KEXCEPTION_FRAME_LENGTH + 0x08)
+#define CoFpcr                  (KEXCEPTION_FRAME_LENGTH + 0x10)
+#define CoFpsr                  (KEXCEPTION_FRAME_LENGTH + 0x18)
+#define CALLOUT_FRAME_LENGTH    (KEXCEPTION_FRAME_LENGTH + 0x20)
+
     .text
     .align 4
 
@@ -9,12 +20,16 @@
     .global KiCallUserMode
     .seh_proc KiCallUserMode
 KiCallUserMode:
-    /*
-     * SEH: Stack must be 16-byte aligned. KEXCEPTION_FRAME_LENGTH (0xC8) is not aligned,
-     * so we allocate 0xD0 (208 bytes) which is 16-byte aligned and matches SEH directive.
-     */
-    sub     sp, sp, #0xD0
-    .seh_stackalloc 0xd0
+    sub     sp, sp, #CALLOUT_FRAME_LENGTH
+    .seh_stackalloc CALLOUT_FRAME_LENGTH
+    stp     d8, d9, [sp, #ExD8]
+    .seh_save_fregp d8, ExD8
+    stp     d10, d11, [sp, #ExD10]
+    .seh_save_fregp d10, ExD10
+    stp     d12, d13, [sp, #ExD12]
+    .seh_save_fregp d12, ExD12
+    stp     d14, d15, [sp, #ExD14]
+    .seh_save_fregp d14, ExD14
     stp     x19, x20, [sp, #ExX19]
     .seh_save_regp x19, ExX19
     stp     x21, x22, [sp, #ExX21]
@@ -25,18 +40,15 @@ KiCallUserMode:
     .seh_save_regp x25, ExX25
     stp     x27, x28, [sp, #ExX27]
     .seh_save_regp x27, ExX27
-    str     x29, [sp, #ExFp]
-    .seh_save_reg x29, ExFp
-    str     x30, [sp, #ExLr]
-    .seh_save_reg x30, ExLr
+    /* Fp and Return (the link register) are adjacent */
+    stp     x29, x30, [sp, #ExFp]
+    .seh_save_fplr ExFp
     .seh_endprologue
-    /* Save return address again (not tracked by SEH) */
-    str     x30, [sp, #ExReturn]
 
     mrs     x9, fpcr
-    str     x9, [sp, #ExFpcr]
+    str     x9, [sp, #CoFpcr]
     mrs     x9, fpsr
-    str     x9, [sp, #ExFpsr]
+    str     x9, [sp, #CoFpsr]
 
     str     x0, [sp, #ExOutputBuffer]
     str     x1, [sp, #ExOutputLength]
@@ -44,19 +56,22 @@ KiCallUserMode:
     mov     x0, sp
     bl      KiUserModeCallout
 
-    ldr     x9, [sp, #ExFpcr]
+    ldr     x9, [sp, #CoFpcr]
     msr     fpcr, x9
-    ldr     x9, [sp, #ExFpsr]
+    ldr     x9, [sp, #CoFpsr]
     msr     fpsr, x9
 
+    ldp     d8, d9, [sp, #ExD8]
+    ldp     d10, d11, [sp, #ExD10]
+    ldp     d12, d13, [sp, #ExD12]
+    ldp     d14, d15, [sp, #ExD14]
     ldp     x19, x20, [sp, #ExX19]
     ldp     x21, x22, [sp, #ExX21]
     ldp     x23, x24, [sp, #ExX23]
     ldp     x25, x26, [sp, #ExX25]
     ldp     x27, x28, [sp, #ExX27]
-    ldr     x29, [sp, #ExFp]
-    ldr     x30, [sp, #ExLr]
-    add     sp, sp, #0xD0
+    ldp     x29, x30, [sp, #ExFp]
+    add     sp, sp, #CALLOUT_FRAME_LENGTH
     ret
     .seh_endproc
 
@@ -68,20 +83,23 @@ KiCallbackReturn:
     mov     sp, x0
     mov     x9, x1
 
-    ldr     x10, [sp, #ExFpcr]
+    ldr     x10, [sp, #CoFpcr]
     msr     fpcr, x10
-    ldr     x10, [sp, #ExFpsr]
+    ldr     x10, [sp, #CoFpsr]
     msr     fpsr, x10
 
+    ldp     d8, d9, [sp, #ExD8]
+    ldp     d10, d11, [sp, #ExD10]
+    ldp     d12, d13, [sp, #ExD12]
+    ldp     d14, d15, [sp, #ExD14]
     ldp     x19, x20, [sp, #ExX19]
     ldp     x21, x22, [sp, #ExX21]
     ldp     x23, x24, [sp, #ExX23]
     ldp     x25, x26, [sp, #ExX25]
     ldp     x27, x28, [sp, #ExX27]
-    ldr     x29, [sp, #ExFp]
-    ldr     x30, [sp, #ExLr]
+    ldp     x29, x30, [sp, #ExFp]
 
-    add     sp, sp, #0xD0
+    add     sp, sp, #CALLOUT_FRAME_LENGTH
 
     mov     x0, x9
     ret

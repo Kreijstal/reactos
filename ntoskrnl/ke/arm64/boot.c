@@ -86,6 +86,7 @@ static UINT64 KiArm64IdentityL2Backing[ARM64_IDENTITY_L2_ENTRIES +
                                        (PAGE_SIZE / sizeof(UINT64))];
 
 extern const UINT64 KiArm64EarlyVectorTable[];
+extern KIPCR KiArm64BootPcr;
 
 static UINT64 *KiArm64IdentityL0;
 static UINT64 *KiArm64IdentityL1;
@@ -1058,6 +1059,9 @@ NTAPI
 KiSystemStartup(_Inout_ PLOADER_PARAMETER_BLOCK LoaderBlock)
 {
     ARM64_BOOT_CONTEXT BootContext = {0};
+
+    /* Point x18 (and TPIDR_EL1) at a zeroed PCR before anything reads it */
+    KiArm64SetCurrentPcr(&KiArm64BootPcr);
 
     if (LoaderBlock && LoaderBlock->u.Arm64.EarlyUartAddress != 0)
     {

@@ -480,16 +480,20 @@ KiInitializeUserApc(
 
 }
 
+/* usercall_asm.S lays the callout frame out by hand */
+C_ASSERT(FIELD_OFFSET(KI_CALLOUT_FRAME, InitialStack) == sizeof(KEXCEPTION_FRAME));
+C_ASSERT(FIELD_OFFSET(KI_CALLOUT_FRAME, Fpsr) == sizeof(KEXCEPTION_FRAME) + 0x18);
+C_ASSERT((sizeof(KI_CALLOUT_FRAME) % 16) == 0);
+
 NTSTATUS
 FASTCALL
 KiUserModeCallout(
-    _Out_ PKCALLOUT_FRAME CalloutFrame)
+    _Out_ PKI_CALLOUT_FRAME CalloutFrame)
 {
     PKTHREAD CurrentThread;
     PEPROCESS Process;
     PKTRAP_FRAME TrapFrame;
     KTRAP_FRAME CallbackTrapFrame;
-    PKIPCR Pcr;
     PVOID UserCallbackDispatcher;
     ULONG_PTR InitialStack;
     NTSTATUS Status;
@@ -529,7 +533,7 @@ KiUserModeCallout(
     CalloutFrame->InitialStack = (ULONG_PTR)CurrentThread->InitialStack;
 
     TrapFrame = CurrentThread->TrapFrame;
-    CalloutFrame->TrapFrame = (ULONG_PTR)TrapFrame;
+    CalloutFrame->ExceptionFrame.TrapFrame = (ULONG_PTR)TrapFrame;
 
     CurrentThread->CallbackStack = CalloutFrame;
 
@@ -538,12 +542,6 @@ KiUserModeCallout(
     CurrentThread->InitialStack = (PVOID)InitialStack;
 
     CallbackTrapFrame = *TrapFrame;
-
-    Pcr = (PKIPCR)KeGetPcr();
-    if (Pcr != NULL)
-    {
-        Pcr->Prcb.RspBase = InitialStack;
-    }
 
     CallbackTrapFrame.Pc = (ULONG_PTR)UserCallbackDispatcher;
     CallbackTrapFrame.Lr = (ULONG_PTR)UserCallbackDispatcher;
@@ -655,9 +653,8 @@ NtCallbackReturn(
     _In_ NTSTATUS CallbackStatus)
 {
     PKTHREAD CurrentThread;
-    PKCALLOUT_FRAME CalloutFrame;
+    PKI_CALLOUT_FRAME CalloutFrame;
     PKTRAP_FRAME CallbackTrapFrame, TrapFrame;
-    PKIPCR Pcr;
 
     CurrentThread = KeGetCurrentThread();
     CalloutFrame = CurrentThread->CallbackStack;
@@ -666,25 +663,18 @@ NtCallbackReturn(
         return STATUS_NO_CALLBACK_ACTIVE;
     }
 
-    *((PVOID*)CalloutFrame->OutputBuffer) = Result;
-    *((ULONG*)CalloutFrame->OutputLength) = ResultLength;
+    *((PVOID*)CalloutFrame->ExceptionFrame.OutputBuffer) = Result;
+    *((ULONG*)CalloutFrame->ExceptionFrame.OutputLength) = ResultLength;
 
     CallbackTrapFrame = CurrentThread->TrapFrame;
 
     _disable();
 
-    Pcr = (PKIPCR)KeGetPcr();
-
-    TrapFrame = (PKTRAP_FRAME)CalloutFrame->TrapFrame;
+    TrapFrame = (PKTRAP_FRAME)CalloutFrame->ExceptionFrame.TrapFrame;
 
     if (CallbackStatus == STATUS_CALLBACK_POP_STACK)
     {
         *TrapFrame = *CallbackTrapFrame;
-    }
-
-    if (Pcr != NULL)
-    {
-        Pcr->Prcb.RspBase = CalloutFrame->InitialStack;
     }
 
     CurrentThread->InitialStack = (PVOID)CalloutFrame->InitialStack;
@@ -693,5 +683,5 @@ NtCallbackReturn(
 
     _enable();
 
-    KiCallbackReturn(CalloutFrame, CallbackStatus);
+    KiCallbackReturn(&CalloutFrame->ExceptionFrame, CallbackStatus);
 }

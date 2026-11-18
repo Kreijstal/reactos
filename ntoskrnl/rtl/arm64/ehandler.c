@@ -37,20 +37,7 @@ typedef struct _SCOPE_TABLE_ARM64 {
 
 typedef SCOPE_TABLE_ARM64 SCOPE_TABLE, *PSCOPE_TABLE;
 
-typedef struct _DISPATCHER_CONTEXT {
-    ULONG_PTR ControlPc;
-    ULONG_PTR ImageBase;
-    PRUNTIME_FUNCTION FunctionEntry;
-    ULONG_PTR EstablisherFrame;
-    ULONG_PTR TargetPc;
-    PCONTEXT ContextRecord;
-    PEXCEPTION_ROUTINE LanguageHandler;
-    PVOID HandlerData;
-    struct _UNWIND_HISTORY_TABLE *HistoryTable;
-    DWORD ScopeIndex;
-    BOOLEAN ControlPcIsUnwound;
-    PUCHAR NonVolatileRegisters;
-} DISPATCHER_CONTEXT, *PDISPATCHER_CONTEXT;
+/* DISPATCHER_CONTEXT comes from the NDK (ndk/arm64/ketypes.h) */
 #endif
 
 NTSYSAPI

@@ -40,12 +40,11 @@ KiRetireDpcListInDpcStack:
  * KiThreadStartup
  *
  * This is the entry point for all new threads on ARM64. When a thread is first
- * scheduled, KiSwapContext returns to this function (via the ReturnAddress
- * stored in KSWITCH_FRAME).
+ * scheduled, KiSwapContext returns to this function (via the Return slot
+ * of its KSWITCH_FRAME), after popping that frame.
  *
  * On entry:
- *   - SP points to KSWITCH_FRAME
- *   - KSTART_FRAME is immediately above KSWITCH_FRAME
+ *   - SP points to the KSTART_FRAME
  *   - IRQL is typically HIGH_LEVEL (from idle loop context switch)
  *
  * This function must:
@@ -60,8 +59,7 @@ KiRetireDpcListInDpcStack:
 KiThreadStartup:
     /*
      * SEH: This is a special entry point - no prologue in traditional sense.
-     * SP already points to KSWITCH_FRAME set up by KiInitializeContextThread.
-     * We declare no frame here since we consume the existing switch frame.
+     * SP already points to the KSTART_FRAME set up by KiInitializeContextThread.
      */
     .seh_endprologue
 
@@ -88,13 +86,7 @@ KiThreadStartup:
     mov     x28, xzr
     mov     x29, xzr
 
-    /* ARM64: When we enter here, SP points to KSWITCH_FRAME.
-     * The KSTART_FRAME is immediately above it (higher address).
-     * First, skip past the KSWITCH_FRAME to point SP at KSTART_FRAME.
-     */
-    add     sp, sp, #KSWITCH_FRAME_LENGTH
-
-    /* Load startup parameters from KSTART_FRAME (SP now points to it).
+    /* Load startup parameters from KSTART_FRAME (SP points to it).
      * Preserve them in callee-saved registers across KfLowerIrql. */
     ldr     x21, [sp, #SfSystemRoutine]
     ldr     x19, [sp, #SfStartRoutine]
@@ -179,9 +171,17 @@ KiThreadStartup:
  */
     .seh_proc KiSwapContext
 KiSwapContext:
-    /* Reserve space for the switch frame and save non-volatile registers */
+    /* Reserve the switch frame and save the non-volatile registers */
     sub     sp, sp, #KSWITCH_FRAME_LENGTH
     .seh_stackalloc KSWITCH_FRAME_LENGTH
+    stp     d8, d9, [sp, #SwD8]
+    .seh_save_fregp d8, SwD8
+    stp     d10, d11, [sp, #SwD10]
+    .seh_save_fregp d10, SwD10
+    stp     d12, d13, [sp, #SwD12]
+    .seh_save_fregp d12, SwD12
+    stp     d14, d15, [sp, #SwD14]
+    .seh_save_fregp d14, SwD14
     stp     x19, x20, [sp, #SwX19]
     .seh_save_regp x19, SwX19
     stp     x21, x22, [sp, #SwX21]
@@ -192,61 +192,49 @@ KiSwapContext:
     .seh_save_regp x25, SwX25
     stp     x27, x28, [sp, #SwX27]
     .seh_save_regp x27, SwX27
-    str     x29, [sp, #SwFp]
-    .seh_save_reg x29, SwFp
+    /* Fp and Return (our return address) are adjacent */
+    stp     x29, x30, [sp, #SwFp]
+    .seh_save_fplr SwFp
     .seh_endprologue
 
     /*
-     * ARM64 CRITICAL: We need to save TWO return addresses:
-     * 1. SwReturn: The final return address (to our caller) - used by ret x9 at the end
-     * 2. SwLr: The return address for KiSwapContextInternal to use after stack switch
-     *
-     * On AMD64, 'call' pushes the return address on the stack, so after stack switch,
-     * 'ret' naturally pops from the new stack. On ARM64, 'bl' uses LR register, so
-     * after stack switch we need to manually load the return address from the new stack.
-     *
-     * SwLr must contain the address of .Lrestore_context so that after stack switch,
-     * KiSwapContextInternal can return there to restore registers.
-     */
-    str     x30, [sp, #SwReturn]   /* Save caller's return address */
-    adr     x9, .Lrestore_context  /* Get address of restore label */
-    str     x9, [sp, #SwLr]        /* Save for KiSwapContextInternal */
-
-    /*
-     * Locate the target (new) thread from the per-CPU PCR.
-     * TPIDR_EL1 holds the per-CPU PCR pointer (set in KiInitializePcr).
-     * Do NOT use the global KeArm64CurrentPcr - it's shared and wrong on SMP.
+     * Locate the target (new) thread from the per-CPU PCR. TPIDR_EL1 holds the
+     * PCR pointer (set in KiInitializePcr); the global KeArm64CurrentPcr is
+     * shared and wrong on SMP.
      */
     mrs     x9, tpidr_el1
     cbz     x9, .Lbad_current_thread
     ldr     x2, [x9, #PcCurrentThread]
     cbz     x2, .Lbad_current_thread
 
+    /* Switches stacks; returns here on the NEW thread's stack */
     bl      KiSwapContextInternal
-    b       .Lrestore_context
 
-.Lbad_current_thread:
-    brk     #0xf000
-    b       .Lbad_current_thread
-
-.Lrestore_context:
-    /* Restore the saved non-volatile register bank */
+    /* Restore the new thread's non-volatile register bank */
+    ldp     d8, d9, [sp, #SwD8]
+    ldp     d10, d11, [sp, #SwD10]
+    ldp     d12, d13, [sp, #SwD12]
+    ldp     d14, d15, [sp, #SwD14]
     ldp     x19, x20, [sp, #SwX19]
     ldp     x21, x22, [sp, #SwX21]
     ldp     x23, x24, [sp, #SwX23]
     ldp     x25, x26, [sp, #SwX25]
     ldp     x27, x28, [sp, #SwX27]
-    ldr     x29, [sp, #SwFp]
+    ldp     x29, x30, [sp, #SwFp]
 
-    /*
-     * ARM64 ABI: x18 remains the EL1 platform register across context
-     * switches. User-mode TEB state is restored only by KiTrapReturn.
-     */
+    /* x18 is the EL1 platform register (the PCR) across context switches */
     mrs     x18, tpidr_el1
 
-    ldr     x9,  [sp, #SwReturn]   /* Load caller's return address */
+    /*
+     * Return to where the new thread called KiSwapContext from, or, for a
+     * thread that never ran, to KiThreadStartup with SP at its KSTART_FRAME.
+     */
     add     sp, sp, #KSWITCH_FRAME_LENGTH
-    ret     x9                      /* Return to our caller */
+    ret
+
+.Lbad_current_thread:
+    brk     #0xf000
+    b       .Lbad_current_thread
     .seh_endproc
 
 /*
@@ -262,17 +250,10 @@ KiSwapContext:
  * on the stack with all callee-saved registers and the return address.
  * This function operates directly on that frame - it does NOT create its own.
  *
- * The KSWITCH_FRAME layout for ARM64:
- *   [sp + 0x00..0x4F]: X19-X28 (10 registers * 8 bytes = 80 bytes)
- *   [sp + 0x50]: Fp (X29)
- *   [sp + 0x58]: Lr (X30)
- *   [sp + 0x60]: ReturnAddress (where to go after context switch)
- *   [sp + 0x68]: ApcBypass
- *   Total: 0x70 bytes
- *
- * After stack switch, this function returns to KiSwapContext which will
- * restore x19-x28 from the NEW thread's KSWITCH_FRAME and then return
- * to the NEW thread's saved return address.
+ * After the stack switch this function returns to KiSwapContext (every
+ * thread enters it from the same call site there), which restores the
+ * non-volatile registers from the NEW thread's KSWITCH_FRAME and returns
+ * through its Return slot.
  */
     .align 4
     .seh_proc KiSwapContextInternal
@@ -283,6 +264,10 @@ KiSwapContextInternal:
      * We declare a minimal frame to allow unwinding.
      */
     .seh_endprologue
+
+    /* The return address into KiSwapContext; x19 is restored from the
+       new frame afterwards */
+    mov     x19, x30
 
     /* Wait until the incoming thread clears its SwapBusy bit */
 .Lswapbusy_wait:
@@ -309,22 +294,6 @@ KiSwapContextInternal:
     ldrb    w0, [sp, #SwApcBypass]
 
 .Lresume_call:
-    /*
-     * Load the return address from the NEW thread's KSWITCH_FRAME.
-     * SwLr contains the address of .Lrestore_context in KiSwapContext.
-     * This was saved when this thread previously called KiSwapContext.
-     *
-     * For NEW threads: KiInitializeContextThread now sets SwLr = KiThreadStartup,
-     * so the cbz check is eliminated from the hot path. New threads take the same
-     * resume path as existing threads, with SwLr pointing to KiThreadStartup
-     * which expects SP to point to KSWITCH_FRAME.
-     */
-    ldr     x10, [sp, #SwLr]     /* Load return address to KiSwapContext */
-
-    /* Resumed/new thread: Call KiSwapContextResume and return */
-    str     x10, [sp, #-16]!     /* Save return address */
     bl      KiSwapContextResume
-    ldr     x30, [sp], #16       /* Restore return address to LR */
-
-    ret                          /* Return (new threads: to KiThreadStartup) */
+    ret     x19
     .seh_endproc

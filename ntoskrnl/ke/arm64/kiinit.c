@@ -193,7 +193,7 @@ PVOID KiArm64PanicStack;
 PVOID KiArm64InterruptStack;
 
 static KIPCR KiArm64PcrStub;
-static KIPCR KiArm64BootPcr;
+KIPCR KiArm64BootPcr;
 
 extern const UINT64 KiArm64EarlyVectorTable[];
 
@@ -255,7 +255,6 @@ KiArm64PrepareBootPcr(_Inout_opt_ PLOADER_PARAMETER_BLOCK LoaderBlock)
     Pcr = &KiArm64BootPcr;
     KeArm64CurrentPcr = Pcr;
     Pcr->Self = (struct _KPCR *)Pcr;
-    Pcr->CurrentPrcb = &Pcr->Prcb;
     Pcr->CurrentIrql = PASSIVE_LEVEL;
 
     KeArm64CurrentIrql = PASSIVE_LEVEL;
@@ -267,7 +266,6 @@ KiArm64PrepareBootPcr(_Inout_opt_ PLOADER_PARAMETER_BLOCK LoaderBlock)
         Pcr->Prcb.CurrentThread = KeArm64CurrentThread;
         Pcr->Prcb.IdleThread = KeArm64CurrentThread;
         Pcr->Prcb.NextThread = NULL;
-        Pcr->Prcb.RspBase = (UINT64)(ULONG_PTR)LoaderBlock->KernelStack;
     }
     else
     {
@@ -280,7 +278,6 @@ KiArm64InitializeStubPcr(VOID)
 {
     RtlZeroMemory(&KiArm64PcrStub, sizeof(KiArm64PcrStub));
     KeArm64CurrentPcr = &KiArm64PcrStub;
-    KeArm64CurrentPcr->CurrentPrcb = &KeArm64CurrentPcr->Prcb;
     KeArm64CurrentPcr->Self = (struct _KPCR *)KeArm64CurrentPcr;
     KeArm64CurrentPcr->CurrentIrql = PASSIVE_LEVEL;
     RtlZeroMemory(&KeArm64CurrentPcr->Prcb, sizeof(KeArm64CurrentPcr->Prcb));
@@ -335,9 +332,6 @@ KiInitializeKernel(_Inout_ PKPROCESS InitProcess,
 
     /* Initialize spin locks and DPC bookkeeping */
     KiInitSpinLocks(Prcb, Number);
-
-    /* Bind the idle stack */
-    Prcb->RspBase = (ULONG_PTR)IdleStack;
 
     /* Boot CPU only work */
     if (Number == 0)
@@ -585,16 +579,11 @@ KiInitializePcr(_In_ ULONG ProcessorNumber,
     RtlZeroMemory(Pcr, sizeof(*Pcr));
 
     Pcr->Self = (struct _KPCR *)Pcr;
-    Pcr->CurrentPrcb = &Pcr->Prcb;
     Pcr->CurrentIrql = PASSIVE_LEVEL;
     Pcr->Prcb.CurrentThread = IdleThread;
     Pcr->Prcb.IdleThread = IdleThread;
     Pcr->Prcb.NextThread = NULL;
     Pcr->Prcb.DpcStack = InterruptStack;
-    if (KeLoaderBlock != NULL)
-    {
-        Pcr->Prcb.RspBase = (UINT64)(ULONG_PTR)KeLoaderBlock->KernelStack;
-    }
 
     if (SetCurrentPcr)
     {
@@ -609,8 +598,7 @@ KiInitializePcr(_In_ ULONG ProcessorNumber,
          * KeGetPcr(). This path is only valid when we are bringing up the
          * currently running CPU.
          */
-        __asm__ __volatile__("msr tpidr_el1, %0" : : "r"(Pcr) : "memory");
-        __asm__ __volatile__("isb" ::: "memory");
+        KiArm64SetCurrentPcr(Pcr);
 
         /*
          * Set global early-boot current CPU state.
@@ -636,7 +624,6 @@ KiInitializePcr(_In_ ULONG ProcessorNumber,
     }
 
     Pcr->Self = (struct _KPCR *)Pcr;
-    Pcr->CurrentPrcb = &Pcr->Prcb;
     Pcr->CurrentIrql = PASSIVE_LEVEL;
 
     Pcr->MajorVersion = PCR_MAJOR_VERSION;
@@ -662,7 +649,7 @@ KiInitializePcr(_In_ ULONG ProcessorNumber,
     Pcr->Prcb.IdleThread = IdleThread;
     Pcr->Prcb.NextThread = NULL;
 
-    KiProcessorBlock[ProcessorNumber] = Pcr->CurrentPrcb;
+    KiProcessorBlock[ProcessorNumber] = &Pcr->Prcb;
 
     Pcr->StallScaleFactor = 50;
     Pcr->SecondLevelCacheSize = 0;
@@ -886,11 +873,6 @@ KiInitializeSystem(_Inout_ PLOADER_PARAMETER_BLOCK LoaderBlock)
                         TRUE,
                         (PVOID)(ULONG_PTR)Arm64Block->PanicStack,
                         (PVOID)(ULONG_PTR)Arm64Block->InterruptStack);
-
-        if (LoaderBlock->KernelStack != 0)
-        {
-            Pcr->Prcb.RspBase = (ULONG_PTR)LoaderBlock->KernelStack;
-        }
     }
 
     ExInitPoolLookasidePointers();

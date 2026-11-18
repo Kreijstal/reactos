@@ -156,8 +156,8 @@ KdbpKdbTrapFrameFromKernelStack(
         KdbTrapFrame->X27 = SwitchFrame->X27;
         KdbTrapFrame->X28 = SwitchFrame->X28;
         KdbTrapFrame->Fp = SwitchFrame->Fp;
-        KdbTrapFrame->Lr = SwitchFrame->ReturnAddress;
-        KdbTrapFrame->Pc = SwitchFrame->ReturnAddress;
+        KdbTrapFrame->Lr = SwitchFrame->Return;
+        KdbTrapFrame->Pc = SwitchFrame->Return;
         KdbTrapFrame->Sp = (ULONG_PTR)(SwitchFrame + 1);
         KdbTrapFrame->Cpsr = 0x5;
     }

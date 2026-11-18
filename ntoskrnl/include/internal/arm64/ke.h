@@ -7,6 +7,68 @@
 #include <ndk/arm64/ketypes.h>
 #include "intrin_i.h"
 
+/* See ntoskrnl.h: use the exported ke/arm64/irql.c routines in the kernel */
+#undef KeRaiseIrqlToDpcLevel
+#undef KeRaiseIrqlToSynchLevel
+#undef KeGetCurrentProcessorNumber
+
+NTKERNELAPI
+KIRQL
+NTAPI
+KeRaiseIrqlToDpcLevel(VOID);
+
+NTKERNELAPI
+KIRQL
+NTAPI
+KeRaiseIrqlToSynchLevel(VOID);
+
+NTKERNELAPI
+ULONG
+NTAPI
+KeGetCurrentProcessorNumber(VOID);
+
+extern NTKERNELAPI volatile KSYSTEM_TIME KeTickCount;
+
+/* The kernel works on the private KIPCR view of the PCR in x18 */
+#undef KeGetPcr
+#define KeGetPcr() ((PKIPCR)__getReg(18))
+
+/*
+ * Make Pcr the current processor's PCR. In kernel mode x18 (the platform
+ * register, never allocated by the compiler) holds it; TPIDR_EL1 keeps a copy
+ * the exception vectors reload x18 from, since user mode owns x18 (the TEB).
+ */
+FORCEINLINE
+VOID
+KiArm64SetCurrentPcr(
+    _In_ PKIPCR Pcr)
+{
+    __asm__ __volatile__("msr tpidr_el1, %0\n\t"
+                         "mov x18, %0\n\t"
+                         "isb"
+                         : : "r"(Pcr) : "memory");
+}
+
+/*
+ * Kernel stack frame of a user-mode callout (KiCallUserMode): the callee-saved
+ * registers in a KEXCEPTION_FRAME, then what NtCallbackReturn must restore.
+ * Keep in sync with the Co* offsets in ke/arm64/usercall_asm.S.
+ */
+typedef struct _KI_CALLOUT_FRAME
+{
+    KEXCEPTION_FRAME ExceptionFrame;
+    ULONG64 InitialStack;
+    ULONG64 CallbackStack;
+    ULONG64 Fpcr;
+    ULONG64 Fpsr;
+} KI_CALLOUT_FRAME, *PKI_CALLOUT_FRAME;
+
+/* Boot-time and uniprocessor fallbacks for the per-CPU state */
+extern PKIPCR KeArm64CurrentPcr;
+extern PKTHREAD KeArm64CurrentThread;
+extern KIRQL KeArm64CurrentIrql;
+extern BOOLEAN KeArm64DpcRoutineActive;
+
 /* Local KSEG0 base for physical-to-virtual mapping in inline functions.
  * Avoids dependency on mm.h include order. Same value as KSEG0_BASE in mm.h. */
 #ifndef KE_ARM64_KSEG0_BASE
@@ -27,6 +89,8 @@ typedef struct _KSWITCHFRAME
 extern NTKERNELAPI PVOID MmSystemRangeStart;
 extern NTKERNELAPI PVOID MmHighestUserAddress;
 
+/* The kernel synchronizes at DISPATCH_LEVEL, also on MP (see irql.c) */
+#undef SYNCH_LEVEL
 #define SYNCH_LEVEL DISPATCH_LEVEL
 
 #define KD_BREAKPOINT_TYPE        ULONG

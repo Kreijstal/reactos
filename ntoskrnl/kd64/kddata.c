@@ -46,7 +46,7 @@ VOID NTAPI RtlpBreakWithStatusInstruction(VOID);
 #elif defined(_M_ARM64)
 
 #define KPCR_SELF_PCR_OFFSET           FIELD_OFFSET(KIPCR, Self)
-#define KPCR_CURRENT_PRCB_OFFSET       FIELD_OFFSET(KIPCR, CurrentPrcb)
+#define KPCR_CURRENT_PRCB_OFFSET       0
 #define KPCR_CONTAINED_PRCB_OFFSET     FIELD_OFFSET(KIPCR, Prcb)
 #define KPCR_INITIAL_STACK_OFFSET      0
 #define KPCR_STACK_LIMIT_OFFSET        0
@@ -546,7 +546,7 @@ KDDEBUGGER_DATA64 KdDebuggerDataBlock =
 #else
     FIELD_OFFSET(KTHREAD, CallbackStack),
 #endif
-#if defined(_M_ARM) || defined(_M_AMD64)
+#if defined(_M_ARM) || defined(_M_AMD64) || defined(_M_ARM64)
     0,
     0,
 #else

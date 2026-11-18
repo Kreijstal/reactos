@@ -514,13 +514,6 @@ KeSwitchKernelStack(
     CurrentThread->StackLimit = (ULONG_PTR)StackLimit;
     CurrentThread->LargeStack = TRUE;
 
-    /* Adjust RspBase in the PCR */
-    Pcr = (PKIPCR)KeGetPcr();
-    if (Pcr != NULL)
-    {
-        Pcr->Prcb.RspBase += StackOffset;
-    }
-
     /*
      * Physically adjust SP and FP (X29) to the new stack.
      *

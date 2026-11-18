@@ -67,7 +67,6 @@ KiArm64SetupStartFrame(
     StartFrame->StartRoutine = (ULONG64)StartRoutine;
     StartFrame->StartContext = (ULONG64)StartContext;
     StartFrame->SystemRoutine = (ULONG64)SystemRoutine;
-    StartFrame->Return = 0;
 }
 
 VOID
@@ -149,8 +148,7 @@ KiInitializeContextThread(_Inout_ PKTHREAD Thread,
         Thread->TrapFrame = NULL;
     }
 
-    SwitchFrame->ReturnAddress = (ULONG64)KiThreadStartup;
-    SwitchFrame->Lr = (ULONG64)KiThreadStartup;
+    SwitchFrame->Return = (ULONG64)KiThreadStartup;
     SwitchFrame->ApcBypass = APC_LEVEL;
 }
 
@@ -479,6 +477,9 @@ KiSwapContextResume(
      * 2. Write the new process's DirectoryTableBase[0] to TTBR0_EL1
      * 3. Perform necessary TLB invalidation
      */
+    /* NtCurrentTeb in kernel mode reads it from the PCR (NtTib.Self) */
+    KeGetPcr()->Used_Self = NewThread->Teb;
+
     OldProcess = OldThread->ApcState.Process;
     NewProcess = NewThread->ApcState.Process;
 

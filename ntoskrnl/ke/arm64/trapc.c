@@ -851,8 +851,6 @@ KiArm64InitializeTrapFrame(
     _Inout_ PARM64_EARLY_SYNC_CONTEXT Context,
     _Out_ PKTRAP_FRAME TrapFrame)
 {
-    ULONG64 Fpcr = 0;
-    ULONG64 Fpsr = 0;
     PKEXCEPTION_FRAME ExceptionFrame = &Context->ExceptionFrame;
     KIRQL CurrentIrql;
 
@@ -883,10 +881,6 @@ KiArm64InitializeTrapFrame(
 
     RtlZeroMemory(ExceptionFrame, sizeof(*ExceptionFrame));
     ExceptionFrame->TrapFrame = (ULONG64)(ULONG_PTR)TrapFrame;
-    __asm__ __volatile__("mrs %0, fpcr" : "=r"(Fpcr));
-    __asm__ __volatile__("mrs %0, fpsr" : "=r"(Fpsr));
-    ExceptionFrame->Fpcr = Fpcr;
-    ExceptionFrame->Fpsr = Fpsr;
     ExceptionFrame->X19 = Context->State.Registers.X[19];
     ExceptionFrame->X20 = Context->State.Registers.X[20];
     ExceptionFrame->X21 = Context->State.Registers.X[21];
@@ -898,7 +892,7 @@ KiArm64InitializeTrapFrame(
     ExceptionFrame->X27 = Context->State.Registers.X[27];
     ExceptionFrame->X28 = Context->State.Registers.X[28];
     ExceptionFrame->Fp = Context->State.Registers.X[29];
-    ExceptionFrame->Lr = Context->State.Registers.X[30];
+    ExceptionFrame->Return = Context->State.Registers.X[30];
     Context->ExceptionFramePointer = ExceptionFrame;
 }
 

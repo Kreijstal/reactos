@@ -70,7 +70,7 @@ KeContextToTrapFrame(_In_ PCONTEXT Context,
         (ExceptionFrame != NULL))
     {
         ExceptionFrame->Fp = Context->Fp;
-        ExceptionFrame->Lr = Context->Lr;
+        ExceptionFrame->Return = Context->Lr;
     }
 
     if (ContextFlags & CONTEXT_CONTROL)

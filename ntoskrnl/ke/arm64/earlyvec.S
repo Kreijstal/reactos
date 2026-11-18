@@ -61,6 +61,7 @@ KiArm64VectorSyncSp0:
     str x16, [sp, #(ARM64_EARLY_STATE_REGS + 16 * 8)]
     str x17, [sp, #(ARM64_EARLY_STATE_REGS + 17 * 8)]
     str x18, [sp, #(ARM64_EARLY_STATE_REGS + 18 * 8)]
+    mrs x18, tpidr_el1           /* x18 is the PCR in kernel mode */
     str x19, [sp, #(ARM64_EARLY_STATE_REGS + 19 * 8)]
     str x20, [sp, #(ARM64_EARLY_STATE_REGS + 20 * 8)]
     str x21, [sp, #(ARM64_EARLY_STATE_REGS + 21 * 8)]
@@ -144,6 +145,7 @@ KiArm64VectorSyncSpx:
     str x16, [sp, #(ARM64_EARLY_STATE_REGS + 16 * 8)]
     str x17, [sp, #(ARM64_EARLY_STATE_REGS + 17 * 8)]
     str x18, [sp, #(ARM64_EARLY_STATE_REGS + 18 * 8)]
+    mrs x18, tpidr_el1           /* x18 is the PCR in kernel mode */
     str x19, [sp, #(ARM64_EARLY_STATE_REGS + 19 * 8)]
     str x20, [sp, #(ARM64_EARLY_STATE_REGS + 20 * 8)]
     str x21, [sp, #(ARM64_EARLY_STATE_REGS + 21 * 8)]
@@ -227,6 +229,7 @@ KiArm64VectorSyncLowerA64:
     str x16, [sp, #(ARM64_EARLY_STATE_REGS + 16 * 8)]
     str x17, [sp, #(ARM64_EARLY_STATE_REGS + 17 * 8)]
     str x18, [sp, #(ARM64_EARLY_STATE_REGS + 18 * 8)]
+    mrs x18, tpidr_el1           /* x18 is the PCR in kernel mode */
     str x19, [sp, #(ARM64_EARLY_STATE_REGS + 19 * 8)]
     str x20, [sp, #(ARM64_EARLY_STATE_REGS + 20 * 8)]
     str x21, [sp, #(ARM64_EARLY_STATE_REGS + 21 * 8)]
