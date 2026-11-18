@@ -36,14 +36,16 @@
 
 BOOLEAN
 NTAPI
-NtfsAcqLazyWrite(PVOID Context,
-                 BOOLEAN Wait)
+NtfsAcqLazyWrite(
+    _In_ PVOID Context,
+    _In_ BOOLEAN Wait)
 {
     PNTFS_FCB Fcb = (PNTFS_FCB)Context;
 
-    DPRINT("NtfsAcqLazyWrite(%p, %u)\n", Context, Wait);
+    ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
 
-    /* Match the main -> paging order used by ordinary writes and Cc flushes. */
+    /* Match the main -> paging order used by ordinary writes and Cc flushes.
+     * The paging writes below take the paging resource exclusively. */
     if (!ExAcquireResourceExclusiveLite(&Fcb->MainResource, Wait))
         return FALSE;
     if (!ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, Wait))
@@ -52,7 +54,9 @@ NtfsAcqLazyWrite(PVOID Context,
         return FALSE;
     }
 
-    IoSetTopLevelIrp((PIRP)FSRTL_CACHE_TOP_LEVEL_IRP);
+    /* Let Cc know it doesn't have to acquire the file again for the flush */
+    if (IoGetTopLevelIrp() == NULL)
+        IoSetTopLevelIrp((PIRP)FSRTL_CACHE_TOP_LEVEL_IRP);
 
     return TRUE;
 }
@@ -60,13 +64,15 @@ NtfsAcqLazyWrite(PVOID Context,
 
 VOID
 NTAPI
-NtfsRelLazyWrite(PVOID Context)
+NtfsRelLazyWrite(
+    _In_ PVOID Context)
 {
     PNTFS_FCB Fcb = (PNTFS_FCB)Context;
 
-    DPRINT("NtfsRelLazyWrite(%p)\n", Context);
+    ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
 
-    IoSetTopLevelIrp(NULL);
+    if (IoGetTopLevelIrp() == (PIRP)FSRTL_CACHE_TOP_LEVEL_IRP)
+        IoSetTopLevelIrp(NULL);
 
     ExReleaseResourceLite(&Fcb->PagingIoResource);
     ExReleaseResourceLite(&Fcb->MainResource);
@@ -75,19 +81,20 @@ NtfsRelLazyWrite(PVOID Context)
 
 BOOLEAN
 NTAPI
-NtfsAcqReadAhead(PVOID Context,
-                 BOOLEAN Wait)
+NtfsAcqReadAhead(
+    _In_ PVOID Context,
+    _In_ BOOLEAN Wait)
 {
     PNTFS_FCB Fcb = (PNTFS_FCB)Context;
 
-    DPRINT("NtfsAcqReadAhead(%p, %u)\n", Context, Wait);
+    ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
 
+    /* Keep size changes out while we read ahead */
     if (!ExAcquireResourceSharedLite(&Fcb->MainResource, Wait))
-    {
         return FALSE;
-    }
 
-    IoSetTopLevelIrp((PIRP)FSRTL_CACHE_TOP_LEVEL_IRP);
+    if (IoGetTopLevelIrp() == NULL)
+        IoSetTopLevelIrp((PIRP)FSRTL_CACHE_TOP_LEVEL_IRP);
 
     return TRUE;
 }
@@ -95,13 +102,15 @@ NtfsAcqReadAhead(PVOID Context,
 
 VOID
 NTAPI
-NtfsRelReadAhead(PVOID Context)
+NtfsRelReadAhead(
+    _In_ PVOID Context)
 {
     PNTFS_FCB Fcb = (PNTFS_FCB)Context;
 
-    DPRINT("NtfsRelReadAhead(%p)\n", Context);
+    ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
 
-    IoSetTopLevelIrp(NULL);
+    if (IoGetTopLevelIrp() == (PIRP)FSRTL_CACHE_TOP_LEVEL_IRP)
+        IoSetTopLevelIrp(NULL);
 
     ExReleaseResourceLite(&Fcb->MainResource);
 }

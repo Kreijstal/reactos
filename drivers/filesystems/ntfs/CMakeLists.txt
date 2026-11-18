@@ -11,9 +11,9 @@ list(APPEND SOURCE
     compressed.c
     create.c
     devctl.c
-    ea.c
     dirctl.c
     dispatch.c
+    ea.c
     fastio.c
     flush.c
     fcb.c
@@ -23,7 +23,7 @@ list(APPEND SOURCE
     lfslog.c
     lfsparse.c
     lfsrecov.c
-    lock.c
+    lockctrl.c
     mft.c
     misc.c
     ntfs.c

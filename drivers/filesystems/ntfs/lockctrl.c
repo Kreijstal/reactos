@@ -1,13 +1,18 @@
 /*
- * PROJECT:     ReactOS NTFS filesystem driver
- * LICENSE:     GPL-2.0-or-later
- * PURPOSE:     Byte-range locks shared by every path to a data stream
+ * PROJECT:     ReactOS NTFS driver
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     Byte range locks
+ * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  */
+
+/* INCLUDES *****************************************************************/
 
 #include "ntfs.h"
 
 #define NDEBUG
 #include <debug.h>
+
+/* FUNCTIONS ****************************************************************/
 
 NTSTATUS
 NTAPI
@@ -127,7 +132,9 @@ NtfsRememberLockOwner(PFILE_OBJECT FileObject, PEPROCESS Process)
 }
 
 NTSTATUS
-NtfsLockControl(PNTFS_IRP_CONTEXT IrpContext)
+NTAPI
+NtfsLockControl(
+    _In_ PNTFS_IRP_CONTEXT IrpContext)
 {
     PFILE_OBJECT FileObject = IrpContext->FileObject;
     PNTFS_FCB Fcb;
@@ -172,3 +179,5 @@ Unlock:
     ExReleaseResourceLite(&Vcb->DirResource);
     return Status;
 }
+
+/* EOF */

@@ -233,9 +233,9 @@ typedef struct
 
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION, NTFS_VCB, *PNTFS_VCB;
 
-#define VCB_VOLUME_LOCKED        0x0001
+#define VCB_VOLUME_LOCKED       0x0001
 /* Volume dismounted: everything but raw volume access is refused */
-#define VCB_VOLUME_DISMOUNTED    0x0002
+#define VCB_VOLUME_DISMOUNTED   0x0002
 #define VCB_QUERY_REMOVE_PENDING 0x0004
 #define VCB_DEVICE_REMOVED       0x0008
 #define VCB_VOLUME_READ_ONLY     0x0010
@@ -775,9 +775,11 @@ typedef struct _NTFS_FILE_LOCK
 
 typedef struct _FCB
 {
-    /* Cc and FsRtl access this header through FileObject->FsContext. */
+    /* Must come first: FsRtl, Cc and Mm read FsContext as this header */
     FSRTL_COMMON_FCB_HEADER RFCB;
+
     NTFSIDENTIFIER Identifier;
+
     SECTION_OBJECT_POINTERS SectionObjectPointers;
 
     PFILE_OBJECT FileObject;
@@ -1202,29 +1204,6 @@ NtfsReportDataChange(PNTFS_FCB Fcb, ULONG Filter);
 
 VOID
 NtfsNotifyDirectoryDeleted(PNTFS_FCB Fcb);
-
-/* lock.c / shared stream-lock lifetime in fcb.c */
-NTSTATUS
-NtfsLockControl(PNTFS_IRP_CONTEXT IrpContext);
-
-NTSTATUS
-NTAPI
-NtfsCompleteLockIrp(PVOID Context, PIRP Irp);
-
-VOID
-NtfsRemoveFileLocks(PNTFS_VCB Vcb);
-
-NTSTATUS
-NtfsInitializeFcbLock(PNTFS_FCB Fcb);
-
-VOID
-NtfsReferenceFileLock(PNTFS_FILE_LOCK FileLock);
-
-VOID
-NtfsReleaseFileLock(PNTFS_FILE_LOCK FileLock);
-
-BOOLEAN
-NtfsCheckFileLock(PNTFS_FCB Fcb, PIRP Irp, PLARGE_INTEGER Offset, ULONG Length, BOOLEAN Write);
 
 /* pnp.c */
 NTSTATUS
@@ -1710,6 +1689,10 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
 NTSTATUS
 NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext);
 
+BOOLEAN
+NtfsIsValidFileName(
+    _In_ PCUNICODE_STRING Name);
+
 NTSTATUS
 NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb);
 
@@ -1722,6 +1705,33 @@ NtfsFileSystemControl(PNTFS_IRP_CONTEXT IrpContext);
 
 NTSTATUS
 NtfsFlushBuffers(PNTFS_IRP_CONTEXT IrpContext);
+
+/* lockctrl.c */
+
+NTSTATUS
+NTAPI
+NtfsLockControl(
+    _In_ PNTFS_IRP_CONTEXT IrpContext);
+
+NTSTATUS
+NTAPI
+NtfsCompleteLockIrp(PVOID Context, PIRP Irp);
+
+VOID
+NtfsRemoveFileLocks(PNTFS_VCB Vcb);
+
+/* fcb.c: the lifetime of the lock a stream shares across its hard links */
+NTSTATUS
+NtfsInitializeFcbLock(PNTFS_FCB Fcb);
+
+VOID
+NtfsReferenceFileLock(PNTFS_FILE_LOCK FileLock);
+
+VOID
+NtfsReleaseFileLock(PNTFS_FILE_LOCK FileLock);
+
+BOOLEAN
+NtfsCheckFileLock(PNTFS_FCB Fcb, PIRP Irp, PLARGE_INTEGER Offset, ULONG Length, BOOLEAN Write);
 
 
 /* mft.c */
@@ -2223,10 +2233,6 @@ NTSTATUS
 NtfsLockUserBuffer(IN PIRP Irp,
                    IN ULONG Length,
                    IN LOCK_OPERATION Operation);
-
-BOOLEAN
-NtfsIsValidFileName(
-    _In_ PCUNICODE_STRING Name);
 
 #if 0
 BOOLEAN

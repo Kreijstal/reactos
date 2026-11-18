@@ -28,6 +28,7 @@
 /* INCLUDES *****************************************************************/
 
 #include <ntddk.h>
+#include "ntfs.h"
 #include "lfswrite.h"
 
 #define NDEBUG

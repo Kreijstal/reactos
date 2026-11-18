@@ -26,6 +26,7 @@
 
 /* INCLUDES *****************************************************************/
 
+#include "ntfs.h"
 #include "lfswrite.h"
 
 #define NDEBUG

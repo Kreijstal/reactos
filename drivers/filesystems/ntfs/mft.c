@@ -29,6 +29,7 @@
 
 /* INCLUDES *****************************************************************/
 
+#include "ntfs.h"
 #include "lfswrite.h"
 #include <ntintsafe.h>
 
