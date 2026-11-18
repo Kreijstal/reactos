@@ -501,20 +501,24 @@ ReferenceClassVersion(
     {
 
         status = ZwLoadDriver(&driverServiceName);
+
+        /*
+         * The class extension registers its library (WdfRegisterClassLibrary)
+         * from its DriverEntry, which also covers one that was loaded before,
+         * e.g. as a boot driver. Without a registered library there is nothing
+         * to bind to, whatever the load returned: also when the image is loaded
+         * but not initialized yet, as with a boot driver that starts after its
+         * client.
+         */
+        if (pClassModule && pClassModule->ClassLibraryInfo)
+            status = STATUS_SUCCESS;
+        else if (NT_SUCCESS(status) || status == STATUS_IMAGE_ALREADY_LOADED)
+            status = STATUS_DRIVER_INTERNAL_ERROR;
+
         if (!NT_SUCCESS(status))
         {
-
-            if (status == STATUS_OBJECT_PATH_NOT_FOUND ||
-                status == STATUS_OBJECT_NAME_NOT_FOUND ||
-                status == STATUS_IMAGE_ALREADY_LOADED)
-            {
-                /* Driver might already be loaded as boot driver - UCX*/
-                status = STATUS_SUCCESS;
-            }
-        }
-        else if (pClassModule && !pClassModule->ClassLibraryInfo)
-        {
-            status = STATUS_DRIVER_INTERNAL_ERROR;
+            DPRINT_ERROR(("Class %S: loading %wZ failed 0x%lx\n",
+                          ClassBindInfo->ClassName, &driverServiceName, status));
         }
     }
     else

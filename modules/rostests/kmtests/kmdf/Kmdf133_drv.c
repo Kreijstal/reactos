@@ -130,6 +130,36 @@ TestStub(VOID)
     trace("class bind section: start %p entry %p end %p\n", Start, Entry, End);
 }
 
+/*
+ * A class extension whose service cannot be loaded (Kmdf133_user creates the
+ * service, its image does not exist) fails the bind. WDFLDR used to report
+ * success for it, with no class library behind the class module, and then
+ * called through its NULL ClassLibraryInfo (a 0x7E at boot when a UCX client
+ * started before ucx01000).
+ */
+static
+VOID
+TestMissingClassExtension(VOID)
+{
+    static PFN_KMTCXFUNC Functions[KmtCxFunctionTableNumEntries];
+    PVOID Globals = NULL;
+    WDF_CLASS_BIND_INFO Info;
+    NTSTATUS Status;
+
+    RtlZeroMemory(&Info, sizeof(Info));
+    Info.Size = sizeof(Info);
+    Info.ClassName = (PWCHAR)KMTNOCX_CLASS_NAME;
+    Info.Version.Major = KMTCX_MAJOR_VERSION;
+    Info.Version.Minor = KMTCX_MINOR_VERSION;
+    Info.FunctionTable = (VOID (NTAPI **)(VOID))Functions;
+    Info.FunctionTableCount = RTL_NUMBER_OF(Functions);
+    Info.ClassBindInfo = &Globals;
+
+    Status = WdfVersionBindClass(&WdfBindInfo.V1, (PWDF_COMPONENT_GLOBALS *)WdfDriverGlobals, &Info);
+    ok(!NT_SUCCESS(Status), "Binding to a class extension with no service returned 0x%lx\n", Status);
+    ok_eq_pointer(Globals, NULL);
+}
+
 static
 VOID
 TestClassExtension(VOID)
@@ -427,6 +457,7 @@ TestMessageHandler(
     ok_irql(PASSIVE_LEVEL);
     TestStub();
     TestClassExtension();
+    TestMissingClassExtension();
     TestVersion();
     TestObjects();
     TestRegistry();

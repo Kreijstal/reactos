@@ -62,6 +62,7 @@ TestCdRom(VOID)
 START_TEST(Kmdf133)
 {
     SC_HANDLE CxService = NULL;
+    SC_HANDLE Manager, NoCxService = NULL;
     DWORD Error;
 
     /*
@@ -72,6 +73,21 @@ START_TEST(Kmdf133)
     if (Error == ERROR_SERVICE_EXISTS)
         Error = ERROR_SUCCESS;
     ok_eq_int(Error, ERROR_SUCCESS);
+
+    /* The service of a class extension whose image does not exist (TestMissingClassExtension) */
+    Manager = OpenSCManagerW(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
+    ok(Manager != NULL, "OpenSCManagerW failed with %lu\n", GetLastError());
+    if (Manager)
+    {
+        NoCxService = CreateServiceW(Manager, KMTNOCX_SERVICE_NAME, KMTNOCX_SERVICE_NAME,
+                                     SERVICE_ALL_ACCESS, SERVICE_KERNEL_DRIVER,
+                                     SERVICE_DEMAND_START, SERVICE_ERROR_IGNORE,
+                                     KMTNOCX_IMAGE_PATH, NULL, NULL, NULL, NULL, NULL);
+        if (!NoCxService && GetLastError() == ERROR_SERVICE_EXISTS)
+            NoCxService = OpenServiceW(Manager, KMTNOCX_SERVICE_NAME, SERVICE_ALL_ACCESS);
+        ok(NoCxService != NULL, "Creating %S failed with %lu\n", KMTNOCX_SERVICE_NAME, GetLastError());
+        CloseServiceHandle(Manager);
+    }
 
     Error = KmtLoadAndOpenDriver(L"Kmdf133", FALSE);
     ok_eq_int(Error, ERROR_SUCCESS);
@@ -86,6 +102,11 @@ START_TEST(Kmdf133)
 
     if (CxService)
         KmtDeleteService(KMTCX_SERVICE_NAME, &CxService);
+    if (NoCxService)
+    {
+        DeleteService(NoCxService);
+        CloseServiceHandle(NoCxService);
+    }
 
     TestCdRom();
 }
