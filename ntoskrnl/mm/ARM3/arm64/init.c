@@ -54,7 +54,7 @@ static BOOLEAN MiArm64PfnFreeListsReady = FALSE;
 /*
  * Self-map cache to eliminate redundant L0/L1/L2 allocations.
  *
- * The self-map region spans indices [457,*,*,*] for the recursive entry.
+ * The self-map region spans indices [0x1ED,*,*,*] for the recursive entry.
  * We track which L0/L1/L2 entries have been created to avoid re-checking
  * and re-allocating them on every MiArm64MapPageTablePage call.
  *
@@ -1238,7 +1238,7 @@ MiArm64InitializeKernelSelfMap(VOID)
     /*
      * A Windows-style ARM64 loader owns the TTBR1 hierarchy at handoff. The
      * kernel validates and adopts the recursive slot instead of rebuilding it:
-     * touching PXE_BASE is only safe when L0[457] already points back to TTBR1.
+     * touching PXE_BASE is only safe when L0[0x1ED] already points back to TTBR1.
      */
     RootL0 = (volatile UINT64 *)PXE_BASE;
     SelfEntry = RootL0[PXE_SELFMAP_INDEX];
@@ -1319,7 +1319,7 @@ MiArm64CanTouchSystemPageTables(VOID)
         RootPfn = (PFN_NUMBER)(RootPa >> PAGE_SHIFT);
         RootL0 = (volatile UINT64 *)PXE_BASE;
 
-        /* 1. Verify TTBR1 L0[457] is self-referential. */
+        /* 1. Verify TTBR1 L0[0x1ED] is self-referential. */
         UINT64 SelfEntry = RootL0[PXE_SELFMAP_INDEX];
         PFN_NUMBER SelfPfn = (PFN_NUMBER)((SelfEntry & ARM64_PTE_ADDR_MASK) >> PAGE_SHIFT);
         if (SelfPfn != RootPfn)

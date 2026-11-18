@@ -90,24 +90,13 @@ MiArm64ProbeForWrite(
  *
  * On ARM64, user addresses (0x0000...) are translated via TTBR0_EL1 and
  * kernel addresses (0xFFFF...) are translated via TTBR1_EL1. The NT Memory
- * Manager's self-map is built into TTBR1's hierarchy at L0 index 457.
+ * Manager's self-map is built into TTBR1's hierarchy at L0 index 0x1ED.
  *
- * L0[457] points back to the active TTBR1 root and L0[494] is hyperspace,
- * matching the Windows ARM64 contract expected by boot loaders and ARM3.
+ * L0[0x1ED] points back to the active TTBR1 root and L0[0x1EE] is hyperspace,
+ * the x64 layout the XDK (xdk/arm64/mm.h: PXE_BASE ... PTE_TOP) describes.
  */
-#define PXE_SELFMAP_INDEX   457
+#define PXE_SELFMAP_INDEX   0x1ED
 
-#define PXE_BASE    0xFFFFE4F2793C9000ULL
-#define PXE_SELFMAP 0xFFFFE4F2793C9E48ULL
-#define PPE_BASE    0xFFFFE4F279200000ULL
-#define PDE_BASE    0xFFFFE4F240000000ULL
-#define PTE_BASE    0xFFFFE48000000000ULL
-#define PXE_TOP     0xFFFFE4F2793C9FFFULL
-#define PPE_TOP     0xFFFFE4F2793FFFFFULL
-#define PDE_TOP     0xFFFFE4F27FFFFFFFULL
-#define PTE_TOP     0xFFFFE4FFFFFFFFFFULL
-
-C_ASSERT(PXE_SELFMAP_INDEX == 457);
 C_ASSERT((((PXE_BASE >> PXI_SHIFT) & PXI_MASK) == PXE_SELFMAP_INDEX));
 C_ASSERT((((PPE_BASE >> PXI_SHIFT) & PXI_MASK) == PXE_SELFMAP_INDEX));
 C_ASSERT((((PDE_BASE >> PXI_SHIFT) & PXI_MASK) == PXE_SELFMAP_INDEX));
