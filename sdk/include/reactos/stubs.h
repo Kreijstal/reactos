@@ -1,4 +1,13 @@
 
+#if defined(_MSC_VER) && !defined(__clang__)
+/* MSVC 14.52 treats these as intrinsics, so their generated stubs could not be
+   defined (C2169); older toolsets do not know them as intrinsics (C4163) */
+#pragma warning(push)
+#pragma warning(disable:4163 4164)
+#pragma function(copysign, copysignf, fmax, fmaxf, fmin, fminf)
+#pragma warning(pop)
+#endif
+
 #ifndef _WINDEF_
 typedef unsigned short wchar_t;
 typedef unsigned long DWORD, ULONG;
