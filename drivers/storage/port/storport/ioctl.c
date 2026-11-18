@@ -8,6 +8,7 @@
 /* INCLUDES *******************************************************************/
 
 #include "precomp.h"
+#include <sptilib.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -374,6 +375,45 @@ PdoDeviceControlScsiGetAddress(
 }
 
 
+static
+NTSTATUS
+PdoDeviceControlScsiPassThrough(
+    _In_ PPDO_DEVICE_EXTENSION DeviceExtension,
+    _Inout_ PIRP Irp)
+{
+    PPORT_CONFIGURATION_INFORMATION PortConfig;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    DPRINT("PdoDeviceControlScsiPassThrough(%p %p)\n", DeviceExtension, Irp);
+
+    NT_ASSERT(DeviceExtension->ExtensionType == PdoExtension);
+
+    /* A claimed unit takes it only through its class driver, which marks the request */
+    if (IoGetCurrentIrpStackLocation(Irp)->MinorFunction == 0 && DeviceExtension->IsClaimed)
+    {
+        Status = STATUS_INVALID_DEVICE_REQUEST;
+    }
+    else
+    {
+        /* Same limits as reported in the adapter descriptor */
+        PortConfig = &DeviceExtension->FdoExtension->Miniport.PortConfig;
+        Status = SptiHandleScsiPassthru(DeviceExtension->Device,
+                                        Irp,
+                                        PortConfig->MaximumTransferLength,
+                                        PortConfig->NumberOfPhysicalBreaks);
+    }
+
+    if (!NT_SUCCESS(Status))
+        Irp->IoStatus.Information = 0;
+    Irp->IoStatus.Status = Status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+    return Status;
+}
+
+
 NTSTATUS
 NTAPI
 PortPdoDeviceControl(
@@ -392,6 +432,10 @@ PortPdoDeviceControl(
 
         case IOCTL_SCSI_GET_ADDRESS:
             return PdoDeviceControlScsiGetAddress(DeviceObject->DeviceExtension, Irp);
+
+        case IOCTL_SCSI_PASS_THROUGH:
+        case IOCTL_SCSI_PASS_THROUGH_DIRECT:
+            return PdoDeviceControlScsiPassThrough(DeviceObject->DeviceExtension, Irp);
 
         default:
             // DbgBreakPoint();
