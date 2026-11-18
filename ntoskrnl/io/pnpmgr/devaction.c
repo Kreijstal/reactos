@@ -1946,7 +1946,9 @@ IopSendRemoveChildDevices(PDEVICE_NODE ParentDeviceNode)
         NextDeviceNode = ChildDeviceNode->Sibling;
         KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
 
-        IopSendRemoveDevice(ChildDeviceNode->PhysicalDeviceObject);
+        /* Only the children IopQueryRemoveChildDevices prepared, see there */
+        if (ChildDeviceNode->State == DeviceNodeAwaitingQueuedRemoval)
+            IopSendRemoveDevice(ChildDeviceNode->PhysicalDeviceObject);
 
         ChildDeviceNode = NextDeviceNode;
 
@@ -1991,7 +1993,12 @@ IopCancelRemoveChildDevices(PDEVICE_NODE ParentDeviceNode)
         NextDeviceNode = ChildDeviceNode->Sibling;
         KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
 
-        IopCancelPrepareDeviceForRemoval(ChildDeviceNode->PhysicalDeviceObject);
+        /* Skipped by IopQueryRemoveChildDevices */
+        if (ChildDeviceNode->State != DeviceNodeRemoved &&
+            ChildDeviceNode->State != DeviceNodeRemovePendingCloses)
+        {
+            IopCancelPrepareDeviceForRemoval(ChildDeviceNode->PhysicalDeviceObject);
+        }
 
         ChildDeviceNode = NextDeviceNode;
 
@@ -2095,13 +2102,23 @@ IopQueryRemoveChildDevices(PDEVICE_NODE ParentDeviceNode, BOOLEAN Force)
     {
         NextDeviceNode = ChildDeviceNode->Sibling;
         KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
-        PiSetDevNodeState(ChildDeviceNode, DeviceNodeAwaitingQueuedRemoval);
 
-        Status = IopPrepareDeviceForRemoval(ChildDeviceNode->PhysicalDeviceObject, Force);
-        if (!NT_SUCCESS(Status))
+        /*
+         * A child that is removed already, or a surprise-removed one that waits
+         * for its handles (IopRemoveDevice did it first), must not be removed
+         * a second time, nor before its handles are closed
+         */
+        if (ChildDeviceNode->State != DeviceNodeRemoved &&
+            ChildDeviceNode->State != DeviceNodeRemovePendingCloses)
         {
-            FailedRemoveDevice = ChildDeviceNode;
-            goto cleanup;
+            PiSetDevNodeState(ChildDeviceNode, DeviceNodeAwaitingQueuedRemoval);
+
+            Status = IopPrepareDeviceForRemoval(ChildDeviceNode->PhysicalDeviceObject, Force);
+            if (!NT_SUCCESS(Status))
+            {
+                FailedRemoveDevice = ChildDeviceNode;
+                goto cleanup;
+            }
         }
 
         KeAcquireSpinLock(&IopDeviceTreeLock, &OldIrql);
@@ -2119,7 +2136,12 @@ cleanup:
         NextDeviceNode = ChildDeviceNode->Sibling;
         KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
 
-        IopCancelPrepareDeviceForRemoval(ChildDeviceNode->PhysicalDeviceObject);
+        /* Skipped by IopQueryRemoveChildDevices */
+        if (ChildDeviceNode->State != DeviceNodeRemoved &&
+            ChildDeviceNode->State != DeviceNodeRemovePendingCloses)
+        {
+            IopCancelPrepareDeviceForRemoval(ChildDeviceNode->PhysicalDeviceObject);
+        }
 
         /* IRP_MN_CANCEL_REMOVE_DEVICE is also sent to the device
          * that failed the IRP_MN_QUERY_REMOVE_DEVICE request */
