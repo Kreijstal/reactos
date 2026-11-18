@@ -1846,50 +1846,6 @@ HalpSetPciRoutingMap(
     }
 }
 
-BOOLEAN
-NTAPI
-HalQueryArm64TimerConfig(
-    _Out_ PHAL_ARM64_TIMER_CONFIG Config)
-{
-    ULONG Flags = 0;
-
-    if (!Config)
-        return FALSE;
-
-    /* Defaults: virtual timer PPI 27, level-sensitive */
-    Config->Vector = 27;
-    Config->UseVirtual = TRUE;
-    Config->Mode = LevelSensitive;
-
-    if (HalpArm64GtdtInfo.Present)
-    {
-        if (HalpArm64GtdtInfo.NonSecureEl1Interrupt)
-        {
-            Config->Vector = HalpArm64GtdtInfo.NonSecureEl1Interrupt;
-            Flags = HalpArm64GtdtInfo.NonSecureEl1Flags;
-            Config->UseVirtual = FALSE;
-        }
-        else if (HalpArm64GtdtInfo.VirtualTimerInterrupt)
-        {
-            Config->Vector = HalpArm64GtdtInfo.VirtualTimerInterrupt;
-            Flags = HalpArm64GtdtInfo.VirtualTimerFlags;
-            Config->UseVirtual = TRUE;
-        }
-        else if (HalpArm64GtdtInfo.SecureEl1Interrupt)
-        {
-            Config->Vector = HalpArm64GtdtInfo.SecureEl1Interrupt;
-            Flags = HalpArm64GtdtInfo.SecureEl1Flags;
-            Config->UseVirtual = FALSE;
-        }
-
-        /* GTDT flags: bit1 indicates trigger (0=edge, 1=level) */
-        if ((Flags & 0x2) == 0)
-            Config->Mode = Latched;
-    }
-
-    return TRUE;
-}
-
 PUCHAR KdComPortInUse = NULL;
 
 #define HAL_ARM64_SYSTEM_RANGE_BASE 0xFFFF800000000000ULL
