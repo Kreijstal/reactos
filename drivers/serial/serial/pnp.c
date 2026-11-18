@@ -114,11 +114,51 @@ ByeBye:
 	return Status;
 }
 
+/*
+ * The ports class installer assigns the COM name and stores it as PortName in
+ * the device key; the port keeps it whatever order its device is added in.
+ */
+static
+BOOLEAN
+SerialGetPortNumber(
+	IN PDEVICE_OBJECT Pdo,
+	OUT PULONG ComPortNumber)
+{
+	UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"PortName");
+	UCHAR Buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + 16 * sizeof(WCHAR)];
+	PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+	UNICODE_STRING PortName, Number;
+	HANDLE Key;
+	ULONG Length;
+	NTSTATUS Status;
+
+	Status = IoOpenDeviceRegistryKey(Pdo, PLUGPLAY_REGKEY_DEVICE, KEY_QUERY_VALUE, &Key);
+	if (!NT_SUCCESS(Status))
+		return FALSE;
+	Status = ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer) - sizeof(WCHAR), &Length);
+	ZwClose(Key);
+	if (!NT_SUCCESS(Status) || Info->Type != REG_SZ || Info->DataLength < 4 * sizeof(WCHAR))
+		return FALSE;
+
+	PortName.Buffer = (PWCHAR)Info->Data;
+	PortName.Length = PortName.MaximumLength = (USHORT)Info->DataLength;
+	while (PortName.Length && PortName.Buffer[PortName.Length / sizeof(WCHAR) - 1] == UNICODE_NULL)
+		PortName.Length -= sizeof(WCHAR);
+	if (PortName.Length < 4 * sizeof(WCHAR) || _wcsnicmp(PortName.Buffer, L"COM", 3) != 0)
+		return FALSE;
+
+	Number.Buffer = PortName.Buffer + 3;
+	Number.Length = Number.MaximumLength = PortName.Length - 3 * sizeof(WCHAR);
+	return NT_SUCCESS(RtlUnicodeStringToInteger(&Number, 10, ComPortNumber)) && *ComPortNumber != 0;
+}
+
 NTSTATUS NTAPI
 SerialAddDevice(
 	IN PDRIVER_OBJECT DriverObject,
 	IN PDEVICE_OBJECT Pdo)
 {
+	ULONG ComPortNumber;
+
 	/* Serial.sys is a legacy driver. AddDevice is called once
 	 * with a NULL Pdo just after the driver initialization.
 	 * Detect this case and return success.
@@ -129,7 +169,9 @@ SerialAddDevice(
 	/* We have here a PDO not null. It represents a real serial
 	 * port. So call the internal AddDevice function.
 	 */
-	return SerialAddDeviceInternal(DriverObject, Pdo, UartUnknown, NULL, NULL);
+	return SerialAddDeviceInternal(DriverObject, Pdo, UartUnknown,
+	                               SerialGetPortNumber(Pdo, &ComPortNumber) ? &ComPortNumber : NULL,
+	                               NULL);
 }
 
 NTSTATUS NTAPI
