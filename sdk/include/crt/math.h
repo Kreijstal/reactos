@@ -318,14 +318,26 @@ _Check_return_ __CRT_INLINE long long llrintl(_In_ long double x) { return (long
 #endif
 _Check_return_ __CRT_INLINE double log2(_In_ double x) { return log(x) / log(2); }
 _Check_return_ __CRT_INLINE float log2f(_In_ float x) { return (float)(log((double)x) / log(2)); }
+/* MSVC 14.52 (_MSC_VER 1952) treats copysignf, fmax, fmin, fmaxf and fminf
+   as intrinsics, which cannot be defined (C2169). In C, #pragma function
+   turns that off; C++ ignores it, so there they are only declared. */
 #if defined(_MSC_VER) && !defined(__clang__)
-/* MSVC 14.52 treats these as intrinsics, which cannot be defined (C2169) */
+#ifdef __cplusplus
+#if (_MSC_VER >= 1952)
+#define _CRT_MSVC_MINMAX_INTRINSICS
+#endif
+#else
 #pragma warning(push)
 #pragma warning(disable:4163 4164) /* not intrinsics on older toolsets */
 #pragma function(copysignf, fmax, fmin, fmaxf, fminf)
 #pragma warning(pop)
 #endif
+#endif
+#ifdef _CRT_MSVC_MINMAX_INTRINSICS
+_Check_return_ float __cdecl copysignf(_In_ float x, _In_ float y);
+#else
 _Check_return_ __CRT_INLINE float copysignf(_In_ float x, _In_ float y) { return _copysignf(x, y); }
+#endif
 
 /* C99 7.12.3.2. _finite() is exported by msvcrt on every architecture,
    unlike _finitef(), which is amd64-only. */
@@ -355,6 +367,12 @@ _Check_return_ _CRTIMP int __cdecl _isnan(_In_ double x);
    if exactly one argument is a NaN; note this is NOT the same as min()/max(). */
 _Check_return_ __CRT_INLINE double exp2(_In_ double x) { return pow(2.0, x); }
 _Check_return_ __CRT_INLINE float exp2f(_In_ float x) { return (float)pow(2.0, (double)x); }
+#ifdef _CRT_MSVC_MINMAX_INTRINSICS
+_Check_return_ double __cdecl fmax(_In_ double x, _In_ double y);
+_Check_return_ double __cdecl fmin(_In_ double x, _In_ double y);
+_Check_return_ float __cdecl fmaxf(_In_ float x, _In_ float y);
+_Check_return_ float __cdecl fminf(_In_ float x, _In_ float y);
+#else
 _Check_return_ __CRT_INLINE double fmax(_In_ double x, _In_ double y)
 {
     if (_isnan(x)) return y;
@@ -369,6 +387,7 @@ _Check_return_ __CRT_INLINE double fmin(_In_ double x, _In_ double y)
 }
 _Check_return_ __CRT_INLINE float fmaxf(_In_ float x, _In_ float y) { return (float)fmax((double)x, (double)y); }
 _Check_return_ __CRT_INLINE float fminf(_In_ float x, _In_ float y) { return (float)fmin((double)x, (double)y); }
+#endif /* _CRT_MSVC_MINMAX_INTRINSICS */
 #endif /* !_CRTBLD */
 
 #ifndef NO_OLDNAMES /* !__STDC__ */
