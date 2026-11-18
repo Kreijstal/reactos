@@ -210,7 +210,14 @@ IdleTimeoutManagement::_SystemManagedIdleTimeoutAvailable(
     VOID
     )
 {
+#ifdef __REACTOS__
+    //
+    // ReactOS builds for NT 5.2 targets have no power framework
+    //
+    return FxLibraryGlobals.PowerFrameworkAvailable;
+#else
     return TRUE;
+#endif
 }
 
 _Must_inspect_result_

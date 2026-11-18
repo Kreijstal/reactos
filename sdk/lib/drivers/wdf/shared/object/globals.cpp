@@ -595,6 +595,12 @@ FxLibraryGlobalsCommission(
     FxLibraryGlobals.IoReportInterruptInactive =
       (PFN_IO_REPORT_INTERRUPT_INACTIVE) MmGetSystemRoutineAddress(&funcName);
 
+#ifdef __REACTOS__
+    RtlInitUnicodeString(&funcName, L"PoFxRegisterDevice");
+    FxLibraryGlobals.PowerFrameworkAvailable =
+        (MmGetSystemRoutineAddress(&funcName) != NULL);
+#endif
+
 #endif //((FX_CORE_MODE)==(FX_CORE_KERNEL_MODE))
 
     FxLibraryGlobals.OsVersionInfo.dwOSVersionInfoSize = sizeof(FxLibraryGlobals.OsVersionInfo);

@@ -1008,6 +1008,14 @@ struct FxLibraryGlobalsType {
     // timeout policy.
     //
     BOOLEAN WdfDirectedPowerTransitionEnabled;
+
+#ifdef __REACTOS__
+    //
+    // The kernel has the power framework (PoFx, NT 6.2+). Without it, system-
+    // managed idle timeout falls back to driver-managed, like on Windows 7.
+    //
+    BOOLEAN PowerFrameworkAvailable;
+#endif
 };
 
 extern FxLibraryGlobalsType FxLibraryGlobals;

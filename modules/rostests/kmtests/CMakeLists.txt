@@ -232,6 +232,7 @@ list(APPEND KMTEST_SOURCE
     kernel32/FileAttributes_user.c
     kernel32/FindFile_user.c
     kmdf/Kmdf133_user.c
+    kmdf/KmdfIdle_user.c
     kmdf/KmdfNetCx_user.c
     kmdf/KmdfRemove_user.c
     kmdf/KmdfUcx_user.c
@@ -287,6 +288,7 @@ add_dependencies(kmtest_drivers
     ioreadwrite_drv
     kernel32_drv
     kmdf133_drv
+    kmdfidle_drv
     kmdfremove_drv
     kmdfcx_drv
     kmdfucx_drv

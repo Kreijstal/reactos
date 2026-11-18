@@ -52,6 +52,15 @@ target_compile_definitions(kmdfucx_drv PRIVATE KMT_STANDALONE_DRIVER)
 add_rostests_file(TARGET kmdfucx_drv)
 
 #
+# KMDF function driver whose device idles through the power framework
+#
+add_library(kmdfidle_drv MODULE KmdfIdle_drv.c)
+set_module_type(kmdfidle_drv kmdfdriver)
+target_compile_definitions(kmdfidle_drv PRIVATE WDF_DEVICE_NO_WDMSEC_H)
+add_importlibs(kmdfidle_drv ntoskrnl hal)
+add_rostests_file(TARGET kmdfidle_drv)
+
+#
 # Plain KMDF function driver whose devices get removed
 #
 add_library(kmdfremove_drv MODULE KmdfRemove_drv.c)

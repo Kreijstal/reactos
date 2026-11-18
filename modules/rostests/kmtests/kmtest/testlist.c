@@ -25,6 +25,7 @@ KMT_TESTFUNC Test_IoCreateFile;
 KMT_TESTFUNC Test_IoDeviceObject;
 KMT_TESTFUNC Test_IoReadWrite;
 KMT_TESTFUNC Test_Kmdf133;
+KMT_TESTFUNC Test_KmdfIdle;
 KMT_TESTFUNC Test_KmdfNetCx;
 KMT_TESTFUNC Test_KmdfNetCxOvpnDco;
 KMT_TESTFUNC Test_KmdfNetCxRawIp;
@@ -93,6 +94,7 @@ const KMT_TEST TestList[] =
     { "IoDeviceObject",               Test_IoDeviceObject },
     { "IoReadWrite",                  Test_IoReadWrite },
     { "Kmdf133",                      Test_Kmdf133 },
+    { "KmdfIdle",                     Test_KmdfIdle },
     { "KmdfNetCx",                    Test_KmdfNetCx },
     { "KmdfNetCxOvpnDco",             Test_KmdfNetCxOvpnDco },
     { "KmdfNetCxRawIp",               Test_KmdfNetCxRawIp },
