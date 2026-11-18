@@ -178,11 +178,34 @@ struct Exe
     bool KDriver = false;
 };
 
+// A kernel device flag (drvmain.sdb): one bit of the flags of a provider (CLASS)
+struct KFlag
+{
+    bool fromXml(XMLHandle dbNode);
+
+    std::string Name;
+    std::string Class;
+    QWORD Mask = 0;
+};
+
+// The flags of one device key ("USBXHCI:PCI\VEN_1022&DEV_7814"), merged per provider
+struct KDevice
+{
+    bool fromXml(XMLHandle dbNode);
+    bool toSdb(Database& db);
+
+    std::string Name;
+    std::list<std::string> KFlagRefs;
+    TAGID Tagid = 0;
+    PlatformType Platform = PLATFORM_ANY;
+};
+
 struct Library
 {
     std::list<InExclude> InExcludes;
     std::list<Shim> Shims;
     std::list<Flag> Flags;
+    std::list<KFlag> KFlags;
 };
 
 struct Database
@@ -247,6 +270,9 @@ struct Database
     // Driver database (drvmain.sdb)
     std::list<Exe> KDrivers;
     std::list<Shim> KShims;
+    std::list<KDevice> KDevices;
+
+    const KFlag* FindKFlag(const std::string& name) const;
 
 private:
     std::map<sdbstring, TAGID> KnownShims;

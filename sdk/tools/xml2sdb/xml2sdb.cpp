@@ -476,6 +476,74 @@ bool Flag::toSdb(Database& db)
 
 
 /***********************************************************************
+ *   KFlag, KDevice
+ */
+
+bool KFlag::fromXml(XMLHandle dbNode)
+{
+    Name = ReadStringNode(dbNode, "NAME");
+    Class = ReadStringNode(dbNode, "CLASS");
+    Mask = ReadQWordNode(dbNode, "MASK");
+    return !Name.empty() && !Class.empty();
+}
+
+bool KDevice::fromXml(XMLHandle dbNode)
+{
+    Name = ReadStringNode(dbNode, "NAME");
+    Platform = ReadPlatformNode(dbNode, "RUNTIME_PLATFORM");
+
+    for (XMLHandle Ref = dbNode.FirstChildElement("KFLAG"); Ref.ToNode();
+         Ref = Ref.NextSiblingElement("KFLAG"))
+    {
+        std::string RefName = ReadStringNode(Ref, "NAME");
+        if (!RefName.empty())
+            KFlagRefs.push_back(RefName);
+    }
+
+    return !Name.empty();
+}
+
+// The kernel looks for FLAG children whose NAME is the provider, so merge the bits per CLASS
+bool KDevice::toSdb(Database& db)
+{
+    std::map<std::string, QWORD> Classes;
+
+    for (const std::string& RefName : KFlagRefs)
+    {
+        const KFlag* Flag = db.FindKFlag(RefName);
+        if (!Flag)
+        {
+            SHIM_ERR("KDEVICE %s references unknown KFLAG %s\n", Name.c_str(), RefName.c_str());
+            return false;
+        }
+        Classes[Flag->Class] |= Flag->Mask;
+    }
+
+    Tagid = db.BeginWriteListTag(TAG_KDEVICE);
+    db.WriteString(TAG_NAME, Name, true);
+    for (const auto& Class : Classes)
+    {
+        TAGID FlagTagid = db.BeginWriteListTag(TAG_FLAG);
+        db.WriteString(TAG_NAME, Class.first, true);
+        db.WriteQWord(TAG_FLAG_MASK_KERNEL, Class.second, true);
+        if (!db.EndWriteListTag(FlagTagid))
+            return false;
+    }
+    return !!db.EndWriteListTag(Tagid);
+}
+
+const KFlag* Database::FindKFlag(const std::string& name) const
+{
+    for (const KFlag& Flag : Library.KFlags)
+    {
+        if (Flag.Name == name)
+            return &Flag;
+    }
+    return nullptr;
+}
+
+
+/***********************************************************************
  *   Data
  */
 
@@ -744,6 +812,14 @@ bool Database::fromXml(XMLHandle dbNode)
             if (flag.fromXml(libChild))
                 Library.Flags.push_back(flag);
         }
+        else if (NodeName == "KFLAG")
+        {
+            KFlag kflag;
+            if (kflag.fromXml(libChild))
+                Library.KFlags.push_back(kflag);
+            else
+                SHIM_ERR("KFLAG needs a NAME and a CLASS\n");
+        }
         else if (NodeName == "INCLUDE" || NodeName == "EXCLUDE")
         {
             InExclude inex;
@@ -758,6 +834,7 @@ bool Database::fromXml(XMLHandle dbNode)
 
     ReadGeneric(dbNode, KShims, "KSHIM", platform);
     ReadGeneric(dbNode, KDrivers, "KDRIVER", platform);
+    ReadGeneric(dbNode, KDevices, "KDEVICE", platform);
     return true;
 }
 
@@ -801,6 +878,8 @@ bool Database::toSdb(LPCWSTR path)
     if (!WriteGeneric(KShims, *this))
         return false;
     if (!WriteGeneric(KDrivers, *this))
+        return false;
+    if (!WriteGeneric(KDevices, *this))
         return false;
     EndWriteListTag(tidDatabase);
 
