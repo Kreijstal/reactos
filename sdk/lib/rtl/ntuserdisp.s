@@ -119,10 +119,57 @@ REPEAT RTL_NUMBER_OF_NTUSER_PFNS
 ENDR
 
 
+#elif defined(_M_ARM64) && defined(__GNUC__)
+
+/* GNU as (llvm-mingw) variant of the ARM64 thunks above */
+
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+#define NUMBER_OF_NTUSER_AW_PFNS 24
+#else
+#define NUMBER_OF_NTUSER_AW_PFNS 23
+#endif
+#define NUMBER_OF_NTUSER_OTHER_PFNS 11
+#define RTL_NUMBER_OF_NTUSER_PFNS (2 * NUMBER_OF_NTUSER_AW_PFNS + NUMBER_OF_NTUSER_OTHER_PFNS)
+
+    .altmacro
+
+    .macro DEFINE_NTUSER_PFN_THUNK Index
+    .p2align 4
+RtlpNtUserPfnDispatch\Index:
+    adrp    x16, RtlpNtUserPfns
+    add     x16, x16, #:lo12:RtlpNtUserPfns
+    ldr     x16, [x16, #(\Index * 8)]
+    br      x16
+    .endm
+
+    .macro DEFINE_NTUSER_PFN_REF Index
+    .quad RtlpNtUserPfnDispatch\Index
+    .endm
+
+    .text
+    .set Index, 0
+    .rept RTL_NUMBER_OF_NTUSER_PFNS
+    DEFINE_NTUSER_PFN_THUNK %Index
+    .set Index, Index + 1
+    .endr
+
+    .section .rdata,"dr"
+    .p2align 3
+    .globl NtDllUserStubs
+NtDllUserStubs:
+    .set Index, 0
+    .rept RTL_NUMBER_OF_NTUSER_PFNS
+    DEFINE_NTUSER_PFN_REF %Index
+    .set Index, Index + 1
+    .endr
+
 #elif defined(_M_ARM) || defined(_M_ARM64)
 
 // TODO Implement this
 
 #endif
 
+/* GNU as on ARM/ARM64 has no asm.inc END macro */
+#if defined(_M_IX86) || defined(_M_AMD64) || !defined(__GNUC__)
     END
+#endif
