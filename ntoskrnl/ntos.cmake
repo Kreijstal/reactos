@@ -417,7 +417,6 @@ elseif(ARCH STREQUAL "arm64")
         ${REACTOS_SOURCE_DIR}/ntoskrnl/config/arm64/cmhardwr.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/arm64/init.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/arm64/probe.c
-        ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/arm64/ioport.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/kd64/arm64/kdarm64.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/atomics.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/boot.c
