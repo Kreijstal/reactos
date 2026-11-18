@@ -23,6 +23,10 @@
 #include <ntddstor.h>
 #include <ntddcdrm.h>
 
+#ifndef FSCTL_ALLOW_EXTENDED_DASD_IO
+#define FSCTL_ALLOW_EXTENDED_DASD_IO CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 32, METHOD_NEITHER, FILE_ANY_ACCESS)
+#endif
+
 #define MAX_DEVICES        8
 #define READERS_PER_DEVICE 4
 #define READS_PER_READER   60
@@ -68,6 +72,14 @@ ReaderThread(PVOID Param)
         Reader->Failed = READS_PER_READER;
         return 0;
     }
+
+    /*
+     * A mounted CD (the boot CD) makes this a volume handle of its file system,
+     * which clips reads at the end of the ISO 9660 volume like Windows' CDFS does,
+     * and that volume ends some sectors before the medium. Read the whole medium.
+     * On a raw disk the request just fails.
+     */
+    DeviceIoControl(Device, FSCTL_ALLOW_EXTENDED_DASD_IO, NULL, 0, NULL, 0, &Read, NULL);
 
     Buffer = VirtualAlloc(NULL, 64 * 1024, MEM_COMMIT, PAGE_READWRITE);
     if (!Buffer)
