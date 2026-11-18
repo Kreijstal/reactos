@@ -65,18 +65,37 @@ static CRITICAL_SECTION g_SerialLock;
  * the suite. */
 #define KMTCD_TEST_TIMEOUT_MS   120000
 
+/* The second UART may still be starting when the runner comes up (bug #90) */
+#define KMTCD_SERIAL_WAIT_MS    15000
+
 static
 VOID
 OpenSerialPort(VOID)
 {
     SECURITY_ATTRIBUTES SecAttrs;
+    DWORD Waited;
+
     SecAttrs.nLength = sizeof(SecAttrs);
     SecAttrs.bInheritHandle = TRUE;
     SecAttrs.lpSecurityDescriptor = NULL;
-    g_SerialHandle = CreateFileW(L"\\\\.\\COM2",
-                                 GENERIC_WRITE,
-                                 FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                 &SecAttrs, OPEN_EXISTING, 0, NULL);
+    for (Waited = 0; ; Waited += 100)
+    {
+        g_SerialHandle = CreateFileW(L"\\\\.\\COM2",
+                                     GENERIC_WRITE,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                     &SecAttrs, OPEN_EXISTING, 0, NULL);
+        if (g_SerialHandle != INVALID_HANDLE_VALUE || Waited >= KMTCD_SERIAL_WAIT_MS)
+            break;
+        Sleep(100);
+    }
+    if (Waited != 0)
+    {
+        CHAR Msg[96] = { 0 };
+        _snprintf(Msg, sizeof(Msg) - 1, "KMTCD-RUNNER COM2 %s after %lu ms, error %lu\n",
+                  g_SerialHandle != INVALID_HANDLE_VALUE ? "opened" : "not opened",
+                  Waited, GetLastError());
+        OutputDebugStringA(Msg);
+    }
 }
 
 static
