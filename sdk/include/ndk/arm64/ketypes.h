@@ -654,6 +654,7 @@ typedef struct _KPRCB
     PROCESSOR_POWER_STATE PowerState;
     CACHE_DESCRIPTOR Cache[5];
     ULONG CacheCount;
+    UINT64 StartCycles;
 #endif
 #ifdef __REACTOS__
 #if  (NTDDI_VERSION < NTDDI_WINBLUE)

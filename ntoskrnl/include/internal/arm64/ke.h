@@ -128,6 +128,17 @@ KiConvertSystemDllAddressToUser(
 }
 
 FORCEINLINE
+ULONG64
+KxQueryProcessorCycleTime(VOID)
+{
+    ULONG64 Counter;
+
+    /* The virtual counter is the cycle source (like the TSC on x86) */
+    __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(Counter));
+    return Counter;
+}
+
+FORCEINLINE
 VOID
 KiArm64WriteUserTtbr(
     _In_ ULONGLONG UserDirectoryBase,

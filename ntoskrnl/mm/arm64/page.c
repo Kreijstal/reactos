@@ -844,6 +844,16 @@ MiArm64InvalidateUserAddress(
     __asm__ __volatile__("isb" ::: "memory");
 }
 
+/*
+ * TLBI ...IS invalidates in the whole inner shareable domain, so the hardware
+ * broadcasts it to every processor; no IPI is needed as on x86.
+ */
+VOID
+MiInvalidateTlbEntryAllProcessors(IN PVOID Address)
+{
+    MiArm64InvalidateUserAddress(Address);
+}
+
 FORCEINLINE
 ULONG64
 MiArm64ReadPteEntry(
