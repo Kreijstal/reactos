@@ -243,6 +243,7 @@ elseif(ARCH STREQUAL "arm64")
         math/atan.c
         math/ceil.c
         math/ceilf.c
+        math/cos.c
         math/exp.c
         math/exp_data.c
         math/fabs.c
@@ -256,6 +257,7 @@ elseif(ARCH STREQUAL "arm64")
         math/log10.c
         math/pow.c
         math/pow_data.c
+        math/sin.c
         math/sqrt.c
         math/sqrt_data.c
         math/sqrtf.c
