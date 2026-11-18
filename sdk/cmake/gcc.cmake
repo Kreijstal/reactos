@@ -410,8 +410,10 @@ if(ARCH STREQUAL "arm64" AND DEFINED LLVM_MINGW_LIBCXX_INCLUDE)
     # comes before <FLAGS>, so neither add_compile_options nor CMAKE_CXX_FLAGS
     # can win the ordering; inject the libc++ -I into the compile rule itself,
     # ahead of <INCLUDES>. It only holds the C++ standard library and so does
-    # not shadow any ReactOS header.
-    set(CMAKE_CXX_COMPILE_OBJECT "<CMAKE_CXX_COMPILER> -I${LLVM_MINGW_LIBCXX_INCLUDE} <DEFINES> <INCLUDES> <FLAGS> -o <OBJECT> -c <SOURCE>")
+    # not shadow any ReactOS header. -nostdinc++ keeps Clang from treating the
+    # directory as its standard library path, which would demote it behind the
+    # user includes; libc++'s C wrappers then include_next ReactOS' CRT headers.
+    set(CMAKE_CXX_COMPILE_OBJECT "<CMAKE_CXX_COMPILER> -nostdinc++ -I${LLVM_MINGW_LIBCXX_INCLUDE} <DEFINES> <INCLUDES> <FLAGS> -o <OBJECT> -c <SOURCE>")
 else()
     set(CMAKE_CXX_COMPILE_OBJECT "<CMAKE_CXX_COMPILER> <DEFINES> <INCLUDES> <FLAGS> -o <OBJECT> -c <SOURCE>")
 endif()

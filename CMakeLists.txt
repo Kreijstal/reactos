@@ -25,30 +25,6 @@ if(ARCH STREQUAL "arm64" AND DEFINED LLVM_MINGW_LIBCXX_INCLUDE)
     if(DEFINED LLVM_MINGW_CLANG_INCLUDE)
         add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-isystem${LLVM_MINGW_CLANG_INCLUDE}>")
     endif()
-    # libc++'s standard headers must be searched before ReactOS' own C headers,
-    # or <cstddef> & co. pick up sdk/include/crt/stddef.h instead of libc++'s
-    # wrapper and abort. Clang refuses to keep a -I pointing at the toolchain's
-    # real libc++ directory ahead of the user includes (it recognises the path
-    # and demotes it to the system-include position, behind ReactOS' headers).
-    # Copy the headers into the build tree, which Clang does not treat as a
-    # standard library path, and use that copy. The CXX compile rule in
-    # gcc.cmake injects it ahead of the project <INCLUDES>.
-    set(_REACTOS_LIBCXX_COPY "${CMAKE_BINARY_DIR}/host-libcxx")
-    execute_process(COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${LLVM_MINGW_LIBCXX_INCLUDE}" "${_REACTOS_LIBCXX_COPY}")
-    # The copied libc++ C wrappers use the same include guards as the real
-    # toolchain wrappers. Keep libc++ first, but let C headers fall through to
-    # ReactOS' CRT headers instead of stopping at the copied wrapper.
-    file(WRITE "${_REACTOS_LIBCXX_COPY}/ctype.h" "#include_next <ctype.h>\n")
-    file(WRITE "${_REACTOS_LIBCXX_COPY}/errno.h" "#include_next <errno.h>\n")
-    file(WRITE "${_REACTOS_LIBCXX_COPY}/fenv.h" "#include_next <fenv.h>\n")
-    file(WRITE "${_REACTOS_LIBCXX_COPY}/float.h" "#include_next <float.h>\n")
-    file(WRITE "${_REACTOS_LIBCXX_COPY}/inttypes.h" "#include_next <inttypes.h>\n")
-    file(WRITE "${_REACTOS_LIBCXX_COPY}/math.h" "#include_next <math.h>\n")
-    file(WRITE "${_REACTOS_LIBCXX_COPY}/string.h" "#include_next <string.h>\n")
-    file(WRITE "${_REACTOS_LIBCXX_COPY}/wctype.h" "#include_next <wctype.h>\n")
-    set(LLVM_MINGW_LIBCXX_INCLUDE "${_REACTOS_LIBCXX_COPY}"
-        CACHE PATH "LLVM-MinGW libc++ include directory" FORCE)
 endif()
 set(CMAKE_SHARED_LIBRARY_PREFIX "")
 set(CMAKE_SHARED_MODULE_PREFIX "")
