@@ -8,6 +8,7 @@
 
 KMT_TESTFUNC Test_CddDisplay;
 KMT_TESTFUNC Test_InbvOwnership;
+KMT_TESTFUNC Test_CmNotify;
 KMT_TESTFUNC Test_CmSecurity;
 KMT_TESTFUNC Test_EtwProvider;
 KMT_TESTFUNC Test_Example;
@@ -155,6 +156,7 @@ const KMT_TEST TestList[] =
 {
     { "CddDisplay",                         Test_CddDisplay },
     { "InbvOwnership",                      Test_InbvOwnership },
+    { "CmNotify",                           Test_CmNotify },
     { "CmSecurity",                         Test_CmSecurity },
     { "ExAllocatePool2",                    Test_ExAllocatePool2 },
     { "ExCallback",                         Test_ExCallback },

@@ -97,7 +97,9 @@ CmpReportNotify(IN PCM_KEY_CONTROL_BLOCK Kcb,
                     }
                     PostEntry = NextPostEntry;
                 }
-                return;
+
+                /* Other notify blocks may watch this key or another ancestor of it */
+                break;
             }
 
             CurrentKcb = CurrentKcb->ParentKcb;
