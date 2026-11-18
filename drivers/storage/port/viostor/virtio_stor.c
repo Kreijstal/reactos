@@ -45,6 +45,7 @@ BOOLEAN IsCrashDumpMode;
 PVOID TraceContext;
 #endif
 
+#ifndef __REACTOS__ /* our storport.h has no role types */
 sp_DRIVER_INITIALIZE DriverEntry;
 HW_INITIALIZE        VirtIoHwInitialize;
 HW_STARTIO           VirtIoStartIo;
@@ -56,6 +57,7 @@ HW_BUILDIO           VirtIoBuildIo;
 HW_DPC_ROUTINE       CompleteDpcRoutine;
 HW_MESSAGE_SIGNALED_INTERRUPT_ROUTINE VirtIoMSInterruptRoutine;
 HW_PASSIVE_INITIALIZE_ROUTINE         VirtIoPassiveInitializeRoutine;
+#endif
 
 extern int vring_add_buf_stor(
     IN struct virtqueue *_vq,
@@ -83,6 +85,7 @@ VirtIoBuildIo(
     );
 
 VOID
+NTAPI
 CompleteDpcRoutine(
     IN PSTOR_DPC  Dpc,
     IN PVOID Context,
@@ -642,6 +645,7 @@ VirtIoFindAdapter(
 }
 
 BOOLEAN
+NTAPI
 VirtIoPassiveInitializeRoutine (
     IN PVOID DeviceExtension
     )
@@ -2162,6 +2166,7 @@ VioStorCompleteRequest(
 
 #pragma warning(disable: 4100 4701)
 VOID
+NTAPI
 CompleteDpcRoutine(
     IN PSTOR_DPC  Dpc,
     IN PVOID Context,

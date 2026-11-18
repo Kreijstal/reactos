@@ -35,6 +35,38 @@
 #include <storport.h>
 #include <ntddscsi.h>
 
+#ifdef __REACTOS__
+/* What the WDK's storport.h has and ours does not */
+#ifndef SP_INTERNAL_ADAPTER_ERROR
+#define SP_INTERNAL_ADAPTER_ERROR 0x0006
+#endif
+
+#define STOR_CURRENT_LOG_INTERFACE_REVISION 0x0100
+
+FORCEINLINE
+ULONG
+StorPortStateChangeDetected(
+    _In_ PVOID HwDeviceExtension,
+    _In_ ULONG ChangedEntity,
+    _In_ PSTOR_ADDRESS Address,
+    _In_ ULONG Attributes,
+    _In_opt_ PHW_STATE_CHANGE HwStateChange,
+    _In_opt_ PVOID HwStateChangeContext)
+{
+    ULONG Status = STOR_STATUS_NOT_IMPLEMENTED;
+
+    StorPortNotification(StateChangeDetectedCall,
+                         HwDeviceExtension,
+                         ChangedEntity,
+                         Address,
+                         Attributes,
+                         HwStateChange,
+                         HwStateChangeContext,
+                         &Status);
+    return Status;
+}
+#endif
+
 #include "osdep.h"
 #include "virtio_pci.h"
 #include "virtio.h"

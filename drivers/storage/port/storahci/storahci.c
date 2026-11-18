@@ -435,6 +435,7 @@ AhciStartPort (
  * @param SystemArgument2
  */
 VOID
+NTAPI
 AhciCommandCompletionDpcRoutine (
     __in PSTOR_DPC Dpc,
     __in PVOID HwDeviceExtension,
@@ -497,6 +498,7 @@ AhciCommandCompletionDpcRoutine (
  * return TRUE if intialization was successful
  */
 BOOLEAN
+NTAPI
 AhciHwPassiveInitialize (
     __in PVOID DeviceExtension
     )
