@@ -320,7 +320,7 @@ _Check_return_ __CRT_INLINE double log2(_In_ double x) { return log(x) / log(2);
 _Check_return_ __CRT_INLINE float log2f(_In_ float x) { return (float)(log((double)x) / log(2)); }
 #if defined(_MSC_VER) && !defined(__clang__) && defined(_M_ARM64)
 /* MSVC 14.52 treats copysignf as an intrinsic on ARM64 (C2169) */
-#pragma warning(suppress:4164) /* intrinsic not declared (older MSVC) */
+#pragma warning(suppress:4163 4164) /* not an intrinsic on older toolsets */
 #pragma function(copysignf)
 #endif
 _Check_return_ __CRT_INLINE float copysignf(_In_ float x, _In_ float y) { return _copysignf(x, y); }
