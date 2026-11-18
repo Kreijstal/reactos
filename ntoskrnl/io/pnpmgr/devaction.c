@@ -1756,6 +1756,37 @@ PiDeviceStackHasOpenHandles(
 }
 
 /**
+ * @brief      Tells whether IRP_MN_REMOVE_DEVICE has to wait for a surprise-removed device
+ *
+ * As on Windows, a surprise-removed device gets its IRP_MN_REMOVE_DEVICE only once
+ * the handles to its stack are closed and all of its children have been removed:
+ * its drivers tear down their device objects on IRP_MN_REMOVE_DEVICE, while the
+ * stacks above (or the file objects of the open handles) still point at them.
+ */
+static
+BOOLEAN
+PiDeviceRemovalBlocked(
+    _In_ PDEVICE_NODE DeviceNode)
+{
+    PDEVICE_NODE Child;
+    BOOLEAN Blocked = FALSE;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&IopDeviceTreeLock, &OldIrql);
+    for (Child = DeviceNode->Child; Child != NULL; Child = Child->Sibling)
+    {
+        if (Child->State != DeviceNodeRemoved)
+        {
+            Blocked = TRUE;
+            break;
+        }
+    }
+    KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
+
+    return Blocked || PiDeviceStackHasOpenHandles(DeviceNode->PhysicalDeviceObject);
+}
+
+/**
  * @brief      Sets or clears DOE_REMOVE_PENDING on every device object of a device stack
  *
  * Once a device stack is query-removed or surprise-removed, the I/O manager fails
@@ -1821,6 +1852,10 @@ IopSendRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
     ASSERT(DeviceNode->State == DeviceNodeAwaitingQueuedRemoval ||
            DeviceNode->State == DeviceNodeRemovePendingCloses);
 
+    /* Its drivers are about to delete device objects that open handles point at */
+    if (PiDeviceStackHasOpenHandles(DeviceObject))
+        DPRINT1("IRP_MN_REMOVE_DEVICE for %wZ while its stack is open\n", &DeviceNode->InstancePath);
+
     /*
      * Keep the device objects of the stack while their drivers process the
      * IRP: they get deleted, and their drivers get unloaded once the IRP has
@@ -1864,6 +1899,14 @@ IopSendRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
     /* End of HACK */
 
     PiSetDevNodeState(DeviceNode, DeviceNodeRemoved);
+
+    /* A surprise-removed parent may have been waiting for this child */
+    if (DeviceNode->Parent && DeviceNode->Parent->State == DeviceNodeRemovePendingCloses)
+    {
+        PiQueueDeviceAction(DeviceNode->Parent->PhysicalDeviceObject,
+                            PiActionRemovePendingCloses, NULL, NULL);
+    }
+
     PiNotifyTargetDeviceChange(&GUID_TARGET_DEVICE_REMOVE_COMPLETE, DeviceObject, NULL);
     LONG_PTR refCount = ObDereferenceObject(DeviceObject);
     if (refCount != 0)
@@ -2233,16 +2276,23 @@ IopRemoveDevice(PDEVICE_NODE DeviceNode)
         while (child)
         {
             PDEVICE_NODE next = child->Sibling;
-            /* Mark as surprise-removed if the parent was surprise-removed */
-            if (surpriseRemoval)
-                child->Flags |= DNF_DEVICE_GONE;
-            PiSetDevNodeState(child, DeviceNodeAwaitingQueuedRemoval);
-            IopRemoveDevice(child);
+
+            /* A child whose removal is done or under way needs nothing more */
+            if (child->State != DeviceNodeRemoved &&
+                child->State != DeviceNodeRemovePendingCloses)
+            {
+                /* Mark as surprise-removed if the parent was surprise-removed */
+                if (surpriseRemoval)
+                    child->Flags |= DNF_DEVICE_GONE;
+                PiSetDevNodeState(child, DeviceNodeAwaitingQueuedRemoval);
+                IopRemoveDevice(child);
+            }
             child = next;
         }
     }
 
-    if (reportedRemoval)
+    /* No new opens of a surprise-removed device */
+    if (surpriseRemoval)
         PiSetDeviceStackRemovePending(DeviceNode->PhysicalDeviceObject, TRUE);
 
     Status = IopPrepareDeviceForRemoval(DeviceNode->PhysicalDeviceObject, surpriseRemoval);
@@ -2253,17 +2303,19 @@ IopRemoveDevice(PDEVICE_NODE DeviceNode)
         IopQueueTargetDeviceEvent(&GUID_DEVICE_SURPRISE_REMOVAL, &DeviceNode->InstancePath);
     }
 
-    if (NT_SUCCESS(Status) && reportedRemoval && DeviceNode->Child == NULL &&
-        PiDeviceStackHasOpenHandles(DeviceNode->PhysicalDeviceObject))
+    if (NT_SUCCESS(Status) && surpriseRemoval && PiDeviceRemovalBlocked(DeviceNode))
     {
-        /* PiNotifyDeviceObjectClosed brings us back once the handles are closed */
+        /*
+         * PiNotifyDeviceObjectClosed, or IopSendRemoveDevice of the last child,
+         * brings us back once nothing holds the device any more
+         */
         PiSetDevNodeState(DeviceNode, DeviceNodeRemovePendingCloses);
-        if (PiDeviceStackHasOpenHandles(DeviceNode->PhysicalDeviceObject))
+        if (PiDeviceRemovalBlocked(DeviceNode))
         {
-            DPRINT("Removal of %wZ waits for open handles\n", &DeviceNode->InstancePath);
+            DPRINT("Removal of %wZ waits for open handles or children\n", &DeviceNode->InstancePath);
             return STATUS_SUCCESS;
         }
-        /* The last one was closed in the meantime */
+        /* The last one went away in the meantime */
     }
 
     if (NT_SUCCESS(Status))
@@ -2731,7 +2783,7 @@ PiDevNodeStateMachine(
                 break;
             case DeviceNodeRemovePendingCloses:
                 // a surprise-removed device, see IopRemoveDevice
-                if (!PiDeviceStackHasOpenHandles(currentNode->PhysicalDeviceObject))
+                if (!PiDeviceRemovalBlocked(currentNode))
                 {
                     DPRINT("DeviceNodeRemovePendingCloses %wZ\n", &currentNode->InstancePath);
                     IopSendRemoveDevice(currentNode->PhysicalDeviceObject);
