@@ -298,7 +298,7 @@ RtlInitializeContext(
     _Out_ PCONTEXT ThreadContext,
     _In_opt_ PVOID ThreadStartParam,
     _In_ PTHREAD_START_ROUTINE ThreadStartAddress,
-    _In_ PINITIAL_TEB InitialStack)
+    _In_ PVOID StackBase)
 {
     UNREFERENCED_PARAMETER(ProcessHandle);
 
@@ -306,7 +306,7 @@ RtlInitializeContext(
 
     ThreadContext->ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_ARM64;
     ThreadContext->Pc = (ULONG64)ThreadStartAddress;
-    ThreadContext->Sp = ALIGN_DOWN_BY((ULONG64)InitialStack, 16);
+    ThreadContext->Sp = ALIGN_DOWN_BY((ULONG64)StackBase, 16);
     ThreadContext->X0 = (ULONG64)ThreadStartParam;
     ThreadContext->Lr = (ULONG64)RtlExitUserThread;
 }
