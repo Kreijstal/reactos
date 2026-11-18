@@ -86,8 +86,10 @@ if(MSVC)
     #        shader constant tables.
     # C4267/C4319: align() masks with a size_t-wide value and the SM1 encoder
     #        narrows a token count to 16 bits.
+    # C4047: MSVC 14.52 flags the C99 pointer-to-bool conversions vkd3d uses
+    #        ("bool b = ptr;", "return ptr;" from a bool function).
     target_compile_options(vkd3d PRIVATE
-        /wd4715 /wd4090 /wd4098 /wd4146 /wd4200 /wd4245 /wd4267 /wd4305 /wd4309 /wd4319)
+        /wd4715 /wd4090 /wd4098 /wd4146 /wd4200 /wd4245 /wd4267 /wd4305 /wd4309 /wd4319 /wd4047)
 else()
     target_compile_options(vkd3d PRIVATE -Wno-unused-but-set-variable)
 endif()
