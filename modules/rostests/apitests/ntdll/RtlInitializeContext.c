@@ -148,7 +148,7 @@ START_TEST(RtlInitializeContext)
     ok_eq_hex64(Stack[3], 0xCCCCCCCCCCCCCCCCull);
 #else
 
-_WARN("Missing CONTEXT validation in RtlInitializeContext test");
+#pragma message("Missing CONTEXT validation in RtlInitializeContext test")
 
 #endif
 

@@ -674,7 +674,11 @@ START_TEST(RtlFls)
     g_SharedFlsIndex2 = FlsAlloc(FlsTestCallback);
     ok((g_SharedFlsIndex2 >= 2) && (g_SharedFlsIndex2 <= 7), "Unexpected first FLS index: %lu\n", g_SharedFlsIndex2);
     FlsSetValue(g_SharedFlsIndex2, UlongToPtr(0xdead0002));
+#if defined(_M_IX86) || defined(_M_AMD64)
     g_SharedFlsIndex3 = FlsAlloc(FlsBadCallback);
+#else
+    g_SharedFlsIndex3 = FlsAlloc(NULL); /* FlsBadCallback raises an x86-only exception */
+#endif
     ok((g_SharedFlsIndex3 >= 3) && (g_SharedFlsIndex3 <= 8), "Unexpected first FLS index: %lu\n", g_SharedFlsIndex3);
     FlsSetValue(g_SharedFlsIndex3, UlongToPtr(0xdead0003));
 
