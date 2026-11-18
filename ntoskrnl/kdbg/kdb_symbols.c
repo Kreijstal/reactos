@@ -80,20 +80,31 @@ KdbpSymFindModule(
 {
     LONG Count = 0;
     PEPROCESS CurrentProcess;
+    BOOLEAN Locked = TRUE;
+    BOOLEAN Found;
+
+    /*
+     * In the debugger the other processors are frozen wherever they were, maybe
+     * inside RtlPcToFileHeader with the lock held: waiting for it would hang the
+     * system. Walk the list without it then, like the kernel debugger does: it
+     * only changes under the lock, and the lock's owner is not running.
+     */
+    if (KdEnteredDebugger)
+        Locked = KeTryToAcquireSpinLockAtDpcLevel(&PsLoadedModuleSpinLock);
+    else
+        KeAcquireSpinLockAtDpcLevel(&PsLoadedModuleSpinLock);
 
     /* First try to look up the module in the kernel module list. */
-    KeAcquireSpinLockAtDpcLevel(&PsLoadedModuleSpinLock);
-    if(KdbpSymSearchModuleList(PsLoadedModuleList.Flink,
-                               &PsLoadedModuleList,
-                               &Count,
-                               Address,
-                               Index,
-                               pLdrEntry))
-    {
+    Found = KdbpSymSearchModuleList(PsLoadedModuleList.Flink,
+                                    &PsLoadedModuleList,
+                                    &Count,
+                                    Address,
+                                    Index,
+                                    pLdrEntry);
+    if (Locked)
         KeReleaseSpinLockFromDpcLevel(&PsLoadedModuleSpinLock);
+    if (Found)
         return TRUE;
-    }
-    KeReleaseSpinLockFromDpcLevel(&PsLoadedModuleSpinLock);
 
     /* That didn't succeed. Try the module list of the current process now. */
     CurrentProcess = PsGetCurrentProcess();

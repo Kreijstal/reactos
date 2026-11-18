@@ -55,6 +55,7 @@ KMT_TESTFUNC Test_IoInterrupt;
 KMT_TESTFUNC Test_IoIrp;
 KMT_TESTFUNC Test_IoMdl;
 KMT_TESTFUNC Test_IoVolume;
+KMT_TESTFUNC Test_KdLoadSymbolsFrozen;
 KMT_TESTFUNC Test_KdSystemDebugControl;
 KMT_TESTFUNC Test_KseDeviceFlags;
 KMT_TESTFUNC Test_KeApc;
@@ -201,6 +202,7 @@ const KMT_TEST TestList[] =
     { "IoIrp",                              Test_IoIrp },
     { "IoMdl",                              Test_IoMdl },
     { "IoVolume",                           Test_IoVolume },
+    { "KdLoadSymbolsFrozen",                Test_KdLoadSymbolsFrozen },
     { "KdSystemDebugControl",               Test_KdSystemDebugControl },
     { "KseDeviceFlags",                     Test_KseDeviceFlags },
     { "KeApc",                              Test_KeApc },
