@@ -37,7 +37,10 @@
 FORCEINLINE VOID
 DxgkpKmClflush(_In_ const void *Line)
 {
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(_M_ARM64)
+    /* DC CVAC: clean the line to the point of coherency */
+    __asm__ __volatile__("dc cvac, %0" : : "r" (Line) : "memory");
+#elif defined(__GNUC__) || defined(__clang__)
     /* Not __builtin_ia32_clflush: that needs -msse2, which x86 builds lack */
     __asm__ __volatile__("clflush %0" : : "m" (*(volatile const char *)Line) : "memory");
 #else
