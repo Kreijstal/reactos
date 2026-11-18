@@ -205,6 +205,7 @@ list(APPEND SOURCE
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/wait.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/kse/kse.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/kse/ksedb.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/kse/ksedevice.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/kse/driverscope.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/kse/ignorepooltag.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/kse/versionlie.c

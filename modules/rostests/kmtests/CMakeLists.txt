@@ -123,6 +123,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/NtfsVolume.c
     ntos_io/UsbStorageRead.c
     ntos_kd/KdSystemDebugControl.c
+    ntos_kse/KseDeviceFlags.c
     ntos_ke/KeApc.c
     ntos_ke/KeDevQueue.c
     ntos_ke/KeDpc.c

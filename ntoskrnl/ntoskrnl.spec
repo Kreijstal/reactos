@@ -796,6 +796,9 @@
 @ stdcall KeWaitForMultipleObjects(long ptr long long long long ptr ptr)
 @ stdcall KeWaitForMutexObject(ptr long long long ptr) KeWaitForSingleObject
 @ stdcall KeWaitForSingleObject(ptr long long long ptr)
+@ stdcall -version=0x602+ KseQueryDeviceData(wstr wstr ptr ptr ptr)
+@ stdcall -version=0x602+ KseQueryDeviceFlags(wstr wstr ptr)
+@ stdcall -version=0x602+ KseSetDeviceFlags(wstr wstr int64)
 @ fastcall -arch=i386,arm,arm64 KefAcquireSpinLockAtDpcLevel(ptr)
 @ fastcall -arch=i386,arm,arm64 KefReleaseSpinLockFromDpcLevel(ptr)
 @ stdcall -arch=i386 Kei386EoiHelper()

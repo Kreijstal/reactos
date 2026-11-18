@@ -101,10 +101,30 @@ typedef struct _KSE_SHIM
 
 
 /* Exported functions */
-//KseQueryDeviceData
+NTSTATUS
+NTAPI
+KseQueryDeviceData(
+    _In_ PCWSTR DeviceKey,
+    _In_ PCWSTR ProviderName,
+    _Inout_ PULONG Type,
+    _Inout_ PULONG DataSize,
+    _Out_writes_bytes_opt_(*DataSize) PVOID Data);
+
 //KseQueryDeviceDataList
-//KseQueryDeviceFlags
-//KseSetDeviceFlags
+
+NTSTATUS
+NTAPI
+KseQueryDeviceFlags(
+    _In_ PCWSTR DeviceKey,
+    _In_ PCWSTR ProviderName,
+    _Out_ PULONG64 Flags);
+
+NTSTATUS
+NTAPI
+KseSetDeviceFlags(
+    _In_ PCWSTR DeviceKey,
+    _In_ PCWSTR ProviderName,
+    _In_ ULONG64 Flags);
 
 NTSTATUS
 NTAPI
@@ -166,6 +186,17 @@ NTAPI
 KseDbInitialize(
     _In_ PVOID DatabaseImage,
     _In_ ULONG DatabaseSize);
+
+NTSTATUS
+NTAPI
+KseDbQueryDeviceFlags(
+    _In_ PCUNICODE_STRING DeviceKey,
+    _In_ PCUNICODE_STRING Provider,
+    _Out_ PULONG64 Flags);
+
+BOOLEAN
+NTAPI
+KsepDeviceShimsActive(VOID);
 
 VOID
 NTAPI

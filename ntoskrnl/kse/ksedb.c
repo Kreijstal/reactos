@@ -31,6 +31,7 @@ TAGID WINAPI SdbGetNextChild(PDB pdb, TAGID parent, TAGID prev_child);
 TAGID WINAPI SdbFindFirstTag(PDB pdb, TAGID parent, TAG tag);
 TAGID WINAPI SdbFindNextTag(PDB pdb, TAGID parent, TAGID prev_child);
 DWORD WINAPI SdbReadDWORDTag(PDB pdb, TAGID tagid, DWORD ret);
+QWORD WINAPI SdbReadQWORDTag(PDB pdb, TAGID tagid, QWORD ret);
 LPWSTR WINAPI SdbGetStringTagPtr(PDB pdb, TAGID tagid);
 
 #define SDB_HEADER_SIZE     12
@@ -242,4 +243,47 @@ KseDbGetShimsForDriver(
             KsepAddShimByName(&ShimName, Shims, NumberOfShims);
         }
     }
+}
+
+/*
+ * Device flags: a KDEVICE named after the device key ("USBXHCI:PCI\VEN_1022&DEV_7814")
+ * holds one FLAG per provider ("USBXHCI"), with the flags in FLAG_MASK_KERNEL.
+ */
+NTSTATUS
+NTAPI
+KseDbQueryDeviceFlags(
+    _In_ PCUNICODE_STRING DeviceKey,
+    _In_ PCUNICODE_STRING Provider,
+    _Out_ PULONG64 Flags)
+{
+    TAGID Device, Flag;
+    BOOLEAN Found = FALSE;
+
+    *Flags = 0;
+
+    if (KseDatabaseRoot == TAGID_NULL)
+        return STATUS_NOT_FOUND;
+
+    for (Device = SdbFindFirstTag(&KseDriverDatabase, KseDatabaseRoot, TAG_KDEVICE);
+         Device != TAGID_NULL;
+         Device = SdbFindNextTag(&KseDriverDatabase, KseDatabaseRoot, Device))
+    {
+        if (!KsepDbStringEquals(Device, TAG_NAME, DeviceKey))
+            continue;
+
+        for (Flag = SdbFindFirstTag(&KseDriverDatabase, Device, TAG_FLAG);
+             Flag != TAGID_NULL;
+             Flag = SdbFindNextTag(&KseDriverDatabase, Device, Flag))
+        {
+            if (!KsepDbStringEquals(Flag, TAG_NAME, Provider))
+                continue;
+
+            *Flags |= SdbReadQWORDTag(&KseDriverDatabase,
+                                      SdbFindFirstTag(&KseDriverDatabase, Flag, TAG_FLAG_MASK_KERNEL),
+                                      0);
+            Found = TRUE;
+        }
+    }
+
+    return Found ? STATUS_SUCCESS : STATUS_NOT_FOUND;
 }

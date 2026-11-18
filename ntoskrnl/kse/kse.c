@@ -78,6 +78,15 @@ KsepPoolAllocateNonPaged(
     return NULL;
 }
 
+/* Device data is served only once the engine is up, unless device shims are disabled */
+BOOLEAN
+NTAPI
+KsepDeviceShimsActive(VOID)
+{
+    return KseEngine.State == KSE_STATE_INITIALIZED &&
+           !(KseEngine.DisableFlags & KSE_DISABLE_DEVICE_SHIMS);
+}
+
 PKSE_SHIM NTAPI
 KsepFindShim(
     _In_ PCUNICODE_STRING Name)
