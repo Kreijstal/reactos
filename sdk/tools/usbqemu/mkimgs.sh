@@ -32,7 +32,6 @@ mcopy -i ctrl.img@@1048576 payload.bin ::/REF.BIN
 rm -f payload.bin
 # %D = control disk letter, %K = kmtest.exe (see kmtcdrunner). D: is usb0.
 cat > RUN.LST <<'L'
-%K XhciBulkTrb
 cmd /c fc /b %D:\REF.BIN D:\PAYLOAD.BIN
 %K UsbStorageRead
 %D:\kernel32_apitest.exe UsbDiskVerify

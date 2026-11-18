@@ -8,7 +8,7 @@ Provider=%ReactOS%
 DriverVer=02/15/2026,1.0
 
 [SourceDisksFiles]
-usbxhciucx.sys = 3426
+usbxhci.sys  = 3426
 ucx01000.sys = 3426
 
 [ControlFlags]
@@ -47,7 +47,7 @@ HKR, Interrupt Management\MessageSignaledInterruptProperties,, 0x00000010
 HKR, Interrupt Management\MessageSignaledInterruptProperties, MSISupported, 0x00010001, 1
 
 [Generic.Install.NT.Services]
-AddService=USBXHCIUCX, 2, Generic.AddService
+AddService=USBXHCI, 2, Generic.AddService
 AddService=UCX01000,,UCX.AddService
 
 [Generic.AddService]
@@ -55,7 +55,7 @@ DisplayName   = %PCI\CC_0C0330.DeviceDesc%
 ServiceType   = 1
 StartType     = 3
 ErrorControl  = 1
-ServiceBinary = %12%\USBXHCIUCX.SYS
+ServiceBinary = %12%\USBXHCI.SYS
 AddReg        = USBXHCI.AddReg
 
 [USBXHCI.AddReg]
@@ -63,7 +63,7 @@ HKR,, BootFlags,  0x00010001, 16 ; CM_SERVICE_USB3_DISK_BOOT_LOAD
 
 [Generic.CopyFiles]
 UCX01000.SYS
-USBXHCIUCX.SYS
+USBXHCI.SYS
 
 [Generic.AddProperty]
 ; DEVPKEY_Device_DebuggerSafe, DEVPROP_TYPE_UINT32

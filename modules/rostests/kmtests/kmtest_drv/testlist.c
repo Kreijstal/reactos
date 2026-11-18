@@ -151,7 +151,6 @@ KMT_TESTFUNC Test_ZwAllocateVirtualMemory;
 KMT_TESTFUNC Test_ZwCreateSection;
 KMT_TESTFUNC Test_ZwMapViewOfSection;
 KMT_TESTFUNC Test_ZwWaitForMultipleObjects;
-KMT_TESTFUNC Test_XhciBulkTrb;
 KMT_TESTFUNC Test_UsbStorageRead;
 
 const KMT_TEST TestList[] =
@@ -300,7 +299,6 @@ const KMT_TEST TestList[] =
     { "ZwCreateSection",                    Test_ZwCreateSection },
     { "ZwMapViewOfSection",                 Test_ZwMapViewOfSection },
     { "ZwWaitForMultipleObjects",           Test_ZwWaitForMultipleObjects},
-    { "XhciBulkTrb",                        Test_XhciBulkTrb },
     { "UsbStorageRead",                     Test_UsbStorageRead },
 #ifdef _M_AMD64
     { "RtlCaptureContextKM",                Test_RtlCaptureContext },
