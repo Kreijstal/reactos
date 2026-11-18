@@ -214,6 +214,23 @@ WRITE_REGISTER_BUFFER_ULONG64(
     *Register++ = *Buffer++;
 }
 
+#ifdef __REACTOS__
+/* ReactOS: drivers pass legacy I/O port numbers, not mapped addresses; the HAL
+   exports these (hal.spec) and translates the port through the PCI host bridge
+   I/O window, so they cannot be plain memory accesses here. */
+NTHALAPI UCHAR NTAPI READ_PORT_UCHAR(_In_ PUCHAR Port);
+NTHALAPI USHORT NTAPI READ_PORT_USHORT(_In_ PUSHORT Port);
+NTHALAPI ULONG NTAPI READ_PORT_ULONG(_In_ PULONG Port);
+NTHALAPI VOID NTAPI READ_PORT_BUFFER_UCHAR(_In_ PUCHAR Port, _Out_writes_all_(Count) PUCHAR Buffer, _In_ ULONG Count);
+NTHALAPI VOID NTAPI READ_PORT_BUFFER_USHORT(_In_ PUSHORT Port, _Out_writes_all_(Count) PUSHORT Buffer, _In_ ULONG Count);
+NTHALAPI VOID NTAPI READ_PORT_BUFFER_ULONG(_In_ PULONG Port, _Out_writes_all_(Count) PULONG Buffer, _In_ ULONG Count);
+NTHALAPI VOID NTAPI WRITE_PORT_UCHAR(_In_ PUCHAR Port, _In_ UCHAR Value);
+NTHALAPI VOID NTAPI WRITE_PORT_USHORT(_In_ PUSHORT Port, _In_ USHORT Value);
+NTHALAPI VOID NTAPI WRITE_PORT_ULONG(_In_ PULONG Port, _In_ ULONG Value);
+NTHALAPI VOID NTAPI WRITE_PORT_BUFFER_UCHAR(_In_ PUCHAR Port, _In_reads_(Count) PUCHAR Buffer, _In_ ULONG Count);
+NTHALAPI VOID NTAPI WRITE_PORT_BUFFER_USHORT(_In_ PUSHORT Port, _In_reads_(Count) PUSHORT Buffer, _In_ ULONG Count);
+NTHALAPI VOID NTAPI WRITE_PORT_BUFFER_ULONG(_In_ PULONG Port, _In_reads_(Count) PULONG Buffer, _In_ ULONG Count);
+#else
 FORCEINLINE
 UCHAR
 READ_PORT_UCHAR(
@@ -336,6 +353,7 @@ WRITE_PORT_BUFFER_ULONG(
   while (Count--)
     *(volatile ULONG *)Port = *Buffer++;
 }
+#endif /* __REACTOS__ */
 
 #elif !defined(_M_AMD64)
 NTHALAPI
