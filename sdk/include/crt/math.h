@@ -390,6 +390,8 @@ _CRT_NONSTDC_DEPRECATE(_yn) _CRTIMP double __cdecl yn(_In_ int x, _In_ double y)
 #ifdef __cplusplus
 }
 #if defined(_LIBCPP_MSVCRT)
+/* The C classification macro above would expand these overload names. */
+#undef isinf
 extern "C++" {
 _Check_return_ inline bool isinf(_In_ float x) throw() { return _finitef(x) == 0 && _isnanf(x) == 0; }
 _Check_return_ inline bool isinf(_In_ double x) throw() { return _finite(x) == 0 && _isnan(x) == 0; }
