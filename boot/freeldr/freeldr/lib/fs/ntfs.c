@@ -1007,6 +1007,19 @@ ARC_STATUS NtfsRead(ULONG FileId, VOID* Buffer, ULONG N, ULONG* Count)
 
     /* Read data */
     BytesRead64 = NtfsReadAttribute(FileHandle->Volume, FileHandle->DataContext, FileHandle->Offset, Buffer, N);
+
+    /* Past the valid data length a file reads as zeros, whatever its
+     * clusters hold: extending a file doesn't write them */
+    if (FileHandle->DataContext->Record.IsNonResident)
+    {
+        ULONGLONG Initialized = FileHandle->DataContext->Record.NonResident.InitializedSize;
+
+        if (FileHandle->Offset >= Initialized)
+            RtlZeroMemory(Buffer, (SIZE_T)BytesRead64);
+        else if (FileHandle->Offset + BytesRead64 > Initialized)
+            RtlZeroMemory((PUCHAR)Buffer + (Initialized - FileHandle->Offset),
+                          (SIZE_T)(FileHandle->Offset + BytesRead64 - Initialized));
+    }
     FileHandle->Offset += BytesRead64;
     *Count = (ULONG)BytesRead64;
     if (BytesRead64 > 0)
