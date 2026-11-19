@@ -4077,6 +4077,26 @@ NtSetInformationFile(IN HANDLE FileHandle,
         Irp->IoStatus.Status = Status;
         Irp->IoStatus.Information = 0;
     }
+    else if (FileInformationClass == FileIoPriorityHintInformation)
+    {
+        /* The I/O priority hint belongs to the I/O manager, the driver never
+         * sees it. There is no I/O prioritization to feed it into yet, so
+         * only validate it. */
+        PFILE_IO_PRIORITY_HINT_INFORMATION PriorityHint =
+            (PFILE_IO_PRIORITY_HINT_INFORMATION)Irp->AssociatedIrp.SystemBuffer;
+
+        if ((ULONG)PriorityHint->PriorityHint >= MaxIoPriorityTypes ||
+            (PreviousMode != KernelMode && PriorityHint->PriorityHint > IoPriorityNormal))
+        {
+            /* User mode can only lower its priority */
+            Status = STATUS_INVALID_PARAMETER;
+        }
+        else
+            Status = STATUS_SUCCESS;
+
+        Irp->IoStatus.Status = Status;
+        Irp->IoStatus.Information = 0;
+    }
 #endif
     else if (FileInformationClass == FileRenameInformation ||
              FileInformationClass == FileRenameInformationEx ||
