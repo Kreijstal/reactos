@@ -1554,7 +1554,8 @@ NtfsSetPositionInformation(PDEVICE_EXTENSION DeviceExt,
 * @name NtfsSetDispositionInformation
 * @implemented
 *
-* Marks a file for deletion, or clears an existing mark.
+* Marks a file for deletion, or clears an existing mark: FileDispositionInformation and
+* FileDispositionInformationEx.
 *
 * @param DeviceExt
 * Points to the target disk's DEVICE_EXTENSION.
@@ -1565,36 +1566,55 @@ NtfsSetPositionInformation(PDEVICE_EXTENSION DeviceExt,
 * @param FileObject
 * Pointer to the FILE_OBJECT the request arrived on.
 *
-* @param CaseSensitive
-* Boolean indicating if the function should operate in case-sensitive mode. This will be TRUE
-* if an application created the file with the FILE_FLAG_POSIX_SEMANTICS flag.
-*
-* @param DispositionInfo
-* Pointer to the FILE_DISPOSITION_INFORMATION supplied by the caller.
+* @param Flags
+* FILE_DISPOSITION_* flags. FileDispositionInformation's DeleteFile is
+* FILE_DISPOSITION_DELETE or FILE_DISPOSITION_DO_NOT_DELETE.
 *
 * @return
 * STATUS_SUCCESS on success.
-* STATUS_CANNOT_DELETE if the file is read-only or is the volume root.
+* STATUS_CANNOT_DELETE if the file is read-only (unless FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE)
+* or is the volume root, or is mapped as an image.
 * STATUS_DIRECTORY_NOT_EMPTY if the file is a directory that still holds entries.
+* STATUS_NOT_SUPPORTED for a flag this version doesn't define, as Windows NTFS answers one it
+* doesn't know (Wine's test_file_disposition_information: 1607/1709 refuse
+* IGNORE_READONLY_ATTRIBUTE that way).
 *
 * @remarks
 * Only records the intent; the file is deleted at cleanup, once its last handle is closed.
+* With FILE_DISPOSITION_POSIX_SEMANTICS the name goes when this handle is cleaned up, while
+* other handles keep the file itself. FILE_DISPOSITION_ON_CLOSE sets or clears the handle's
+* delete-on-close state (FILE_DELETE_ON_CLOSE) instead of the file's delete disposition.
 */
 static
 NTSTATUS
 NtfsSetDispositionInformation(PDEVICE_EXTENSION DeviceExt,
                               PNTFS_FCB Fcb,
                               PFILE_OBJECT FileObject,
-                              BOOLEAN CaseSensitive,
-                              PFILE_DISPOSITION_INFORMATION DispositionInfo)
+                              ULONG Flags)
 {
-    DPRINT("NtfsSetDispositionInformation(%p, %p, %p, %s, %p)\n",
-           DeviceExt, Fcb, FileObject, CaseSensitive ? "TRUE" : "FALSE", DispositionInfo);
+    PNTFS_CCB Ccb = FileObject->FsContext2;
 
-    if (!DispositionInfo->DeleteFile)
+    DPRINT("NtfsSetDispositionInformation(%p, %p, %p, %lx)\n",
+           DeviceExt, Fcb, FileObject, Flags);
+
+    if (Flags & ~(FILE_DISPOSITION_DELETE | FILE_DISPOSITION_POSIX_SEMANTICS |
+                  FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK | FILE_DISPOSITION_ON_CLOSE |
+                  FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE))
     {
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    if (!(Flags & FILE_DISPOSITION_DELETE))
+    {
+        if (Flags & FILE_DISPOSITION_ON_CLOSE)
+        {
+            /* Clears what FILE_DELETE_ON_CLOSE asked for, not the file's disposition */
+            Ccb->Flags &= ~CCB_DELETE_ON_CLOSE;
+            return STATUS_SUCCESS;
+        }
         Fcb->Flags &= ~FCB_DELETE_PENDING;
         FileObject->DeletePending = FALSE;
+        Ccb->Flags &= ~CCB_POSIX_DELETE;
         return STATUS_SUCCESS;
     }
 
@@ -1608,8 +1628,11 @@ NtfsSetDispositionInformation(PDEVICE_EXTENSION DeviceExt,
     if (NtfsFCBIsRoot(Fcb))
         return STATUS_CANNOT_DELETE;
 
-    if (Fcb->Entry.FileAttributes & NTFS_FILE_TYPE_READ_ONLY)
+    if ((Fcb->Entry.FileAttributes & NTFS_FILE_TYPE_READ_ONLY) &&
+        !(Flags & FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE))
+    {
         return STATUS_CANNOT_DELETE;
+    }
 
     if (NtfsFCBIsDirectory(Fcb))
     {
@@ -1635,8 +1658,19 @@ NtfsSetDispositionInformation(PDEVICE_EXTENSION DeviceExt,
     if (!MmFlushImageSection(&Fcb->SectionObjectPointers, MmFlushForDelete))
         return STATUS_CANNOT_DELETE;
 
+    if (Flags & FILE_DISPOSITION_ON_CLOSE)
+    {
+        /* As if the handle had been opened with FILE_DELETE_ON_CLOSE */
+        Ccb->Flags |= CCB_DELETE_ON_CLOSE;
+        return STATUS_SUCCESS;
+    }
+
     Fcb->Flags |= FCB_DELETE_PENDING;
     FileObject->DeletePending = TRUE;
+    if (Flags & FILE_DISPOSITION_POSIX_SEMANTICS)
+        Ccb->Flags |= CCB_POSIX_DELETE;
+    else
+        Ccb->Flags &= ~CCB_POSIX_DELETE;
 
     return STATUS_SUCCESS;
 }
@@ -3533,8 +3567,21 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             Status = NtfsSetDispositionInformation(DeviceExt,
                                                    Fcb,
                                                    FileObject,
-                                                   BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
-                                                   (PFILE_DISPOSITION_INFORMATION)SystemBuffer);
+                                                   ((PFILE_DISPOSITION_INFORMATION)SystemBuffer)->DeleteFile ?
+                                                       FILE_DISPOSITION_DELETE : FILE_DISPOSITION_DO_NOT_DELETE);
+            break;
+
+        case FileDispositionInformationEx:
+            if (BufferLength < sizeof(FILE_DISPOSITION_INFORMATION_EX))
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            Status = NtfsSetDispositionInformation(DeviceExt,
+                                                   Fcb,
+                                                   FileObject,
+                                                   ((PFILE_DISPOSITION_INFORMATION_EX)SystemBuffer)->Flags);
             break;
 
         case FileLinkInformation:
@@ -3619,7 +3666,9 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             NtfsReportDataChange(Fcb, NotifyFilter);
     }
 
-    if (NT_SUCCESS(Status) && FileInformationClass == FileDispositionInformation &&
+    if (NT_SUCCESS(Status) &&
+        (FileInformationClass == FileDispositionInformation ||
+         FileInformationClass == FileDispositionInformationEx) &&
         NtfsFCBIsDirectory(Fcb) && (Fcb->Flags & FCB_DELETE_PENDING))
         NtfsNotifyDirectoryDeleted(Fcb);
 

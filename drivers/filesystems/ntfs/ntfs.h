@@ -6,7 +6,22 @@
 #include <section_attribs.h>
 
 #if (NTDDI_VERSION < NTDDI_WIN8)
+#define FileDispositionInformationEx ((FILE_INFORMATION_CLASS)64)
 #define FileRenameInformationEx ((FILE_INFORMATION_CLASS)65)
+#endif
+
+#if (NTDDI_VERSION < NTDDI_WIN10)
+/* Windows 10 NTFS implements this class whatever the build's target version is. */
+typedef struct _FILE_DISPOSITION_INFORMATION_EX {
+    ULONG Flags;
+} FILE_DISPOSITION_INFORMATION_EX, *PFILE_DISPOSITION_INFORMATION_EX;
+
+#define FILE_DISPOSITION_DO_NOT_DELETE              0x00000000
+#define FILE_DISPOSITION_DELETE                     0x00000001
+#define FILE_DISPOSITION_POSIX_SEMANTICS            0x00000002
+#define FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK  0x00000004
+#define FILE_DISPOSITION_ON_CLOSE                   0x00000008
+#define FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE  0x00000010
 #endif
 
 #if (NTDDI_VERSION < NTDDI_VISTA)
@@ -296,6 +311,10 @@ typedef struct
 #define CCB_USER_SET_ACCESS_TIME 0x0100
 #define CCB_UPDATE_CHANGE_TIME   0x0200
 #define CCB_MANAGE_VOLUME       0x0400
+/* FileDispositionInformationEx with FILE_DISPOSITION_POSIX_SEMANTICS through this
+ * handle: its cleanup takes the name out of the namespace even while other handles
+ * keep the file open */
+#define CCB_POSIX_DELETE        0x0800
 
 typedef struct
 {

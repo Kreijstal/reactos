@@ -79,6 +79,7 @@ NtfsReadOnlyMutation(PNTFS_IRP_CONTEXT Context)
                 case FileValidDataLengthInformation:
                 case FileLinkInformation:
                 case FileDispositionInformation:
+                case FileDispositionInformationEx:
                 case FileRenameInformation:
                 case FileRenameInformationEx:
                     return TRUE;

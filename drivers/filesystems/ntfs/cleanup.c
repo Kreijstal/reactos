@@ -99,6 +99,76 @@ NtfsApplyDeleteOnClose(
     FileObject->DeletePending = TRUE;
 }
 
+/**
+* @name NtfsApplyPosixDelete
+*
+* The cleanup of a handle that set FILE_DISPOSITION_POSIX_SEMANTICS takes the name it
+* deleted out of the namespace at once, even while other handles keep the file open: the
+* name can be created again and its directory can be deleted. Those handles keep the file,
+* whose record goes with the last of them when this was its last name
+* (NtfsDeferFileDeletion). Without other handles the ordinary delete-on-cleanup does it.
+*
+* @remarks
+* The caller owns DirResource, MainResource and PagingIoResource.
+*/
+static
+VOID
+NtfsApplyPosixDelete(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PNTFS_FCB Fcb,
+    _In_ PFILE_OBJECT FileObject)
+{
+    PNTFS_CCB Ccb = FileObject->FsContext2;
+    UNICODE_STRING Name;
+    USHORT LinksLeft = 0;
+    NTSTATUS Status;
+
+    if (Ccb == NULL || !BooleanFlagOn(Ccb->Flags, CCB_POSIX_DELETE))
+        return;
+
+    Ccb->Flags &= ~CCB_POSIX_DELETE;
+
+    /* A directory's handles enumerate and create through its index, which
+     * must stay reachable: it goes with its last handle, as without the flag.
+     * So does a named stream, which has no name of its own to remove. */
+    if (Fcb->OpenHandleCount == 0 ||
+        !BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING) ||
+        BooleanFlagOn(Fcb->Flags, FCB_DELETED) ||
+        Fcb->Stream[0] != UNICODE_NULL ||
+        NtfsFCBIsDirectory(Fcb))
+    {
+        return;
+    }
+
+    NtfsPostUsnChange(DeviceExt, Fcb, (Fcb->LinkCount > 1) ? USN_REASON_HARD_LINK_CHANGE : USN_REASON_FILE_DELETE);
+
+    RtlInitUnicodeString(&Name, Fcb->ObjectName + 1);
+    Status = NtfsUnlinkFileName(DeviceExt, Fcb->MFTIndex, Fcb->ParentMFTIndex, &Name, FALSE, &LinksLeft);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Still pending: the last handle deletes it as usual */
+        DPRINT1("POSIX delete of '%wS' failed: %lx\n", Fcb->PathName, Status);
+        return;
+    }
+
+    /* The name is gone: the other handles' cleanup has nothing left to delete */
+    Fcb->Flags &= ~FCB_DELETE_PENDING;
+    NtfsReportPathChange(DeviceExt, Fcb->PathName, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_REMOVED);
+    if (LinksLeft != 0)
+    {
+        NtfsSetLinkCount(DeviceExt, Fcb->MFTIndex, LinksLeft);
+        NtfsRemoveFCBFromTable(DeviceExt, Fcb);
+    }
+    else
+    {
+        BOOLEAN Deferred = NtfsDeferFileDeletion(DeviceExt, NtfsFileReference(Fcb));
+
+        /* This FCB is open, so its file lock holds the record */
+        ASSERT(Deferred);
+        UNREFERENCED_PARAMETER(Deferred);
+    }
+}
+
 /* The caller owns DirResource, MainResource and PagingIoResource. Cleanup
  * stamps the final times once cached writes through this open are complete. */
 static NTSTATUS
@@ -199,6 +269,9 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
         {
             IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
         }
+
+        if (!(DeviceExt->Flags & (VCB_DEVICE_REMOVED | VCB_VOLUME_READ_ONLY)))
+            NtfsApplyPosixDelete(DeviceExt, Fcb, FileObject);
 
         /* A file marked for deletion goes on the last handle. Truncate it first, so the cache
          * manager drops its pages while there are still clusters to write them back to. */
