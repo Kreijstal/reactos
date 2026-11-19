@@ -5648,12 +5648,7 @@ static void test_SetFileInformationByHandle(void)
     HANDLE file;
     BOOL ret;
 
-#if defined(__REACTOS__) && DLL_EXPORT_VERSION >= 0x600
-    /* FIXME: SetFileInformationByHandle is a STUB on ReactOS. */
-    if (is_reactos() || !pSetFileInformationByHandle)
-#else
     if (!pSetFileInformationByHandle)
-#endif
     {
         win_skip("SetFileInformationByHandle is not supported\n");
         return;
@@ -5764,12 +5759,7 @@ static void test_SetFileRenameInfo(void)
     DWORD size;
     BOOL ret;
 
-#if defined(__REACTOS__) && DLL_EXPORT_VERSION >= 0x600
-    /* FIXME: SetFileInformationByHandle is a STUB on ReactOS. */
-    if (is_reactos() || !pSetFileInformationByHandle)
-#else
     if (!pSetFileInformationByHandle)
-#endif
     {
         win_skip("SetFileInformationByHandle is not supported\n");
         return;
