@@ -22,6 +22,21 @@
 #include <kmt_test.h>
 #include "NtfsKmt.h"
 
+#if (NTDDI_VERSION < NTDDI_WIN8)
+#define FileDispositionInformationEx ((FILE_INFORMATION_CLASS)64)
+#endif
+#if (NTDDI_VERSION < NTDDI_WIN10)
+typedef struct _FILE_DISPOSITION_INFORMATION_EX {
+    ULONG Flags;
+} FILE_DISPOSITION_INFORMATION_EX, *PFILE_DISPOSITION_INFORMATION_EX;
+#define FILE_DISPOSITION_DO_NOT_DELETE              0x00000000
+#define FILE_DISPOSITION_DELETE                     0x00000001
+#define FILE_DISPOSITION_POSIX_SEMANTICS            0x00000002
+#define FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK  0x00000004
+#define FILE_DISPOSITION_ON_CLOSE                   0x00000008
+#define FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE  0x00000010
+#endif
+
 static
 NTSTATUS
 CreateInfo(
@@ -564,6 +579,268 @@ TestReusedFileIds(PCWSTR Dir)
     trace("Observed %lu reused MFT slots in %lu file incarnations\n", Reused, i);
 }
 
+static
+NTSTATUS
+OpenShared(
+    _Out_ PHANDLE Handle,
+    _In_ PCWSTR Path,
+    _In_ ACCESS_MASK Access,
+    _In_ ULONG Options)
+{
+    return NtfsKmtCreate(Handle, NULL, Path, Access, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         FILE_OPEN, Options, NULL, 0, NULL);
+}
+
+static
+NTSTATUS
+SetDispositionEx(
+    _In_ HANDLE Handle,
+    _In_ ULONG Flags)
+{
+    FILE_DISPOSITION_INFORMATION_EX Info;
+
+    Info.Flags = Flags;
+    return NtfsKmtSetInfo(Handle, &Info, sizeof(Info), FileDispositionInformationEx);
+}
+
+/* Status of opening Path for attributes (the handle is closed again) */
+static
+NTSTATUS
+ProbeOpen(
+    _In_ PCWSTR Path)
+{
+    HANDLE Handle;
+    NTSTATUS Status;
+
+    Status = NtfsKmtOpen(&Handle, Path, FILE_READ_ATTRIBUTES, 0);
+    if (NT_SUCCESS(Status))
+        ZwClose(Handle);
+    return Status;
+}
+
+/* FileDispositionInformationEx (Windows 10 1709+ NTFS; Wine ntdll/file.c
+ * test_file_disposition_information and the FILE_DISPOSITION_INFORMATION_EX
+ * documentation): DELETE, DO_NOT_DELETE, POSIX_SEMANTICS (the name goes when
+ * the handle that set it is closed, while other handles keep the file),
+ * IGNORE_READONLY_ATTRIBUTE, and ON_CLOSE (the handle's delete-on-close
+ * state). */
+static
+VOID
+TestDispositionEx(
+    _In_ PCWSTR Dir)
+{
+    WCHAR Path[MAX_PATH], Link[MAX_PATH], SubDir[MAX_PATH];
+    HANDLE First, Second;
+    FILE_STANDARD_INFORMATION Standard;
+    UCHAR Data[16];
+    ULONG_PTR Read;
+    NTSTATUS Status;
+
+    NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, L"dispex.txt");
+    NtfsKmtJoin(Link, RTL_NUMBER_OF(Link), Dir, L"dispex-link.txt");
+    NtfsKmtJoin(SubDir, RTL_NUMBER_OF(SubDir), Dir, L"dispex-dir");
+
+    /* The class exists: a plain delete through it */
+    Status = NtfsKmtCreateFileWithData(Path, "posix", 5);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = OpenShared(&First, Path, DELETE, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    Status = SetDispositionEx(First, FILE_DISPOSITION_DELETE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ZwClose(First);
+    if (!NT_SUCCESS(Status))
+    {
+        trace("FileDispositionInformationEx: 0x%lx\n", Status);
+        NtfsKmtDelete(Path);
+        return;
+    }
+    ok_eq_hex(ProbeOpen(Path), STATUS_OBJECT_NAME_NOT_FOUND);
+
+    /* Without POSIX semantics: the name stays, delete pending, while another
+     * handle is open */
+    Status = NtfsKmtCreateFileWithData(Path, "posix", 5);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = OpenShared(&First, Path, DELETE, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = OpenShared(&Second, Path, GENERIC_READ, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = SetDispositionEx(First, FILE_DISPOSITION_DELETE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(First);
+        ok_eq_hex(ProbeOpen(Path), STATUS_DELETE_PENDING);
+        ZwClose(Second);
+    }
+    ok_eq_hex(ProbeOpen(Path), STATUS_OBJECT_NAME_NOT_FOUND);
+
+    /* POSIX semantics: the name goes with the handle that set it, the other
+     * handle keeps the file and its data, and the name can be reused */
+    Status = NtfsKmtCreateFileWithData(Path, "posix", 5);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = OpenShared(&First, Path, DELETE, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = OpenShared(&Second, Path, GENERIC_READ | GENERIC_WRITE, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = SetDispositionEx(First, FILE_DISPOSITION_DELETE | FILE_DISPOSITION_POSIX_SEMANTICS);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(First);
+        ok_eq_hex(ProbeOpen(Path), STATUS_OBJECT_NAME_NOT_FOUND);
+
+        /* The name is free while the old file is still open */
+        Status = NtfsKmtCreateFileWithData(Path, "new", 3);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+
+        RtlZeroMemory(Data, sizeof(Data));
+        Status = NtfsKmtRead(Second, 0, Data, sizeof(Data), &Read);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok_eq_ulongptr(Read, 5);
+        ok(RtlCompareMemory(Data, "posix", 5) == 5, "the open file lost its data\n");
+        Status = NtfsKmtWrite(Second, 5, "-still-open", 11, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        RtlZeroMemory(Data, sizeof(Data));
+        Status = NtfsKmtRead(Second, 0, Data, sizeof(Data), &Read);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok_eq_ulongptr(Read, 16);
+        ok(RtlCompareMemory(Data, "posix-still-open", 16) == 16, "write after the name went was lost\n");
+        ZwClose(Second);
+
+        /* Closing the old file doesn't touch the new one of the same name */
+        Status = NtfsKmtOpen(&First, Path, GENERIC_READ, FILE_NON_DIRECTORY_FILE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            RtlZeroMemory(Data, sizeof(Data));
+            Status = NtfsKmtRead(First, 0, Data, sizeof(Data), &Read);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            ok_eq_ulongptr(Read, 3);
+            ZwClose(First);
+        }
+        Status = NtfsKmtDelete(Path);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+    }
+    ok_eq_hex(ProbeOpen(Path), STATUS_OBJECT_NAME_NOT_FOUND);
+
+    /* POSIX semantics, the other handle closed first: deleted with the last one */
+    Status = NtfsKmtCreateFileWithData(Path, "posix", 5);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = OpenShared(&First, Path, DELETE, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = OpenShared(&Second, Path, GENERIC_READ, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = SetDispositionEx(First, FILE_DISPOSITION_DELETE | FILE_DISPOSITION_POSIX_SEMANTICS);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(Second);
+        ok_eq_hex(ProbeOpen(Path), STATUS_DELETE_PENDING);
+        ZwClose(First);
+    }
+    ok_eq_hex(ProbeOpen(Path), STATUS_OBJECT_NAME_NOT_FOUND);
+
+    /* POSIX semantics on one of two links: only that name goes */
+    Status = NtfsKmtCreateFileWithData(Path, "posix", 5);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtOpen(&First, Path, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES, 0);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtfsKmtLink(First, Link, FALSE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(First);
+    }
+    Status = OpenShared(&First, Path, DELETE, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = OpenShared(&Second, Path, GENERIC_READ, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = SetDispositionEx(First, FILE_DISPOSITION_DELETE | FILE_DISPOSITION_POSIX_SEMANTICS);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(First);
+        ok_eq_hex(ProbeOpen(Path), STATUS_OBJECT_NAME_NOT_FOUND);
+        Status = NtfsKmtOpen(&First, Link, FILE_READ_ATTRIBUTES, 0);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            Status = NtfsKmtQueryStandard(First, &Standard);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            ok_eq_ulong(Standard.NumberOfLinks, 1UL);
+            ZwClose(First);
+        }
+        ZwClose(Second);
+    }
+    ok_eq_hex(ProbeOpen(Path), STATUS_OBJECT_NAME_NOT_FOUND);
+    Status = NtfsKmtDelete(Link);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+
+    /* DO_NOT_DELETE clears the disposition */
+    Status = NtfsKmtCreateFileWithData(Path, "posix", 5);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = OpenShared(&First, Path, DELETE, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = SetDispositionEx(First, FILE_DISPOSITION_DELETE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Status = SetDispositionEx(First, FILE_DISPOSITION_DO_NOT_DELETE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(First);
+    }
+    ok_eq_hex(ProbeOpen(Path), STATUS_SUCCESS);
+
+    /* ON_CLOSE without DELETE clears FILE_DELETE_ON_CLOSE */
+    Status = NtfsKmtCreate(&First, NULL, Path, DELETE, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           FILE_OPEN, FILE_NON_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE, NULL, 0, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = SetDispositionEx(First, FILE_DISPOSITION_ON_CLOSE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(First);
+    }
+    ok_eq_hex(ProbeOpen(Path), STATUS_SUCCESS);
+    Status = NtfsKmtDelete(Path);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+
+    /* A read-only file: refused, unless IGNORE_READONLY_ATTRIBUTE */
+    Status = NtfsKmtCreate(&First, NULL, Path, GENERIC_WRITE, FILE_ATTRIBUTE_READONLY, 0, FILE_CREATE,
+                           FILE_NON_DIRECTORY_FILE, NULL, 0, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+        ZwClose(First);
+    Status = OpenShared(&First, Path, DELETE, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = SetDispositionEx(First, FILE_DISPOSITION_DELETE);
+        ok_eq_hex(Status, STATUS_CANNOT_DELETE);
+        Status = SetDispositionEx(First, FILE_DISPOSITION_DELETE | FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(First);
+    }
+    ok_eq_hex(ProbeOpen(Path), STATUS_OBJECT_NAME_NOT_FOUND);
+    if (ProbeOpen(Path) == STATUS_SUCCESS)
+        NtfsKmtDelete(Path);
+
+    /* An empty directory with POSIX semantics */
+    Status = NtfsKmtCreateDirectory(SubDir);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = OpenShared(&First, SubDir, DELETE, FILE_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = SetDispositionEx(First, FILE_DISPOSITION_DELETE | FILE_DISPOSITION_POSIX_SEMANTICS);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(First);
+    }
+    ok_eq_hex(ProbeOpen(SubDir), STATUS_OBJECT_NAME_NOT_FOUND);
+}
+
 START_TEST(NtfsCreateSemantics)
 {
     WCHAR Root[MAX_PATH];
@@ -585,6 +862,7 @@ START_TEST(NtfsCreateSemantics)
     TestPathForms(Dir);
     TestLongNames(Dir);
     TestDeleteSemantics(Dir);
+    TestDispositionEx(Dir);
     TestSharingAndCase(Dir);
     TestOpenById(Dir);
     TestReusedFileIds(Dir);
