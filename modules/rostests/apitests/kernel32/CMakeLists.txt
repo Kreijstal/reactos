@@ -27,6 +27,7 @@ list(APPEND SOURCE
     GetLocaleInfo.c
     GetModuleFileName.c
     GetOverlappedResultEx.c
+    GetSystemWow64Directory.c
     GetVolumeInformation.c
     ILOnlyImage.c
     InitOnce.c

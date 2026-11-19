@@ -26,6 +26,7 @@ extern void func_GetFinalPathNameByHandle(void);
 extern void func_GetLocaleInfo(void);
 extern void func_GetModuleFileName(void);
 extern void func_GetOverlappedResultEx(void);
+extern void func_GetSystemWow64Directory(void);
 extern void func_GetVolumeInformation(void);
 extern void func_ILOnlyImage(void);
 extern void func_InitOnce(void);
@@ -89,6 +90,7 @@ const struct test winetest_testlist[] =
     { "GetLocaleInfo",               func_GetLocaleInfo },
     { "GetModuleFileName",           func_GetModuleFileName },
     { "GetOverlappedResultEx",       func_GetOverlappedResultEx },
+    { "GetSystemWow64Directory",     func_GetSystemWow64Directory },
     { "GetVolumeInformation",        func_GetVolumeInformation },
     { "ILOnlyImage",                 func_ILOnlyImage },
     { "InitOnce",                    func_InitOnce },
