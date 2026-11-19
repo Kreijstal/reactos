@@ -704,6 +704,15 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     // Get the size of the stream on disk
     StreamSize = AttributeDataLength(DataContext->pRecord);
 
+    /* Everything that changes the file record holds the paging resource
+     * exclusive. Only the modified page writer may hold it shared, for a
+     * write that doesn't (see NtfsAcquireForModWrite). */
+    ASSERT(ExIsResourceAcquiredExclusiveLite(&Fcb->PagingIoResource) ||
+           ((IrpFlags & IRP_PAGING_IO) &&
+            DataContext->pRecord->IsNonResident &&
+            !(DataContext->pRecord->Flags & (NTFS_ATTR_COMPRESSION_MASK | NTFS_ATTR_SPARSE)) &&
+            WriteOffset + Length <= (ULONGLONG)Fcb->RFCB.ValidDataLength.QuadPart));
+
     DPRINT("WriteOffset: %I64u\tStreamSize: %I64u\n", WriteOffset, StreamSize);
 
     // Are we trying to write beyond the end of the stream?
@@ -932,17 +941,22 @@ NtfsCachedWriteFile(PDEVICE_EXTENSION Vcb,
     IO_STATUS_BLOCK IoStatus;
     NTSTATUS Status = STATUS_SUCCESS;
 
+    /* The caller holds the main resource exclusive. Sizes change under the
+     * paging resource too, so the modified page writer, which holds only
+     * that, sees them stable. */
+    ASSERT(ExIsResourceAcquiredExclusiveLite(&Fcb->MainResource));
+    ASSERT(!ExIsResourceAcquiredSharedLite(&Fcb->PagingIoResource));
     *Written = 0;
-    if (Fcb->DataCacheGeneration != Fcb->CacheGeneration)
-    {
-        Status = NtfsRefreshDataCache(Vcb, FileObject);
-        if (!NT_SUCCESS(Status))
-            return Status;
-    }
     End.QuadPart = Offset.QuadPart + Length;
-    if (End.QuadPart > Fcb->RFCB.FileSize.QuadPart)
+    if (Fcb->DataCacheGeneration != Fcb->CacheGeneration ||
+        End.QuadPart > Fcb->RFCB.FileSize.QuadPart)
     {
-        Status = NtfsSetEndOfFile(Fcb, FileObject, Vcb, 0, CaseSensitive, &End);
+        ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
+        if (Fcb->DataCacheGeneration != Fcb->CacheGeneration)
+            Status = NtfsRefreshDataCache(Vcb, FileObject);
+        if (NT_SUCCESS(Status) && End.QuadPart > Fcb->RFCB.FileSize.QuadPart)
+            Status = NtfsSetEndOfFile(Fcb, FileObject, Vcb, 0, CaseSensitive, &End);
+        ExReleaseResourceLite(&Fcb->PagingIoResource);
         if (!NT_SUCCESS(Status))
             return Status;
     }
@@ -971,7 +985,10 @@ NtfsCachedWriteFile(PDEVICE_EXTENSION Vcb,
 
     if (End.QuadPart > Fcb->RFCB.ValidDataLength.QuadPart)
     {
-        Status = NtfsSetValidDataLength(Vcb, Fcb, FileObject, End.QuadPart, NULL);
+        ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
+        if (End.QuadPart > Fcb->RFCB.ValidDataLength.QuadPart)
+            Status = NtfsSetValidDataLength(Vcb, Fcb, FileObject, End.QuadPart, NULL);
+        ExReleaseResourceLite(&Fcb->PagingIoResource);
         if (!NT_SUCCESS(Status))
             return Status;
     }
@@ -1018,6 +1035,7 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     PIRP Irp = NULL;
     ULONG BytesPerSector;
     BOOLEAN PagingResourceAcquired = FALSE;
+    BOOLEAN UseDataCache;
 
     DPRINT("NtfsWrite(IrpContext %p)\n", IrpContext);
     ASSERT(IrpContext);
@@ -1114,13 +1132,28 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
         Resource = &Fcb->MainResource;
     }
 
-    // acquire exclusive access to the Resource
-    if (!ExAcquireResourceExclusiveLite(Resource, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
+    /* A paging write issued by the modified page writer, the lazy writer or
+     * a flush runs under the paging resource its issuer already holds;
+     * recurse in that mode. The modified page writer holds it shared only
+     * for a write that leaves the file record alone. */
+    if (Resource == &Fcb->PagingIoResource && ExIsResourceAcquiredSharedLite(Resource))
+    {
+        ExAcquireResourceSharedLite(Resource, TRUE);
+    }
+    else if (!ExAcquireResourceExclusiveLite(Resource, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
         return STATUS_CANT_WAIT;
     }
 
-    if (Resource == &Fcb->MainResource)
+    UseDataCache = !(Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)) &&
+                   !NtfsFCBIsDirectory(Fcb) &&
+                   NtfsUseDataCache(Fcb, FileObject, Irp);
+
+    /* A cached write holds the main resource only, as reads do, and takes the
+     * paging resource around the size changes it makes. Holding it while the
+     * copy waits for memory would keep the modified page writer from the
+     * file's pages. A non-cached write changes sizes as it goes. */
+    if (Resource == &Fcb->MainResource && !UseDataCache)
     {
         ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
         PagingResourceAcquired = TRUE;
@@ -1200,7 +1233,7 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
         if (!NT_SUCCESS(Status))
             goto WriteDone;
 
-        if (NtfsUseDataCache(Fcb, FileObject, Irp))
+        if (UseDataCache)
         {
             Status = NtfsCachedWriteFile(DeviceExt, FileObject, Buffer, ByteOffset, Length,
                                          BooleanFlagOn(IrpContext->Stack->Flags, SL_CASE_SENSITIVE),

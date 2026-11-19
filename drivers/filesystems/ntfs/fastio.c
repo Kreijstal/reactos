@@ -45,7 +45,8 @@ NtfsAcqLazyWrite(
     ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
 
     /* Match the main -> paging order used by ordinary writes and Cc flushes.
-     * The paging writes below take the paging resource exclusively. */
+     * The paging writes below recurse into the paging resource, and may move
+     * ValidDataLength, which needs it exclusive. */
     if (!ExAcquireResourceExclusiveLite(&Fcb->MainResource, Wait))
         return FALSE;
     if (!ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, Wait))

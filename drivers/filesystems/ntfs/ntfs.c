@@ -86,8 +86,8 @@ NtfsAcquireForSectionSynchronization(PFS_FILTER_CALLBACK_DATA Data,
                                      STATUS_FILE_LOCKED_WITH_ONLY_READERS;
 }
 
-/* Paging writes take the paging resource exclusively. Acquiring it shared
- * in the default FsRtl callbacks would require an unsupported lock upgrade. */
+/* Paging writes recurse into the paging resource in the mode its owner
+ * holds it, and a flush may move ValidDataLength, which needs it exclusive. */
 static
 NTSTATUS
 NTAPI
@@ -118,6 +118,27 @@ NtfsReleaseForCcFlush(PFILE_OBJECT FileObject, PDEVICE_OBJECT DeviceObject)
     return STATUS_SUCCESS;
 }
 
+/* Whether a paging write of the page ending at EndingOffset leaves the file
+ * record alone: it lands below ValidDataLength in clusters the stream already
+ * has. A resident stream's data is in its file record, which can't hold
+ * BytesPerFileRecord bytes of it, so a larger allocation is non-resident.
+ * A compressed or sparse stream may get clusters on any write. */
+static
+BOOLEAN
+NtfsModWriteKeepsRecord(PNTFS_FCB Fcb, PLARGE_INTEGER EndingOffset)
+{
+    return !(Fcb->Flags & FCB_IS_VOLUME) &&
+           EndingOffset->QuadPart <= Fcb->RFCB.ValidDataLength.QuadPart &&
+           Fcb->RFCB.AllocationSize.QuadPart >= Fcb->Vcb->NtfsInfo.BytesPerFileRecord &&
+           !(Fcb->Entry.FileAttributes & (NTFS_FILE_TYPE_COMPRESSED | NTFS_FILE_TYPE_SPARSE));
+}
+
+/* The modified page writer never waits, so it must not need what an
+ * ordinary reader or writer holds while it waits for memory: the main
+ * resource. As FsRtl's default does, a write that only puts pages back
+ * where they already are takes the paging I/O resource shared; one that
+ * changes the file record (ValidDataLength, allocation, resident data)
+ * takes the main resource exclusive like every other change of it. */
 static
 NTSTATUS
 NTAPI
@@ -128,10 +149,21 @@ NtfsAcquireForModWrite(PFILE_OBJECT FileObject,
 {
     PNTFS_FCB Fcb = FileObject->FsContext;
 
-    UNREFERENCED_PARAMETER(EndingOffset);
     UNREFERENCED_PARAMETER(DeviceObject);
     ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
     *ResourceToRelease = NULL;
+    /* What decides it changes only under the paging I/O resource exclusive */
+    if (NtfsModWriteKeepsRecord(Fcb, EndingOffset))
+    {
+        if (!ExAcquireSharedWaitForExclusive(&Fcb->PagingIoResource, FALSE))
+            return STATUS_CANT_WAIT;
+        if (NtfsModWriteKeepsRecord(Fcb, EndingOffset))
+        {
+            *ResourceToRelease = &Fcb->PagingIoResource;
+            return STATUS_SUCCESS;
+        }
+        ExReleaseResourceLite(&Fcb->PagingIoResource);
+    }
     /* An explicit flush can be called by a reader already holding main
      * shared. Recurse in that mode instead of attempting a lock upgrade. */
     if (ExIsResourceAcquiredSharedLite(&Fcb->MainResource))
