@@ -154,6 +154,8 @@ NTAPI
 MiTrimMemoryConsumer(ULONG Consumer, ULONG InitialTarget)
 {
     ULONG Target = InitialTarget;
+    ULONG Shortage = 0;
+    ULONG Owed;
     ULONG NrFreedPages = 0;
     NTSTATUS Status;
 
@@ -167,7 +169,8 @@ MiTrimMemoryConsumer(ULONG Consumer, ULONG InitialTarget)
     if (MmAvailablePages < MiMinimumAvailablePages)
     {
         /* Global page limit exceeded */
-        Target = (ULONG)max(Target, MiMinimumAvailablePages - MmAvailablePages);
+        Shortage = (ULONG)(MiMinimumAvailablePages - MmAvailablePages);
+        Target = max(Target, Shortage);
     }
     else if (MiMemoryConsumers[Consumer].PagesUsed > MiMemoryConsumers[Consumer].PagesTarget)
     {
@@ -188,15 +191,22 @@ MiTrimMemoryConsumer(ULONG Consumer, ULONG InitialTarget)
         }
     }
 
-    /* Report what is still outstanding against the target we actually trimmed
-     * for, not just against the caller's initial one. A shortage found through
-     * the global limit raises Target above InitialTarget, and reporting only
-     * InitialTarget - NrFreedPages hides that shortage from the balancer: with
-     * the balancer entering its loop at InitialTarget == 0, the loop then sees
-     * 0 outstanding, runs a single pass however deep the shortage is, and can
-     * never satisfy its own no-progress test - so an unrecoverable shortage
-     * neither recovers nor bugchecks, it spins. */
-    return (Target > NrFreedPages) ? (Target - NrFreedPages) : 0;
+    /* Report what the balancer still owes. A page shortage is owed: the
+     * balancer has to keep at it until the shortage is gone, and since a
+     * shortage found through the global limit raises Target above
+     * InitialTarget, it has to be reported in full, not just against the
+     * caller's initial target, or the balancer -- which starts at 0 -- never
+     * sees it.
+     *
+     * A consumer above its own target is not owed. That target is only where
+     * trimming aims, and falling short of it leaves as many pages free as
+     * before: the pages may be in use (only their accessed bit was cleared
+     * this time), or dirty with their file system refusing the write for now,
+     * which the modified page writer never waits for. Counting that as owed
+     * made the balancer loop on it, and then declare NO_PAGES_AVAILABLE over
+     * a single refused page with 800 MB free. */
+    Owed = max(InitialTarget, Shortage);
+    return (Owed > NrFreedPages) ? (Owed - NrFreedPages) : 0;
 }
 
 NTSTATUS
@@ -591,6 +601,11 @@ MiBalancerThread(PVOID Unused)
                 if (InitialTarget != 0 &&
                     InitialTarget == OldTarget)
                 {
+                    /* Only a page shortage is ever owed, and someone else
+                     * may have ended it meanwhile. Then nothing is owed. */
+                    if (MmAvailablePages >= MiMinimumAvailablePages)
+                        break;
+
                     /* A single barren pass does not mean the system is out of
                      * pages: every candidate may just have been locked, or had
                      * its write-out still in flight, at the instant we looked.
