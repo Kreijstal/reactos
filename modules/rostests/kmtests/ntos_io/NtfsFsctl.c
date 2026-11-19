@@ -163,6 +163,30 @@ TestFileRecord(
                      (ULONG)(wcslen(FileName) * sizeof(WCHAR))),
            "file record does not carry the file name\n");
     }
+
+    /* The whole file reference, sequence number included, as
+     * FileInternalInformation returns it: the same record */
+    Input.FileReferenceNumber.QuadPart = (LONGLONG)FileId;
+    RtlZeroMemory(Output, OutputSize);
+    Status = NtfsKmtFsctl(Volume, FSCTL_GET_NTFS_FILE_RECORD, &Input, sizeof(Input),
+                          Output, OutputSize, &Info);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+        ok_eq_ulonglong(RecordNumber(Output->FileReferenceNumber.QuadPart), RecordNumber(FileId));
+
+    /* Past the end of the MFT: the highest record in use */
+    Input.FileReferenceNumber.QuadPart = 0x0000ffffffff0000LL;
+    RtlZeroMemory(Output, OutputSize);
+    Status = NtfsKmtFsctl(Volume, FSCTL_GET_NTFS_FILE_RECORD, &Input, sizeof(Input),
+                          Output, OutputSize, &Info);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok(RecordNumber(Output->FileReferenceNumber.QuadPart) >= RecordNumber(FileId),
+           "highest record in use %I64u is below the test file's %I64u\n",
+           RecordNumber(Output->FileReferenceNumber.QuadPart), RecordNumber(FileId));
+        ok(RtlCompareMemory(Output->FileRecordBuffer, "FILE", 4) == 4, "last record lacks FILE magic\n");
+    }
     NtfsKmtFree(Output);
 }
 
