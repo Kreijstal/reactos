@@ -2512,8 +2512,37 @@ GetSystemWindowsDirectoryW(OUT LPWSTR lpBuffer,
     return ReturnLength / sizeof(WCHAR);
 }
 
+#if defined(_WIN64) || defined(BUILD_WOW6432)
 /*
- * @unimplemented
+ * The WoW64 system directory is "SysWOW64" in the Windows directory.
+ * The caller frees the buffer with RtlFreeUnicodeString.
+ */
+static
+NTSTATUS
+BasepGetWow64Directory(OUT PUNICODE_STRING Wow64Directory)
+{
+    static const UNICODE_STRING SysWow64 = RTL_CONSTANT_STRING(L"\\SysWOW64");
+    ULONG MaximumLength;
+
+    MaximumLength = BaseWindowsDirectory.Length + SysWow64.Length + sizeof(UNICODE_NULL);
+    if (MaximumLength > UNICODE_STRING_MAX_BYTES)
+        return STATUS_NAME_TOO_LONG;
+
+    Wow64Directory->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, MaximumLength);
+    if (!Wow64Directory->Buffer)
+        return STATUS_NO_MEMORY;
+    Wow64Directory->Length = 0;
+    Wow64Directory->MaximumLength = (USHORT)MaximumLength;
+
+    RtlCopyUnicodeString(Wow64Directory, &BaseWindowsDirectory);
+    RtlAppendUnicodeStringToString(Wow64Directory, &SysWow64);
+    Wow64Directory->Buffer[Wow64Directory->Length / sizeof(WCHAR)] = UNICODE_NULL;
+    return STATUS_SUCCESS;
+}
+#endif
+
+/*
+ * @implemented
  */
 UINT
 WINAPI
@@ -2521,24 +2550,39 @@ GetSystemWow64DirectoryW(OUT LPWSTR lpBuffer,
                          IN UINT uSize)
 {
 #if defined(_WIN64) || defined(BUILD_WOW6432)
-    const WCHAR WowDir[] = L"C:\\ReactOS\\SysWOW64";
+    UNICODE_STRING Wow64Directory;
+    NTSTATUS Status;
+    UINT Length;
 
-    /* FIXME */
-    if (uSize < sizeof(WowDir) / sizeof(WCHAR))
+    Status = BasepGetWow64Directory(&Wow64Directory);
+    if (!NT_SUCCESS(Status))
     {
-        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        BaseSetLastNTError(Status);
         return 0;
     }
-    RtlCopyMemory(lpBuffer, WowDir, sizeof(WowDir));
-    return sizeof(WowDir) / sizeof(WCHAR) - 1;
+
+    /* Like GetSystemDirectoryW: the size with the terminator when too small */
+    Length = Wow64Directory.Length / sizeof(WCHAR);
+    if (uSize > Length)
+    {
+        RtlCopyMemory(lpBuffer, Wow64Directory.Buffer, Wow64Directory.Length + sizeof(UNICODE_NULL));
+    }
+    else
+    {
+        Length++;
+    }
+
+    RtlFreeUnicodeString(&Wow64Directory);
+    return Length;
 #else
+    /* There is no WoW64 on a 32-bit system */
     SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     return 0;
 #endif
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 UINT
 WINAPI
@@ -2546,17 +2590,44 @@ GetSystemWow64DirectoryA(OUT LPSTR lpBuffer,
                          IN UINT uSize)
 {
 #if defined(_WIN64) || defined(BUILD_WOW6432)
-    const char WowDir[] = "C:\\ReactOS\\SysWOW64";
+    UNICODE_STRING Wow64Directory;
+    ANSI_STRING AnsiString;
+    NTSTATUS Status;
+    ULONG AnsiLength;
+    UINT Result;
 
-    /* FIXME */
-    if (uSize < sizeof(WowDir))
+    Status = BasepGetWow64Directory(&Wow64Directory);
+    if (!NT_SUCCESS(Status))
     {
-        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        BaseSetLastNTError(Status);
         return 0;
     }
-    RtlCopyMemory(lpBuffer, WowDir, sizeof(WowDir));
-    return sizeof(WowDir) - 1;
+
+    /* The size with the terminator */
+    AnsiLength = BasepUnicodeStringTo8BitSize(&Wow64Directory);
+    if (uSize < AnsiLength)
+    {
+        Result = AnsiLength;
+    }
+    else
+    {
+        RtlInitEmptyAnsiString(&AnsiString, lpBuffer, (USHORT)min(uSize, MAXUSHORT));
+        Status = BasepUnicodeStringTo8BitString(&AnsiString, &Wow64Directory, FALSE);
+        if (NT_SUCCESS(Status))
+        {
+            Result = AnsiString.Length;
+        }
+        else
+        {
+            BaseSetLastNTError(Status);
+            Result = 0;
+        }
+    }
+
+    RtlFreeUnicodeString(&Wow64Directory);
+    return Result;
 #else
+    /* There is no WoW64 on a 32-bit system */
     SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     return 0;
 #endif
