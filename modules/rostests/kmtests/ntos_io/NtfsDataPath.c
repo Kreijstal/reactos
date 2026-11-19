@@ -848,6 +848,153 @@ TestManyLinks(
     }
 }
 
+static
+ULONG_PTR
+AvailableMb(VOID)
+{
+    SYSTEM_PERFORMANCE_INFORMATION Info;
+
+    if (!NT_SUCCESS(ZwQuerySystemInformation(SystemPerformanceInformation, &Info, sizeof(Info), NULL)))
+        return 0;
+    return (ULONG_PTR)Info.AvailablePages / ((1024 * 1024) / PAGE_SIZE);
+}
+
+/* Reads [Offset, Offset + Length) in 64 KB pieces and checks they are zeros */
+static
+VOID
+ZeroCheck(
+    _In_ HANDLE Handle,
+    _In_ ULONGLONG Offset,
+    _In_ ULONG Length,
+    _In_ PCSTR What)
+{
+    const ULONG Piece = 64 * KB;
+    PUCHAR Buffer = NtfsKmtAlloc(Piece);
+    ULONG_PTR Read;
+    NTSTATUS Status;
+    ULONG Done, Chunk;
+
+    if (Buffer == NULL)
+        return;
+    for (Done = 0; Done < Length; Done += Chunk)
+    {
+        Chunk = min(Piece, Length - Done);
+        RtlFillMemory(Buffer, Chunk, 0xCC);
+        Status = NtfsKmtRead(Handle, Offset + Done, Buffer, Chunk, &Read);
+        ok(Status == STATUS_SUCCESS && Read == Chunk, "%s: read(%I64u,%lu): 0x%lx, %Iu bytes\n",
+           What, Offset + Done, Chunk, Status, Read);
+        if (!NT_SUCCESS(Status))
+            break;
+        if (!NtfsKmtIsZero(Buffer, Chunk))
+        {
+            ok(FALSE, "%s: non-zero data in [%I64u, %I64u)\n", What, Offset + Done, Offset + Done + Chunk);
+            break;
+        }
+    }
+    NtfsKmtFree(Buffer);
+}
+
+/* Extending a non-sparse file moves its end only: the valid data length
+ * stays where the data ends and the range past it reads as zeros without
+ * being written (NTFS's ValidDataLength; SetFileValidData exists to skip the
+ * zeroing a write past it costs). So extending takes neither the time nor the
+ * memory that writing the range would. A write past the valid data length
+ * zeroes the gap before it. */
+static
+VOID
+TestExtendWithoutZeroFill(
+    _In_ PCWSTR Dir)
+{
+    WCHAR Path[MAX_PATH], Garbage[MAX_PATH];
+    FILE_END_OF_FILE_INFORMATION EndOfFile;
+    FILE_FS_SIZE_INFORMATION Size;
+    IO_STATUS_BLOCK IoStatus;
+    ULONGLONG Extend, Free;
+    ULONG_PTR Before, After;
+    LONGLONG Start, Elapsed;
+    HANDLE Handle;
+    NTSTATUS Status;
+    ULONG Offset;
+
+    NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, L"extend-vdl.bin");
+    NtfsKmtJoin(Garbage, RTL_NUMBER_OF(Garbage), Dir, L"extend-garbage.bin");
+
+    /* Leave data in free clusters the extended file may be given */
+    Status = NtfsKmtCreate(&Handle, NULL, Garbage, GENERIC_READ | GENERIC_WRITE, 0, 0,
+                           FILE_CREATE, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    for (Offset = 0; Offset < 4 * 1024 * KB && NT_SUCCESS(Status); Offset += 256 * KB)
+        Status = WritePattern(Handle, Offset, 256 * KB, 51);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_hex(NtfsKmtFlush(Handle), STATUS_SUCCESS);
+    if (NT_SUCCESS(ZwQueryVolumeInformationFile(Handle, &IoStatus, &Size, sizeof(Size), FileFsSizeInformation)))
+        Free = (ULONGLONG)Size.AvailableAllocationUnits.QuadPart * Size.SectorsPerAllocationUnit * Size.BytesPerSector;
+    else
+        Free = 0;
+    ZwClose(Handle);
+    Status = NtfsKmtDelete(Garbage);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+
+    Extend = min(96ULL * 1024 * KB, Free / 2) & ~(ULONGLONG)(64 * KB - 1);
+    if (Extend < 16 * 1024 * KB)
+    {
+        skip(FALSE, "Only %I64u bytes free\n", Free);
+        return;
+    }
+
+    Status = NtfsKmtCreate(&Handle, NULL, Path, GENERIC_READ | GENERIC_WRITE, 0,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           FILE_CREATE, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    Status = WritePattern(Handle, 0, 4096, 52);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+
+    Before = AvailableMb();
+    Start = KeQueryInterruptTime();
+    EndOfFile.EndOfFile.QuadPart = Extend;
+    Status = NtfsKmtSetInfo(Handle, &EndOfFile, sizeof(EndOfFile), FileEndOfFileInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Elapsed = KeQueryInterruptTime() - Start;
+    After = AvailableMb();
+    trace("Extended to %I64u MB in %I64d ms, available %Iu -> %Iu MB\n",
+          Extend / (1024 * KB), Elapsed / 10000, Before, After);
+    ok(After + (ULONG_PTR)(Extend / (1024 * KB)) / 2 >= Before,
+       "extending by %I64u MB took %Iu MB of memory: the range was written\n",
+       Extend / (1024 * KB), Before - After);
+    ok_eq_longlong(Standard(Handle).EndOfFile.QuadPart, (LONGLONG)Extend);
+
+    /* The data stays, the extension reads as zeros */
+    ReadCheck(Handle, 0, 4096, STATUS_SUCCESS, 4096, 52, "extended head");
+    ZeroCheck(Handle, 4096, 4 * 1024 * KB, "extension start");
+    ZeroCheck(Handle, Extend - 256 * KB, 256 * KB, "extension end");
+
+    /* A write past the valid data length: the gap before it reads as zeros */
+    Status = WritePattern(Handle, 6 * 1024 * KB + 100, 5000, 53);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_hex(NtfsKmtFlush(Handle), STATUS_SUCCESS);
+    ReadCheck(Handle, 6 * 1024 * KB + 100, 5000, STATUS_SUCCESS, 5000, 53, "write past VDL");
+    ZeroCheck(Handle, 4096, 6 * 1024 * KB + 100 - 4096, "gap before the write");
+    ZeroCheck(Handle, 6 * 1024 * KB + 5100, 64 * KB, "after the write");
+    ZwClose(Handle);
+
+    /* Not just in the cache: the same through a non-cached open */
+    Status = NtfsKmtOpen(&Handle, Path, GENERIC_READ, FILE_NON_DIRECTORY_FILE | FILE_NO_INTERMEDIATE_BUFFERING);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ZeroCheck(Handle, 64 * KB, 1024 * KB, "non-cached extension");
+        ZeroCheck(Handle, 6 * 1024 * KB - 64 * KB, 64 * KB, "non-cached gap");
+        ZeroCheck(Handle, Extend - 64 * KB, 64 * KB, "non-cached end");
+        ZwClose(Handle);
+    }
+    Status = NtfsKmtDelete(Path);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+}
+
 START_TEST(NtfsDataPath)
 {
     IO_STATUS_BLOCK IoStatus;
@@ -880,6 +1027,7 @@ START_TEST(NtfsDataPath)
     TestCacheBoundaries(Dir);
     TestMappedLifetime(Dir);
     TestGrowAndTruncate(Dir);
+    TestExtendWithoutZeroFill(Dir);
     TestNonCachedWriteThenShrink(Dir, Drive);
     TestSectionExtendedFiles(Dir, Drive);
     TestPagingFileCreate(Dir);
