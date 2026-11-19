@@ -704,6 +704,121 @@ Test_ProcQueryAlignmentProbe(void)
     }
 }
 
+static
+void
+Test_ProcessLimitedQuery(void)
+{
+    /*
+     * Since Vista these classes only need PROCESS_QUERY_LIMITED_INFORMATION,
+     * see "Process Security and Access Rights" and GetProcessTimes,
+     * GetProcessIoCounters, GetProcessHandleCount, GetPriorityClass,
+     * GetProcessPriorityBoost, QueryFullProcessImageName and IsWow64Process.
+     * .NET opens a process this way for Process.StartTime.
+     */
+    NTSTATUS Status;
+    HANDLE ProcessHandle;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    CLIENT_ID ClientId;
+    KERNEL_USER_TIMES Times;
+    IO_COUNTERS IoCounters;
+    ULONG HandleCount;
+    DECLSPEC_ALIGN(4) PROCESS_PRIORITY_CLASS PriorityClass;
+    ULONG PriorityBoost;
+    ULONG_PTR Wow64;
+    ULONG Length;
+    union
+    {
+        UNICODE_STRING String;
+        UCHAR Buffer[sizeof(UNICODE_STRING) + MAX_PATH * sizeof(WCHAR)];
+    } ImageName;
+
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    ClientId.UniqueProcess = NtCurrentTeb()->ClientId.UniqueProcess;
+    ClientId.UniqueThread = NULL;
+    Status = NtOpenProcess(&ProcessHandle,
+                           PROCESS_QUERY_LIMITED_INFORMATION,
+                           &ObjectAttributes,
+                           &ClientId);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    /* The handle really is limited */
+    Status = NtQueryInformationProcess(ProcessHandle,
+                                       ProcessDebugPort,
+                                       &Wow64,
+                                       sizeof(HANDLE),
+                                       NULL);
+    ok_hex(Status, STATUS_ACCESS_DENIED);
+
+    RtlZeroMemory(&Times, sizeof(Times));
+    Status = NtQueryInformationProcess(ProcessHandle,
+                                       ProcessTimes,
+                                       &Times,
+                                       sizeof(Times),
+                                       NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok(Times.CreateTime.QuadPart != 0 && Times.CreateTime.QuadPart < TestStartTime.QuadPart,
+       "CreateTime is %I64u, expected < %I64u\n", Times.CreateTime.QuadPart, TestStartTime.QuadPart);
+
+    Status = NtQueryInformationProcess(ProcessHandle,
+                                       ProcessIoCounters,
+                                       &IoCounters,
+                                       sizeof(IoCounters),
+                                       NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+
+    HandleCount = 0;
+    Status = NtQueryInformationProcess(ProcessHandle,
+                                       ProcessHandleCount,
+                                       &HandleCount,
+                                       sizeof(HandleCount),
+                                       NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok(HandleCount != 0, "HandleCount is 0\n");
+
+    Status = NtQueryInformationProcess(ProcessHandle,
+                                       ProcessPriorityClass,
+                                       &PriorityClass,
+                                       sizeof(PriorityClass),
+                                       NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+
+    Status = NtQueryInformationProcess(ProcessHandle,
+                                       ProcessPriorityBoost,
+                                       &PriorityBoost,
+                                       sizeof(PriorityBoost),
+                                       NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+
+    Status = NtQueryInformationProcess(ProcessHandle,
+                                       ProcessWow64Information,
+                                       &Wow64,
+                                       sizeof(Wow64),
+                                       NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+
+    Length = 0;
+    Status = NtQueryInformationProcess(ProcessHandle,
+                                       ProcessImageFileName,
+                                       &ImageName,
+                                       sizeof(ImageName),
+                                       &Length);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok(Length > sizeof(UNICODE_STRING), "Length is %lu\n", Length);
+
+    Length = 0;
+    Status = NtQueryInformationProcess(ProcessHandle,
+                                       ProcessImageFileNameWin32,
+                                       &ImageName,
+                                       sizeof(ImageName),
+                                       &Length);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok(Length > sizeof(UNICODE_STRING), "Length is %lu\n", Length);
+
+    NtClose(ProcessHandle);
+}
+
 START_TEST(NtQueryInformationProcess)
 {
     NTSTATUS Status;
@@ -715,6 +830,7 @@ START_TEST(NtQueryInformationProcess)
     ok_hex(Status, STATUS_SUCCESS);
 
     Test_ProcessTimes();
+    Test_ProcessLimitedQuery();
     Test_ProcessBasicInformation();
     Test_ProcessQuotaLimits();
     Test_ProcessQuotaLimitsEx();
