@@ -570,13 +570,199 @@ TestLiveLinkData(
     ZwClose(First);
 }
 
+/* Reads a file's MFT record header link count (offset 0x12) and counts its
+ * $FILE_NAME attributes and the DOS-only ones among them. FALSE when the
+ * record can't be read or has an attribute list (names elsewhere). */
+static
+BOOLEAN
+ReadRecordLinks(
+    _In_ WCHAR Drive,
+    _In_ PCWSTR Path,
+    _Out_ PUSHORT HeaderLinks,
+    _Out_ PULONG Names,
+    _Out_ PULONG DosNames)
+{
+    NTFS_VOLUME_DATA_BUFFER Geometry;
+    NTFS_FILE_RECORD_INPUT_BUFFER Input;
+    PNTFS_FILE_RECORD_OUTPUT_BUFFER Output = NULL;
+    PUCHAR Record;
+    ULONG OutputSize, Position, Type, Length;
+    USHORT AttributeOffset, ValueOffset;
+    HANDLE Volume;
+    BOOLEAN Result = FALSE;
+    NTSTATUS Status;
+
+    *HeaderLinks = 0;
+    *Names = *DosNames = 0;
+    Input.FileReferenceNumber.QuadPart = QueryIdByPath(Path) & 0x0000ffffffffffffULL;
+    ok(Input.FileReferenceNumber.QuadPart != 0, "no file ID for %ls\n", Path);
+    if (Input.FileReferenceNumber.QuadPart == 0)
+        return FALSE;
+    Status = NtfsKmtOpenVolume(Drive, FILE_READ_DATA, &Volume);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+    Status = NtfsKmtFsctl(Volume, FSCTL_GET_NTFS_VOLUME_DATA, NULL, 0, &Geometry, sizeof(Geometry), NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    OutputSize = FIELD_OFFSET(NTFS_FILE_RECORD_OUTPUT_BUFFER, FileRecordBuffer) +
+                 Geometry.BytesPerFileRecordSegment;
+    Output = NtfsKmtAlloc(OutputSize);
+    if (Output == NULL)
+        goto Cleanup;
+    Status = NtfsKmtFsctl(Volume, FSCTL_GET_NTFS_FILE_RECORD, &Input, sizeof(Input), Output, OutputSize, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    ok_eq_longlong(Output->FileReferenceNumber.QuadPart & 0x0000ffffffffffffULL,
+                   Input.FileReferenceNumber.QuadPart & 0x0000ffffffffffffULL);
+    if (Output->FileRecordLength < 24 || Output->FileRecordLength > Geometry.BytesPerFileRecordSegment)
+        goto Cleanup;
+    Record = Output->FileRecordBuffer;
+    RtlCopyMemory(HeaderLinks, Record + 0x12, sizeof(*HeaderLinks));
+    RtlCopyMemory(&AttributeOffset, Record + 20, sizeof(AttributeOffset));
+    Result = TRUE;
+    for (Position = AttributeOffset; Position + 8 <= Output->FileRecordLength; Position += Length)
+    {
+        RtlCopyMemory(&Type, Record + Position, sizeof(Type));
+        RtlCopyMemory(&Length, Record + Position + 4, sizeof(Length));
+        if (Type == MAXULONG)
+            break;
+        if (Length < 24 || Length > Output->FileRecordLength - Position)
+        {
+            Result = FALSE;
+            break;
+        }
+        if (Type == 0x20) /* $ATTRIBUTE_LIST: some names may be in other records */
+        {
+            Result = FALSE;
+            break;
+        }
+        if (Type != 0x30 || Record[Position + 8] != 0)
+            continue;
+        RtlCopyMemory(&ValueOffset, Record + Position + 20, sizeof(ValueOffset));
+        if (ValueOffset + 0x42 > Length)
+        {
+            Result = FALSE;
+            break;
+        }
+        (*Names)++;
+        /* FILE_NAME.NameType at 0x41: 2 = DOS only */
+        if (Record[Position + ValueOffset + 0x41] == 2)
+            (*DosNames)++;
+    }
+    ok(Result, "couldn't walk the record of %ls\n", Path);
+
+Cleanup:
+    NtfsKmtFree(Output);
+    ZwClose(Volume);
+    return Result;
+}
+
+static
+BOOLEAN
+HasShortName(
+    _In_ PCWSTR Path)
+{
+    UCHAR Buffer[sizeof(FILE_NAME_INFORMATION) + 16 * sizeof(WCHAR)];
+    PFILE_NAME_INFORMATION Alt = (PFILE_NAME_INFORMATION)Buffer;
+    HANDLE Handle;
+    NTSTATUS Status;
+    PCWSTR Name = wcsrchr(Path, L'\\') + 1;
+
+    if (!NT_SUCCESS(NtfsKmtOpen(&Handle, Path, FILE_READ_ATTRIBUTES, 0)))
+        return FALSE;
+    Status = NtfsKmtQueryInfo(Handle, Alt, sizeof(Buffer), FileAlternateNameInformation, NULL);
+    ZwClose(Handle);
+    /* A name that is its own 8.3 name has no separate DOS $FILE_NAME */
+    return NT_SUCCESS(Status) && Alt->FileNameLength != 0 &&
+           !(Alt->FileNameLength == wcslen(Name) * sizeof(WCHAR) &&
+             RtlCompareMemory(Alt->FileName, Name, Alt->FileNameLength) == Alt->FileNameLength);
+}
+
+/* The record header's hard link count counts directory entries: a long name
+ * with an 8.3 name has two $FILE_NAMEs, each with its own index entry, so its
+ * count is 2 (what Windows writes and chkdsk verifies), while
+ * FileStandardInformation counts that pair as one link. */
+static
+VOID
+TestDosAliasLinkCount(
+    _In_ PCWSTR Dir,
+    _In_ WCHAR Drive)
+{
+    WCHAR Long[MAX_PATH], Link[MAX_PATH], Renamed[MAX_PATH];
+    NTSTATUS Status;
+    USHORT Header;
+    ULONG Names, Dos;
+    BOOLEAN Short;
+    HANDLE Handle;
+
+    NtfsKmtJoin(Long, RTL_NUMBER_OF(Long), Dir, L"A long file name with an alias.txt");
+    NtfsKmtJoin(Link, RTL_NUMBER_OF(Link), Dir, L"Another long hard link name.txt");
+    NtfsKmtJoin(Renamed, RTL_NUMBER_OF(Renamed), Dir, L"A renamed long file name.txt");
+
+    Status = NtfsKmtCreateFileWithData(Long, "alias", 5);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    Short = HasShortName(Long);
+    trace("8.3 name generated: %u\n", Short);
+    ok_eq_ulong(QueryLinkCount(Long), 1UL);
+    if (ReadRecordLinks(Drive, Long, &Header, &Names, &Dos))
+    {
+        ok_eq_ulong(Names, Short ? 2UL : 1UL);
+        ok_eq_ulong(Dos, Short ? 1UL : 0UL);
+        ok_eq_ulong((ULONG)Header, Names);
+    }
+
+    /* A hard link: one more link and one more entry */
+    Status = LinkPath(Long, Link, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_ulong(QueryLinkCount(Long), 2UL);
+    if (ReadRecordLinks(Drive, Long, &Header, &Names, &Dos))
+    {
+        ok_eq_ulong(Names - Dos, 2UL);
+        ok_eq_ulong((ULONG)Header, Names);
+    }
+
+    /* Renaming the long name keeps the header in step with its names */
+    Status = NtfsKmtOpen(&Handle, Long, DELETE, 0);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtfsKmtRename(Handle, Renamed, FALSE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(Handle);
+    }
+    ok_eq_ulong(QueryLinkCount(Renamed), 2UL);
+    if (ReadRecordLinks(Drive, Renamed, &Header, &Names, &Dos))
+    {
+        ok_eq_ulong(Names - Dos, 2UL);
+        ok_eq_ulong((ULONG)Header, Names);
+    }
+
+    /* Deleting the long name takes its 8.3 name with it */
+    Status = NtfsKmtDelete(Renamed);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_ulong(QueryLinkCount(Link), 1UL);
+    if (ReadRecordLinks(Drive, Link, &Header, &Names, &Dos))
+    {
+        ok_eq_ulong(Names - Dos, 1UL);
+        ok_eq_ulong((ULONG)Header, Names);
+    }
+    Status = NtfsKmtDelete(Link);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+}
+
 START_TEST(NtfsLinks)
 {
     WCHAR Root[MAX_PATH];
     WCHAR Dir[MAX_PATH];
+    WCHAR Drive;
     NTSTATUS Status;
 
-    if (!NtfsKmtFindVolume(Root, NULL))
+    if (!NtfsKmtFindVolume(Root, &Drive))
     {
         ok(FALSE, "No writable NTFS volume found (attach an NTFS data disk)\n");
         return;
@@ -590,6 +776,7 @@ START_TEST(NtfsLinks)
     TestBasicLinks(Dir);
     TestLiveLinkData(Dir);
     TestLinkGroups(Dir);
+    TestDosAliasLinkCount(Dir, Drive);
 
     Status = NtfsKmtDeleteTree(Dir);
     ok_eq_hex(Status, STATUS_SUCCESS);
