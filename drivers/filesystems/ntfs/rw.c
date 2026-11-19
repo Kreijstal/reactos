@@ -162,7 +162,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     ULONG RealLength;
     ULONGLONG RealReadOffset;
     ULONG RealLengthRead;
-    ULONG ToRead;
+    ULONG ToRead, Valid;
     BOOLEAN AllocatedBuffer = FALSE;
     PCHAR ReadBuffer = (PCHAR)Buffer;
     ULONGLONG StreamSize;
@@ -265,15 +265,37 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         return STATUS_SUCCESS;
     }
 
-    RealReadOffset = ReadOffset;
-    RealLength = ToRead;
+    /* Past the valid data length the stream reads as zeros, whatever its
+     * clusters hold: extending a file doesn't write them (NtfsSetEndOfFile).
+     * The paging file is written before it is read and keeps its clusters. */
+    Valid = ToRead;
+    if (DataContext->pRecord->IsNonResident && !(Fcb->Flags & FCB_IS_PAGING_FILE))
+    {
+        ULONGLONG Initialized = DataContext->pRecord->NonResident.InitializedSize;
 
-    if ((ReadOffset % DeviceExt->NtfsInfo.BytesPerSector) != 0 || (ToRead % DeviceExt->NtfsInfo.BytesPerSector) != 0)
+        if (ReadOffset >= Initialized)
+            Valid = 0;
+        else if (ReadOffset + ToRead > Initialized)
+            Valid = (ULONG)(Initialized - ReadOffset);
+    }
+    if (Valid == 0)
+    {
+        ReleaseAttributeContext(DataContext);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        RtlZeroMemory(Buffer, (IrpFlags & IRP_PAGING_IO) ? Length : ToRead);
+        *LengthRead = ToRead;
+        return STATUS_SUCCESS;
+    }
+
+    RealReadOffset = ReadOffset;
+    RealLength = Valid;
+
+    if ((ReadOffset % DeviceExt->NtfsInfo.BytesPerSector) != 0 || (Valid % DeviceExt->NtfsInfo.BytesPerSector) != 0)
     {
         RealReadOffset = ROUND_DOWN(ReadOffset, DeviceExt->NtfsInfo.BytesPerSector);
-        /* The aligned window must cover all of [ReadOffset, ReadOffset + ToRead),
+        /* The aligned window must cover all of [ReadOffset, ReadOffset + Valid),
          * including the sectors the unaligned start pulls in */
-        RealLength = (ULONG)(ROUND_UP(ReadOffset + ToRead, DeviceExt->NtfsInfo.BytesPerSector) - RealReadOffset);
+        RealLength = (ULONG)(ROUND_UP(ReadOffset + Valid, DeviceExt->NtfsInfo.BytesPerSector) - RealReadOffset);
 
         ReadBuffer = ExAllocatePoolWithTag(NonPagedPool, RealLength, TAG_NTFS);
         if (ReadBuffer == NULL)
@@ -317,9 +339,12 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
 
     if (AllocatedBuffer)
     {
-        ASSERT(RealLengthRead >= (ReadOffset - RealReadOffset) + ToRead);
-        RtlCopyMemory(Buffer, ReadBuffer + (ReadOffset - RealReadOffset), ToRead);
+        ASSERT(RealLengthRead >= (ReadOffset - RealReadOffset) + Valid);
+        RtlCopyMemory(Buffer, ReadBuffer + (ReadOffset - RealReadOffset), Valid);
     }
+
+    if (Valid != ToRead)
+        RtlZeroMemory(Buffer + Valid, ToRead - Valid);
 
     if (ToRead != Length && (IrpFlags & IRP_PAGING_IO))
     {
@@ -598,7 +623,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     PNTFS_ATTR_CONTEXT DataContext = NULL;
     PFILE_RECORD_HEADER Holder;
     ULONG AttributeOffset;
-    ULONGLONG StreamSize;
+    ULONGLONG StreamSize, Initialized;
     ULONG RequestedLength = 0;
 
     DPRINT("NtfsWriteFile(%p, %p, %p, %lu, %I64u, %x, %s, %p)\n",
@@ -704,6 +729,15 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     // Get the size of the stream on disk
     StreamSize = AttributeDataLength(DataContext->pRecord);
 
+    /* Where the stream's valid data ends before this write. A compressed
+     * stream is zeroed unit by unit as it grows, so it is valid to its end. */
+    Initialized = StreamSize;
+    if (DataContext->pRecord->IsNonResident && !NtfsAttributeIsCompressed(DataContext) &&
+        !(Fcb->Flags & FCB_IS_PAGING_FILE))
+    {
+        Initialized = min(DataContext->pRecord->NonResident.InitializedSize, StreamSize);
+    }
+
     /* Everything that changes the file record holds the paging resource
      * exclusive. Only the modified page writer may hold it shared, for a
      * write that doesn't (see NtfsAcquireForModWrite). */
@@ -750,10 +784,6 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
 
             // set the attribute data length
             Status = SetAttributeDataLength(FileObject, Fcb, DataContext, AttributeOffset, Holder, &DataSize);
-
-            /* What lies between the old end and the write reads as zeros */
-            if (NT_SUCCESS(Status) && WriteOffset > StreamSize)
-                Status = NtfsZeroStreamRange(DeviceExt, DataContext, AttributeOffset, Holder, StreamSize, WriteOffset);
 
             if (!NT_SUCCESS(Status))
             {
@@ -807,6 +837,23 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     }
 
     DPRINT("Length: %lu\tWriteOffset: %I64u\tStreamSize: %I64u\n", Length, WriteOffset, StreamSize);
+
+    /* What lies between the valid data and the write reads as zeros once the
+     * write moves the valid data length past it, so it has to be zeros on
+     * disk first: the clusters may hold anything (Windows NTFS zeroes it the
+     * same way, which is what SetFileValidData skips). */
+    if (WriteOffset > Initialized && !(Fcb->Flags & FCB_IS_VOLUME))
+    {
+        Status = NtfsZeroStreamRange(DeviceExt, DataContext, AttributeOffset, Holder, Initialized, WriteOffset);
+        if (!NT_SUCCESS(Status))
+        {
+            ReleaseAttributeContext(DataContext);
+            NtfsReleaseAttributeHolder(DeviceExt, FileRecord, Holder);
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+            *LengthWritten = 0;
+            return Status;
+        }
+    }
 
     // Write the data to the attribute
     /* Buffer is the system mapping of this IRP's MDL, so hand the IRP down too

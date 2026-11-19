@@ -1182,12 +1182,16 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     // set the attribute data length
     Status = SetAttributeDataLength(FileObject, Fcb, DataContext, AttributeOffset, Holder, NewFileSize);
 
-    /* The range the file grew by reads as zeros. Not for a paging file: Mm
-     * writes every page of it before it reads one back, and zeroing the
-     * gigabytes NtCreatePagingFile sizes it to would have to pass through
-     * memory before there is any page file to relieve it. */
+    /* The range the file grew by reads as zeros. For a non-resident stream
+     * that is the valid data length's job, as on Windows: it stays where the
+     * data ends (below), reads past it return zeros without I/O and a write
+     * past it zeroes the gap first (NtfsReadFile, NtfsWriteFile), so the range
+     * isn't written now - writing it took as long and as much memory as
+     * writing that much data. A compressed stream is zeroed unit by unit as
+     * before. Never a paging file: Mm writes every page of it before it reads
+     * one back. */
     if (NT_SUCCESS(Status) && NewFileSize->QuadPart > CurrentFileSize.QuadPart &&
-        !(Fcb->Flags & FCB_IS_PAGING_FILE))
+        !(Fcb->Flags & FCB_IS_PAGING_FILE) && NtfsAttributeIsCompressed(DataContext))
     {
         Status = NtfsZeroStreamRange(DeviceExt,
                                      DataContext,

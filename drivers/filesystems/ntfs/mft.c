@@ -1293,8 +1293,18 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
         KeEnterCriticalRegion();
         ExAcquireResourceExclusiveLite(&Vcb->MftContextResource, TRUE);
     }
+    /* Shrinking keeps a valid data length below the new end: what lies past it
+     * was never written (NtfsSetEndOfFile doesn't zero an extension). */
+    if ((ULONGLONG)DataSize->QuadPart < AttrContext->pRecord->NonResident.DataSize)
+    {
+        AttrContext->pRecord->NonResident.InitializedSize =
+            min(AttrContext->pRecord->NonResident.InitializedSize, (ULONGLONG)DataSize->QuadPart);
+    }
+    else
+    {
+        AttrContext->pRecord->NonResident.InitializedSize = DataSize->QuadPart;
+    }
     AttrContext->pRecord->NonResident.DataSize = DataSize->QuadPart;
-    AttrContext->pRecord->NonResident.InitializedSize = DataSize->QuadPart;
 
     if ((AttrContext->FileMFTIndex & NTFS_MFT_MASK) != FileRecord->MFTRecordNumber)
     {
@@ -1305,7 +1315,7 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
     DestinationAttribute = (PNTFS_ATTR_RECORD)((PUCHAR)FileRecord + AttrOffset);
     DestinationAttribute->NonResident.AllocatedSize = AttrContext->pRecord->NonResident.AllocatedSize;
     DestinationAttribute->NonResident.DataSize = DataSize->QuadPart;
-    DestinationAttribute->NonResident.InitializedSize = DataSize->QuadPart;
+    DestinationAttribute->NonResident.InitializedSize = AttrContext->pRecord->NonResident.InitializedSize;
 
     /* AddRun() and FreeClusters() keep HighestVCN on the last VCN the runs
      * describe, holes included, so it's carried over rather than recomputed */
