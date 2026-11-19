@@ -35,6 +35,7 @@ KMT_TESTFUNC Test_FsRtlExpression;
 KMT_TESTFUNC Test_FsRtlFileLock;
 KMT_TESTFUNC Test_FsRtlLegal;
 KMT_TESTFUNC Test_FsRtlMcb;
+KMT_TESTFUNC Test_FsRtlModWrite;
 KMT_TESTFUNC Test_FsRtlRemoveDotsFromPath;
 KMT_TESTFUNC Test_FsRtlTunnel;
 KMT_TESTFUNC Test_FatPerf;
@@ -185,6 +186,7 @@ const KMT_TEST TestList[] =
     { "FsRtlFileLock",                       Test_FsRtlFileLock },
     { "FsRtlLegal",                         Test_FsRtlLegal },
     { "FsRtlMcb",                           Test_FsRtlMcb },
+    { "FsRtlModWrite",                      Test_FsRtlModWrite },
     { "FsRtlRemoveDotsFromPath",            Test_FsRtlRemoveDotsFromPath },
     { "FsRtlTunnel",                        Test_FsRtlTunnel },
     { "FatPerf",                            Test_FatPerf },
