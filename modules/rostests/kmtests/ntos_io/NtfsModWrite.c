@@ -14,8 +14,16 @@
  * has a paging I/O resource takes that one, shared, for pages below the
  * valid data length, so a thread holding the main resource of the file -
  * any cached write does - doesn't keep the file's pages from being written
- * out. FsRtlAcquireFileForModWriteEx calls the same callback.
+ * out. The test acquires through FsRtlAcquireFileForModWriteEx, as the
+ * modified page writer does; on a kernel that doesn't export it, it calls
+ * the callback directly.
  */
+
+typedef NTSTATUS (NTAPI *PFSRTL_ACQUIRE_FOR_MOD_WRITE)(PFILE_OBJECT, PLARGE_INTEGER, PERESOURCE *);
+typedef VOID (NTAPI *PFSRTL_RELEASE_FOR_MOD_WRITE)(PFILE_OBJECT, PERESOURCE);
+
+static PFSRTL_ACQUIRE_FOR_MOD_WRITE pFsRtlAcquireFileForModWriteEx;
+static PFSRTL_RELEASE_FOR_MOD_WRITE pFsRtlReleaseFileForModWrite;
 
 #define FILE_SIZE   (16 * PAGE_SIZE)
 
@@ -59,6 +67,18 @@ AcquireForModWrite(PFILE_OBJECT FileObject,
     *Acquired = NULL;
     Ending.QuadPart = EndingOffset;
     KeRaiseIrql(APC_LEVEL, &OldIrql);
+    if (pFsRtlAcquireFileForModWriteEx && pFsRtlReleaseFileForModWrite)
+    {
+        Status = pFsRtlAcquireFileForModWriteEx(FileObject, &Ending, &Resource);
+        if (Status == STATUS_SUCCESS)
+        {
+            *Acquired = Resource;
+            if (Resource != NULL)
+                pFsRtlReleaseFileForModWrite(FileObject, Resource);
+        }
+        KeLowerIrql(OldIrql);
+        return Status;
+    }
     Status = FastIo->AcquireForModWrite(FileObject, &Ending, &Resource, Device);
     if (Status == STATUS_SUCCESS)
     {
@@ -89,6 +109,17 @@ START_TEST(NtfsModWrite)
     LARGE_INTEGER Timeout;
     SIZE_T Mismatch;
     NTSTATUS Status;
+
+    {
+        UNICODE_STRING Name;
+
+        RtlInitUnicodeString(&Name, L"FsRtlAcquireFileForModWriteEx");
+        pFsRtlAcquireFileForModWriteEx = MmGetSystemRoutineAddress(&Name);
+        RtlInitUnicodeString(&Name, L"FsRtlReleaseFileForModWrite");
+        pFsRtlReleaseFileForModWrite = MmGetSystemRoutineAddress(&Name);
+        if (!pFsRtlAcquireFileForModWriteEx || !pFsRtlReleaseFileForModWrite)
+            trace("No FsRtl ModWrite exports, calling the file system directly\n");
+    }
 
     if (!NtfsKmtFindVolume(Root, NULL))
         return;
