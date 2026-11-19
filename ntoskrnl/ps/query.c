@@ -420,7 +420,11 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
+#else
                                                PROCESS_QUERY_INFORMATION,
+#endif
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -465,7 +469,11 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
+#else
                                                PROCESS_QUERY_INFORMATION,
+#endif
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -548,7 +556,11 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
+#else
                                                PROCESS_QUERY_INFORMATION,
+#endif
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -770,7 +782,11 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
+#else
                                                PROCESS_QUERY_INFORMATION,
+#endif
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -876,7 +892,11 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
+#else
                                                PROCESS_QUERY_INFORMATION,
+#endif
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -908,7 +928,11 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
+#else
                                                PROCESS_QUERY_INFORMATION,
+#endif
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -967,8 +991,11 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
-            // FIXME: Use PROCESS_QUERY_LIMITED_INFORMATION when implemented
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
+#else
                                                PROCESS_QUERY_INFORMATION,
+#endif
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -1329,7 +1356,11 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
+#else
                                                PROCESS_QUERY_INFORMATION,
+#endif
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
