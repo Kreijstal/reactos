@@ -945,24 +945,39 @@ GetNtfsFileRecord(PDEVICE_EXTENSION DeviceExt,
 
     InputBuffer = (PNTFS_FILE_RECORD_INPUT_BUFFER)Irp->AssociatedIrp.SystemBuffer;
 
-    MFTRecord = InputBuffer->FileReferenceNumber.QuadPart;
-    DPRINT1("Requesting: %I64x\n", MFTRecord);
+    /* A file reference: the segment number is its low 48 bits, the sequence
+     * number above them doesn't select a record. Past the end of the MFT, the
+     * search starts at its last record. */
+    MFTRecord = InputBuffer->FileReferenceNumber.QuadPart & NTFS_MFT_MASK;
+    DPRINT("Requesting: %I64x\n", MFTRecord);
+    {
+        ULONGLONG Records = AttributeDataLength(DeviceExt->MFTContext->pRecord) / DeviceExt->NtfsInfo.BytesPerFileRecord;
 
-    do
+        if (Records == 0)
+        {
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+            return STATUS_FILE_CORRUPT_ERROR;
+        }
+        MFTRecord = min(MFTRecord, Records - 1);
+    }
+
+    /* The highest record in use at or below it */
+    for (;;)
     {
         Status = ReadFileRecord(DeviceExt, MFTRecord, FileRecord);
-        if (NT_SUCCESS(Status))
+        if (NT_SUCCESS(Status) && (FileRecord->Flags & FRH_IN_USE))
+            break;
+
+        /* Record 0, $MFT itself, is always in use */
+        if (MFTRecord == 0)
         {
-            if (FileRecord->Flags & FRH_IN_USE)
-            {
-                break;
-            }
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+            return NT_SUCCESS(Status) ? STATUS_FILE_CORRUPT_ERROR : Status;
         }
-
         --MFTRecord;
-    } while (TRUE);
+    }
 
-    DPRINT1("Returning: %I64x\n", MFTRecord);
+    DPRINT("Returning: %I64x\n", MFTRecord);
     OutputBuffer = (PNTFS_FILE_RECORD_OUTPUT_BUFFER)Irp->AssociatedIrp.SystemBuffer;
     OutputBuffer->FileReferenceNumber.QuadPart = MFTRecord;
     OutputBuffer->FileRecordLength = DeviceExt->NtfsInfo.BytesPerFileRecord;
