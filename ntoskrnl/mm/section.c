@@ -6340,8 +6340,11 @@ MmCheckDirtySegment(
 
         if (!NT_SUCCESS(Status))
         {
-            /* Damn, this failed. Consider this page as still dirty */
-            DPRINT1("MiWritePage FAILED: Status 0x%08x!\n", Status);
+            /* Damn, this failed. Consider this page as still dirty. The file
+             * system refusing the page writer its file for now is no failure:
+             * the page is written on a later pass. */
+            if (Status != STATUS_CANT_WAIT)
+                DPRINT1("MiWritePage FAILED: Status 0x%08x!\n", Status);
             if (Iosb)
             {
                 Iosb->Status = Status;
