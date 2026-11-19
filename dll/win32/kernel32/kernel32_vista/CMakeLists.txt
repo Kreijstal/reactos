@@ -29,6 +29,7 @@ list(APPEND SOURCE
     PrefetchVirtualMemory.c
     QueryUnbiasedInterruptTime.c
     ResolveLocaleName.c
+    SetFileInformationByHandle.c
     SetThreadGroupAffinity.c
     sync.c
     ThreadDescription.c

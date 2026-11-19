@@ -7,6 +7,7 @@
 @ stdcall CancelIoEx(ptr ptr)
 
 @ stdcall GetFileInformationByHandleEx(long long ptr long)
+@ stdcall SetFileInformationByHandle(ptr long ptr long)
 @ stdcall -ret64 GetTickCount64()
 
 @ stdcall InitializeSRWLock(ptr)
