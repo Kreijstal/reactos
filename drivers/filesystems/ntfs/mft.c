@@ -5066,6 +5066,116 @@ NtfsFreeFileNames(PFILENAME_ATTRIBUTE *Names,
     ExFreePoolWithTag(Names, TAG_NTFS);
 }
 
+/**
+* @name NtfsCountFileNames
+*
+* Counts a file's $FILE_NAMEs two ways. The record header's hard link count is the
+* number of directory entries naming the file: every indexed $FILE_NAME, a DOS name as
+* well as the Win32 name it belongs to (each has its own index entry, and chkdsk and
+* Windows count both). The links a caller sees (FileStandardInformation.NumberOfLinks,
+* "is this the last name") count a Win32 name and its DOS name once.
+*
+* @param Names
+* Receives the number of $FILE_NAMEs, the value the record header holds.
+*
+* @param Links
+* Receives the number of links: the $FILE_NAMEs that are not DOS-only names.
+*/
+NTSTATUS
+NtfsCountFileNames(PDEVICE_EXTENSION DeviceExt,
+                   PFILE_RECORD_HEADER BaseRecord,
+                   PUSHORT Names,
+                   PUSHORT Links)
+{
+    PFILENAME_ATTRIBUTE *List;
+    ULONG Count, i;
+    USHORT Dos = 0;
+    NTSTATUS Status;
+
+    /* Without an attribute list every name is in the base record */
+    if (!NtfsRecordHasAttributeList(BaseRecord))
+    {
+        PNTFS_ATTR_RECORD Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseRecord + BaseRecord->AttributeOffset);
+        ULONG Offset = BaseRecord->AttributeOffset;
+
+        *Names = 0;
+        while (Offset + sizeof(ULONG) <= DeviceExt->NtfsInfo.BytesPerFileRecord &&
+               Attribute->Type != AttributeEnd && Attribute->Length != 0)
+        {
+            if (Attribute->Type == AttributeFileName && !Attribute->IsNonResident)
+            {
+                (*Names)++;
+                if (((PFILENAME_ATTRIBUTE)((ULONG_PTR)Attribute + Attribute->Resident.ValueOffset))->NameType ==
+                    NTFS_FILE_NAME_DOS)
+                {
+                    Dos++;
+                }
+            }
+            Offset += Attribute->Length;
+            Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseRecord + Offset);
+        }
+        *Links = *Names - Dos;
+        return STATUS_SUCCESS;
+    }
+
+    Status = NtfsGetFileNames(DeviceExt, BaseRecord, &List, &Count);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    for (i = 0; i < Count; i++)
+    {
+        if (List[i]->NameType == NTFS_FILE_NAME_DOS)
+            Dos++;
+    }
+    *Names = (USHORT)Count;
+    *Links = (USHORT)(Count - Dos);
+    NtfsFreeFileNames(List, Count);
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsGetLinkCount
+*
+* The number of links of a file as callers see them, a Win32 name and its DOS name
+* counted once. Falls back to the record header for a record whose names can't be read.
+*/
+USHORT
+NtfsGetLinkCount(PDEVICE_EXTENSION DeviceExt,
+                 PFILE_RECORD_HEADER BaseRecord)
+{
+    USHORT Names, Links;
+
+    if (!NT_SUCCESS(NtfsCountFileNames(DeviceExt, BaseRecord, &Names, &Links)) || Names == 0)
+        return BaseRecord->LinkCount;
+    return Links;
+}
+
+/**
+* @name NtfsRecountLinks
+*
+* Sets the hard link count of a base record whose names were just added or removed to
+* the number of $FILE_NAMEs it has (see NtfsCountFileNames), before the record is
+* written.
+*
+* @param Links
+* Optionally receives the number of links as callers see them.
+*/
+NTSTATUS
+NtfsRecountLinks(PDEVICE_EXTENSION DeviceExt,
+                 PFILE_RECORD_HEADER BaseRecord,
+                 PUSHORT Links)
+{
+    USHORT Names, Count;
+    NTSTATUS Status;
+
+    Status = NtfsCountFileNames(DeviceExt, BaseRecord, &Names, &Count);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    BaseRecord->LinkCount = Names;
+    if (Links != NULL)
+        *Links = Count;
+    return STATUS_SUCCESS;
+}
+
 /* Whether a $FILE_NAME is Name in the directory ParentIndex */
 static
 BOOLEAN
@@ -5241,11 +5351,13 @@ NtfsUnlinkFileNameLocked(PDEVICE_EXTENSION DeviceExt,
                    ULONGLONG MftIndex,
                    ULONGLONG ParentIndex,
                    PCUNICODE_STRING Name,
-                   BOOLEAN CaseSensitive)
+                   BOOLEAN CaseSensitive,
+                   PUSHORT LinksLeft)
 {
     PFILE_RECORD_HEADER FileRecord;
     PFILENAME_ATTRIBUTE *Names = NULL;
     ULONG Count = 0, i;
+    USHORT Links = 0;
     NTSTATUS Status;
 
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
@@ -5295,14 +5407,17 @@ NtfsUnlinkFileNameLocked(PDEVICE_EXTENSION DeviceExt,
         }
 
         if (NT_SUCCESS(Status))
+            Status = NtfsRecountLinks(DeviceExt, FileRecord, &Links);
+
+        /* A file whose last name went keeps its record until its last handle
+         * is closed (NtfsDeferFileDeletion) */
+        if (NT_SUCCESS(Status) && Links != 0)
             Status = NtfsKeepFileNameInBase(DeviceExt, FileRecord);
 
         if (NT_SUCCESS(Status))
-        {
-            ASSERT(FileRecord->LinkCount > 1);
-            FileRecord->LinkCount--;
             Status = UpdateFileRecord(DeviceExt, MftIndex, FileRecord);
-        }
+        if (NT_SUCCESS(Status) && LinksLeft != NULL)
+            *LinksLeft = Links;
         break;
     }
 
@@ -5322,13 +5437,14 @@ NtfsUnlinkFileName(PDEVICE_EXTENSION DeviceExt,
                    ULONGLONG MftIndex,
                    ULONGLONG ParentIndex,
                    PCUNICODE_STRING Name,
-                   BOOLEAN CaseSensitive)
+                   BOOLEAN CaseSensitive,
+                   PUSHORT LinksLeft)
 {
     NTSTATUS Status;
 
     KeEnterCriticalRegion();
     NtfsAcquireIndexExclusive(DeviceExt);
-    Status = NtfsUnlinkFileNameLocked(DeviceExt, MftIndex, ParentIndex, Name, CaseSensitive);
+    Status = NtfsUnlinkFileNameLocked(DeviceExt, MftIndex, ParentIndex, Name, CaseSensitive, LinksLeft);
     NtfsReleaseIndexExclusive(DeviceExt);
     KeLeaveCriticalRegion();
     return Status;
@@ -5353,7 +5469,7 @@ NtfsDeleteFileLink(PDEVICE_EXTENSION DeviceExt,
                    PUSHORT LinksLeft)
 {
     PFILE_RECORD_HEADER FileRecord;
-    USHORT LinkCount;
+    USHORT LinkCount = 0;
     NTSTATUS Status;
 
     *LinksLeft = 0;
@@ -5363,7 +5479,8 @@ NtfsDeleteFileLink(PDEVICE_EXTENSION DeviceExt,
         return STATUS_INSUFFICIENT_RESOURCES;
 
     Status = ReadFileRecord(DeviceExt, MftIndex, FileRecord);
-    LinkCount = FileRecord->LinkCount;
+    if (NT_SUCCESS(Status))
+        LinkCount = NtfsGetLinkCount(DeviceExt, FileRecord);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
     if (!NT_SUCCESS(Status))
@@ -5372,9 +5489,7 @@ NtfsDeleteFileLink(PDEVICE_EXTENSION DeviceExt,
     if (LinkCount <= 1)
         return NtfsDeleteFileRecord(DeviceExt, MftIndex, CaseSensitive);
 
-    Status = NtfsUnlinkFileName(DeviceExt, MftIndex, ParentIndex, Name, CaseSensitive);
-    if (NT_SUCCESS(Status))
-        *LinksLeft = LinkCount - 1;
+    Status = NtfsUnlinkFileName(DeviceExt, MftIndex, ParentIndex, Name, CaseSensitive, LinksLeft);
 
     return Status;
 }

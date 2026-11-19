@@ -1930,6 +1930,21 @@ NtfsFreeFileNames(PFILENAME_ATTRIBUTE *Names,
                   ULONG Count);
 
 NTSTATUS
+NtfsCountFileNames(PDEVICE_EXTENSION DeviceExt,
+                   PFILE_RECORD_HEADER BaseRecord,
+                   PUSHORT Names,
+                   PUSHORT Links);
+
+USHORT
+NtfsGetLinkCount(PDEVICE_EXTENSION DeviceExt,
+                 PFILE_RECORD_HEADER BaseRecord);
+
+NTSTATUS
+NtfsRecountLinks(PDEVICE_EXTENSION DeviceExt,
+                 PFILE_RECORD_HEADER BaseRecord,
+                 PUSHORT Links);
+
+NTSTATUS
 NtfsDeleteFileLink(PDEVICE_EXTENSION DeviceExt,
                    ULONGLONG MftIndex,
                    ULONGLONG ParentIndex,
@@ -1956,7 +1971,8 @@ NtfsUnlinkFileName(PDEVICE_EXTENSION DeviceExt,
                    ULONGLONG MftIndex,
                    ULONGLONG ParentIndex,
                    PCUNICODE_STRING Name,
-                   BOOLEAN CaseSensitive);
+                   BOOLEAN CaseSensitive,
+                   PUSHORT LinksLeft);
 
 NTSTATUS
 NtfsDeleteExtensionRecords(PDEVICE_EXTENSION DeviceExt,

@@ -2301,8 +2301,9 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
             goto FreeRecord;
         DosAttribute = (PFILENAME_ATTRIBUTE)((PUCHAR)NextAttribute + NextAttribute->Resident.ValueOffset);
         RtlCopyMemory(DosAttribute, FilenameAttribute, FIELD_OFFSET(FILENAME_ATTRIBUTE, NameLength));
+        /* AddFileName counted the alias: it has its own index entry, so the
+         * header's link count is 2, as Windows writes it. */
         DosAttribute->NameType = NTFS_FILE_NAME_DOS;
-        FileRecord->LinkCount--; /* The alias is the same directory link. */
     }
 
 #ifndef NDEBUG

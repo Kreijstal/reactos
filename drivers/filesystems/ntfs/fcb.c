@@ -783,7 +783,7 @@ NtfsMakeRootFCB(PNTFS_VCB Vcb)
     Fcb->MFTIndex = NTFS_FILE_ROOT;
     Fcb->ParentMFTIndex = NTFS_FILE_ROOT;
     Fcb->SequenceNumber = MftRecord->SequenceNumber;
-    Fcb->LinkCount = MftRecord->LinkCount;
+    Fcb->LinkCount = NtfsGetLinkCount(Vcb, MftRecord);
 
     NtfsFCBInitializeCache(Vcb, Fcb);
     NtfsAddFCBToTable(Vcb, Fcb);
@@ -933,7 +933,7 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
     rcFCB->MFTIndex = MFTIndex;
     rcFCB->ParentMFTIndex = DirectoryFCB ? DirectoryFCB->MFTIndex : (FileName->DirectoryFileReferenceNumber & NTFS_MFT_MASK);
     rcFCB->SequenceNumber = Record->SequenceNumber;
-    rcFCB->LinkCount = Record->LinkCount;
+    rcFCB->LinkCount = NtfsGetLinkCount(Vcb, Record);
     Status = NtfsInitializeFcbLock(rcFCB);
     if (!NT_SUCCESS(Status))
     {

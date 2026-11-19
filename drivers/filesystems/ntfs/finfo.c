@@ -2370,6 +2370,8 @@ NtfsRestoreExpandedRename(PDEVICE_EXTENSION Vcb,
     if (NT_SUCCESS(Status))
         Status = NtfsKeepFileNameInBase(Vcb, Base);
     if (NT_SUCCESS(Status))
+        Status = NtfsRecountLinks(Vcb, Base, NULL);
+    if (NT_SUCCESS(Status))
         Status = UpdateFileRecord(Vcb, Fcb->MFTIndex, Base);
 Cleanup:
     if (Copy != NULL)
@@ -2381,7 +2383,8 @@ Cleanup:
 
 /* Build the final name metadata before touching either directory index. The
  * logical link count stays unchanged: these are two representations of the
- * same link while DirResource excludes namespace observers. */
+ * same link while DirResource excludes namespace observers. The header's
+ * count drops by one when the DOS name goes (NtfsRecountLinks). */
 static NTSTATUS
 NtfsPrepareExpandedRename(PDEVICE_EXTENSION Vcb,
                            PNTFS_FCB Fcb,
@@ -2418,6 +2421,8 @@ NtfsPrepareExpandedRename(PDEVICE_EXTENSION Vcb,
     }
     if (NT_SUCCESS(Status))
         Status = NtfsKeepFileNameInBase(Vcb, Base);
+    if (NT_SUCCESS(Status))
+        Status = NtfsRecountLinks(Vcb, Base, NULL);
     if (NT_SUCCESS(Status))
         Status = UpdateFileRecord(Vcb, Fcb->MFTIndex, Base);
     if (!NT_SUCCESS(Status))
@@ -2613,6 +2618,7 @@ NtfsRetireReplacedLink(PDEVICE_EXTENSION Vcb,
 {
     UNICODE_STRING Name;
     ULONGLONG Parent = OldValue->DirectoryFileReferenceNumber & NTFS_MFT_MASK;
+    USHORT Links;
     NTSTATUS Status;
 
     if (DosValue != NULL)
@@ -2632,16 +2638,15 @@ NtfsRetireReplacedLink(PDEVICE_EXTENSION Vcb,
     }
     if (!NT_SUCCESS(Status))
         return Status;
-    ASSERT(Target->LinkCount != 0);
-    Target->LinkCount--;
-    if (Target->LinkCount != 0)
+    Status = NtfsRecountLinks(Vcb, Target, &Links);
+    if (NT_SUCCESS(Status) && Links != 0)
         Status = NtfsKeepFileNameInBase(Vcb, Target);
     if (NT_SUCCESS(Status))
         Status = UpdateFileRecord(Vcb, Target->MFTRecordNumber, Target);
     if (!NT_SUCCESS(Status))
         return Status;
-    NtfsSetLinkCount(Vcb, Target->MFTRecordNumber, Target->LinkCount);
-    if (Target->LinkCount == 0 &&
+    NtfsSetLinkCount(Vcb, Target->MFTRecordNumber, Links);
+    if (Links == 0 &&
         !NtfsDeferFileDeletion(Vcb, Target->MFTRecordNumber | ((ULONGLONG)Target->SequenceNumber << 48)))
     {
         Status = NtfsDeleteFileRecord(Vcb, Target->MFTRecordNumber, CaseSensitive);
@@ -2964,6 +2969,7 @@ NtfsSetRenameInformation(
     ULONGLONG ExistingMft, ReplacementMft = 0;
     USHORT Instance;
     BOOLEAN RemoveDos, Expanded = FALSE, ExactCaseMatch = FALSE;
+    USHORT LinksLeft;
     PFILENAME_ATTRIBUTE *Names = NULL, OldValue = NULL, DosValue = NULL;
     ULONG NameCount = 0, i;
     PFILENAME_ATTRIBUTE OldName;
@@ -3036,10 +3042,10 @@ NtfsSetRenameInformation(
         OldLinkName.Buffer = OldName->Name;
         OldLinkName.Length = OldLinkName.MaximumLength = OldName->NameLength * sizeof(WCHAR);
         NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_RENAME_OLD_NAME);
-        Status = NtfsUnlinkFileName(DeviceExt, Fcb->MFTIndex, OldParentMft, &OldLinkName, CaseSensitive);
+        Status = NtfsUnlinkFileName(DeviceExt, Fcb->MFTIndex, OldParentMft, &OldLinkName, CaseSensitive, &LinksLeft);
         if (NT_SUCCESS(Status))
         {
-            NtfsSetLinkCount(DeviceExt, Fcb->MFTIndex, FileRecord->LinkCount - 1);
+            NtfsSetLinkCount(DeviceExt, Fcb->MFTIndex, LinksLeft);
             NtfsReportPathChange(DeviceExt, Fcb->PathName, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_REMOVED);
             NtfsRenameFcbs(DeviceExt, RenamedFcbs, Fcb->MFTIndex, TargetDirMft);
             RenamedFcbs = NULL;
@@ -3310,7 +3316,7 @@ NtfsSetLinkInformation(
                                             CaseSensitive);
         if (NT_SUCCESS(Status))
         {
-            NtfsSetLinkCount(DeviceExt, Fcb->MFTIndex, FileRecord->LinkCount);
+            NtfsSetLinkCount(DeviceExt, Fcb->MFTIndex, NtfsGetLinkCount(DeviceExt, FileRecord));
             NtfsReportPathChange(DeviceExt, NewPath, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_ADDED);
         }
         else if (NT_SUCCESS(ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord)) &&
