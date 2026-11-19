@@ -210,6 +210,8 @@
 @ fastcall -arch=i386 ExiReleaseFastMutex(ptr) ExReleaseFastMutex
 @ fastcall -arch=i386 ExiTryToAcquireFastMutex(ptr) ExTryToAcquireFastMutex
 @ stdcall FsRtlAcquireFileExclusive(ptr)
+@ stdcall FsRtlAcquireFileForCcFlushEx(ptr)
+@ stdcall FsRtlAcquireFileForModWriteEx(ptr ptr ptr)
 @ stdcall FsRtlAddBaseMcbEntry(ptr long long long long long long)
 @ stdcall FsRtlAddLargeMcbEntry(ptr long long long long long long)
 @ stdcall FsRtlAddMcbEntry(ptr long long long)
@@ -323,6 +325,8 @@
 @ stdcall FsRtlRegisterFileSystemFilterCallbacks(ptr ptr)
 @ stdcall FsRtlRegisterUncProvider(ptr ptr long)
 @ stdcall FsRtlReleaseFile(ptr)
+@ stdcall FsRtlReleaseFileForCcFlush(ptr)
+@ stdcall FsRtlReleaseFileForModWrite(ptr ptr)
 @ stdcall FsRtlRemoveDotsFromPath(ptr long ptr)
 @ stdcall FsRtlValidateReparsePointBuffer(long ptr)
 @ stdcall FsRtlRemoveBaseMcbEntry(ptr long long long long)

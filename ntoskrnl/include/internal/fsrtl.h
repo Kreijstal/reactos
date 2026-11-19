@@ -153,23 +153,3 @@ NTSTATUS
 NTAPI
 FsRtlAcquireToCreateMappedSection(_In_ PFILE_OBJECT FileObject,
                                   _In_ ULONG SectionPageProtection);
-
-VOID
-NTAPI
-FsRtlReleaseFileForCcFlush(IN PFILE_OBJECT FileObject);
-
-NTSTATUS
-NTAPI
-FsRtlAcquireFileForCcFlushEx(IN PFILE_OBJECT FileObject);
-
-_Check_return_
-NTSTATUS
-NTAPI
-FsRtlAcquireFileForModWriteEx(_In_ PFILE_OBJECT FileObject,
-                              _In_ PLARGE_INTEGER EndingOffset,
-                              _Outptr_result_maybenull_ PERESOURCE *ResourceToRelease);
-
-VOID
-NTAPI
-FsRtlReleaseFileForModWrite(IN PFILE_OBJECT FileObject,
-                            IN PERESOURCE ResourceToRelease);

@@ -871,6 +871,38 @@ FsRtlCreateSectionForDataScan(
 
 #if (NTDDI_VERSION >= NTDDI_WINXP)
 
+_IRQL_requires_max_(APC_LEVEL)
+NTKERNELAPI
+NTSTATUS
+NTAPI
+FsRtlAcquireFileForCcFlushEx(
+  _In_ PFILE_OBJECT FileObject);
+
+_IRQL_requires_max_(APC_LEVEL)
+NTKERNELAPI
+VOID
+NTAPI
+FsRtlReleaseFileForCcFlush(
+  _In_ PFILE_OBJECT FileObject);
+
+_Check_return_
+_IRQL_requires_max_(APC_LEVEL)
+NTKERNELAPI
+NTSTATUS
+NTAPI
+FsRtlAcquireFileForModWriteEx(
+  _In_ PFILE_OBJECT FileObject,
+  _In_ PLARGE_INTEGER EndingOffset,
+  _Outptr_result_maybenull_ PERESOURCE *ResourceToRelease);
+
+_IRQL_requires_max_(APC_LEVEL)
+NTKERNELAPI
+VOID
+NTAPI
+FsRtlReleaseFileForModWrite(
+  _In_ PFILE_OBJECT FileObject,
+  _In_ PERESOURCE ResourceToRelease);
+
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTKERNELAPI
 VOID
