@@ -455,6 +455,46 @@ PartMgrUpdatePartitionDevices(
 
 /**
  * @brief
+ * Makes the given layout the cached layout of the disk, along with the
+ * partition style and the disk signature or GUID it gives the disk.
+ *
+ * The device instance IDs and the unique IDs of the partitions are made of
+ * these: they must be those of the layout the partitions come from, also
+ * when that layout was just set rather than read from the disk.
+ *
+ * @note    Requires partitioning lock held.
+ **/
+static
+CODE_SEG("PAGE")
+VOID
+PartMgrCacheDriveLayout(
+    _In_ PFDO_EXTENSION FdoExtension,
+    _In_ PDRIVE_LAYOUT_INFORMATION_EX LayoutEx)
+{
+    PAGED_CODE();
+
+    if (FdoExtension->LayoutCache && FdoExtension->LayoutCache != LayoutEx)
+        ExFreePool(FdoExtension->LayoutCache);
+
+    FdoExtension->LayoutCache = LayoutEx;
+    FdoExtension->LayoutValid = TRUE;
+
+    FdoExtension->DiskData.PartitionStyle = LayoutEx->PartitionStyle;
+    if (FdoExtension->DiskData.PartitionStyle == PARTITION_STYLE_MBR)
+    {
+        FdoExtension->DiskData.Mbr.Signature = LayoutEx->Mbr.Signature;
+        // FdoExtension->DiskData.Mbr.Checksum = geometryEx.Partition.Mbr.CheckSum;
+    }
+    else
+    {
+        FdoExtension->DiskData.Gpt.DiskId = LayoutEx->Gpt.DiskId;
+    }
+
+    FdoExtension->IsSuperFloppy = PartMgrIsDiskSuperFloppy(FdoExtension);
+}
+
+/**
+ * @brief
  * Retrieves the disk partition layout from the given disk FDO.
  *
  * If the disk layout cache is valid, just return it; otherwise,
@@ -482,24 +522,7 @@ PartMgrGetDriveLayout(
     if (!NT_SUCCESS(status))
         return status;
 
-    if (FdoExtension->LayoutCache)
-        ExFreePool(FdoExtension->LayoutCache);
-
-    FdoExtension->LayoutCache = layoutEx;
-    FdoExtension->LayoutValid = TRUE;
-
-    FdoExtension->DiskData.PartitionStyle = layoutEx->PartitionStyle;
-    if (FdoExtension->DiskData.PartitionStyle == PARTITION_STYLE_MBR)
-    {
-        FdoExtension->DiskData.Mbr.Signature = layoutEx->Mbr.Signature;
-        // FdoExtension->DiskData.Mbr.Checksum = geometryEx.Partition.Mbr.CheckSum;
-    }
-    else
-    {
-        FdoExtension->DiskData.Gpt.DiskId = layoutEx->Gpt.DiskId;
-    }
-
-    FdoExtension->IsSuperFloppy = PartMgrIsDiskSuperFloppy(FdoExtension);
+    PartMgrCacheDriveLayout(FdoExtension, layoutEx);
 
     *DriveLayout = layoutEx;
     return status;
@@ -771,12 +794,7 @@ FdoIoctlDiskSetDriveLayout(
     if (NT_SUCCESS(status))
     {
         // save the layout cache
-        if (FdoExtension->LayoutCache)
-        {
-            ExFreePool(FdoExtension->LayoutCache);
-        }
-        FdoExtension->LayoutCache = layoutEx;
-        FdoExtension->LayoutValid = TRUE;
+        PartMgrCacheDriveLayout(FdoExtension, layoutEx);
 
         // set updated partition numbers
         for (UINT32 i = 0; i < layoutInfo->PartitionCount; i++)
@@ -785,8 +803,6 @@ FdoIoctlDiskSetDriveLayout(
 
             part->PartitionNumber = layoutEx->PartitionEntry[i].PartitionNumber;
         }
-
-        FdoExtension->IsSuperFloppy = PartMgrIsDiskSuperFloppy(FdoExtension);
     }
     else
     {
@@ -900,14 +916,7 @@ FdoIoctlDiskSetDriveLayoutEx(
     // update the layout cache
     if (NT_SUCCESS(status))
     {
-        if (FdoExtension->LayoutCache)
-        {
-            ExFreePool(FdoExtension->LayoutCache);
-        }
-        FdoExtension->LayoutCache = layoutEx;
-        FdoExtension->LayoutValid = TRUE;
-
-        FdoExtension->IsSuperFloppy = PartMgrIsDiskSuperFloppy(FdoExtension);
+        PartMgrCacheDriveLayout(FdoExtension, layoutEx);
     }
     else
     {
