@@ -1140,6 +1140,20 @@ RawDispatch(IN PDEVICE_OBJECT DeviceObject,
             Status = RawQueryVolumeInformation(Vcb, Irp, IoStackLocation);
             break;
 
+        /* Plug and Play request */
+        case IRP_MJ_PNP:
+
+            /*
+             * The PnP manager sends the removal requests of a device to
+             * the file system mounted on it (PiIrpSendRemoveCheckVpb),
+             * which passes them down. RAW keeps nothing of the device:
+             * pass everything down, so that the device stack learns of
+             * a surprise removal while the raw volume is open.
+             */
+            IoSkipCurrentIrpStackLocation(Irp);
+            Status = IoCallDriver(Vcb->TargetDeviceObject, Irp);
+            break;
+
         /* Unexpected request */
         default:
 
@@ -1258,7 +1272,8 @@ RawFsDriverEntry(IN PDRIVER_OBJECT DriverObject,
     DriverObject->MajorFunction[IRP_MJ_SET_INFORMATION] =
     DriverObject->MajorFunction[IRP_MJ_QUERY_VOLUME_INFORMATION] =
     DriverObject->MajorFunction[IRP_MJ_FILE_SYSTEM_CONTROL] =
-    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = RawDispatch;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] =
+    DriverObject->MajorFunction[IRP_MJ_PNP] = RawDispatch;
 
     /* Shutdown and unload */
     DriverObject->MajorFunction[IRP_MJ_SHUTDOWN] = RawShutdown;
