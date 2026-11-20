@@ -1839,6 +1839,35 @@ NTSTATUS
 IopUpdateResourceMapForPnPDevice(
     IN PDEVICE_NODE DeviceNode);
 
+/**
+ * @brief      Unlinks the (removed) children of a device node from the device tree
+ *
+ * A device node is freed with its PDO (IopDeleteDevice), which outlives its
+ * IRP_MN_REMOVE_DEVICE as long as anybody references it. An unlinked child
+ * has no parent; IopFreeDeviceNode frees it alone.
+ */
+static
+VOID
+PiUnlinkRemovedChildren(
+    _In_ PDEVICE_NODE DeviceNode)
+{
+    PDEVICE_NODE Child, Next;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&IopDeviceTreeLock, &OldIrql);
+    for (Child = DeviceNode->Child; Child != NULL; Child = Next)
+    {
+        Next = Child->Sibling;
+        ASSERT(Child->Child == NULL);
+        ASSERT(Child->State == DeviceNodeRemoved);
+        Child->Parent = NULL;
+        Child->Sibling = NULL;
+    }
+    DeviceNode->Child = NULL;
+    DeviceNode->LastChild = NULL;
+    KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
+}
+
 static
 VOID
 NTAPI
@@ -1874,6 +1903,15 @@ IopSendRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
 
     /* Drivers should never fail a IRP_MN_REMOVE_DEVICE request */
     PiIrpSendRemoveCheckVpb(DeviceObject, IRP_MN_REMOVE_DEVICE);
+
+    /*
+     * The children were removed before their parent, and its bus driver has
+     * now deleted their PDOs. A child's device node goes away with its PDO,
+     * but that PDO may still be referenced and outlive this one: take the
+     * children out of the tree now, as Windows deletes a removed device node
+     * before the REMOVE of its parent completes.
+     */
+    PiUnlinkRemovedChildren(DeviceNode);
 
     OldIrql = KeAcquireQueuedSpinLock(LockQueueIoDatabaseLock);
     for (i = 0; i < StackCount; i++)
