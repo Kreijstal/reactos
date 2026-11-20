@@ -29,7 +29,7 @@ target_compile_definitions(viostor PUBLIC
     NTDDI_VERSION=0x06020000) # NTDDI_WIN8
 
 target_link_libraries(viostor virtio ntoskrnl_vista libcntpr)
-set_module_type(viostor kernelmodedriver ENTRYPOINT DriverEntry)
+set_module_type(viostor kernelmodedriver)
 add_importlibs(viostor storport ntoskrnl hal)
 add_cd_file(TARGET viostor DESTINATION reactos/system32/drivers NO_CAB FOR all)
 add_driver_inf(viostor viostor.inf)
