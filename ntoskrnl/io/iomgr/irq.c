@@ -194,11 +194,85 @@ IopConnectInterruptExFullySpecific(
     return Status;
 }
 
+/*
+ * Connects ServiceRoutine to the line interrupt PnP assigned to PhysicalDeviceObject,
+ * as found in its translated resources.
+ */
+static
+NTSTATUS
+IopConnectInterruptExLineBased(
+    _In_ PDEVICE_OBJECT PhysicalDeviceObject,
+    _Out_ PKINTERRUPT *InterruptObject,
+    _In_ PKSERVICE_ROUTINE ServiceRoutine,
+    _In_ PVOID ServiceContext,
+    _In_opt_ PKSPIN_LOCK SpinLock,
+    _In_opt_ KIRQL SynchronizeIrql,
+    _In_ BOOLEAN FloatingSave)
+{
+    PDEVICE_NODE DeviceNode;
+    PCM_RESOURCE_LIST ResourceList;
+    PCM_FULL_RESOURCE_DESCRIPTOR FullDescriptor;
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR Descriptor;
+    ULONG i, j;
+    KIRQL Irql;
+
+    PAGED_CODE();
+
+    *InterruptObject = NULL;
+
+    if (!PhysicalDeviceObject)
+        return STATUS_INVALID_PARAMETER;
+
+    DeviceNode = IopGetDeviceNode(PhysicalDeviceObject);
+    if (!DeviceNode)
+        return STATUS_INVALID_PARAMETER;
+
+    ResourceList = DeviceNode->ResourceListTranslated;
+    if (!ResourceList)
+        return STATUS_NOT_FOUND;
+
+    FullDescriptor = &ResourceList->List[0];
+    for (i = 0; i < ResourceList->Count; i++)
+    {
+        for (j = 0; j < FullDescriptor->PartialResourceList.Count; j++)
+        {
+            Descriptor = &FullDescriptor->PartialResourceList.PartialDescriptors[j];
+            if (Descriptor->Type != CmResourceTypeInterrupt ||
+                (Descriptor->Flags & CM_RESOURCE_INTERRUPT_MESSAGE))
+            {
+                continue;
+            }
+
+            Irql = (KIRQL)Descriptor->u.Interrupt.Level;
+            return IoConnectInterrupt(InterruptObject,
+                                      ServiceRoutine,
+                                      ServiceContext,
+                                      SpinLock,
+                                      Descriptor->u.Interrupt.Vector,
+                                      Irql,
+                                      SpinLock ? SynchronizeIrql : Irql,
+                                      (Descriptor->Flags & CM_RESOURCE_INTERRUPT_LATCHED) ?
+                                          Latched : LevelSensitive,
+                                      Descriptor->ShareDisposition == CmResourceShareShared,
+                                      Descriptor->u.Interrupt.Affinity,
+                                      FloatingSave);
+        }
+
+        /* The next full descriptor follows the last partial one */
+        FullDescriptor = (PCM_FULL_RESOURCE_DESCRIPTOR)
+            &FullDescriptor->PartialResourceList.PartialDescriptors[FullDescriptor->PartialResourceList.Count];
+    }
+
+    return STATUS_NOT_FOUND;
+}
+
 NTSTATUS
 NTAPI
 IoConnectInterruptEx(
     _Inout_ PIO_CONNECT_INTERRUPT_PARAMETERS Parameters)
 {
+    NTSTATUS Status;
+
     PAGED_CODE();
 
     switch (Parameters->Version)
@@ -209,14 +283,35 @@ IoConnectInterruptEx(
             //TODO: We don't do anything for the group type
             return IopConnectInterruptExFullySpecific(Parameters);
         case CONNECT_MESSAGE_BASED:
-            DPRINT1("FIXME: Message based interrupts are UNIMPLEMENTED\n");
-            break;
+            /*
+             * No message signaled interrupt is ever assigned yet: like for any device
+             * without messages, connect the fallback routine to the line interrupt
+             * and tell the caller so through Version.
+             */
+            if (!Parameters->MessageBased.FallBackServiceRoutine)
+                return STATUS_NOT_FOUND;
+
+            Status = IopConnectInterruptExLineBased(Parameters->MessageBased.PhysicalDeviceObject,
+                                                    &Parameters->MessageBased.ConnectionContext.InterruptObject,
+                                                    Parameters->MessageBased.FallBackServiceRoutine,
+                                                    Parameters->MessageBased.ServiceContext,
+                                                    Parameters->MessageBased.SpinLock,
+                                                    Parameters->MessageBased.SynchronizeIrql,
+                                                    Parameters->MessageBased.FloatingSave);
+            if (NT_SUCCESS(Status))
+                Parameters->Version = CONNECT_LINE_BASED;
+            return Status;
         case CONNECT_LINE_BASED:
-            DPRINT1("FIXME: Line based interrupts are UNIMPLEMENTED\n");
-            break;
+            return IopConnectInterruptExLineBased(Parameters->LineBased.PhysicalDeviceObject,
+                                                  Parameters->LineBased.InterruptObject,
+                                                  Parameters->LineBased.ServiceRoutine,
+                                                  Parameters->LineBased.ServiceContext,
+                                                  Parameters->LineBased.SpinLock,
+                                                  Parameters->LineBased.SynchronizeIrql,
+                                                  Parameters->LineBased.FloatingSave);
     }
 
-    return STATUS_SUCCESS;
+    return STATUS_INVALID_PARAMETER_1;
 }
 
 VOID
