@@ -458,30 +458,33 @@ AhciCommandCompletionDpcRoutine (
     AdapterExtension = (PAHCI_ADAPTER_EXTENSION)HwDeviceExtension;
     PortExtension = (PAHCI_PORT_EXTENSION)SystemArgument1;
 
-    StorPortAcquireSpinLock(AdapterExtension, InterruptLock, NULL, &lockhandle);
-    Srb = RemoveQueue(&PortExtension->CompletionQueue);
-    StorPortReleaseSpinLock(AdapterExtension, &lockhandle);
-
-    NT_ASSERT(Srb != NULL);
-
-    if (Srb->SrbStatus == SRB_STATUS_PENDING)
+    // StorPortIssueDpc does not queue the DPC again while it is pending, so one
+    // run must complete every SRB the interrupt handler queued since the last one.
+    for (;;)
     {
+        StorPortAcquireSpinLock(AdapterExtension, InterruptLock, NULL, &lockhandle);
+        Srb = RemoveQueue(&PortExtension->CompletionQueue);
+        StorPortReleaseSpinLock(AdapterExtension, &lockhandle);
+
+        if (Srb == NULL)
+        {
+            break;
+        }
+
+        // Only the interrupt handler queues an SRB here, once, after taking it out of its slot
+        NT_ASSERT(Srb->SrbStatus == SRB_STATUS_PENDING);
         Srb->SrbStatus = SRB_STATUS_SUCCESS;
+
+        SrbExtension = GetSrbExtension(Srb);
+
+        CompletionRoutine = SrbExtension->CompletionRoutine;
+        NT_ASSERT(CompletionRoutine != NULL);
+
+        // now it's completion routine responsibility to set SrbStatus
+        CompletionRoutine(PortExtension, Srb);
+
+        StorPortNotification(RequestComplete, AdapterExtension, Srb);
     }
-    else
-    {
-        return;
-    }
-
-    SrbExtension = GetSrbExtension(Srb);
-
-    CompletionRoutine = SrbExtension->CompletionRoutine;
-    NT_ASSERT(CompletionRoutine != NULL);
-
-    // now it's completion routine responsibility to set SrbStatus
-    CompletionRoutine(PortExtension, Srb);
-
-    StorPortNotification(RequestComplete, AdapterExtension, Srb);
 
     return;
 }// -- AhciCommandCompletionDpcRoutine();
@@ -600,24 +603,27 @@ AhciCompleteIssuedSrb (
     {
         if (((1 << i) & CommandsToComplete) != 0)
         {
+            // The slot gives up the SRB: from here on only this completion owns it
             Srb = PortExtension->Slot[i];
+            PortExtension->Slot[i] = NULL;
 
             if (Srb == NULL)
             {
                 continue;
             }
 
+            NT_ASSERT(Srb->SrbStatus == SRB_STATUS_PENDING);
+
             SrbExtension = GetSrbExtension(Srb);
             NT_ASSERT(SrbExtension != NULL);
 
             if (SrbExtension->CompletionRoutine != NULL)
             {
-                AddQueue(&PortExtension->CompletionQueue, Srb);
+                NT_VERIFY(AddQueue(&PortExtension->CompletionQueue, Srb));
                 StorPortIssueDpc(AdapterExtension, &PortExtension->CommandCompletion, PortExtension, Srb);
             }
             else
             {
-                NT_ASSERT(Srb->SrbStatus == SRB_STATUS_PENDING);
                 Srb->SrbStatus = SRB_STATUS_SUCCESS;
                 StorPortNotification(RequestComplete, AdapterExtension, Srb);
             }
@@ -756,6 +762,7 @@ AhciInterruptHandler (
             PortExtension->Slot[i] = NULL;
             if (FailedSrb == NULL)
                 continue;
+            NT_ASSERT(FailedSrb->SrbStatus == SRB_STATUS_PENDING);
             FailedSrb->SrbStatus = SRB_STATUS_ERROR;
             StorPortNotification(RequestComplete, AdapterExtension, FailedSrb);
         }
