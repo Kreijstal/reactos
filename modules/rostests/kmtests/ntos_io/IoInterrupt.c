@@ -120,8 +120,125 @@ TestConnectInterrupt(VOID)
     ok_eq_pointer(InterruptObject, NULL);
 }
 
+static KSERVICE_ROUTINE DummyServiceRoutine;
+
+static
+BOOLEAN
+NTAPI
+DummyServiceRoutine(
+    _In_ PKINTERRUPT Interrupt,
+    _In_ PVOID ServiceContext)
+{
+    UNREFERENCED_PARAMETER(Interrupt);
+    UNREFERENCED_PARAMETER(ServiceContext);
+    return FALSE;
+}
+
+static KMESSAGE_SERVICE_ROUTINE DummyMessageServiceRoutine;
+
+static
+BOOLEAN
+NTAPI
+DummyMessageServiceRoutine(
+    _In_ PKINTERRUPT Interrupt,
+    _In_ PVOID ServiceContext,
+    _In_ ULONG MessageId)
+{
+    UNREFERENCED_PARAMETER(Interrupt);
+    UNREFERENCED_PARAMETER(ServiceContext);
+    UNREFERENCED_PARAMETER(MessageId);
+    return FALSE;
+}
+
+/* A disk's PDO, the port's unit: it has no interrupt of its own */
+static
+PDEVICE_OBJECT
+ReferenceDiskPdo(VOID)
+{
+    static const GUID DiskInterface = { 0x53F56307, 0xB6BF, 0x11D0, { 0x94, 0xF2, 0x00, 0xA0, 0xC9, 0x1E, 0xFB, 0x8B } };
+    PZZWSTR SymbolicLinkList;
+    UNICODE_STRING Link;
+    PFILE_OBJECT FileObject;
+    PDEVICE_OBJECT TopDevice, Pdo = NULL;
+    NTSTATUS Status;
+
+    Status = IoGetDeviceInterfaces(&DiskInterface, NULL, 0, &SymbolicLinkList);
+    if (!NT_SUCCESS(Status))
+        return NULL;
+
+    if (*SymbolicLinkList != UNICODE_NULL)
+    {
+        RtlInitUnicodeString(&Link, SymbolicLinkList);
+        Status = IoGetDeviceObjectPointer(&Link, FILE_READ_ATTRIBUTES, &FileObject, &TopDevice);
+        if (NT_SUCCESS(Status))
+        {
+            Pdo = IoGetDeviceAttachmentBaseRef(TopDevice);
+            ObDereferenceObject(FileObject);
+        }
+    }
+
+    ExFreePool(SymbolicLinkList);
+    return Pdo;
+}
+
+typedef NTSTATUS (NTAPI *PIO_CONNECT_INTERRUPT_EX)(PIO_CONNECT_INTERRUPT_PARAMETERS);
+
+static
+VOID
+TestConnectInterruptEx(VOID)
+{
+    static UNICODE_STRING RoutineName = RTL_CONSTANT_STRING(L"IoConnectInterruptEx");
+    PIO_CONNECT_INTERRUPT_EX pIoConnectInterruptEx;
+    IO_CONNECT_INTERRUPT_PARAMETERS Parameters;
+    PDEVICE_OBJECT Pdo;
+    PKINTERRUPT InterruptObject;
+    NTSTATUS Status;
+
+    pIoConnectInterruptEx = (PIO_CONNECT_INTERRUPT_EX)MmGetSystemRoutineAddress(&RoutineName);
+    if (skip(pIoConnectInterruptEx != NULL, "IoConnectInterruptEx is missing\n"))
+        return;
+
+    /* Unknown version */
+    RtlZeroMemory(&Parameters, sizeof(Parameters));
+    Parameters.Version = 0x7F;
+    Status = pIoConnectInterruptEx(&Parameters);
+    ok_eq_hex(Status, STATUS_INVALID_PARAMETER_1);
+
+    Pdo = ReferenceDiskPdo();
+    if (skip(Pdo != NULL, "No disk PDO\n"))
+        return;
+
+    /* Line based: the unit has no interrupt */
+    InterruptObject = KmtInvalidPointer;
+    RtlZeroMemory(&Parameters, sizeof(Parameters));
+    Parameters.Version = CONNECT_LINE_BASED;
+    Parameters.LineBased.PhysicalDeviceObject = Pdo;
+    Parameters.LineBased.InterruptObject = &InterruptObject;
+    Parameters.LineBased.ServiceRoutine = DummyServiceRoutine;
+    Status = pIoConnectInterruptEx(&Parameters);
+    ok_eq_hex(Status, STATUS_NOT_FOUND);
+    ok_eq_ulong(Parameters.Version, CONNECT_LINE_BASED);
+    if (NT_SUCCESS(Status) && InterruptObject && InterruptObject != KmtInvalidPointer)
+        IoDisconnectInterrupt(InterruptObject);
+
+    /* Message based, neither messages nor a line to fall back to */
+    RtlZeroMemory(&Parameters, sizeof(Parameters));
+    Parameters.Version = CONNECT_MESSAGE_BASED;
+    Parameters.MessageBased.PhysicalDeviceObject = Pdo;
+    Parameters.MessageBased.ConnectionContext.InterruptObject = NULL;
+    Parameters.MessageBased.MessageServiceRoutine = DummyMessageServiceRoutine;
+    Parameters.MessageBased.FallBackServiceRoutine = DummyServiceRoutine;
+    Status = pIoConnectInterruptEx(&Parameters);
+    ok_eq_hex(Status, STATUS_NOT_FOUND);
+    ok_eq_ulong(Parameters.Version, CONNECT_MESSAGE_BASED);
+    ok_eq_pointer(Parameters.MessageBased.ConnectionContext.Generic, NULL);
+
+    ObDereferenceObject(Pdo);
+}
+
 START_TEST(IoInterrupt)
 {
     TestSynchronizeExecution();
     TestConnectInterrupt();
+    TestConnectInterruptEx();
 }
