@@ -2082,7 +2082,7 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
                    IN PCONTROL_AREA ControlArea,
                    IN PMMSUPPORT Ws)
 {
-    PMMPTE PointerPte, ProtoPte;//, FirstPte;
+    PMMPTE PointerPte;//, FirstPte;
     PMMPDE PointerPde, SystemMapPde;
     PMMPFN Pfn1, Pfn2;
     MMPTE PteContents;
@@ -2141,18 +2141,14 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
         }
         else
         {
-            /* Windows ASSERT */
+            /*
+             * Windows ASSERT. A prototype pointer PTE references nothing by
+             * itself: whatever its prototype PTE holds (the demand-zero
+             * template of a committed page nobody touched, a transition or
+             * page file PTE, or a valid one another view faulted in) belongs
+             * to the segment, so there is nothing to release here.
+             */
             ASSERT((PteContents.u.Long == 0) || (PteContents.u.Soft.Prototype == 1));
-
-            /* Check if this is a prototype pointer PTE */
-            if (PteContents.u.Soft.Prototype == 1)
-            {
-                /* Get the prototype PTE */
-                ProtoPte = MiProtoPteToPte(&PteContents);
-
-                /* We don't support anything else atm */
-                ASSERT(MiIsPrototypePtePageDemandZero(ProtoPte) || (ProtoPte->u.Long == 0));
-            }
         }
 
         /* MiRemoveMappedPtes is the section-view-unmap path; ARM3 has no
@@ -2165,13 +2161,19 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
         if (PteContents.u.Hard.Valid == 1)
         {
             PFN_NUMBER UnmapPfn = PFN_FROM_PTE(&PteContents);
-            if (MmGetRmapListHeadPage(UnmapPfn) != NULL)
+            PMM_RMAP_ENTRY RmapHead;
+
+            /* The rmap list is guarded by the PFN lock */
+            OldIrql = MiAcquirePfnLock();
+            RmapHead = MmGetRmapListHeadPage(UnmapPfn);
+            MiReleasePfnLock(OldIrql);
+            if (RmapHead != NULL)
             {
                 PVOID UnmapVa = MiPteToAddress(PointerPte);
                 DbgPrint("MiRemoveMappedPtes: stale rmap on PFN %p VA %p Proc %p\n",
                          (PVOID)UnmapPfn, UnmapVa, PsGetCurrentProcess());
                 MmDumpRmapTrace(UnmapPfn, PsGetCurrentProcess(), UnmapVa);
-                ASSERT(MmGetRmapListHeadPage(UnmapPfn) == NULL);
+                ASSERT(RmapHead == NULL);
             }
         }
 #endif
