@@ -56,6 +56,7 @@ KMT_TESTFUNC Test_NtfsUsn;
 KMT_TESTFUNC Test_NtfsVolumeControl;
 KMT_TESTFUNC Test_NtfsVolumeDirty;
 KMT_TESTFUNC Test_NtSystemDebugControl;
+KMT_TESTFUNC Test_PoIdle;
 KMT_TESTFUNC Test_PoIrp;
 KMT_TESTFUNC Test_RtlAvlTree;
 KMT_TESTFUNC Test_RtlCaptureContext;
@@ -124,6 +125,7 @@ const KMT_TEST TestList[] =
     { "NtfsVolumeControl",             Test_NtfsVolumeControl },
     { "NtfsVolumeDirty",               Test_NtfsVolumeDirty },
     { "NtSystemDebugControl",         Test_NtSystemDebugControl },
+    { "PoIdle",                       Test_PoIdle },
     { "PoIrp",                        Test_PoIrp },
     { "RtlAvlTree",                   Test_RtlAvlTree },
     { "RtlException",                 Test_RtlException },
