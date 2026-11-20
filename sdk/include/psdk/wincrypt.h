@@ -309,6 +309,20 @@ typedef struct _CERT_ECC_SIGNATURE {
     CRYPT_UINT_BLOB s;
 } CERT_ECC_SIGNATURE, *PCERT_ECC_SIGNATURE;
 
+typedef struct _CRYPT_MASK_GEN_ALGORITHM {
+    LPSTR                      pszObjId;
+    CRYPT_ALGORITHM_IDENTIFIER HashAlgorithm;
+} CRYPT_MASK_GEN_ALGORITHM, *PCRYPT_MASK_GEN_ALGORITHM;
+
+typedef struct _CRYPT_RSA_SSA_PSS_PARAMETERS {
+    CRYPT_ALGORITHM_IDENTIFIER HashAlgorithm;
+    CRYPT_MASK_GEN_ALGORITHM   MaskGenAlgorithm;
+    DWORD                      dwSaltLength;
+    DWORD                      dwTrailerField;
+} CRYPT_RSA_SSA_PSS_PARAMETERS, *PCRYPT_RSA_SSA_PSS_PARAMETERS;
+
+#define PKCS_RSA_SSA_PSS_TRAILER_FIELD_BC 1
+
 /* byte 0 */
 #define CERT_DIGITAL_SIGNATURE_KEY_USAGE 0x80
 #define CERT_NON_REPUDIATION_KEY_USAGE   0x40
@@ -3174,6 +3188,10 @@ typedef struct _CTL_FIND_SUBJECT_PARA
 #define szOID_RSA_MD5RSA                    "1.2.840.113549.1.1.4"
 #define szOID_RSA_SHA1RSA                   "1.2.840.113549.1.1.5"
 #define szOID_RSA_SET0AEP_RSA               "1.2.840.113549.1.1.6"
+#define szOID_RSAES_OAEP                    "1.2.840.113549.1.1.7"
+#define szOID_RSA_MGF1                      "1.2.840.113549.1.1.8"
+#define szOID_RSA_PSPECIFIED                "1.2.840.113549.1.1.9"
+#define szOID_RSA_SSA_PSS                   "1.2.840.113549.1.1.10"
 #define szOID_RSA_SHA256RSA                 "1.2.840.113549.1.1.11"
 #define szOID_RSA_SHA384RSA                 "1.2.840.113549.1.1.12"
 #define szOID_RSA_SHA512RSA                 "1.2.840.113549.1.1.13"
@@ -3591,6 +3609,8 @@ typedef struct _CTL_FIND_SUBJECT_PARA
 #define OCSP_BASIC_RESPONSE                  ((LPCSTR)69)
 #define CNG_RSA_PUBLIC_KEY_BLOB              ((LPCSTR)72)
 #define X509_OBJECT_IDENTIFIER               ((LPCSTR)73)
+#define X509_ALGORITHM_IDENTIFIER            ((LPCSTR)74)
+#define PKCS_RSA_SSA_PSS_PARAMETERS          ((LPCSTR)75)
 #define PKCS7_SIGNER_INFO                    ((LPCSTR)500)
 #define CMS_SIGNER_INFO                      ((LPCSTR)501)
 
