@@ -78,6 +78,7 @@ KMT_TESTFUNC Test_MmForceSectionClosed;
 KMT_TESTFUNC Test_MmCygwinSectionStress;
 KMT_TESTFUNC Test_MmMdl;
 KMT_TESTFUNC Test_MmSection;
+KMT_TESTFUNC Test_MmSystemViewUnmap;
 KMT_TESTFUNC Test_MmReservedMapping;
 KMT_TESTFUNC Test_MmVadLock;
 KMT_TESTFUNC Test_NpfsConnect;
@@ -231,6 +232,7 @@ const KMT_TEST TestList[] =
     { "MmCygwinSectionStress",              Test_MmCygwinSectionStress },
     { "MmMdl",                              Test_MmMdl },
     { "MmSection",                          Test_MmSection },
+    { "MmSystemViewUnmap",                  Test_MmSystemViewUnmap },
     { "MmReservedMapping",                  Test_MmReservedMapping },
     { "MmVadLock",                          Test_MmVadLock },
     { "NpfsConnect",                        Test_NpfsConnect },
