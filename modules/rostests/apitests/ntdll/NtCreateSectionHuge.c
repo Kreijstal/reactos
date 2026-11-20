@@ -9,8 +9,15 @@
 #define VIEW_SIZE 0x10000
 
 /* The prototype PTEs of a pagefile-backed section take paged pool address
- * space, so on ReactOS the largest sections only fit when paged pool is big
- * enough (about 8 GB of RAM for 2 TB). Windows creates them on any machine. */
+ * space: 4 GB for a 2 TB section. 64-bit Windows creates such sections on any
+ * machine, its paged pool spans 128 GB of address space whatever the amount
+ * of RAM. 32-bit has no room for them. */
+#ifdef _WIN64
+#define OutOfPrototypePtes(...) ok(FALSE, __VA_ARGS__)
+#else
+#define OutOfPrototypePtes(...) skip(__VA_ARGS__)
+#endif
+
 static
 BOOLEAN
 IsOutOfPrototypePtes(NTSTATUS Status)
@@ -90,7 +97,7 @@ TestDoubleMapping(ULONGLONG Size)
     Status = CreateReserveSection(&Section, Size);
     if (IsOutOfPrototypePtes(Status))
     {
-        skip("Section of 0x%I64x bytes needs more paged pool (0x%lx)\n", Size, Status);
+        OutOfPrototypePtes("Section of 0x%I64x bytes failed (0x%lx)\n", Size, Status);
         return;
     }
     ok_ntstatus(Status, STATUS_SUCCESS);
@@ -129,7 +136,7 @@ TestSecondSectionAboveFourGigabytes(VOID)
     Status = CreateReserveSection(&First, 0x20000000000ULL);
     if (IsOutOfPrototypePtes(Status))
     {
-        skip("2 TB section needs more paged pool (0x%lx)\n", Status);
+        OutOfPrototypePtes("2 TB section failed (0x%lx)\n", Status);
         return;
     }
     ok_ntstatus(Status, STATUS_SUCCESS);
@@ -148,7 +155,7 @@ TestSecondSectionAboveFourGigabytes(VOID)
     Status = CreateReserveSection(&Second, 0x8000000000ULL);
     if (IsOutOfPrototypePtes(Status))
     {
-        skip("512 GB section next to a 2 TB one needs more paged pool (0x%lx)\n", Status);
+        OutOfPrototypePtes("512 GB section next to a 2 TB one failed (0x%lx)\n", Status);
     }
     else
     {
@@ -247,7 +254,7 @@ TestReserveConsumesNothing(VOID)
     NtQueryPerformanceCounter(&End, NULL);
     if (IsOutOfPrototypePtes(Status))
     {
-        skip("2 TB section needs more paged pool (0x%lx)\n", Status);
+        OutOfPrototypePtes("2 TB section failed (0x%lx)\n", Status);
         return;
     }
     ok_ntstatus(Status, STATUS_SUCCESS);
@@ -445,7 +452,7 @@ TestFreshPrototypePtePages(VOID)
     Status = CreateReserveSection(&Section, FRESH_SECTION_SIZE);
     if (IsOutOfPrototypePtes(Status))
     {
-        skip("64 GB section needs more paged pool (0x%lx)\n", Status);
+        OutOfPrototypePtes("64 GB section failed (0x%lx)\n", Status);
         return;
     }
     ok_ntstatus(Status, STATUS_SUCCESS);
@@ -615,10 +622,53 @@ TestCommitChargeReturned(VOID)
        CHARGE_ROUNDS, 2 * CHARGE_COMMIT_PAGES, (LONG)(After.CommittedPages - Before.CommittedPages));
 }
 
+/* Every .NET process keeps a 2 TB section: several of them at once must fit,
+ * not only the first one on a machine with plenty of RAM */
+#define MANY_SECTIONS 8
+static
+VOID
+TestManyHugeSections(VOID)
+{
+    NTSTATUS Status;
+    HANDLE Sections[MANY_SECTIONS];
+    PUCHAR Views[MANY_SECTIONS];
+    ULONG i, Created = 0;
+
+    for (i = 0; i < MANY_SECTIONS; i++)
+    {
+        Views[i] = NULL;
+        Status = CreateReserveSection(&Sections[i], 0x20000000000ULL);
+        if (IsOutOfPrototypePtes(Status))
+        {
+            OutOfPrototypePtes("2 TB section #%lu failed (0x%lx)\n", i + 1, Status);
+            break;
+        }
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            break;
+        Created++;
+
+        Views[i] = MapAndCommit(Sections[i], (ULONGLONG)i * FIRST_OFFSET, PAGE_READWRITE);
+        if (Views[i])
+            Views[i][0] = (UCHAR)(0x40 + i);
+    }
+
+    for (i = 0; i < Created; i++)
+    {
+        if (Views[i])
+        {
+            ok(Views[i][0] == (UCHAR)(0x40 + i), "Section #%lu reads 0x%x\n", i + 1, Views[i][0]);
+            NtUnmapViewOfSection(NtCurrentProcess(), Views[i]);
+        }
+        NtClose(Sections[i]);
+    }
+}
+
 START_TEST(NtCreateSectionHuge)
 {
     /* First, while paged pool has no multi-GB holes yet */
     TestSecondSectionAboveFourGigabytes();
+    TestManyHugeSections();
     TestReserveConsumesNothing();
     TestFreshPrototypePtePages();
     TestCommitChargeReturned();
