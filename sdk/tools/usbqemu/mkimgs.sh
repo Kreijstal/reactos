@@ -1,5 +1,5 @@
 #!/bin/bash
-# mkimgs.sh <work-dir> <build-dir>
+# [LIST=removal] mkimgs.sh <work-dir> <build-dir>
 #
 # Builds the scratch images run.sh boots with, in <work-dir>/img, without
 # mounting anything: three USB disks (usb0 FAT with a 96 MB payload file,
@@ -31,6 +31,16 @@ mcopy -i ctrl.img@@1048576 "$B/modules/rostests/apitests/kernel32/kernel32_apite
 mcopy -i ctrl.img@@1048576 payload.bin ::/REF.BIN
 rm -f payload.bin
 # %D = control disk letter, %K = kmtest.exe (see kmtcdrunner). D: is usb0.
+# LIST=removal: UsbDiskRemoval first, for run.sh HOTPLUG=1
+# HOTPLUG_AFTER=USBDISK-UNPLUG-NOW (it waits for a disk to be unplugged).
+if [ "$LIST" = removal ]; then
+cat > RUN.LST <<'L'
+%D:\kernel32_apitest.exe UsbDiskRemoval
+%D:\kernel32_apitest.exe UsbDiskVerify
+%D:\kernel32_apitest.exe UsbDiskQueue
+%K UsbStorageRead
+L
+else
 cat > RUN.LST <<'L'
 cmd /c fc /b %D:\REF.BIN D:\PAYLOAD.BIN
 %K UsbStorageRead
@@ -39,6 +49,7 @@ cmd /c fc /b %D:\REF.BIN D:\PAYLOAD.BIN
 %D:\kernel32_apitest.exe UsbConcurrentDevices
 %K UsbStorageRead
 L
+fi
 sed -i 's/$/\r/' RUN.LST
 mcopy -i ctrl.img@@1048576 RUN.LST ::/RUN.LST
 rm -f RUN.LST
