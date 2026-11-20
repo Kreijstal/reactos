@@ -143,6 +143,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeTimerTableStress.c
     ntos_mm/MmForceSectionClosed.c
     ntos_mm/MmCygwinSectionStress.c
+    ntos_mm/MmFaultHighIrql.c
     ntos_mm/MmMdl.c
     ntos_mm/MmReservedMapping.c
     ntos_mm/MmSection.c
