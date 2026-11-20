@@ -957,6 +957,14 @@ SptiHandleScsiPassthru(
     if (SRB_STATUS(Srb->SrbStatus) == SRB_STATUS_DATA_OVERRUN)
         Status = STATUS_SUCCESS;
 
+    /*
+     * The device executed the CDB and answered with a SCSI status (e.g. CHECK CONDITION).
+     * That is the result of the pass-through, not a failure of it: the caller gets
+     * ScsiStatus and the sense data with a successful IOCTL.
+     */
+    if (SRB_STATUS(Srb->SrbStatus) == SRB_STATUS_ERROR && Srb->ScsiStatus != SCSISTAT_GOOD)
+        Status = STATUS_SUCCESS;
+
     if (Srb->SrbStatus & SRB_STATUS_AUTOSENSE_VALID)
     {
         ASSERT(Srb->SenseInfoBufferLength <= Spt->SenseInfoLength);
