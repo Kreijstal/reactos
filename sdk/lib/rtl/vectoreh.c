@@ -13,8 +13,14 @@
 #define NDEBUG
 #include <debug.h>
 
-RTL_CRITICAL_SECTION RtlpVectoredHandlerLock;
-LIST_ENTRY RtlpVectoredExceptionList, RtlpVectoredContinueList;
+/*
+ * Exceptions can be dispatched before the loader initialized the process
+ * (when it fails early): the lists and the lock must be usable from the
+ * start. The lock gets its debug info when the process is initialized.
+ */
+RTL_CRITICAL_SECTION RtlpVectoredHandlerLock = { NULL, -1, 0, NULL, NULL, 0 };
+LIST_ENTRY RtlpVectoredExceptionList = { &RtlpVectoredExceptionList, &RtlpVectoredExceptionList };
+LIST_ENTRY RtlpVectoredContinueList = { &RtlpVectoredContinueList, &RtlpVectoredContinueList };
 
 typedef struct _RTL_VECTORED_HANDLER_ENTRY
 {
@@ -29,10 +35,11 @@ VOID
 NTAPI
 RtlpInitializeVectoredExceptionHandling(VOID)
 {
-    /* Initialize our two lists and the common lock */
+    /* The lists are initialized statically and nothing can have been added
+       to them yet; give the common lock its debug info */
+    ASSERT(IsListEmpty(&RtlpVectoredExceptionList));
+    ASSERT(IsListEmpty(&RtlpVectoredContinueList));
     RtlInitializeCriticalSection(&RtlpVectoredHandlerLock);
-    InitializeListHead(&RtlpVectoredExceptionList);
-    InitializeListHead(&RtlpVectoredContinueList);
 }
 
 BOOLEAN
