@@ -1333,7 +1333,9 @@ AhciHwFindAdapter (
 
     ConfigInfo->MaximumNumberOfTargets = 1;
     ConfigInfo->ResetTargetSupported = TRUE;
-    ConfigInfo->NumberOfPhysicalBreaks = 0x21;
+    // A transfer may not need more scatter/gather elements than the PRDT
+    // holds; the breaks between them are one fewer.
+    ConfigInfo->NumberOfPhysicalBreaks = MAXIMUM_AHCI_PRDT_ENTRIES - 1;
     ConfigInfo->MaximumNumberOfLogicalUnits = 1;
     ConfigInfo->NumberOfBuses = MAXIMUM_AHCI_PORT_COUNT;
     ConfigInfo->MaximumTransferLength = MAXIMUM_TRANSFER_LENGTH;
