@@ -1829,15 +1829,18 @@ PiSetDeviceStackRemovePending(
  *
  * A surprise-removed device gets its IRP_MN_REMOVE_DEVICE only once all handles
  * to its stack are closed. Queue the device so that the removal is finished.
+ *
+ * @param[in]  BaseDevice
+ * The base of the stack, which the caller referenced when it saw the last open
+ * go: the removal may then proceed at once and its drivers delete their devices.
+ * Dereferenced here.
  */
 VOID
 PiNotifyDeviceObjectClosed(
-    _In_ PDEVICE_OBJECT DeviceObject)
+    _In_ PDEVICE_OBJECT BaseDevice)
 {
-    PDEVICE_OBJECT BaseDevice;
     PDEVICE_NODE DeviceNode;
 
-    BaseDevice = IoGetDeviceAttachmentBaseRef(DeviceObject);
     DeviceNode = IopGetDeviceNode(BaseDevice);
     if (DeviceNode && DeviceNode->State == DeviceNodeRemovePendingCloses)
     {

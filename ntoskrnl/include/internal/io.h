@@ -1377,7 +1377,7 @@ PiQueueDeviceAction(
 
 VOID
 PiNotifyDeviceObjectClosed(
-    _In_ PDEVICE_OBJECT DeviceObject);
+    _In_ PDEVICE_OBJECT BaseDevice);
 
 NTSTATUS
 PiPerformSyncDeviceAction(

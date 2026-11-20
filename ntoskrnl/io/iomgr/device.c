@@ -541,6 +541,7 @@ IopDereferenceDeviceObject(IN PDEVICE_OBJECT DeviceObject,
 {
     ULONG ExtensionFlags;
     LONG ReferenceCount;
+    PDEVICE_OBJECT BaseDevice = NULL;
     KIRQL OldIrql;
 
     /* Sanity check */
@@ -554,20 +555,29 @@ IopDereferenceDeviceObject(IN PDEVICE_OBJECT DeviceObject,
     OldIrql = KeAcquireQueuedSpinLock(LockQueueIoDatabaseLock);
     ReferenceCount = InterlockedDecrement(&DeviceObject->ReferenceCount);
     ExtensionFlags = IoGetDevObjExtension(DeviceObject)->ExtensionFlags;
-    KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
-
-    if (ReferenceCount != 0)
-        return;
 
     /*
      * A surprise-removed device may be waiting for its last handle to be
      * closed. Once its IRP_MN_REMOVE_DEVICE has been sent (DOE_REMOVE_PROCESSED)
      * nothing waits any more, and the devices below this one may already be
      * deleted: walking down to the base of the stack would touch freed
-     * device objects.
+     * device objects. As soon as the count is 0, the PnP manager may also
+     * send the IRP from another thread and the drivers delete the stack:
+     * reference its base before the lock is released.
      */
-    if ((ExtensionFlags & (DOE_REMOVE_PENDING | DOE_REMOVE_PROCESSED)) == DOE_REMOVE_PENDING)
-        PiNotifyDeviceObjectClosed(DeviceObject);
+    if (ReferenceCount == 0 &&
+        (ExtensionFlags & (DOE_REMOVE_PENDING | DOE_REMOVE_PROCESSED)) == DOE_REMOVE_PENDING)
+    {
+        BaseDevice = IopGetLowestDevice(DeviceObject);
+        ObReferenceObject(BaseDevice);
+    }
+    KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
+
+    if (ReferenceCount != 0)
+        return;
+
+    if (BaseDevice)
+        PiNotifyDeviceObjectClosed(BaseDevice);
 
     /* Check if we can unload it and it's safe to unload */
     if (ExtensionFlags & DOE_DELETE_PENDING)
