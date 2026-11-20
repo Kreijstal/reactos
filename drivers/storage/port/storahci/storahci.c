@@ -2562,8 +2562,28 @@ DeviceRequestReadWrite (
 
     SrbExtension->Device = (0xA0 | IDE_LBA_MODE);
 
+    /*
+     * Storport and the class drivers never send more than the
+     * MaximumTransferLength reported in AhciHwFindAdapter (pass-through
+     * requests included). That is 256 sectors, which both command forms
+     * take: their sector count register encodes the largest count as 0.
+     */
+    NT_ASSERT(SectorCount <= MAXIMUM_TRANSFER_LENGTH / BytesPerSector);
+
+    /* A pass-through request can address any LBA: refuse what is beyond
+     * the medium, the address registers could not hold it */
+    if (StartOffset + SectorCount > (ULONG64)PortExtension->DeviceParams.MaxLba.QuadPart)
+    {
+        Srb->DataTransferLength = 0;
+        return SRB_STATUS_INVALID_REQUEST;
+    }
+
     if (PortExtension->DeviceParams.Lba48BitMode)
     {
+        /* READ/WRITE DMA EXT: 48-bit LBA, 16-bit sector count (0 = 65536) */
+        NT_ASSERT(SectorCount <= 0x10000);
+        NT_ASSERT(StartOffset + SectorCount <= (1ULL << 48));
+
         SrbExtension->Flags |= ATA_FLAGS_48BIT_COMMAND;
 
         if (IsReading)
@@ -2581,14 +2601,21 @@ DeviceRequestReadWrite (
     }
     else
     {
-        NT_ASSERT(FALSE);
+        /* READ/WRITE DMA: 28-bit LBA, its bits 24-27 in the Device
+         * register; 8-bit sector count (0 = 256) */
+        NT_ASSERT(SectorCount <= 0x100);
+        NT_ASSERT(StartOffset + SectorCount <= (1ULL << 28));
+
+        SrbExtension->Device |= (StartOffset >> 24) & 0x0F;
+        SrbExtension->LBA3 = 0;
+        SrbExtension->LBA4 = 0;
+        SrbExtension->LBA5 = 0;
     }
 
     SrbExtension->FeaturesHigh = 0;
     SrbExtension->SectorCountLow = (SectorCount >> 0) & 0xFF;
-    SrbExtension->SectorCountHigh = (SectorCount >> 8) & 0xFF;
-
-    NT_ASSERT(SectorCount < 0x100);
+    SrbExtension->SectorCountHigh = PortExtension->DeviceParams.Lba48BitMode ?
+                                    (SectorCount >> 8) & 0xFF : 0;
 
     SrbExtension->pSgl = (PLOCAL_SCATTER_GATHER_LIST)StorPortGetScatterGatherList(AdapterExtension, Srb);
 
