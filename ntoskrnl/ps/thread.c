@@ -1220,6 +1220,17 @@ NtOpenThread(OUT PHANDLE ThreadHandle,
             return Status;
         }
 
+        /*
+         * A thread gets its ID before it is inserted, and IDs are reused:
+         * one that is still being created does not exist yet for an opener.
+         */
+        if (!ObIsObjectInserted(Thread))
+        {
+            ObDereferenceObject(Thread);
+            SeDeleteAccessState(&AccessState);
+            return STATUS_INVALID_CID;
+        }
+
         /* Open the Thread Object */
         Status = ObOpenObjectByPointer(Thread,
                                        Attributes,

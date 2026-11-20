@@ -35,6 +35,18 @@ ObpValidateAttributes(IN ULONG Attributes,
     }
 }
 
+/*
+ * TRUE once ObInsertObject took the object. Until then only its creator may
+ * create a handle: one opened by anybody else takes the object's create
+ * information, and the creator's ObInsertObject then fails.
+ */
+FORCEINLINE
+BOOLEAN
+ObIsObjectInserted(IN PVOID Object)
+{
+    return !(OBJECT_TO_OBJECT_HEADER(Object)->Flags & OB_FLAG_CREATE_INFO);
+}
+
 FORCEINLINE
 ULONG
 ObpSelectObjectLockSlot(IN POBJECT_HEADER ObjectHeader)

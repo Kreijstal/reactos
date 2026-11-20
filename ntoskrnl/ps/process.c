@@ -2530,6 +2530,18 @@ NtOpenProcess(OUT PHANDLE ProcessHandle,
             return STATUS_INVALID_CID;
         }
 
+        /*
+         * A process gets its ID before it is inserted, and IDs are reused:
+         * one that is still being created does not exist yet for an opener.
+         */
+        if (!ObIsObjectInserted(Process))
+        {
+            if (Thread) ObDereferenceObject(Thread);
+            ObDereferenceObject(Process);
+            SeDeleteAccessState(&AccessState);
+            return STATUS_INVALID_CID;
+        }
+
         /* Open the Process Object */
         Status = ObOpenObjectByPointer(Process,
                                        Attributes,
@@ -2684,6 +2696,10 @@ NtGetNextProcess(
     /* Get the next process (this will dereference the previous process) */
     NextProcess = PsGetNextProcessEx(Process, Reverse);
 
+    /* Skip the processes that are still being created */
+    while (NextProcess && !ObIsObjectInserted(NextProcess))
+        NextProcess = PsGetNextProcessEx(NextProcess, Reverse);
+
     /* Fail, if no process was found */
     if (NextProcess == NULL)
     {
@@ -2809,6 +2825,10 @@ NtGetNextThread(
 
     /* Get the next thread (this will dereference the previous thread) */
     NextThread = PsGetNextProcessThread(Process, Thread);
+
+    /* Skip the threads that are still being created */
+    while (NextThread && !ObIsObjectInserted(NextThread))
+        NextThread = PsGetNextProcessThread(Process, NextThread);
 
     /* Dereference the process */
     ObDereferenceObject(Process);
