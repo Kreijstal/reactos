@@ -2150,6 +2150,7 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     UNICODE_STRING CurrentDirectory;
     HANDLE OptionsKey;
     ULONG HeapFlags;
+    SIZE_T HeapReserve, HeapCommit;
     PIMAGE_NT_HEADERS NtHeader;
     LPWSTR NtDllName = NULL;
     NTSTATUS Status, ImportStatus;
@@ -2383,12 +2384,29 @@ LdrpInitializeProcess(IN PCONTEXT Context,
         HeapFlags |= HEAP_CREATE_ALIGN_16;
     }
 
+    /* The image of a WoW64 process has a 32-bit optional header, in which
+       the heap sizes are 32 bits wide and sit at other offsets */
+#ifdef _WIN64
+    if (NtHeader->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+    {
+        PIMAGE_NT_HEADERS32 NtHeader32 = (PIMAGE_NT_HEADERS32)NtHeader;
+
+        HeapReserve = NtHeader32->OptionalHeader.SizeOfHeapReserve;
+        HeapCommit = NtHeader32->OptionalHeader.SizeOfHeapCommit;
+    }
+    else
+#endif
+    {
+        HeapReserve = NtHeader->OptionalHeader.SizeOfHeapReserve;
+        HeapCommit = NtHeader->OptionalHeader.SizeOfHeapCommit;
+    }
+
     /* Setup the Heap */
     RtlInitializeHeapManager();
     Peb->ProcessHeap = RtlCreateHeap(HeapFlags,
                                      NULL,
-                                     NtHeader->OptionalHeader.SizeOfHeapReserve,
-                                     NtHeader->OptionalHeader.SizeOfHeapCommit,
+                                     HeapReserve,
+                                     HeapCommit,
                                      NULL,
                                      &HeapParameters);
 
