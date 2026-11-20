@@ -11,6 +11,7 @@ extern void func_DefaultActCtx(void);
 extern void func_DeviceIoControl(void);
 extern void func_dosdev(void);
 extern void func_EnumSystemCodePages(void);
+extern void func_ExceptionFpuState(void);
 extern void func_FindActCtxSectionStringW(void);
 extern void func_DeleteWhileEnum(void);
 extern void func_FindFiles(void);
@@ -75,6 +76,7 @@ const struct test winetest_testlist[] =
     { "DeviceIoControl",             func_DeviceIoControl },
     { "dosdev",                      func_dosdev },
     { "EnumSystemCodePages",         func_EnumSystemCodePages },
+    { "ExceptionFpuState",           func_ExceptionFpuState },
     { "FindActCtxSectionStringW",    func_FindActCtxSectionStringW },
     { "DeleteWhileEnum",             func_DeleteWhileEnum },
     { "FindFiles",                   func_FindFiles },

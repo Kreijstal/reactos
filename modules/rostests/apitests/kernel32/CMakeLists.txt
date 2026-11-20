@@ -12,6 +12,7 @@ list(APPEND SOURCE
     DeviceIoControl.c
     dosdev.c
     EnumSystemCodePages.c
+    ExceptionFpuState.c
     FindActCtxSectionStringW.c
     DeleteWhileEnum.c
     FindFiles.c
