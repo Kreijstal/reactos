@@ -237,11 +237,15 @@ typedef struct _FILE_OBJECT_EXTENSION
  * BOOLEAN
  * IopIsValidPhysicalDeviceObject(
  *   IN PDEVICE_OBJECT PhysicalDeviceObject);
+ *
+ * A PDO is one PnP has a device node for. It stays valid when its bus driver
+ * no longer reports it, until it is deleted: its drivers, and a file system
+ * mounted on it, may still use it until the device is removed.
  */
-#define IopIsValidPhysicalDeviceObject(PhysicalDeviceObject)                                                            \
-        (((PEXTENDED_DEVOBJ_EXTENSION)PhysicalDeviceObject) &&                                                          \
-        (((PEXTENDED_DEVOBJ_EXTENSION)PhysicalDeviceObject->DeviceObjectExtension)->DeviceNode) &&                      \
-        (((PEXTENDED_DEVOBJ_EXTENSION)PhysicalDeviceObject->DeviceObjectExtension)->DeviceNode->Flags & DNF_ENUMERATED))
+#define IopIsValidPhysicalDeviceObject(_Pdo)                                                                            \
+        ((_Pdo) &&                                                                                                      \
+        (((PEXTENDED_DEVOBJ_EXTENSION)(_Pdo)->DeviceObjectExtension)->DeviceNode) &&                                    \
+        (((PEXTENDED_DEVOBJ_EXTENSION)(_Pdo)->DeviceObjectExtension)->DeviceNode->PhysicalDeviceObject == (_Pdo)))
 
 //
 // Device List Operations
