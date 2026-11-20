@@ -13,6 +13,7 @@ extern "C" {
 }
 
 VOID
+NTAPI
 FxPoxInterface::StateCallback(
     __in PVOID Context,
     __in ULONG Component,
@@ -66,6 +67,7 @@ FxPoxInterface::StateCallback(
 }
 
 VOID
+NTAPI
 FxPoxInterface::ComponentActiveCallback(
     __in PVOID Context,
     __in ULONG Component
@@ -123,6 +125,7 @@ FxPoxInterface::ComponentActiveCallback(
 }
 
 VOID
+NTAPI
 FxPoxInterface::ComponentIdleCallback(
     __in PVOID Context,
     __in ULONG Component
@@ -181,6 +184,7 @@ FxPoxInterface::ComponentIdleCallback(
 }
 
 VOID
+NTAPI
 FxPoxInterface::PowerRequiredCallback(
     __in PVOID Context
     )
@@ -193,6 +197,7 @@ FxPoxInterface::PowerRequiredCallback(
 }
 
 VOID
+NTAPI
 FxPoxInterface::PowerNotRequiredCallback(
     __in PVOID Context
     )
@@ -208,6 +213,7 @@ FxPoxInterface::PowerNotRequiredCallback(
 _Function_class_(PO_FX_POWER_CONTROL_CALLBACK)
 _IRQL_requires_max_(DISPATCH_LEVEL)
 NTSTATUS
+NTAPI
 FxPoxInterface::PowerControlCallback(
     _In_ PVOID Context,
     _In_ LPCGUID PowerControlCode,
@@ -493,6 +499,7 @@ FxPoxInterface::PoxSetDeviceIdleTimeout(
 
 
 VOID
+NTAPI
 FxPoxInterface::DirectedPowerDownCallback(
     __in PVOID Context,
     __in ULONG Flags
@@ -540,6 +547,7 @@ FxPoxInterface::DirectedPowerDownCallback(
 
 
 VOID
+NTAPI
 FxPoxInterface::DirectedPowerUpCallback(
     __in PVOID Context,
     __in ULONG Flags
