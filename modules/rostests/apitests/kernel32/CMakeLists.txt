@@ -68,6 +68,7 @@ list(APPEND SOURCE
     UEFIFirmware.c
     UsbConcurrentDevices.c
     UsbDiskQueue.c
+    UsbDiskRemoval.c
     UsbDiskVerify.c
     WideCharToMultiByte.c
     WriteFile.c
