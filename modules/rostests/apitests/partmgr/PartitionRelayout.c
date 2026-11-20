@@ -18,6 +18,7 @@
 #include "precomp.h"
 #include <ntddstor.h>
 #include <mountmgr.h>
+#include <mountdev.h>
 #include <strsafe.h>
 #include <fmifs/fmifs.h>
 
@@ -338,6 +339,143 @@ START_TEST(NtfsFormatType)
     }
 
 Cleanup:
+    ok(SetOnePartition(Disk, 0), "Clearing the layout failed with %lu\n", GetLastError());
+    CloseHandle(Disk);
+}
+
+/*
+ * A partition recreated with the offset and length of one whose device is
+ * still open gets the device instance ID of the old one (partmgr builds it
+ * from the disk signature, the offset and the length). PnP must take the new
+ * partition for that instance while the old device waits for its handles to
+ * be closed, as Windows does for a device that is plugged in again while it
+ * is still open, and not bugcheck on a duplicate device instance.
+ *
+ * The signature in these IDs (and in the unique ID MountMgr knows the
+ * volume by) is that of the layout that was set, not that of the layout
+ * last read from the disk.
+ */
+START_TEST(PartitionSameIdentity)
+{
+    WCHAR DiskName[96], Name[96];
+    WCHAR VolumeA[64], VolumeB[64], VolumeC[64], VolumeNow[64];
+    HANDLE Disk = INVALID_HANDLE_VALUE, OldVolume = NULL, NewVolume;
+    UNICODE_STRING NameU;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK Iosb;
+    PARTITION_INFORMATION_EX PartInfo;
+    struct { MOUNTDEV_UNIQUE_ID Id; UCHAR Buffer[32]; } UniqueId;
+    LAYOUT4 Layout;
+    ULONG DiskNumber = 0, i;
+    CREATE_DISK CreateDisk;
+    NTSTATUS Status;
+    DWORD Size;
+
+    for (i = 0; i < 16; i++)
+    {
+        StringCchPrintfW(DiskName, _countof(DiskName), L"\\\\.\\PhysicalDrive%lu", i);
+        Disk = CreateFileW(DiskName, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL, OPEN_EXISTING, 0, NULL);
+        if (Disk == INVALID_HANDLE_VALUE)
+            continue;
+        if (IsBlankDisk(Disk, &DiskNumber))
+            break;
+        CloseHandle(Disk);
+        Disk = INVALID_HANDLE_VALUE;
+    }
+    if (Disk == INVALID_HANDLE_VALUE)
+    {
+        skip("No blank disk to repartition\n");
+        return;
+    }
+    trace("Using blank disk %lu\n", DiskNumber);
+
+    ZeroMemory(&CreateDisk, sizeof(CreateDisk));
+    CreateDisk.PartitionStyle = PARTITION_STYLE_MBR;
+    CreateDisk.Mbr.Signature = 0x32545052; /* 'RPT2' */
+    ok(DeviceIoControl(Disk, IOCTL_DISK_CREATE_DISK, &CreateDisk, sizeof(CreateDisk), NULL, 0, &Size, NULL),
+       "IOCTL_DISK_CREATE_DISK failed with %lu\n", GetLastError());
+    /* Have the disk's layout read, with that signature */
+    ok(DeviceIoControl(Disk, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, NULL, 0, &Layout, sizeof(Layout), &Size, NULL),
+       "IOCTL_DISK_GET_DRIVE_LAYOUT_EX failed with %lu\n", GetLastError());
+    ok(Layout.Layout.Mbr.Signature == 0x32545052, "Signature is 0x%08lx\n", Layout.Layout.Mbr.Signature);
+
+    /* Partition 1, 16 MB, in a layout with another signature ('RPTR'), and
+     * keep its device open */
+    ok(SetOnePartition(Disk, 16 * MB), "Setting the first layout failed with %lu\n", GetLastError());
+    Status = WaitForPartition1(DiskNumber, NULL, VolumeA, _countof(VolumeA));
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    RtlInitUnicodeString(&NameU, VolumeA);
+    InitializeObjectAttributes(&ObjectAttributes, &NameU, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    /* FILE_READ_ATTRIBUTES only: a direct device open, no file system mount */
+    Status = NtOpenFile(&OldVolume, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &ObjectAttributes,
+                        &Iosb, FILE_SHARE_ALL, FILE_SYNCHRONOUS_IO_NONALERT);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        OldVolume = NULL;
+        goto Cleanup;
+    }
+
+    /* Its unique ID is made of the signature of the layout just set and its offset */
+    Status = NtDeviceIoControlFile(OldVolume, NULL, NULL, NULL, &Iosb, IOCTL_MOUNTDEV_QUERY_UNIQUE_ID,
+                                   NULL, 0, &UniqueId, sizeof(UniqueId));
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok(UniqueId.Id.UniqueIdLength == 12, "UniqueIdLength is %u\n", UniqueId.Id.UniqueIdLength);
+        ok(*(PULONG)&UniqueId.Id.UniqueId[0] == 0x52545052,
+           "Unique ID signature is 0x%08lx\n", *(PULONG)&UniqueId.Id.UniqueId[0]);
+        ok(*(PULONGLONG)&UniqueId.Id.UniqueId[4] == 1 * MB,
+           "Unique ID offset is 0x%I64x\n", *(PULONGLONG)&UniqueId.Id.UniqueId[4]);
+    }
+
+    /* Another partition in its place: the open one is surprise-removed */
+    ok(SetOnePartition(Disk, 32 * MB), "Setting the second layout failed with %lu\n", GetLastError());
+    Status = WaitForPartition1(DiskNumber, VolumeA, VolumeB, _countof(VolumeB));
+    ok(NT_SUCCESS(Status), "Waiting for the second Partition1 failed with 0x%lx\n", Status);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    /* And the first one again, while the device of the first one is open */
+    ok(SetOnePartition(Disk, 16 * MB), "Setting the third layout failed with %lu\n", GetLastError());
+    Status = WaitForPartition1(DiskNumber, VolumeB, VolumeC, _countof(VolumeC));
+    ok(NT_SUCCESS(Status), "Waiting for the third Partition1 failed with 0x%lx\n", Status);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    ok(wcscmp(VolumeC, VolumeA) != 0, "Partition1 names the removed volume %ls\n", VolumeA);
+    trace("Volumes %ls, %ls, %ls\n", VolumeA, VolumeB, VolumeC);
+
+    /* The removal of the old device completes now; it leaves the new one alone */
+    NtClose(OldVolume);
+    OldVolume = NULL;
+    Sleep(1000);
+
+    Status = QueryPartition1(DiskNumber, VolumeNow, _countof(VolumeNow));
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+        ok(wcscmp(VolumeNow, VolumeC) == 0, "Partition1 names %ls, expected %ls\n", VolumeNow, VolumeC);
+
+    StringCchPrintfW(Name, _countof(Name), L"\\\\?\\GLOBALROOT%ls", VolumeC);
+    NewVolume = CreateFileW(Name, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            NULL, OPEN_EXISTING, 0, NULL);
+    ok(NewVolume != INVALID_HANDLE_VALUE, "Opening %ls failed with %lu\n", Name, GetLastError());
+    if (NewVolume != INVALID_HANDLE_VALUE)
+    {
+        ok(DeviceIoControl(NewVolume, IOCTL_DISK_GET_PARTITION_INFO_EX, NULL, 0,
+                           &PartInfo, sizeof(PartInfo), &Size, NULL),
+           "IOCTL_DISK_GET_PARTITION_INFO_EX failed with %lu\n", GetLastError());
+        ok(PartInfo.PartitionLength.QuadPart == 16 * MB,
+           "Partition length is 0x%I64x\n", PartInfo.PartitionLength.QuadPart);
+        CloseHandle(NewVolume);
+    }
+
+Cleanup:
+    if (OldVolume)
+        NtClose(OldVolume);
     ok(SetOnePartition(Disk, 0), "Clearing the layout failed with %lu\n", GetLastError());
     CloseHandle(Disk);
 }
