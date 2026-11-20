@@ -225,13 +225,14 @@ TestConnectInterruptEx(VOID)
     RtlZeroMemory(&Parameters, sizeof(Parameters));
     Parameters.Version = CONNECT_MESSAGE_BASED;
     Parameters.MessageBased.PhysicalDeviceObject = Pdo;
-    Parameters.MessageBased.ConnectionContext.InterruptObject = NULL;
+    InterruptObject = KmtInvalidPointer;
+    Parameters.MessageBased.ConnectionContext.InterruptObject = &InterruptObject;
     Parameters.MessageBased.MessageServiceRoutine = DummyMessageServiceRoutine;
     Parameters.MessageBased.FallBackServiceRoutine = DummyServiceRoutine;
     Status = pIoConnectInterruptEx(&Parameters);
     ok_eq_hex(Status, STATUS_NOT_FOUND);
     ok_eq_ulong(Parameters.Version, CONNECT_MESSAGE_BASED);
-    ok_eq_pointer(Parameters.MessageBased.ConnectionContext.Generic, NULL);
+    ok_eq_pointer(Parameters.MessageBased.ConnectionContext.InterruptObject, &InterruptObject);
 
     ObDereferenceObject(Pdo);
 }

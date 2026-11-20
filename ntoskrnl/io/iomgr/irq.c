@@ -218,6 +218,9 @@ IopConnectInterruptExLineBased(
 
     PAGED_CODE();
 
+    if (!InterruptObject)
+        return STATUS_INVALID_PARAMETER;
+
     *InterruptObject = NULL;
 
     if (!PhysicalDeviceObject)
@@ -292,7 +295,7 @@ IoConnectInterruptEx(
                 return STATUS_NOT_FOUND;
 
             Status = IopConnectInterruptExLineBased(Parameters->MessageBased.PhysicalDeviceObject,
-                                                    &Parameters->MessageBased.ConnectionContext.InterruptObject,
+                                                    Parameters->MessageBased.ConnectionContext.InterruptObject,
                                                     Parameters->MessageBased.FallBackServiceRoutine,
                                                     Parameters->MessageBased.ServiceContext,
                                                     Parameters->MessageBased.SpinLock,
