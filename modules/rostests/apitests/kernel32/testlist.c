@@ -5,6 +5,7 @@
 extern void func_ActCtxWithXmlNamespaces(void);
 extern void func_CdRomMedia(void);
 extern void func_ConsoleCP(void);
+extern void func_ConsoleCtrlHandler(void);
 extern void func_CreateProcess(void);
 extern void func_CreateProcessDos(void);
 extern void func_CreateProcessWow64(void);
@@ -71,6 +72,7 @@ const struct test winetest_testlist[] =
     { "ActCtxWithXmlNamespaces",     func_ActCtxWithXmlNamespaces },
     { "CdRomMedia",                  func_CdRomMedia },
     { "ConsoleCP",                   func_ConsoleCP },
+    { "ConsoleCtrlHandler",          func_ConsoleCtrlHandler },
     { "CreateProcess",               func_CreateProcess },
     { "CreateProcessDos",            func_CreateProcessDos },
     { "CreateProcessWow64",          func_CreateProcessWow64 },

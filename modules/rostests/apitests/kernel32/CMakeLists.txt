@@ -5,6 +5,7 @@ add_message_headers(ANSI FormatMessage.mc)
 
 list(APPEND SOURCE
     ConsoleCP.c
+    ConsoleCtrlHandler.c
     CreateProcess.c
     CreateProcessDos.c
     CreateProcessWow64.c
