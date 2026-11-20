@@ -150,6 +150,53 @@ USBSTOR_IssueRequestSense(
     IN PFDO_DEVICE_EXTENSION FDODeviceExtension,
     IN PIRP Irp);
 
+/*
+ * Sets the error status of a request whose transfer failed, and starts the
+ * reset recovery (BOT 5.3.4) where one can help.
+ *
+ * The hub fails every transfer of a device that has been unplugged: usbhub
+ * with STATUS_DEVICE_NOT_CONNECTED and USBD_STATUS_DEVICE_GONE, usbhub3 with
+ * STATUS_NO_SUCH_DEVICE. Nothing can be recovered then, a reset fails the same
+ * way, and reporting the request as a bus reset makes the class driver retry
+ * it, each retry with its own failed reset, until the handles to the disk are
+ * closed. Report SRB_STATUS_NO_DEVICE instead, which it does not retry.
+ */
+static
+VOID
+USBSTOR_SetTransferError(
+    IN PFDO_DEVICE_EXTENSION FDODeviceExtension,
+    IN PIRP Irp,
+    IN PSCSI_REQUEST_BLOCK Request)
+{
+    PIRP_CONTEXT Context = &FDODeviceExtension->CurrentIrpContext;
+
+    Irp->IoStatus.Information = 0;
+
+    if (Irp->IoStatus.Status == STATUS_NO_SUCH_DEVICE ||
+        Irp->IoStatus.Status == STATUS_DEVICE_NOT_CONNECTED ||
+        Irp->IoStatus.Status == STATUS_DEVICE_DOES_NOT_EXIST ||
+        Context->Urb.UrbHeader.Status == USBD_STATUS_DEVICE_GONE)
+    {
+        Request->SrbStatus = SRB_STATUS_NO_DEVICE;
+        Irp->IoStatus.Status = USBSTOR_SrbStatusToNtStatus(Request);
+    }
+    else if (Context->WatchdogTimedOut)
+    {
+        Request->SrbStatus = SRB_STATUS_TIMEOUT;
+        Irp->IoStatus.Status = STATUS_IO_TIMEOUT;
+    }
+    else
+    {
+        Request->SrbStatus = SRB_STATUS_BUS_RESET;
+        Irp->IoStatus.Status = STATUS_IO_DEVICE_ERROR;
+
+        /* Raise DEVICE_RESETTING before ActiveSrb is released, so that no other
+         * request can be claimed and started into the reset; the reset work item
+         * restarts the waiting requests when it is done. */
+        USBSTOR_QueueResetDevice(FDODeviceExtension);
+    }
+}
+
 IO_COMPLETION_ROUTINE USBSTOR_CSWCompletionRoutine;
 
 NTSTATUS
@@ -319,17 +366,7 @@ ResetRecovery:
         Request = FDODeviceExtension->ActiveSrb;
 
     Context->Srb = Request;
-    Irp->IoStatus.Information = 0;
-    Irp->IoStatus.Status = Context->WatchdogTimedOut ?
-                           STATUS_IO_TIMEOUT : STATUS_IO_DEVICE_ERROR;
-    Request->SrbStatus = Context->WatchdogTimedOut ?
-                         SRB_STATUS_TIMEOUT : SRB_STATUS_BUS_RESET;
-
-    /* Raise DEVICE_RESETTING before ActiveSrb is released, so that no other
-     * request can be claimed and started into the reset; the reset work item
-     * restarts the waiting requests when it is done. */
-    if (!Context->WatchdogTimedOut)
-        USBSTOR_QueueResetDevice(FDODeviceExtension);
+    USBSTOR_SetTransferError(FDODeviceExtension, Irp, Request);
     USBSTOR_QueueTerminateRequest(PDODeviceExtension->LowerDeviceObject, Irp);
 
     /*
@@ -423,16 +460,7 @@ USBSTOR_DataCompletionRoutine(
     }
     else
     {
-        Irp->IoStatus.Information = 0;
-        Irp->IoStatus.Status = Context->WatchdogTimedOut ?
-                               STATUS_IO_TIMEOUT : STATUS_IO_DEVICE_ERROR;
-        Request->SrbStatus = Context->WatchdogTimedOut ?
-                             SRB_STATUS_TIMEOUT : SRB_STATUS_BUS_RESET;
-
-        /* DEVICE_RESETTING before ActiveSrb is released; see
-         * USBSTOR_CBWCompletionRoutine. */
-        if (!Context->WatchdogTimedOut)
-            USBSTOR_QueueResetDevice(FDODeviceExtension);
+        USBSTOR_SetTransferError(FDODeviceExtension, Irp, Request);
         USBSTOR_QueueTerminateRequest(PDODeviceExtension->LowerDeviceObject, Irp);
 
         /* Release the started packet, as in USBSTOR_CSWCompletionRoutine. */
@@ -564,17 +592,7 @@ ResetRecovery:
         Request = FDODeviceExtension->ActiveSrb;
 
     Context->Srb = Request;
-    Irp->IoStatus.Information = 0;
-    Irp->IoStatus.Status = Context->WatchdogTimedOut ?
-                           STATUS_IO_TIMEOUT : STATUS_IO_DEVICE_ERROR;
-    Request->SrbStatus = Context->WatchdogTimedOut ?
-                         SRB_STATUS_TIMEOUT : SRB_STATUS_BUS_RESET;
-
-    /* Raise DEVICE_RESETTING before ActiveSrb is released, so that no other
-     * request can be claimed and started into the reset; the reset work item
-     * restarts the waiting requests when it is done. */
-    if (!Context->WatchdogTimedOut)
-        USBSTOR_QueueResetDevice(FDODeviceExtension);
+    USBSTOR_SetTransferError(FDODeviceExtension, Irp, Request);
     USBSTOR_QueueTerminateRequest(PDODeviceExtension->LowerDeviceObject, Irp);
 
     /* Release the started packet, as in USBSTOR_CSWCompletionRoutine. */
