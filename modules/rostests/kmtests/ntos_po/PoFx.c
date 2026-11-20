@@ -111,6 +111,7 @@ LogEvent(
 
 static
 VOID
+NTAPI
 ActiveCallback(
     _In_ PVOID Context,
     _In_ ULONG Component)
@@ -121,6 +122,7 @@ ActiveCallback(
 
 static
 VOID
+NTAPI
 IdleCallback(
     _In_ PVOID Context,
     _In_ ULONG Component)
@@ -133,6 +135,7 @@ IdleCallback(
 
 static
 VOID
+NTAPI
 IdleStateCallback(
     _In_ PVOID Context,
     _In_ ULONG Component,
@@ -146,6 +149,7 @@ IdleStateCallback(
 
 static
 VOID
+NTAPI
 PowerRequiredCallback(
     _In_ PVOID Context)
 {
@@ -157,6 +161,7 @@ PowerRequiredCallback(
 
 static
 VOID
+NTAPI
 PowerNotRequiredCallback(
     _In_ PVOID Context)
 {

@@ -140,6 +140,7 @@ static PO_FX_COMPONENT_ACTIVE_CONDITION_CALLBACK KmdfIdleComponentActive;
 
 static
 VOID
+NTAPI
 KmdfIdleComponentActive(
     _In_ PVOID Context,
     _In_ ULONG Component)
@@ -155,6 +156,7 @@ static PO_FX_COMPONENT_IDLE_CONDITION_CALLBACK KmdfIdleComponentIdle;
 
 static
 VOID
+NTAPI
 KmdfIdleComponentIdle(
     _In_ PVOID Context,
     _In_ ULONG Component)
