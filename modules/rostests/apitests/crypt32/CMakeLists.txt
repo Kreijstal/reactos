@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     CertChainSsl.c
     CertEnumSystemStoreLocation.c
+    CertPss.c
     testlist.c)
 
 add_executable(crypt32_apitest ${SOURCE})
