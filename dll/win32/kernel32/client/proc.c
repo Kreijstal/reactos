@@ -3268,6 +3268,14 @@ StartScan:
     {
         case STATUS_INVALID_IMAGE_WIN_16:
         {
+#if defined(_WIN64) || defined(BUILD_WOW6432)
+            /* 64-bit Windows has no VDM, for 32-bit callers neither */
+            DPRINT1("No VDM for 16-bit application %wZ\n", &PathName);
+            SetLastError(ERROR_BAD_EXE_FORMAT);
+            Result = FALSE;
+            goto Quickie;
+#endif
+
             /* 16-bit binary. Should we use WOW or does the caller force VDM? */
             if (!(dwCreationFlags & CREATE_FORCEDOS))
             {
@@ -3416,6 +3424,14 @@ StartScan:
                 (Status == STATUS_INVALID_IMAGE_NE_FORMAT) ||
                 (BinarySubType = BaseIsDosApplication(&PathName, Status)))
             {
+#if defined(_WIN64) || defined(BUILD_WOW6432)
+                /* 64-bit Windows has no VDM, for 32-bit callers neither */
+                DPRINT1("No VDM for DOS application %wZ\n", &PathName);
+                SetLastError(ERROR_BAD_EXE_FORMAT);
+                Result = FALSE;
+                goto Quickie;
+#endif
+
                 /* We're launching a DOS application */
                 VdmBinaryType = BINARY_TYPE_DOS;
 
