@@ -252,6 +252,7 @@ typedef struct _FDO_DEVICE_EXTENSION
     MINIPORT Miniport;
     ULONG BusNumber;
     ULONG SlotNumber;
+    ULONG RaidPortNumber;
     LONG ScsiPortNumber;
     PCM_RESOURCE_LIST AllocatedResources;
     PCM_RESOURCE_LIST TranslatedResources;

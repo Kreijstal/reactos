@@ -17,6 +17,12 @@
 /* FUNCTIONS ******************************************************************/
 
 static
+NTSTATUS
+PdoDeviceControlScsiPassThrough(
+    _In_ PPDO_DEVICE_EXTENSION DeviceExtension,
+    _Inout_ PIRP Irp);
+
+static
 UINT32
 GetFieldLength(
     _In_ PUCHAR Name,
@@ -143,6 +149,48 @@ FdoDeviceControlQueryProperty(
 }
 
 
+static
+NTSTATUS
+FdoDeviceControlScsiPassThrough(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension,
+    _Inout_ PIRP Irp)
+{
+    PIO_STACK_LOCATION IoStack;
+    PSCSI_PASS_THROUGH Spt;
+    PPDO_DEVICE_EXTENSION PdoExtension;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    DPRINT("FdoDeviceControlScsiPassThrough(%p %p)\n", DeviceExtension, Irp);
+
+    NT_ASSERT(DeviceExtension->ExtensionType == FdoExtension);
+
+    /* The adapter routes the request to the unit it addresses */
+    IoStack = IoGetCurrentIrpStackLocation(Irp);
+    if (IoStack->Parameters.DeviceIoControl.InputBufferLength <
+        RTL_SIZEOF_THROUGH_FIELD(SCSI_PASS_THROUGH, Lun))
+    {
+        Status = STATUS_BUFFER_TOO_SMALL;
+    }
+    else
+    {
+        Spt = Irp->AssociatedIrp.SystemBuffer;
+        PdoExtension = FdoFindLun(DeviceExtension, Spt->PathId, Spt->TargetId, Spt->Lun);
+        if (PdoExtension != NULL)
+            return PdoDeviceControlScsiPassThrough(PdoExtension, Irp);
+
+        Status = STATUS_NO_SUCH_DEVICE;
+    }
+
+    Irp->IoStatus.Information = 0;
+    Irp->IoStatus.Status = Status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+    return Status;
+}
+
+
 NTSTATUS
 NTAPI
 PortFdoDeviceControl(
@@ -158,6 +206,10 @@ PortFdoDeviceControl(
     {
         case IOCTL_STORAGE_QUERY_PROPERTY:
             return FdoDeviceControlQueryProperty(DeviceObject->DeviceExtension, Irp);
+
+        case IOCTL_SCSI_PASS_THROUGH:
+        case IOCTL_SCSI_PASS_THROUGH_DIRECT:
+            return FdoDeviceControlScsiPassThrough(DeviceObject->DeviceExtension, Irp);
 
         default:
             // __debugbreak();

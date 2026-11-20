@@ -515,6 +515,66 @@ PortFdoStartMiniport(
 
 
 static
+VOID
+PortFdoFormatDosLink(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension,
+    _Out_writes_(BufferCount) PWCHAR Buffer,
+    _In_ SIZE_T BufferCount,
+    _Out_ PUNICODE_STRING LinkName)
+{
+    NTSTATUS Status;
+
+    Status = RtlStringCchPrintfW(Buffer,
+                                 BufferCount,
+                                 L"\\DosDevices\\Scsi%ld:",
+                                 DeviceExtension->ScsiPortNumber);
+    ASSERT(NT_SUCCESS(Status));
+    RtlInitUnicodeString(LinkName, Buffer);
+}
+
+
+static
+VOID
+PortFdoCreateDosLink(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension)
+{
+    WCHAR LinkBuffer[sizeof("\\DosDevices\\Scsi4294967295:")];
+    WCHAR NameBuffer[sizeof("\\Device\\RaidPort4294967295")];
+    UNICODE_STRING LinkName, DeviceName;
+    NTSTATUS Status;
+
+    PortFdoFormatDosLink(DeviceExtension, LinkBuffer, RTL_NUMBER_OF(LinkBuffer), &LinkName);
+
+    Status = RtlStringCchPrintfW(NameBuffer,
+                                 RTL_NUMBER_OF(NameBuffer),
+                                 L"\\Device\\RaidPort%lu",
+                                 DeviceExtension->RaidPortNumber);
+    ASSERT(NT_SUCCESS(Status));
+    RtlInitUnicodeString(&DeviceName, NameBuffer);
+
+    Status = IoCreateSymbolicLink(&LinkName, &DeviceName);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("IoCreateSymbolicLink(%wZ) failed (Status 0x%08lx)\n", &LinkName, Status);
+}
+
+
+static
+VOID
+PortFdoDeleteDosLink(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension)
+{
+    WCHAR LinkBuffer[sizeof("\\DosDevices\\Scsi4294967295:")];
+    UNICODE_STRING LinkName;
+
+    if (DeviceExtension->ScsiPortNumber < 0)
+        return;
+
+    PortFdoFormatDosLink(DeviceExtension, LinkBuffer, RTL_NUMBER_OF(LinkBuffer), &LinkName);
+    IoDeleteSymbolicLink(&LinkName);
+}
+
+
+static
 NTSTATUS
 PortFdoStartDevice(
     _In_ PFDO_DEVICE_EXTENSION DeviceExtension,
@@ -596,11 +656,17 @@ PortFdoStartDevice(
         PortAllocateRequestReserve(DeviceExtension);
     }
 
-    /* Claim and increase SCSI port number */
-    /* TODO: Reverse this when stopping adapter */
-    ConfigInfo = IoGetConfigurationInformation();
-    DeviceExtension->ScsiPortNumber = ConfigInfo->ScsiPortCount;
-    ConfigInfo->ScsiPortCount++;
+    /* Claim and increase SCSI port number, once: a restart after a stop keeps it */
+    /* TODO: Reverse this when removing adapter */
+    if (DeviceExtension->ScsiPortNumber < 0)
+    {
+        ConfigInfo = IoGetConfigurationInformation();
+        DeviceExtension->ScsiPortNumber = ConfigInfo->ScsiPortCount;
+        ConfigInfo->ScsiPortCount++;
+
+        /* Like any SCSI adapter, let user mode open it as \\.\ScsiN: */
+        PortFdoCreateDosLink(DeviceExtension);
+    }
 
     return Status;
 }
@@ -1547,6 +1613,7 @@ PortFdoPnp(
 
         case IRP_MN_REMOVE_DEVICE: /* 0x02 */
             DPRINT1("IRP_MJ_PNP / IRP_MN_REMOVE_DEVICE\n");
+            PortFdoDeleteDosLink(DeviceExtension);
             PortFdoStopAdapter(DeviceExtension);
             PortFdoDisconnectInterrupt(DeviceExtension);
 

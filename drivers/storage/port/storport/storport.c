@@ -204,6 +204,7 @@ PortAddDevice(
     WCHAR NameBuffer[sizeof("\\Device\\RaidPort4294967295")];
     UNICODE_STRING DeviceName;
     PDEVICE_OBJECT Fdo = NULL;
+    ULONG RaidPortNumber;
     NTSTATUS Status;
 
     DPRINT1("PortAddDevice(%p %p)\n",
@@ -218,7 +219,7 @@ PortAddDevice(
                                 PortNumber);
     ASSERT(NT_SUCCESS(Status));
     RtlInitUnicodeString(&DeviceName, NameBuffer);
-    PortNumber++;
+    RaidPortNumber = PortNumber++;
 
     DPRINT1("Creating device: %wZ\n", &DeviceName);
 
@@ -253,6 +254,7 @@ PortAddDevice(
 
     DeviceExtension->PnpState = dsStopped;
 
+    DeviceExtension->RaidPortNumber = RaidPortNumber;
     DeviceExtension->ScsiPortNumber = -1;
 
     KeInitializeSpinLock(&DeviceExtension->PdoListLock);
