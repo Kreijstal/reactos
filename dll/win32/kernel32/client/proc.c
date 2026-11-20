@@ -3366,7 +3366,7 @@ StartScan:
                         VdmUndoLevel = VDM_UNDO_REUSE;
 
                         /* Check if CSRSS wants us to wait on VDM */
-                        VdmWaitObject = CheckVdmMsg->WaitObjectForParent;
+                        VdmWaitObject = FROM_LPC_HANDLE(CheckVdmMsg->WaitObjectForParent);
                         break;
 
                     case VDM_NOT_READY:
@@ -3489,7 +3489,7 @@ StartScan:
                         VdmUndoLevel = VDM_UNDO_REUSE;
 
                         /* Check if CSRSS wants us to wait on VDM */
-                        VdmWaitObject = CheckVdmMsg->WaitObjectForParent;
+                        VdmWaitObject = FROM_LPC_HANDLE(CheckVdmMsg->WaitObjectForParent);
                         break;
 
                     case VDM_NOT_READY:

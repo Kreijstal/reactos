@@ -292,7 +292,7 @@ BaseCheckVDM(IN ULONG BinaryType,
     }
 
     /* Setup the input parameters */
-    CheckVdm->ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+    CheckVdm->ConsoleHandle = TO_LPC_HANDLE(NtCurrentPeb()->ProcessParameters->ConsoleHandle);
     CheckVdm->BinaryType = BinaryType;
     CheckVdm->CodePage = CP_ACP;
     CheckVdm->dwCreationFlags = CreationFlags;
@@ -309,9 +309,9 @@ BaseCheckVDM(IN ULONG BinaryType,
     if (StartupInfo->dwFlags & STARTF_USESTDHANDLES)
     {
         /* Set the standard handles */
-        CheckVdm->StdIn  = StartupInfo->hStdInput;
-        CheckVdm->StdOut = StartupInfo->hStdOutput;
-        CheckVdm->StdErr = StartupInfo->hStdError;
+        CheckVdm->StdIn  = TO_LPC_HANDLE(StartupInfo->hStdInput);
+        CheckVdm->StdOut = TO_LPC_HANDLE(StartupInfo->hStdOutput);
+        CheckVdm->StdErr = TO_LPC_HANDLE(StartupInfo->hStdError);
     }
 
     /* Allocate memory for the ANSI strings */
@@ -436,7 +436,7 @@ BaseCheckVDM(IN ULONG BinaryType,
                                              + CheckVdm->TitleLen
                                              + CheckVdm->ReservedLen
                                              + CheckVdm->EnvLen
-                                             + sizeof(*CheckVdm->StartupInfo));
+                                             + sizeof(STARTUPINFOA));
     if (CaptureBuffer == NULL)
     {
         Status = STATUS_NO_MEMORY;
@@ -455,7 +455,7 @@ BaseCheckVDM(IN ULONG BinaryType,
                             CheckVdm->AppLen,
                             (PVOID*)&CheckVdm->AppName);
 
-    CheckVdm->PifFile = NULL; // TODO: PIF file support!
+    CheckVdm->PifFile = 0; // TODO: PIF file support!
 
     /* Capture the current directory */
     CsrCaptureMessageBuffer(CaptureBuffer,
@@ -472,7 +472,7 @@ BaseCheckVDM(IN ULONG BinaryType,
     /* Capture the startup info structure */
     CsrCaptureMessageBuffer(CaptureBuffer,
                             &AnsiStartupInfo,
-                            sizeof(*CheckVdm->StartupInfo),
+                            sizeof(STARTUPINFOA),
                             (PVOID*)&CheckVdm->StartupInfo);
 
     if (StartupInfo->lpDesktop)
@@ -483,7 +483,7 @@ BaseCheckVDM(IN ULONG BinaryType,
                                 CheckVdm->DesktopLen,
                                 (PVOID*)&CheckVdm->Desktop);
     }
-    else CheckVdm->Desktop = NULL;
+    else CheckVdm->Desktop = 0;
 
     if (StartupInfo->lpTitle)
     {
@@ -493,7 +493,7 @@ BaseCheckVDM(IN ULONG BinaryType,
                                 CheckVdm->TitleLen,
                                 (PVOID*)&CheckVdm->Title);
     }
-    else CheckVdm->Title = NULL;
+    else CheckVdm->Title = 0;
 
     if (StartupInfo->lpReserved)
     {
@@ -503,7 +503,7 @@ BaseCheckVDM(IN ULONG BinaryType,
                                 CheckVdm->ReservedLen,
                                 (PVOID*)&CheckVdm->Reserved);
     }
-    else CheckVdm->Reserved = NULL;
+    else CheckVdm->Reserved = 0;
 
     /* Send the message to CSRSS */
     Status = CsrClientCallServer((PCSR_API_MESSAGE)ApiMessage,
@@ -563,7 +563,7 @@ BaseUpdateVDMEntry(IN ULONG UpdateIndex,
         case VdmEntryUpdateProcess:
         {
             /* Send it the process handle */
-            UpdateVdmEntry->VDMProcessHandle = *WaitHandle;
+            UpdateVdmEntry->VDMProcessHandle = TO_LPC_HANDLE(*WaitHandle);
             UpdateVdmEntry->iTask = IndexInfo;
             break;
         }
@@ -573,17 +573,17 @@ BaseUpdateVDMEntry(IN ULONG UpdateIndex,
     if (BinaryType == BINARY_TYPE_WOW)
     {
         /* Magic value for 16-bit apps */
-        UpdateVdmEntry->ConsoleHandle = (HANDLE)-1;
+        UpdateVdmEntry->ConsoleHandle = (LPC_HANDLE)(LONG_PTR)-1;
     }
     else if (UpdateVdmEntry->iTask)
     {
         /* No handle for true VDM */
-        UpdateVdmEntry->ConsoleHandle = NULL;
+        UpdateVdmEntry->ConsoleHandle = 0;
     }
     else
     {
         /* Otherwise, use the regular console handle */
-        UpdateVdmEntry->ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+        UpdateVdmEntry->ConsoleHandle = TO_LPC_HANDLE(NtCurrentPeb()->ProcessParameters->ConsoleHandle);
     }
 
     /* Finally write the index and binary type */
@@ -606,7 +606,7 @@ BaseUpdateVDMEntry(IN ULONG UpdateIndex,
     if (UpdateIndex == VdmEntryUpdateProcess)
     {
         /* Return it to the caller */
-        *WaitHandle = UpdateVdmEntry->WaitObjectForParent;
+        *WaitHandle = FROM_LPC_HANDLE(UpdateVdmEntry->WaitObjectForParent);
     }
 
     /* We made it */
@@ -632,8 +632,8 @@ BaseCheckForVDM(IN HANDLE ProcessHandle,
     if (!NT_SUCCESS(Status)) return FALSE;
 
     /* Setup the input parameters */
-    GetVdmExitCode->ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
-    GetVdmExitCode->hParent = ProcessHandle;
+    GetVdmExitCode->ConsoleHandle = TO_LPC_HANDLE(NtCurrentPeb()->ProcessParameters->ConsoleHandle);
+    GetVdmExitCode->hParent = TO_LPC_HANDLE(ProcessHandle);
 
     /* Call CSRSS */
     Status = CsrClientCallServer((PCSR_API_MESSAGE)&ApiMessage,
@@ -1395,9 +1395,9 @@ ExitVDM(BOOL IsWow, ULONG iWowTask)
     PBASE_EXIT_VDM ExitVdm = &ApiMessage.Data.ExitVDMRequest;
 
     /* Setup the input parameters */
-    ExitVdm->ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+    ExitVdm->ConsoleHandle = TO_LPC_HANDLE(NtCurrentPeb()->ProcessParameters->ConsoleHandle);
     ExitVdm->iWowTask = IsWow ? iWowTask : 0; /* Always zero for DOS tasks */
-    ExitVdm->WaitObjectForVDM = NULL;
+    ExitVdm->WaitObjectForVDM = 0;
 
     /* Call CSRSS */
     CsrClientCallServer((PCSR_API_MESSAGE)&ApiMessage,
@@ -1406,9 +1406,9 @@ ExitVDM(BOOL IsWow, ULONG iWowTask)
                         sizeof(*ExitVdm));
 
     /* Close the returned wait object handle, if any */
-    if (NT_SUCCESS(ApiMessage.Status) && (ExitVdm->WaitObjectForVDM != NULL))
+    if (NT_SUCCESS(ApiMessage.Status) && (ExitVdm->WaitObjectForVDM != 0))
     {
-        CloseHandle(ExitVdm->WaitObjectForVDM);
+        CloseHandle(FROM_LPC_HANDLE(ExitVdm->WaitObjectForVDM));
     }
 }
 
@@ -1457,7 +1457,7 @@ GetNextVDMCommand(PVDM_COMMAND_INFO CommandData)
         (CommandData->VDMState == VDM_DEC_REENTER_COUNT))
     {
         /* Setup the input parameters */
-        SetReenterCount->ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+        SetReenterCount->ConsoleHandle = TO_LPC_HANDLE(NtCurrentPeb()->ProcessParameters->ConsoleHandle);
         SetReenterCount->fIncDec = CommandData->VDMState;
 
         /* Call CSRSS */
@@ -1490,7 +1490,7 @@ GetNextVDMCommand(PVDM_COMMAND_INFO CommandData)
 
     /* Setup the input parameters */
     GetNextVdmCommand->iTask = CommandData->TaskId;
-    GetNextVdmCommand->ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+    GetNextVdmCommand->ConsoleHandle = TO_LPC_HANDLE(NtCurrentPeb()->ProcessParameters->ConsoleHandle);
     GetNextVdmCommand->CmdLen = CommandData->CmdLen;
     GetNextVdmCommand->AppLen = CommandData->AppLen;
     GetNextVdmCommand->PifLen = CommandData->PifLen;
@@ -1521,7 +1521,7 @@ GetNextVDMCommand(PVDM_COMMAND_INFO CommandData)
                                              + GetNextVdmCommand->DesktopLen
                                              + GetNextVdmCommand->TitleLen
                                              + GetNextVdmCommand->ReservedLen
-                                             + sizeof(*GetNextVdmCommand->StartupInfo));
+                                             + sizeof(STARTUPINFOA));
     if (CaptureBuffer == NULL)
     {
         BaseSetLastNTError(STATUS_NO_MEMORY);
@@ -1531,7 +1531,7 @@ GetNextVDMCommand(PVDM_COMMAND_INFO CommandData)
     /* Capture the data */
 
     CsrAllocateMessagePointer(CaptureBuffer,
-                              sizeof(*GetNextVdmCommand->StartupInfo),
+                              sizeof(STARTUPINFOA),
                               (PVOID*)&GetNextVdmCommand->StartupInfo);
 
     if (CommandData->CmdLen)
@@ -1599,11 +1599,11 @@ GetNextVDMCommand(PVDM_COMMAND_INFO CommandData)
                                      sizeof(*GetNextVdmCommand));
 
         /* Exit the waiting loop if we did not receive any event handle */
-        if (GetNextVdmCommand->WaitObjectForVDM == NULL)
+        if (GetNextVdmCommand->WaitObjectForVDM == 0)
             break;
 
         /* Wait for the event to become signaled and try again */
-        Status = NtWaitForSingleObject(GetNextVdmCommand->WaitObjectForVDM,
+        Status = NtWaitForSingleObject(FROM_LPC_HANDLE(GetNextVdmCommand->WaitObjectForVDM),
                                        FALSE, NULL);
         if (Status != STATUS_SUCCESS)
         {
@@ -1653,20 +1653,20 @@ GetNextVDMCommand(PVDM_COMMAND_INFO CommandData)
     }
 
     /* Write back the standard handles */
-    CommandData->StdIn  = GetNextVdmCommand->StdIn;
-    CommandData->StdOut = GetNextVdmCommand->StdOut;
-    CommandData->StdErr = GetNextVdmCommand->StdErr;
+    CommandData->StdIn  = FROM_LPC_HANDLE(GetNextVdmCommand->StdIn);
+    CommandData->StdOut = FROM_LPC_HANDLE(GetNextVdmCommand->StdOut);
+    CommandData->StdErr = FROM_LPC_HANDLE(GetNextVdmCommand->StdErr);
 
     /* Write back the startup info */
     RtlMoveMemory(&CommandData->StartupInfo,
-                  GetNextVdmCommand->StartupInfo,
-                  sizeof(*GetNextVdmCommand->StartupInfo));
+                  (PVOID)(ULONG_PTR)GetNextVdmCommand->StartupInfo,
+                  sizeof(STARTUPINFOA));
 
     if (CommandData->CmdLen)
     {
         /* Write back the command line */
         RtlMoveMemory(CommandData->CmdLine,
-                      GetNextVdmCommand->CmdLine,
+                      (PVOID)(ULONG_PTR)GetNextVdmCommand->CmdLine,
                       GetNextVdmCommand->CmdLen);
 
         /* Set the actual length */
@@ -1677,7 +1677,7 @@ GetNextVDMCommand(PVDM_COMMAND_INFO CommandData)
     {
         /* Write back the application name */
         RtlMoveMemory(CommandData->AppName,
-                      GetNextVdmCommand->AppName,
+                      (PVOID)(ULONG_PTR)GetNextVdmCommand->AppName,
                       GetNextVdmCommand->AppLen);
 
         /* Set the actual length */
@@ -1688,7 +1688,7 @@ GetNextVDMCommand(PVDM_COMMAND_INFO CommandData)
     {
         /* Write back the PIF file name */
         RtlMoveMemory(CommandData->PifFile,
-                      GetNextVdmCommand->PifFile,
+                      (PVOID)(ULONG_PTR)GetNextVdmCommand->PifFile,
                       GetNextVdmCommand->PifLen);
 
         /* Set the actual length */
@@ -1699,7 +1699,7 @@ GetNextVDMCommand(PVDM_COMMAND_INFO CommandData)
     {
         /* Write back the current directory */
         RtlMoveMemory(CommandData->CurDirectory,
-                      GetNextVdmCommand->CurDirectory,
+                      (PVOID)(ULONG_PTR)GetNextVdmCommand->CurDirectory,
                       GetNextVdmCommand->CurDirectoryLen);
 
         /* Set the actual length */
@@ -1710,7 +1710,7 @@ GetNextVDMCommand(PVDM_COMMAND_INFO CommandData)
     {
         /* Write back the environment */
         RtlMoveMemory(CommandData->Env,
-                      GetNextVdmCommand->Env,
+                      (PVOID)(ULONG_PTR)GetNextVdmCommand->Env,
                       GetNextVdmCommand->EnvLen);
 
         /* Set the actual length */
@@ -1721,7 +1721,7 @@ GetNextVDMCommand(PVDM_COMMAND_INFO CommandData)
     {
         /* Write back the desktop name */
         RtlMoveMemory(CommandData->Desktop,
-                      GetNextVdmCommand->Desktop,
+                      (PVOID)(ULONG_PTR)GetNextVdmCommand->Desktop,
                       GetNextVdmCommand->DesktopLen);
 
         /* Set the actual length */
@@ -1732,7 +1732,7 @@ GetNextVDMCommand(PVDM_COMMAND_INFO CommandData)
     {
         /* Write back the title */
         RtlMoveMemory(CommandData->Title,
-                      GetNextVdmCommand->Title,
+                      (PVOID)(ULONG_PTR)GetNextVdmCommand->Title,
                       GetNextVdmCommand->TitleLen);
 
         /* Set the actual length */
@@ -1743,7 +1743,7 @@ GetNextVDMCommand(PVDM_COMMAND_INFO CommandData)
     {
         /* Write back the reserved parameter */
         RtlMoveMemory(CommandData->Reserved,
-                      GetNextVdmCommand->Reserved,
+                      (PVOID)(ULONG_PTR)GetNextVdmCommand->Reserved,
                       GetNextVdmCommand->ReservedLen);
 
         /* Set the actual length */
@@ -1805,7 +1805,7 @@ GetVDMCurrentDirectories(DWORD cchCurDirs, PCHAR lpszzCurDirs)
     if (NT_SUCCESS(ApiMessage.Status))
     {
         /* Copy the result */
-        RtlMoveMemory(lpszzCurDirs, VDMCurrentDirsRequest->lpszzCurDirs, cchCurDirs);
+        RtlMoveMemory(lpszzCurDirs, (PVOID)(ULONG_PTR)VDMCurrentDirsRequest->lpszzCurDirs, cchCurDirs);
     }
 
     /* Free the capture buffer */

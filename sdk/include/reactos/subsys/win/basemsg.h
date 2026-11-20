@@ -118,26 +118,26 @@ typedef struct _BASE_EXIT_PROCESS
 typedef struct _BASE_CHECK_VDM
 {
     ULONG  iTask;
-    HANDLE ConsoleHandle;
+    LPC_HANDLE ConsoleHandle;
     ULONG  BinaryType;
-    HANDLE WaitObjectForParent;
-    HANDLE StdIn;
-    HANDLE StdOut;
-    HANDLE StdErr;
+    LPC_HANDLE WaitObjectForParent;
+    LPC_HANDLE StdIn;
+    LPC_HANDLE StdOut;
+    LPC_HANDLE StdErr;
     ULONG  CodePage;
     ULONG  dwCreationFlags;
-    PCHAR  CmdLine;
-    PCHAR  AppName;
-    PCHAR  PifFile;
-    PCHAR  CurDirectory;
-    PCHAR  Env;
+    LPC_PTRTYPE(PCHAR) CmdLine;
+    LPC_PTRTYPE(PCHAR) AppName;
+    LPC_PTRTYPE(PCHAR) PifFile;
+    LPC_PTRTYPE(PCHAR) CurDirectory;
+    LPC_PTRTYPE(PCHAR) Env;
     ULONG  EnvLen;
-    LPSTARTUPINFOA StartupInfo;
-    PCHAR  Desktop;
+    LPC_PTRTYPE(LPSTARTUPINFOA) StartupInfo;
+    LPC_PTRTYPE(PCHAR) Desktop;
     ULONG  DesktopLen;
-    PCHAR  Title;
+    LPC_PTRTYPE(PCHAR) Title;
     ULONG  TitleLen;
-    PCHAR  Reserved;
+    LPC_PTRTYPE(PCHAR) Reserved;
     ULONG  ReservedLen;
     USHORT CmdLen;
     USHORT AppLen;
@@ -151,9 +151,9 @@ typedef struct _BASE_UPDATE_VDM_ENTRY
 {
     ULONG  iTask;
     ULONG  BinaryType;
-    HANDLE ConsoleHandle;
-    HANDLE VDMProcessHandle;
-    HANDLE WaitObjectForParent;
+    LPC_HANDLE ConsoleHandle;
+    LPC_HANDLE VDMProcessHandle;
+    LPC_HANDLE WaitObjectForParent;
     USHORT EntryIndex;
     USHORT VDMCreationState;
 } BASE_UPDATE_VDM_ENTRY, *PBASE_UPDATE_VDM_ENTRY;
@@ -161,26 +161,26 @@ typedef struct _BASE_UPDATE_VDM_ENTRY
 typedef struct _BASE_GET_NEXT_VDM_COMMAND
 {
     ULONG  iTask;
-    HANDLE ConsoleHandle;
-    HANDLE WaitObjectForVDM;
-    HANDLE StdIn;
-    HANDLE StdOut;
-    HANDLE StdErr;
+    LPC_HANDLE ConsoleHandle;
+    LPC_HANDLE WaitObjectForVDM;
+    LPC_HANDLE StdIn;
+    LPC_HANDLE StdOut;
+    LPC_HANDLE StdErr;
     ULONG  CodePage;
     ULONG  dwCreationFlags;
     ULONG  ExitCode;
-    PCHAR  CmdLine;
-    PCHAR  AppName;
-    PCHAR  PifFile;
-    PCHAR  CurDirectory;
-    PCHAR  Env;
+    LPC_PTRTYPE(PCHAR) CmdLine;
+    LPC_PTRTYPE(PCHAR) AppName;
+    LPC_PTRTYPE(PCHAR) PifFile;
+    LPC_PTRTYPE(PCHAR) CurDirectory;
+    LPC_PTRTYPE(PCHAR) Env;
     ULONG  EnvLen;
-    LPSTARTUPINFOA StartupInfo;
-    PCHAR  Desktop;
+    LPC_PTRTYPE(LPSTARTUPINFOA) StartupInfo;
+    LPC_PTRTYPE(PCHAR) Desktop;
     ULONG  DesktopLen;
-    PCHAR  Title;
+    LPC_PTRTYPE(PCHAR) Title;
     ULONG  TitleLen;
-    PCHAR  Reserved;
+    LPC_PTRTYPE(PCHAR) Reserved;
     ULONG  ReservedLen;
     USHORT CurrentDrive;
     USHORT CmdLen;
@@ -193,9 +193,9 @@ typedef struct _BASE_GET_NEXT_VDM_COMMAND
 
 typedef struct _BASE_EXIT_VDM
 {
-    HANDLE ConsoleHandle;
+    LPC_HANDLE ConsoleHandle;
     ULONG  iWowTask;
-    HANDLE WaitObjectForVDM;
+    LPC_HANDLE WaitObjectForVDM;
 } BASE_EXIT_VDM, *PBASE_EXIT_VDM;
 
 typedef struct _BASE_IS_FIRST_VDM
@@ -205,14 +205,14 @@ typedef struct _BASE_IS_FIRST_VDM
 
 typedef struct _BASE_GET_VDM_EXIT_CODE
 {
-    HANDLE ConsoleHandle;
-    HANDLE hParent;
+    LPC_HANDLE ConsoleHandle;
+    LPC_HANDLE hParent;
     ULONG  ExitCode;
 } BASE_GET_VDM_EXIT_CODE, *PBASE_GET_VDM_EXIT_CODE;
 
 typedef struct _BASE_SET_REENTER_COUNT
 {
-    HANDLE ConsoleHandle;
+    LPC_HANDLE ConsoleHandle;
     ULONG  fIncDec;
 } BASE_SET_REENTER_COUNT, *PBASE_SET_REENTER_COUNT;
 
@@ -224,20 +224,20 @@ typedef struct _BASE_GETSET_PROCESS_SHUTDOWN_PARAMS
 
 typedef struct _BASE_GETSET_VDM_CURDIRS
 {
-    HANDLE ConsoleHandle;
-    PCHAR  lpszzCurDirs;
+    LPC_HANDLE ConsoleHandle;
+    LPC_PTRTYPE(PCHAR) lpszzCurDirs;
     ULONG  cchCurDirs;
 } BASE_GETSET_VDM_CURDIRS, *PBASE_GETSET_VDM_CURDIRS;
 
 typedef struct _BASE_BAT_NOTIFICATION
 {
-    HANDLE ConsoleHandle;
+    LPC_HANDLE ConsoleHandle;
     ULONG  fBeginEnd;
 } BASE_BAT_NOTIFICATION, *PBASE_BAT_NOTIFICATION;
 
 typedef struct _BASE_REGISTER_WOWEXEC
 {
-    HANDLE hwndWowExec;
+    LPC_HANDLE hwndWowExec;
 } BASE_REGISTER_WOWEXEC, *PBASE_REGISTER_WOWEXEC;
 
 typedef struct _BASE_SOUND_SENTRY
