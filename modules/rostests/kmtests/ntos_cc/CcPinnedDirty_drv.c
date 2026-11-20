@@ -43,8 +43,6 @@ static FAST_IO_DISPATCH TestFastIoDispatch;
 static UCHAR DiskByte = OLD_BYTE;
 static volatile LONG DiskWrites = 0;
 
-static KEVENT FlushDoneEvent;
-
 static
 BOOLEAN
 NTAPI
@@ -168,7 +166,6 @@ FlusherRoutine(
     IO_STATUS_BLOCK IoStatus;
 
     CcFlushCache(&Fcb->SectionObjectPointers, NULL, 0, &IoStatus);
-    KeSetEvent(&FlushDoneEvent, IO_NO_INCREMENT, FALSE);
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
@@ -181,13 +178,11 @@ TestPinnedDirtyThenModify(
     LARGE_INTEGER Offset = RTL_CONSTANT_LARGE_INTEGER(0LL);
     LARGE_INTEGER Timeout;
     IO_STATUS_BLOCK IoStatus;
-    OBJECT_ATTRIBUTES ThreadAttributes;
-    HANDLE ThreadHandle;
+    PKTHREAD Flusher;
     PVOID Bcb;
     PUCHAR Buffer;
     BOOLEAN Ret;
     BOOLEAN FlushedWhilePinned;
-    NTSTATUS Status;
 
     Ret = FALSE;
     _SEH2_TRY
@@ -207,23 +202,22 @@ TestPinnedDirtyThenModify(
     /* Mark the BCB dirty BEFORE modifying it, as fastfat does. */
     CcSetDirtyPinnedData(Bcb, NULL);
 
-    /* A write-behind happens now, while the BCB is pinned but unmodified. */
-    KeInitializeEvent(&FlushDoneEvent, NotificationEvent, FALSE);
-    InitializeObjectAttributes(&ThreadAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
-    Status = PsCreateSystemThread(&ThreadHandle, THREAD_ALL_ACCESS, &ThreadAttributes,
-                                  NULL, NULL, FlusherRoutine, Fcb);
-    ok_eq_hex(Status, STATUS_SUCCESS);
-    if (!NT_SUCCESS(Status))
+    /* A write-behind happens now, while the BCB is pinned but unmodified.
+     * The flusher runs this driver's code, so it is waited for by its thread
+     * object, not by an event it sets: the driver may be unloaded as soon as
+     * this test returns, and an event signaled before the thread exits does
+     * not keep it out of the image. */
+    Flusher = KmtStartThread(FlusherRoutine, Fcb);
+    if (!Flusher)
     {
         CcUnpinData(Bcb);
         return;
     }
-    ZwClose(ThreadHandle);
 
     /* Windows may hold the flush off until the BCB is unpinned: don't wait
      * for it forever. */
     Timeout.QuadPart = -2 * 1000 * 1000 * 10LL;
-    FlushedWhilePinned = (KeWaitForSingleObject(&FlushDoneEvent, Executive, KernelMode,
+    FlushedWhilePinned = (KeWaitForSingleObject(Flusher, Executive, KernelMode,
                                                 FALSE, &Timeout) == STATUS_SUCCESS);
     trace("flush while pinned %s, disk writes so far %ld\n",
           FlushedWhilePinned ? "completed" : "held off", DiskWrites);
@@ -232,8 +226,7 @@ TestPinnedDirtyThenModify(
     RtlFillMemory(Buffer, PAGE_SIZE, NEW_BYTE);
     CcUnpinData(Bcb);
 
-    if (!FlushedWhilePinned)
-        KeWaitForSingleObject(&FlushDoneEvent, Executive, KernelMode, FALSE, NULL);
+    KmtFinishThread(Flusher, NULL);
 
     /* Write back everything that is dirty now. */
     CcFlushCache(&Fcb->SectionObjectPointers, NULL, 0, &IoStatus);

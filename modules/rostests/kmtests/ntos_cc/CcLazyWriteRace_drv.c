@@ -40,6 +40,8 @@ static FAST_IO_DISPATCH TestFastIoDispatch;
 static KEVENT LazyParkedEvent;      /* set by AcquireForLazyWrite when parked  */
 static KEVENT LazyReleaseEvent;     /* set by the flusher to release the writer */
 static volatile LONG RaceArmed = 0; /* 1 = next lazy write should park          */
+static BOOLEAN RaceAborted;         /* no lazy write parked: flusher must not flush */
+static PKTHREAD FlusherThread;      /* runs this driver's code: waited for at cleanup */
 
 static
 BOOLEAN
@@ -189,9 +191,12 @@ FlusherRoutine(
 
     KeWaitForSingleObject(&LazyParkedEvent, Executive, KernelMode, FALSE, NULL);
 
-    DPRINT("[CcLazyWriteRace] flusher: cleaning VACB via CcFlushCache\n");
-    CcFlushCache(&Fcb->SectionObjectPointers, NULL, 0, &IoStatus);
-    DPRINT("[CcLazyWriteRace] flusher: CcFlushCache done, releasing lazy writer\n");
+    if (!RaceAborted)
+    {
+        DPRINT("[CcLazyWriteRace] flusher: cleaning VACB via CcFlushCache\n");
+        CcFlushCache(&Fcb->SectionObjectPointers, NULL, 0, &IoStatus);
+        DPRINT("[CcLazyWriteRace] flusher: CcFlushCache done, releasing lazy writer\n");
+    }
 
     KeSetEvent(&LazyReleaseEvent, IO_NO_INCREMENT, FALSE);
 
@@ -313,8 +318,6 @@ TestIrpHandler(
             /* Cached write: dirty the VACB, then arm the race and spin up the
              * flusher thread. */
             BOOLEAN Ret;
-            HANDLE ThreadHandle;
-            OBJECT_ATTRIBUTES ThreadAttributes;
 
             ok_irql(PASSIVE_LEVEL);
             ok(RtlCompareUnicodeString(&IoStack->FileObject->FileName, &RaceTestFileName, TRUE) == 0,
@@ -325,13 +328,9 @@ TestIrpHandler(
 
             Fcb->WriteLength = Length;
 
-            InitializeObjectAttributes(&ThreadAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
-            Status = PsCreateSystemThread(&ThreadHandle, THREAD_ALL_ACCESS,
-                                          &ThreadAttributes, NULL, NULL,
-                                          FlusherRoutine, Fcb);
-            ok_eq_hex(Status, STATUS_SUCCESS);
-            if (NT_SUCCESS(Status))
-                ZwClose(ThreadHandle);
+            ASSERT(FlusherThread == NULL);
+            RaceAborted = FALSE;
+            FlusherThread = KmtStartThread(FlusherRoutine, Fcb);
 
             _SEH2_TRY
             {
@@ -380,6 +379,20 @@ TestIrpHandler(
     else if (IoStack->MajorFunction == IRP_MJ_CLEANUP)
     {
         ok_irql(PASSIVE_LEVEL);
+        if (FlusherThread)
+        {
+            /* The flusher runs this driver's code and uses the FCB: it must be
+             * gone before the FCB is freed and the driver can be unloaded.  If
+             * no lazy write took the armed gate it would wait forever, so close
+             * the gate and release it without a flush. */
+            if (InterlockedExchange(&RaceArmed, 0) == 1)
+            {
+                RaceAborted = TRUE;
+                KeSetEvent(&LazyParkedEvent, IO_NO_INCREMENT, FALSE);
+            }
+            KmtFinishThread(FlusherThread, NULL);
+            FlusherThread = NULL;
+        }
         KeInitializeEvent(&CacheUninitEvent.Event, NotificationEvent, FALSE);
         CcUninitializeCacheMap(IoStack->FileObject, &Zero, &CacheUninitEvent);
         KeWaitForSingleObject(&CacheUninitEvent.Event, Executive, KernelMode, FALSE, NULL);
