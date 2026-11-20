@@ -723,3 +723,6 @@ Wow64CopyContext32To64(PCONTEXT pContext,
 VOID
 Wow64CopyContext64To32(PI386_CONTEXT pContext32,
                        PCONTEXT pContext);
+
+ULONG
+Wow64ContextFlags32To64(ULONG ContextFlags32);

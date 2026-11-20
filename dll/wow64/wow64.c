@@ -51,13 +51,113 @@ void EnterApc32(PVOID pEnterCtx,
 void KiWow64SystemCall32(void);
 __declspec(dllexport) void WINAPI Wow64LdrpInitialize(PCONTEXT pContext);
 
-/* FIXME: this is an incomplete implementation */
+/* The x87 state in the FSAVE layout of a 32-bit CONTEXT's FloatSave,
+   from and to the FXSAVE layout. From Wine (dlls/wow64cpu, dlls/ntdll) */
+static
+VOID
+Wow64FxsaveToFsave(PI386_FLOATING_SAVE_AREA Fpu,
+                   const XMM_SAVE_AREA32 *Fpux)
+{
+    ULONG i, Tag, StackTop;
+
+    Fpu->ControlWord = Fpux->ControlWord;
+    Fpu->StatusWord = Fpux->StatusWord;
+    Fpu->ErrorOffset = Fpux->ErrorOffset;
+    Fpu->ErrorSelector = Fpux->ErrorSelector | ((ULONG)Fpux->ErrorOpcode << 16);
+    Fpu->DataOffset = Fpux->DataOffset;
+    Fpu->DataSelector = Fpux->DataSelector;
+    Fpu->Cr0NpxState = Fpux->StatusWord | 0xFFFF0000;
+
+    StackTop = (Fpux->StatusWord >> 11) & 7;
+    Fpu->TagWord = 0xFFFF0000;
+    for (i = 0; i < 8; i++)
+    {
+        RtlCopyMemory(&Fpu->RegisterArea[10 * i], &Fpux->FloatRegisters[i], 10);
+        if (!(Fpux->TagWord & (1 << i)))
+        {
+            /* Empty */
+            Tag = 3;
+        }
+        else
+        {
+            const M128A *Reg = &Fpux->FloatRegisters[(i - StackTop) & 7];
+
+            if ((Reg->High & 0x7FFF) == 0x7FFF)
+                Tag = 2; /* Special: exponent all ones */
+            else if (!(Reg->High & 0x7FFF))
+                Tag = Reg->Low ? 2 : 1; /* Denormal (special) or zero */
+            else
+                Tag = (Reg->Low >> 63) ? 0 : 2; /* Valid, or unnormal (special) */
+        }
+        Fpu->TagWord |= Tag << (2 * i);
+    }
+}
+
+static
+VOID
+Wow64FsaveToFxsave(XMM_SAVE_AREA32 *Fpux,
+                   const I386_FLOATING_SAVE_AREA *Fpu)
+{
+    ULONG i;
+
+    Fpux->ControlWord = (USHORT)Fpu->ControlWord;
+    Fpux->StatusWord = (USHORT)Fpu->StatusWord;
+    Fpux->ErrorOffset = Fpu->ErrorOffset;
+    Fpux->ErrorSelector = (USHORT)Fpu->ErrorSelector;
+    Fpux->ErrorOpcode = (USHORT)(Fpu->ErrorSelector >> 16);
+    Fpux->DataOffset = Fpu->DataOffset;
+    Fpux->DataSelector = (USHORT)Fpu->DataSelector;
+    Fpux->TagWord = 0;
+    for (i = 0; i < 8; i++)
+    {
+        if (((Fpu->TagWord >> (i * 2)) & 3) != 3)
+            Fpux->TagWord |= 1 << i;
+        RtlCopyMemory(&Fpux->FloatRegisters[i], &Fpu->RegisterArea[10 * i], 10);
+    }
+}
+
+/* The native flags for the parts a 32-bit CONTEXT's flags select */
+ULONG
+Wow64ContextFlags32To64(ULONG ContextFlags32)
+{
+    ULONG ContextFlags = CONTEXT_AMD64;
+
+    if ((ContextFlags32 & WOW64_CONTEXT_CONTROL) == WOW64_CONTEXT_CONTROL)
+        ContextFlags |= CONTEXT_CONTROL;
+    if ((ContextFlags32 & WOW64_CONTEXT_INTEGER) == WOW64_CONTEXT_INTEGER)
+        ContextFlags |= CONTEXT_INTEGER;
+    if ((ContextFlags32 & WOW64_CONTEXT_SEGMENTS) == WOW64_CONTEXT_SEGMENTS)
+        ContextFlags |= CONTEXT_SEGMENTS;
+    if ((ContextFlags32 & WOW64_CONTEXT_DEBUG_REGISTERS) == WOW64_CONTEXT_DEBUG_REGISTERS)
+        ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+    /* The native FXSAVE area holds both the x87 and the SSE state */
+    if (((ContextFlags32 & WOW64_CONTEXT_FLOATING_POINT) == WOW64_CONTEXT_FLOATING_POINT) ||
+        ((ContextFlags32 & WOW64_CONTEXT_EXTENDED_REGISTERS) == WOW64_CONTEXT_EXTENDED_REGISTERS))
+    {
+        ContextFlags |= CONTEXT_FLOATING_POINT;
+    }
+
+    return ContextFlags;
+}
+
+/*
+ * Build the native context of 32-bit code from its 32-bit context. Only
+ * the floating point state the 32-bit context carries is taken over: the
+ * FXSAVE image of WOW64_CONTEXT_EXTENDED_REGISTERS has the layout of the
+ * native XMM_SAVE_AREA32, the FSAVE image of WOW64_CONTEXT_FLOATING_POINT
+ * alone only gives the x87 part. Without either, the native context has no
+ * CONTEXT_FLOATING_POINT, so NtContinue and the like leave the thread's
+ * state alone; its FltSave still holds the initial state for those that
+ * take a whole context.
+ */
 VOID
 Wow64CopyContext32To64(PCONTEXT pContext,
                        PI386_CONTEXT pContext32)
 {
+    ULONG ContextFlags32 = pContext32->ContextFlags;
+
     RtlZeroMemory(pContext, sizeof(*pContext));
-    pContext->ContextFlags = CONTEXT_FULL;
+    pContext->ContextFlags = CONTEXT_AMD64 | CONTEXT_CONTROL | CONTEXT_INTEGER;
     pContext->Rip = pContext32->Eip;
     pContext->Rax = pContext32->Eax;
     pContext->Rbx = pContext32->Ebx;
@@ -76,9 +176,27 @@ Wow64CopyContext32To64(PCONTEXT pContext,
     pContext->SegFs = 0x53;
     pContext->SegGs = pContext32->SegGs;
     pContext->SegSs = 0x2B;
+
+    /* The initial state: x87 extended precision with all exceptions masked */
+    pContext->FltSave.ControlWord = 0x27F;
+    pContext->FltSave.MxCsr = INITIAL_MXCSR;
+    pContext->FltSave.MxCsr_Mask = 0xFFFF;
     pContext->MxCsr = INITIAL_MXCSR;
 
-    if (pContext32->ContextFlags & WOW64_CONTEXT_DEBUG_REGISTERS)
+    C_ASSERT(sizeof(pContext32->ExtendedRegisters) == sizeof(pContext->FltSave));
+    if ((ContextFlags32 & WOW64_CONTEXT_EXTENDED_REGISTERS) == WOW64_CONTEXT_EXTENDED_REGISTERS)
+    {
+        RtlCopyMemory(&pContext->FltSave, pContext32->ExtendedRegisters, sizeof(pContext->FltSave));
+        pContext->MxCsr = pContext->FltSave.MxCsr;
+        pContext->ContextFlags |= CONTEXT_FLOATING_POINT;
+    }
+    else if ((ContextFlags32 & WOW64_CONTEXT_FLOATING_POINT) == WOW64_CONTEXT_FLOATING_POINT)
+    {
+        Wow64FsaveToFxsave(&pContext->FltSave, &pContext32->FloatSave);
+        pContext->ContextFlags |= CONTEXT_FLOATING_POINT;
+    }
+
+    if ((ContextFlags32 & WOW64_CONTEXT_DEBUG_REGISTERS) == WOW64_CONTEXT_DEBUG_REGISTERS)
     {
         pContext->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
         pContext->Dr0 = pContext32->Dr0;
@@ -90,10 +208,13 @@ Wow64CopyContext32To64(PCONTEXT pContext,
     }
 }
 
+/* The 32-bit context of 32-bit code from its native context */
 VOID
 Wow64CopyContext64To32(PI386_CONTEXT pContext32,
                        PCONTEXT pContext)
 {
+    ULONG ContextFlags32 = WOW64_CONTEXT_i386;
+
     pContext32->Eip = pContext->Rip;
     pContext32->Eax = pContext->Rax;
     pContext32->Ebx = pContext->Rbx;
@@ -110,9 +231,26 @@ Wow64CopyContext64To32(PI386_CONTEXT pContext32,
     pContext32->SegGs = pContext->SegGs;
     pContext32->SegSs = pContext->SegSs;
     pContext32->EFlags = pContext->EFlags;
-    pContext32->ContextFlags = 0x10000 | (pContext->ContextFlags & 0xffff);
 
-    if (pContext->ContextFlags & CONTEXT_DEBUG_REGISTERS)
+    if ((pContext->ContextFlags & CONTEXT_CONTROL) == CONTEXT_CONTROL)
+        ContextFlags32 |= WOW64_CONTEXT_CONTROL;
+    if ((pContext->ContextFlags & CONTEXT_INTEGER) == CONTEXT_INTEGER)
+        ContextFlags32 |= WOW64_CONTEXT_INTEGER;
+    if ((pContext->ContextFlags & CONTEXT_SEGMENTS) == CONTEXT_SEGMENTS)
+        ContextFlags32 |= WOW64_CONTEXT_SEGMENTS;
+
+    if ((pContext->ContextFlags & CONTEXT_FLOATING_POINT) == CONTEXT_FLOATING_POINT)
+    {
+        XMM_SAVE_AREA32 FltSave = pContext->FltSave;
+
+        /* The native context keeps MXCSR outside of its FXSAVE area too */
+        FltSave.MxCsr = pContext->MxCsr;
+        RtlCopyMemory(pContext32->ExtendedRegisters, &FltSave, sizeof(pContext32->ExtendedRegisters));
+        Wow64FxsaveToFsave(&pContext32->FloatSave, &FltSave);
+        ContextFlags32 |= WOW64_CONTEXT_FLOATING_POINT | WOW64_CONTEXT_EXTENDED_REGISTERS;
+    }
+
+    if ((pContext->ContextFlags & CONTEXT_DEBUG_REGISTERS) == CONTEXT_DEBUG_REGISTERS)
     {
         pContext32->Dr0 = pContext->Dr0;
         pContext32->Dr1 = pContext->Dr1;
@@ -120,7 +258,10 @@ Wow64CopyContext64To32(PI386_CONTEXT pContext32,
         pContext32->Dr3 = pContext->Dr3;
         pContext32->Dr6 = pContext->Dr6;
         pContext32->Dr7 = pContext->Dr7;
+        ContextFlags32 |= WOW64_CONTEXT_DEBUG_REGISTERS;
     }
+
+    pContext32->ContextFlags = ContextFlags32;
 }
 
 /* From wine/dlls/ntdll/unix/env.c */
@@ -1059,20 +1200,39 @@ wow64_NtGetContextThread(UINT *pArgs)
     PI386_CONTEXT pContext32;
     NTSTATUS Status;
     
+    ULONG ContextFlags32;
+
     HANDLE hThread = get_handle(&pArgs);
     pContext32 = get_ptr(&pArgs);
-    
-    Context64.ContextFlags = CONTEXT_AMD64 | (pContext32->ContextFlags & 0xFFFF);
-    
+
+    ContextFlags32 = pContext32->ContextFlags;
+    RtlZeroMemory(&Context64, sizeof(Context64));
+    Context64.ContextFlags = Wow64ContextFlags32To64(ContextFlags32);
+
     Status = NtGetContextThread(hThread, &Context64);
     if (!NT_SUCCESS(Status))
     {
         return Status;
     }
-    
+
     Wow64CopyContext64To32(pContext32, &Context64);
-    pContext32->ContextFlags &= 0xFFFF;
-    pContext32->ContextFlags |= 0x10000;
+    /* The caller gets the parts it asked for */
+    pContext32->ContextFlags = ContextFlags32;
+    return STATUS_SUCCESS;
+}
+
+/* The checks a set information call makes on its buffer, in their order */
+static
+NTSTATUS
+Wow64CheckSetBuffer(PVOID Information,
+                    ULONG Length,
+                    ULONG ExpectedLength,
+                    ULONG Alignment)
+{
+    if (Length != ExpectedLength)
+        return STATUS_INFO_LENGTH_MISMATCH;
+    if ((ULONG_PTR)Information & (Alignment - 1))
+        return STATUS_DATATYPE_MISALIGNMENT;
     return STATUS_SUCCESS;
 }
 

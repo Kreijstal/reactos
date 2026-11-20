@@ -57,14 +57,6 @@ wow64_NtRaiseException(UINT* pArgs)
        to the debugger and the exception port, as for a native process. */
     Wow64CopyContext32To64(&Context, pContext32);
 
-    /* The guest context only carries floating point state if it says so,
-       don't let the zeroed native one load over the thread's */
-    if (!(pContext32->ContextFlags & (WOW64_CONTEXT_FLOATING_POINT & ~WOW64_CONTEXT_i386)) &&
-        !(pContext32->ContextFlags & (WOW64_CONTEXT_EXTENDED_REGISTERS & ~WOW64_CONTEXT_i386)))
-    {
-        Context.ContextFlags &= ~(CONTEXT_FLOATING_POINT & ~CONTEXT_AMD64);
-    }
-
     if (!FirstChance)
     {
         DPRINT1("WOW64: unhandled 32-bit exception %08lx at %08lx\n",
