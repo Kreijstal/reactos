@@ -574,7 +574,8 @@ NtfsLogCheckpointLocked(PNTFS_LOG_WRITER Writer)
     /* No record is logged until the checkpoint ends; a write issued from
      * here on stays in the table. */
     Capacity = Writer->DirtyCount + 64;
-    Pages = ExAllocatePoolWithTag(PagedPool, Capacity * sizeof(ULONGLONG), TAG_NTFS);
+    /* Filled under PendingLock, at DISPATCH_LEVEL */
+    Pages = ExAllocatePoolWithTag(NonPagedPool, Capacity * sizeof(ULONGLONG), TAG_NTFS);
     KeAcquireSpinLock(&Writer->PendingLock, &OldIrql);
     FullFlushLsn = Writer->FullFlushLsn;
     Full = FullFlushLsn != 0 || Pages == NULL;
