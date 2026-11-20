@@ -14,6 +14,7 @@
 EXTERN KiDispatchException:PROC
 EXTERN KeBugCheckWithTf:PROC
 EXTERN MmAccessFault:PROC
+EXTERN KiPageFaultIrqlNotLessOrEqual:PROC
 EXTERN KiSystemFatalException:PROC
 EXTERN KiNpxNotAvailableFaultHandler:PROC
 EXTERN KiGeneralProtectionFaultHandler:PROC
@@ -474,31 +475,13 @@ FUNC KiPageFault
 
 IntsDisabled:
 
-    /* Save current IRQL from cr8, lower to APC_LEVEL for page fault handling.
-     * Working set locks use KeEnterGuardedRegion which requires IRQL <= APC_LEVEL.
-     * Only lower if currently above APC_LEVEL.
-     * Push 16 bytes to maintain stack alignment for the call. */
-    mov rax, cr8
-    push rax
-    sub rsp, 8
-    cmp rax, APC_LEVEL
-    jbe .LIrqlOk
-    mov rax, APC_LEVEL
-    mov cr8, rax
-.LIrqlOk:
-
-    /* Call page fault handler */
+    /* Call page fault handler at the IRQL of the fault */
     mov ecx, [rbp + KTRAP_FRAME_ErrorCode] // FaultCode
     // rdx == Address
     mov r8b, [rbp + KTRAP_FRAME_SegCs] // Mode
     and r8b, 1
     mov r9, rbp // TrapInformation
     call MmAccessFault
-
-    /* Restore previous IRQL */
-    add rsp, 8
-    pop rcx
-    mov cr8, rcx
 
     /* Check for success */
     test eax, eax
@@ -510,6 +493,15 @@ IntsDisabled:
     jmp PageFaultReturn
 
 PageFaultError:
+
+    /* A fault that could not be resolved at this IRQL is fatal */
+    cmp eax, (STATUS_IN_PAGE_ERROR OR HEX(10000000))
+    jne PageFaultDispatch
+    mov rcx, rbp
+    call KiPageFaultIrqlNotLessOrEqual
+    int 3
+
+PageFaultDispatch:
 
     /* Set parameter 1 to write/execute flag.
        See https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-exception_record */

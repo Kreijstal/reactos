@@ -1386,6 +1386,17 @@ KiTrap0EHandler(IN PKTRAP_FRAME TrapFrame)
         KiEoiHelper(TrapFrame);
     }
 
+    /* A fault that could not be resolved at this IRQL is fatal */
+    if (Status == (STATUS_IN_PAGE_ERROR | 0x10000000))
+    {
+        KeBugCheckWithTf(IRQL_NOT_LESS_OR_EQUAL,
+                         Cr2,
+                         KeGetCurrentIrql(),
+                         MI_IS_WRITE_ACCESS(TrapFrame->ErrCode),
+                         TrapFrame->Eip,
+                         TrapFrame);
+    }
+
     /* Check for syscall fault */
 #if 0
     if ((TrapFrame->Eip == (ULONG_PTR)CopyParams) ||

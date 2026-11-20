@@ -760,6 +760,32 @@ KiStackFaultHandler(
     KiSystemFatalException(EXCEPTION_STACK_FAULT, TrapFrame);
 }
 
+/*
+ * The page fault handler could not resolve a fault at the current IRQL
+ * (a not-present page touched above APC_LEVEL). Nothing can wait or take
+ * the memory manager's locks here, so stop the system the way Windows does.
+ */
+DECLSPEC_NORETURN
+VOID
+NTAPI
+KiPageFaultIrqlNotLessOrEqual(
+    _In_ PKTRAP_FRAME TrapFrame)
+{
+    ULONG Access;
+
+    /* Bit 0: write, bit 3: execute */
+    Access = (TrapFrame->ErrorCode >> 1) & 1;
+    if (TrapFrame->ErrorCode & 0x10)
+        Access |= 8;
+
+    KeBugCheckWithTf(IRQL_NOT_LESS_OR_EQUAL,
+                     TrapFrame->FaultAddress,
+                     KeGetCurrentIrql(),
+                     Access,
+                     TrapFrame->Rip,
+                     TrapFrame);
+}
+
 NTSTATUS
 NTAPI
 KiXmmExceptionHandler(

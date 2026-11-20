@@ -351,6 +351,17 @@ MmAccessFaultEx(IN ULONG FaultCode,
 #endif
     }
 
+    /*
+     * Above APC_LEVEL nothing below may run: the VAD lookups take the working
+     * set push locks and the RosMm paths wait. Only a fault on an already
+     * valid PTE can be resolved there; MmArmAccessFault checks that without
+     * taking any lock and otherwise tells the trap handler to bugcheck.
+     */
+    if (KeGetCurrentIrql() > APC_LEVEL)
+    {
+        return MmArmAccessFault(FaultCode, Address, Mode, TrapInformation);
+    }
+
     MiUnlockWorkingSetForFault(&FaultWsState);
 
     /* Handle shared user page / page table, which don't have a VAD / MemoryArea */
