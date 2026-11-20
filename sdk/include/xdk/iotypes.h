@@ -7747,11 +7747,11 @@ typedef enum _ACPI_REG_TYPE {
     MaxRegType
 } ACPI_REG_TYPE, *PACPI_REG_TYPE;
 
-typedef USHORT (*PREAD_ACPI_REGISTER) (
+typedef USHORT (NTAPI *PREAD_ACPI_REGISTER) (
   _In_ ACPI_REG_TYPE AcpiReg,
   _In_ ULONG         Register);
 
-typedef VOID (*PWRITE_ACPI_REGISTER) (
+typedef VOID (NTAPI *PWRITE_ACPI_REGISTER) (
   _In_ ACPI_REG_TYPE AcpiReg,
   _In_ ULONG         Register,
   _In_ USHORT        Value
@@ -7767,7 +7767,7 @@ typedef struct _ACPI_REGS_INTERFACE_STANDARD {
     PWRITE_ACPI_REGISTER WriteAcpiRegister;
 } ACPI_REGS_INTERFACE_STANDARD, *PACPI_REGS_INTERFACE_STANDARD;
 
-typedef NTSTATUS (*PHAL_QUERY_ALLOCATE_PORT_RANGE) (
+typedef NTSTATUS (NTAPI *PHAL_QUERY_ALLOCATE_PORT_RANGE) (
   _In_ BOOLEAN IsSparse,
   _In_ BOOLEAN PrimaryIsMmio,
   _In_opt_ PVOID VirtBaseAddr,
@@ -7776,7 +7776,7 @@ typedef NTSTATUS (*PHAL_QUERY_ALLOCATE_PORT_RANGE) (
   _Out_ PUSHORT NewRangeId
   );
 
-typedef VOID (*PHAL_FREE_PORT_RANGE)(
+typedef VOID (NTAPI *PHAL_FREE_PORT_RANGE)(
     _In_ USHORT RangeId
     );
 
