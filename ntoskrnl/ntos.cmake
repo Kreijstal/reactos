@@ -265,6 +265,7 @@ list(APPEND SOURCE
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ob/obsdcach.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ob/obsecure.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ob/obwait.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/po/devidle.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/po/events.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/po/idle.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/po/poshtdwn.c

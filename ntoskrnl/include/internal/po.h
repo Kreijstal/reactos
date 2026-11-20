@@ -266,6 +266,9 @@ typedef struct  _DEVICE_OBJECT_POWER_EXTENSION
     LIST_ENTRY NotifyTargetList;
     POWER_CHANNEL_SUMMARY PowerChannelSummary;
     LIST_ENTRY Volume;
+    /* Idle detection: the IRP of this idle period is out, or the scan is about to send it */
+    BOOLEAN IdleRequested;
+    BOOLEAN IdlePending;
 } DEVICE_OBJECT_POWER_EXTENSION, *PDEVICE_OBJECT_POWER_EXTENSION;
 
 typedef struct _POP_SHUTDOWN_WAIT_ENTRY
@@ -373,8 +376,48 @@ PoVolumeDevice(
 
 VOID
 NTAPI
-PoRemoveVolumeDevice(
-    IN PDEVICE_OBJECT DeviceObject);
+PoRunDownDeviceObject(
+    _In_ PDEVICE_OBJECT DeviceObject);
+
+VOID
+NTAPI
+PoFreeDeviceObjectPower(
+    _In_ PDEVICE_OBJECT DeviceObject);
+
+PDEVICE_OBJECT_POWER_EXTENSION
+NTAPI
+PopGetDope(
+    _In_ PDEVICE_OBJECT DeviceObject);
+
+#if (NTDDI_VERSION < NTDDI_VISTA)
+/* Exported in every configuration; wdm.h declares it from Vista on */
+NTSTATUS
+NTAPI
+PoRegisterPowerSettingCallback(
+    _In_opt_ PDEVICE_OBJECT DeviceObject,
+    _In_ LPCGUID SettingGuid,
+    _In_ PPOWER_SETTING_CALLBACK Callback,
+    _In_opt_ PVOID Context,
+    _Outptr_opt_ PVOID *Handle);
+#endif
+
+//
+// Device idle detection
+//
+CODE_SEG("INIT")
+VOID
+NTAPI
+PopInitializeIdleDetection(VOID);
+
+CODE_SEG("INIT")
+VOID
+NTAPI
+PopStartIdleDetection(VOID);
+
+VOID
+NTAPI
+PopRemoveIdleDevice(
+    _In_ PDEVICE_OBJECT_POWER_EXTENSION Dope);
 
 //
 // Power State routines

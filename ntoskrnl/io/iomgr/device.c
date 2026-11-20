@@ -61,6 +61,9 @@ IopDeleteDevice(IN PVOID ObjectBody)
 
     PiPropReleaseDevice(DeviceObject);
 
+    /* Free what the power manager kept for the device */
+    PoFreeDeviceObjectPower(DeviceObject);
+
     /* Dereference the driver object, referenced in IoCreateDevice */
     if (DeviceObject->DriverObject)
         ObDereferenceObject(DeviceObject->DriverObject);
@@ -1374,7 +1377,7 @@ IoDeleteDevice(IN PDEVICE_OBJECT DeviceObject)
     }
 
     /* Unlink with the power manager */
-    if (DeviceObject->Vpb) PoRemoveVolumeDevice(DeviceObject);
+    PoRunDownDeviceObject(DeviceObject);
 
     /*
      * Set the pending delete flag and check if the device object can be

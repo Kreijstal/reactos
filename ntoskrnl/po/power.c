@@ -481,6 +481,9 @@ PoInitSystem(IN ULONG BootPhase)
         if (!NT_SUCCESS(Status))
             return FALSE;
 
+        /* Idle detection follows the power source and the disk time-out */
+        PopStartIdleDetection();
+
         /* Report power setting values to the callbacks registered so far */
         PopStartPowerSettingWorker();
         return TRUE;
@@ -519,6 +522,7 @@ PoInitSystem(IN ULONG BootPhase)
 
     /* Initialize support for dope */
     KeInitializeSpinLock(&PopDopeGlobalLock);
+    PopInitializeIdleDetection();
 
     /* Initialize support for shutdown waits and work-items */
     PopInitShutdownList();
@@ -682,20 +686,6 @@ PoCallDriver(
 
     /* Call the next driver, either directly or at PASSIVE_LEVEL */
     return PopPresentIrp(NextStack, Irp);
-}
-
-/*
- * @unimplemented
- */
-PULONG
-NTAPI
-PoRegisterDeviceForIdleDetection(IN PDEVICE_OBJECT DeviceObject,
-                                 IN ULONG ConservationIdleTime,
-                                 IN ULONG PerformanceIdleTime,
-                                 IN DEVICE_POWER_STATE State)
-{
-    UNIMPLEMENTED;
-    return NULL;
 }
 
 /*

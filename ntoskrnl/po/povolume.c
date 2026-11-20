@@ -98,48 +98,57 @@ PoVolumeDevice(IN PDEVICE_OBJECT DeviceObject)
     }
 }
 
+/* IoDeleteDevice: the power manager stops using the device */
 VOID
 NTAPI
-PoRemoveVolumeDevice(IN PDEVICE_OBJECT DeviceObject)
+PoRunDownDeviceObject(IN PDEVICE_OBJECT DeviceObject)
 {
     PDEVICE_OBJECT_POWER_EXTENSION Dope;
-    PEXTENDED_DEVOBJ_EXTENSION DeviceExtension;
-    KIRQL OldIrql;
     PAGED_CODE();
 
-    /* If the device already has the dope, return it */
-    DeviceExtension = IoGetDevObjExtension(DeviceObject);
-    if (!DeviceExtension->Dope)
+    Dope = IoGetDevObjExtension(DeviceObject)->Dope;
+    if (!Dope)
     {
         /* no dope */
         return;
     }
 
+    /* No more idle power IRPs */
+    PopRemoveIdleDevice(Dope);
+
     /* Make sure we can flush safely */
     KeAcquireGuardedMutex(&PopVolumeLock);
-
-    /* Get dope from device */
-    Dope = (PDEVICE_OBJECT_POWER_EXTENSION)DeviceExtension->Dope;
 
     if (Dope->Volume.Flink)
     {
         /* Remove from volume from list */
         RemoveEntryList(&Dope->Volume);
+        Dope->Volume.Flink = NULL;
     }
 
     /* Allow flushes to go through */
     KeReleaseGuardedMutex(&PopVolumeLock);
+}
 
-    /* Now remove dope from device object */
-    KeAcquireSpinLock(&PopDopeGlobalLock, &OldIrql);
+/*
+ * The device object goes away. The dope lives as long as the object: a
+ * driver may still touch its idle counter until it lets go of the device.
+ */
+VOID
+NTAPI
+PoFreeDeviceObjectPower(IN PDEVICE_OBJECT DeviceObject)
+{
+    PEXTENDED_DEVOBJ_EXTENSION DeviceExtension;
+    PDEVICE_OBJECT_POWER_EXTENSION Dope;
 
-    /* remove from dev obj */
+    DeviceExtension = IoGetDevObjExtension(DeviceObject);
+    Dope = DeviceExtension->Dope;
+    if (!Dope)
+        return;
+
+    ASSERT(Dope->IdleList.Flink == &Dope->IdleList);
+    ASSERT(Dope->Volume.Flink == NULL);
     DeviceExtension->Dope = NULL;
-
-    /* Release lock */
-    KeReleaseSpinLock(&PopDopeGlobalLock, OldIrql);
-
-    /* Free dope */
     ExFreePoolWithTag(Dope, TAG_PO_DOPE);
 }
 

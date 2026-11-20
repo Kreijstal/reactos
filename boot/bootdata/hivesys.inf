@@ -1527,6 +1527,14 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Calendars\Japanese\Eras","2019 05 01"
 ; clients (User\PowerSchemes\<scheme>\<subgroup>\<setting> overrides DefaultPowerSchemeValues)
 HKLM,"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes","ActivePowerScheme",0x00000000,"381b4222-f694-41f0-9685-ff5bb260df2e"
 HKLM,"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes\381b4222-f694-41f0-9685-ff5bb260df2e","FriendlyName",0x00000000,"Balanced"
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\0012ee47-9041-4b5d-9b77-535fba8b1442","FriendlyName",0x00000000,"Hard disk"
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\0012ee47-9041-4b5d-9b77-535fba8b1442\6738e2c4-e8a5-4a42-b16a-e040e769756e","FriendlyName",0x00000000,"Turn off hard disk after"
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\0012ee47-9041-4b5d-9b77-535fba8b1442\6738e2c4-e8a5-4a42-b16a-e040e769756e","ValueMin",0x00010001,0
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\0012ee47-9041-4b5d-9b77-535fba8b1442\6738e2c4-e8a5-4a42-b16a-e040e769756e","ValueMax",0x00010001,0xffffffff
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\0012ee47-9041-4b5d-9b77-535fba8b1442\6738e2c4-e8a5-4a42-b16a-e040e769756e","ValueIncrement",0x00010001,1
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\0012ee47-9041-4b5d-9b77-535fba8b1442\6738e2c4-e8a5-4a42-b16a-e040e769756e","ValueUnits",0x00000000,"Seconds"
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\0012ee47-9041-4b5d-9b77-535fba8b1442\6738e2c4-e8a5-4a42-b16a-e040e769756e\DefaultPowerSchemeValues\381b4222-f694-41f0-9685-ff5bb260df2e","ACSettingIndex",0x00010001,1200
+HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\0012ee47-9041-4b5d-9b77-535fba8b1442\6738e2c4-e8a5-4a42-b16a-e040e769756e\DefaultPowerSchemeValues\381b4222-f694-41f0-9685-ff5bb260df2e","DCSettingIndex",0x00010001,600
 HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3","FriendlyName",0x00000000,"USB settings"
 HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3\0853a681-27c8-4100-a2fd-82013e970683","FriendlyName",0x00000000,"Hub Selective Suspend Timeout"
 HKLM,"SYSTEM\CurrentControlSet\Control\Power\PowerSettings\2a737441-1930-4402-8d77-b2bebba308a3\0853a681-27c8-4100-a2fd-82013e970683","ValueMin",0x00010001,0
