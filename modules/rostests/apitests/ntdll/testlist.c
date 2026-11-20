@@ -27,6 +27,7 @@ extern void func_wcstombs(void);
 extern void func_DllLoadNotification(void);
 extern void func_LdrEnumResources(void);
 extern void func_LdrFindResource_U(void);
+extern void func_LdrInitFailure(void);
 extern void func_LdrLoadDll(void);
 extern void func_load_notifications(void);
 extern void func_NtAcceptConnectPort(void);
@@ -172,6 +173,7 @@ const struct test winetest_testlist[] =
     { "DllLoadNotification",            func_DllLoadNotification },
     { "LdrEnumResources",               func_LdrEnumResources },
     { "LdrFindResource_U",              func_LdrFindResource_U },
+    { "LdrInitFailure",                 func_LdrInitFailure },
     { "LdrLoadDll",                     func_LdrLoadDll },
     { "load_notifications",             func_load_notifications },
     { "NtAcceptConnectPort",            func_NtAcceptConnectPort },

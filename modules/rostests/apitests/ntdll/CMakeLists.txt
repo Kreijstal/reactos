@@ -39,6 +39,7 @@ list(APPEND SOURCE
     DllLoadNotification.c
     LdrEnumResources.c
     LdrFindResource_U.c
+    LdrInitFailure.c
     LdrLoadDll.c
     load_notifications.c
     locale.c
