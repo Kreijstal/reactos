@@ -95,6 +95,7 @@ list(APPEND SOURCE
     NtSetVolumeInformationFile.c
     NtStartProfile.c
     NtUnloadDriver.c
+    NtWow64VirtualMemory64.c
     NtWriteFile.c
     probelib.c
     RtlAllocateHeap.c

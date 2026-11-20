@@ -82,6 +82,7 @@ extern void func_NtSetVolumeInformationFile(void);
 extern void func_NtStartProfile(void);
 extern void func_NtSystemInformation(void);
 extern void func_NtUnloadDriver(void);
+extern void func_NtWow64VirtualMemory64(void);
 extern void func_NtWriteFile(void);
 extern void func_RtlAllocateHeap(void);
 extern void func_RtlBitmapApi(void);
@@ -226,6 +227,7 @@ const struct test winetest_testlist[] =
     { "NtStartProfile",                 func_NtStartProfile },
     { "NtSystemInformation",            func_NtSystemInformation },
     { "NtUnloadDriver",                 func_NtUnloadDriver },
+    { "NtWow64VirtualMemory64",         func_NtWow64VirtualMemory64 },
     { "NtWriteFile",                    func_NtWriteFile },
     { "RtlAllocateHeap",                func_RtlAllocateHeap },
     { "RtlBitmapApi",                   func_RtlBitmapApi },
