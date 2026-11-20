@@ -1232,8 +1232,19 @@ PiInitializeDevNode(
         return Status;
     }
 
-    /* Verify that this is not a duplicate */
+    /*
+     * Verify that this is not a duplicate. A device of that instance that
+     * is gone (its bus driver no longer reports it) and only waits for its
+     * removal is not: the bus driver may report the device again meanwhile.
+     */
     OldDeviceObject = IopGetDeviceObjectFromDeviceInstance(&InstancePathU);
+    if (OldDeviceObject != NULL &&
+        (IopGetDeviceNode(OldDeviceObject)->Flags & DNF_DEVICE_GONE))
+    {
+        DPRINT("Device instance '%wZ' replaces a removed one\n", &InstancePathU);
+        ObDereferenceObject(OldDeviceObject);
+        OldDeviceObject = NULL;
+    }
     if (OldDeviceObject != NULL)
     {
         PDEVICE_NODE OldDeviceNode = IopGetDeviceNode(OldDeviceObject);

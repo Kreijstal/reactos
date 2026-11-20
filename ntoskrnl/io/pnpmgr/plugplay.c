@@ -22,6 +22,7 @@ typedef struct _IOP_FIND_DEVICE_INSTANCE_TRAVERSE_CONTEXT
 {
     PCUNICODE_STRING InstancePath;
     PDEVICE_OBJECT DeviceObject;
+    PDEVICE_OBJECT GoneDeviceObject;
 } IOP_FIND_DEVICE_INSTANCE_TRAVERSE_CONTEXT, *PIOP_FIND_DEVICE_INSTANCE_TRAVERSE_CONTEXT;
 
 
@@ -230,6 +231,23 @@ IopFindDeviceInstanceTraverse(
     if (RtlEqualUnicodeString(&DeviceNode->InstancePath,
                               DeviceInstanceContext->InstancePath, TRUE))
     {
+        /*
+         * A device its bus driver no longer reports may still wait for its
+         * handles to be closed while the bus reports it again (a partition
+         * recreated with the same offset and length, a disk plugged in again
+         * while its volume is open): the new device node is that instance
+         * then. The old one is only found while it is the only one.
+         */
+        if (DeviceNode->Flags & DNF_DEVICE_GONE)
+        {
+            if (!DeviceInstanceContext->GoneDeviceObject)
+            {
+                ObReferenceObject(DeviceNode->PhysicalDeviceObject);
+                DeviceInstanceContext->GoneDeviceObject = DeviceNode->PhysicalDeviceObject;
+            }
+            return STATUS_SUCCESS;
+        }
+
         ObReferenceObject(DeviceNode->PhysicalDeviceObject);
         DeviceInstanceContext->DeviceObject = DeviceNode->PhysicalDeviceObject;
 
@@ -264,11 +282,17 @@ IopGetDeviceObjectFromDeviceInstance(PUNICODE_STRING DeviceInstance)
     /* Traverse the device tree to find the matching device node */
     DeviceInstanceContext.InstancePath = DeviceInstance;
     DeviceInstanceContext.DeviceObject = NULL;
+    DeviceInstanceContext.GoneDeviceObject = NULL;
     IopInitDeviceTreeTraverseContext(&Context,
                                      IopRootDeviceNode,
                                      IopFindDeviceInstanceTraverse,
                                      &DeviceInstanceContext);
     (void)IopTraverseDeviceTree(&Context);
+
+    if (!DeviceInstanceContext.DeviceObject)
+        DeviceInstanceContext.DeviceObject = DeviceInstanceContext.GoneDeviceObject;
+    else if (DeviceInstanceContext.GoneDeviceObject)
+        ObDereferenceObject(DeviceInstanceContext.GoneDeviceObject);
 
     /* In case of error or instance not found, this will still be NULL from above. */
     return DeviceInstanceContext.DeviceObject;
