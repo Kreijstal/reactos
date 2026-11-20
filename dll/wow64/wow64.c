@@ -10,6 +10,7 @@
 #include "ros_wow64_private.h"
 #include "sysfuncnum.h"
 #include <ndk/rtlfuncs.h>
+#include <pseh/pseh2.h>
 
 //#define NDEBUG
 #include <debug.h>
@@ -511,11 +512,11 @@ Wow64WinHandler(ULONG syscallNum,
     return Service(pArgs);
 }
 
+static
 NTSTATUS
-WINAPI
-Wow64SystemServiceEx(ULONG syscallNum, 
-                     ULONG* pArgs)
-{   
+Wow64DispatchSystemService(ULONG syscallNum,
+                           ULONG* pArgs)
+{
     NTSTATUS status;
 
     static const char* mapping[] = 
@@ -768,9 +769,7 @@ Wow64SystemServiceEx(ULONG syscallNum,
         {
             if (syscallNum >= 0x1000)
             {
-                status = Wow64WinHandler(syscallNum - 0x1000, pArgs);
-                Wow64FreeTempData();
-                return status;
+                return Wow64WinHandler(syscallNum - 0x1000, pArgs);
             }
             
             if (syscallNum < sizeof(mapping) / sizeof(*mapping))
@@ -785,6 +784,33 @@ Wow64SystemServiceEx(ULONG syscallNum,
             status = STATUS_NOT_IMPLEMENTED;
         }
     }
+
+    return status;
+}
+
+/*
+ * The thunks read the 32-bit arguments and write the results back to the
+ * caller's buffers from 64-bit code, and raise on values they can't
+ * convert. A system call fails with the status of such an exception, as
+ * the native system call fails with STATUS_ACCESS_VIOLATION for a bad
+ * buffer, instead of the exception going unhandled in 64-bit code.
+ */
+NTSTATUS
+WINAPI
+Wow64SystemServiceEx(ULONG syscallNum,
+                     ULONG* pArgs)
+{
+    NTSTATUS status;
+
+    _SEH2_TRY
+    {
+        status = Wow64DispatchSystemService(syscallNum, pArgs);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
 
     Wow64FreeTempData();
     return status;
@@ -1063,27 +1089,100 @@ wow64_NtSetInformationProcess(UINT* pArgs)
     PROCESSINFOCLASS Class = get_ulong(&pArgs);
     PVOID Information = get_ptr(&pArgs);
     ULONG Length = get_ulong(&pArgs);
-    
+    NTSTATUS Status;
+
     switch (Class)
     {
+        /* Same layout in 32 and 64 bits */
         case ProcessIoCounters:  /* IO_COUNTERS */
         case ProcessTimes:  /* KERNEL_USER_TIMES */
+        case ProcessBasePriority:  /* KPRIORITY */
+        case ProcessRaisePriority:  /* ULONG */
         case ProcessDefaultHardErrorMode:  /* ULONG */
+        case ProcessEnableAlignmentFaultFixup:  /* BOOLEAN */
         case ProcessPriorityClass:  /* PROCESS_PRIORITY_CLASS */
+        case ProcessWx86Information:  /* ULONG */
         case ProcessHandleCount:  /* ULONG */
-        case ProcessSessionInformation:  /* ULONG */
+        case ProcessPriorityBoost:  /* ULONG */
+        case ProcessSessionInformation:  /* PROCESS_SESSION_INFORMATION */
+        case ProcessForegroundInformation:  /* PROCESS_FOREGROUND_BACKGROUND */
+        case ProcessBreakOnTermination:  /* ULONG */
         case ProcessDebugFlags:  /* ULONG */
+        case ProcessIoPriority:  /* IO_PRIORITY_HINT */
         case ProcessExecuteFlags:  /* ULONG */
         case ProcessCookie:  /* ULONG */
         case ProcessCycleTime:  /* PROCESS_CYCLE_TIME_INFORMATION */
+        case ProcessPagePriority:  /* PAGE_PRIORITY_INFORMATION */
+        case ProcessLdtInformation:  /* PROCESS_LDT_INFORMATION */
+        case ProcessLdtSize:  /* PROCESS_LDT_SIZE */
+        case ProcessIoPortHandlers:  /* kernel mode only */
+        case ProcessWorkingSetWatch:  /* PROCESS_WS_WATCH_INFORMATION */
+        case ProcessHandleTracing:  /* PROCESS_HANDLE_TRACING_ENABLE(_EX) */
             return NtSetInformationProcess(Handle, Class, Information, Length);
+
+        /*
+         * Pointer-sized members: widen them. The 32-bit buffer is checked
+         * the way the native call checks the native one, its length first,
+         * then its alignment; a bad address faults when read, and the fault
+         * becomes the status (see Wow64SystemServiceEx).
+         */
+        case ProcessAffinityMask:  /* KAFFINITY */
+        {
+            KAFFINITY Affinity;
+
+            Status = Wow64CheckSetBuffer(Information, Length, sizeof(ULONG), sizeof(ULONG));
+            if (!NT_SUCCESS(Status))
+                return Status;
+            Affinity = *(PULONG)Information;
+            return NtSetInformationProcess(Handle, Class, &Affinity, sizeof(Affinity));
+        }
+
+        case ProcessExceptionPort:  /* HANDLE */
+        case ProcessDeviceMap:  /* PROCESS_DEVICEMAP_INFORMATION.Set: HANDLE */
+        {
+            HANDLE Value;
+
+            Status = Wow64CheckSetBuffer(Information, Length, sizeof(ULONG), sizeof(ULONG));
+            if (!NT_SUCCESS(Status))
+                return Status;
+            Value = UlongToHandle(*(PULONG)Information);
+            return NtSetInformationProcess(Handle, Class, &Value, sizeof(Value));
+        }
+
+        case ProcessAccessToken:  /* PROCESS_ACCESS_TOKEN */
+        {
+            PROCESS_ACCESS_TOKEN Token;
+
+            Status = Wow64CheckSetBuffer(Information, Length, 2 * sizeof(ULONG), sizeof(ULONG));
+            if (!NT_SUCCESS(Status))
+                return Status;
+            Token.Token = UlongToHandle(((PULONG)Information)[0]);
+            Token.Thread = UlongToHandle(((PULONG)Information)[1]);
+            return NtSetInformationProcess(Handle, Class, &Token, sizeof(Token));
+        }
+
+        case ProcessQuotaLimits:  /* QUOTA_LIMITS */
+        {
+            QUOTA_LIMITS32 *Limits32 = Information;
+            QUOTA_LIMITS Limits;
+
+            Status = Wow64CheckSetBuffer(Information, Length, sizeof(*Limits32), sizeof(ULONG));
+            if (!NT_SUCCESS(Status))
+                return Status;
+            RtlZeroMemory(&Limits, sizeof(Limits));
+            Limits.PagedPoolLimit = Limits32->PagedPoolLimit;
+            Limits.NonPagedPoolLimit = Limits32->NonPagedPoolLimit;
+            Limits.MinimumWorkingSetSize = Limits32->MinimumWorkingSetSize;
+            Limits.MaximumWorkingSetSize = Limits32->MaximumWorkingSetSize;
+            Limits.PagefileLimit = Limits32->PagefileLimit;
+            Limits.TimeLimit = Limits32->TimeLimit;
+            return NtSetInformationProcess(Handle, Class, &Limits, sizeof(Limits));
+        }
+
         default:
-            /* UNIMPLEMENTED */
-            __debugbreak();
-            return STATUS_NOT_IMPLEMENTED;
+            DPRINT1("WOW64: NtSetInformationProcess class %lu is not thunked\n", Class);
+            return STATUS_INVALID_INFO_CLASS;
     }
-    
-    return STATUS_SUCCESS;
 }
 
 

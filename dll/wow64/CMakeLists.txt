@@ -28,6 +28,7 @@ set_subsystem(wow64 console)
 
 # FIXME: force a base address below 4 GiB, this one was chosen arbitrarily
 set_image_base(wow64 0xFF000000)
+target_link_libraries(wow64 ${PSEH_LIB})
 add_importlibs(wow64 ntdll)
 
 add_cd_file(TARGET wow64 DESTINATION reactos/system32 FOR all)
