@@ -1910,18 +1910,14 @@ MiBuildPagedPool(VOID)
     }
 #elif defined(_M_AMD64)
     //
-    // Size paged pool the same way as x86 (twice the size of nonpaged pool),
-    // but bound it to the VA window dedicated to paged pool. On x64 the nonpaged
-    // pool expansion area lives in a separate, far higher region, so it cannot
-    // be used as the upper bound the way it is on x86. Leaving paged pool at the
-    // 32 MB static minimum (as happened when this whole block was x86-only) made
-    // every allocation larger than that fail outright.
+    // On x64 paged pool gets its whole VA window (128 GB) whatever the amount
+    // of RAM, as on Windows: address space is not memory, only the pages in
+    // use are backed. Sizing it after nonpaged pool (a few GB) made big
+    // contiguous users fail early: the prototype PTEs of one 2 TB
+    // pagefile-backed section (CoreCLR's W^X double mapping, in every .NET
+    // process) take 4 GB of it, and are not backed until touched.
     //
-    MmSizeOfPagedPoolInBytes = 2 * MmMaximumNonPagedPoolInBytes;
-    if (MmSizeOfPagedPoolInBytes > MI_PAGED_POOL_SIZE)
-    {
-        MmSizeOfPagedPoolInBytes = MI_PAGED_POOL_SIZE;
-    }
+    MmSizeOfPagedPoolInBytes = MI_PAGED_POOL_SIZE;
 #endif // _M_IX86
 
     //
