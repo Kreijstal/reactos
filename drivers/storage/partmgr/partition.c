@@ -189,18 +189,21 @@ PartitionHandleStartDevice(
  * Notifies MountMgr to delete all mount points
  * associated with the given volume.
  *
+ * MountMgr queries the volumes while it holds its device lock, and the
+ * partitions answer some of these queries under the layout lock of their
+ * disk: never call this with a layout lock held.
+ *
  * @note    This should belong to volmgr.sys and act on a PVOLUME_EXTENSION.
  **/
 CODE_SEG("PAGE")
 NTSTATUS
 VolumeDeleteMountPoints(
-    _In_ PPARTITION_EXTENSION PartExt)
+    _In_ PCUNICODE_STRING DeviceName)
 {
     NTSTATUS Status;
     UNICODE_STRING MountMgr;
     ULONG InputSize, OutputSize;
     LOGICAL Retry;
-    PUNICODE_STRING DeviceName;
     PDEVICE_OBJECT DeviceObject;
     PFILE_OBJECT FileObject = NULL;
     PMOUNTMGR_MOUNT_POINT InputBuffer = NULL;
@@ -216,9 +219,6 @@ VolumeDeleteMountPoints(
                                       &DeviceObject);
     if (!NT_SUCCESS(Status))
         return Status;
-
-    /* Setup the volume device name for deleting its mount points */
-    DeviceName = &PartExt->DeviceName;
 
     /* Allocate the input buffer */
     InputSize = sizeof(*InputBuffer) + DeviceName->Length;

@@ -133,7 +133,7 @@ PartitionDeleteSymlink(
 CODE_SEG("PAGE")
 NTSTATUS
 VolumeDeleteMountPoints(
-    _In_ PPARTITION_EXTENSION PartExt);
+    _In_ PCUNICODE_STRING DeviceName);
 
 CODE_SEG("PAGE")
 NTSTATUS

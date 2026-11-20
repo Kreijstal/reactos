@@ -224,12 +224,58 @@ PartMgrIsDiskSuperFloppy(
     return TRUE;
 }
 
+/* The name of a volume whose partition a layout change deleted */
+typedef struct _DELETED_VOLUME
+{
+    SINGLE_LIST_ENTRY ListEntry;
+    UNICODE_STRING DeviceName;
+} DELETED_VOLUME, *PDELETED_VOLUME;
+
+/**
+ * @brief
+ * Deletes the mount points of the volumes PartMgrUpdatePartitionDevices
+ * took off the disk, and frees the list.
+ *
+ * @note    Must be called without the partitioning lock held, see
+ *          VolumeDeleteMountPoints.
+ **/
+static
+CODE_SEG("PAGE")
+VOID
+PartMgrDeleteMountPoints(
+    _Inout_ PSINGLE_LIST_ENTRY DeletedVolumes)
+{
+    PSINGLE_LIST_ENTRY entry;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    while ((entry = PopEntryList(DeletedVolumes)) != NULL)
+    {
+        PDELETED_VOLUME volume = CONTAINING_RECORD(entry, DELETED_VOLUME, ListEntry);
+
+        status = VolumeDeleteMountPoints(&volume->DeviceName);
+        if (!NT_SUCCESS(status))
+        {
+            ERR("VolumeDeleteMountPoints(%wZ) failed with status 0x%08lx\n",
+                &volume->DeviceName, status);
+        }
+        ExFreePoolWithTag(volume, TAG_PARTMGR);
+    }
+}
+
+/**
+ * @note    Requires partitioning lock held. The volumes of the partitions
+ *          it deletes are added to DeletedVolumes: once the lock is released,
+ *          PartMgrDeleteMountPoints must delete their mount points.
+ **/
 static
 CODE_SEG("PAGE")
 VOID
 PartMgrUpdatePartitionDevices(
     _In_ PFDO_EXTENSION FdoExtension,
-    _Inout_ PDRIVE_LAYOUT_INFORMATION_EX NewLayout)
+    _Inout_ PDRIVE_LAYOUT_INFORMATION_EX NewLayout,
+    _Inout_ PSINGLE_LIST_ENTRY DeletedVolumes)
 {
     NTSTATUS status;
     PSINGLE_LIST_ENTRY curEntry, prevEntry;
@@ -313,19 +359,33 @@ PartMgrUpdatePartitionDevices(
             partExt->Attached = FALSE;
 
             /*
-             * The partition is deleted: delete its mount points (drive
-             * letter) now, from the thread that changes the layout, as
-             * Windows' disk management does before it deletes a partition.
-             * MountMgr does not delete them on its own, to keep the drive
-             * letter of a volume that only goes offline.
+             * The partition is deleted: its mount points (drive letter) are
+             * deleted from the thread that changes the layout, as Windows'
+             * disk management does before it deletes a partition, once the
+             * layout lock is released. MountMgr does not delete them on its
+             * own, to keep the drive letter of a volume that only goes
+             * offline.
              */
-            if (partExt->VolumeInterfaceName.Buffer)
+            if (partExt->VolumeInterfaceName.Buffer && partExt->DeviceName.Buffer)
             {
-                status = VolumeDeleteMountPoints(partExt);
-                if (!NT_SUCCESS(status))
+                PDELETED_VOLUME volume;
+
+                volume = ExAllocatePoolWithTag(PagedPool,
+                                               sizeof(*volume) + partExt->DeviceName.Length,
+                                               TAG_PARTMGR);
+                if (volume)
                 {
-                    ERR("VolumeDeleteMountPoints(%wZ) failed with status 0x%08lx\n",
-                        &partExt->DeviceName, status);
+                    volume->DeviceName.Buffer = (PWCHAR)(volume + 1);
+                    volume->DeviceName.Length = partExt->DeviceName.Length;
+                    volume->DeviceName.MaximumLength = partExt->DeviceName.Length;
+                    RtlCopyMemory(volume->DeviceName.Buffer,
+                                  partExt->DeviceName.Buffer,
+                                  partExt->DeviceName.Length);
+                    PushEntryList(DeletedVolumes, &volume->ListEntry);
+                }
+                else
+                {
+                    ERR("Cannot delete the mount points of %wZ\n", &partExt->DeviceName);
                 }
             }
 
@@ -769,6 +829,7 @@ FdoIoctlDiskSetDriveLayout(
     }
 
     PDRIVE_LAYOUT_INFORMATION_EX layoutEx = PartMgrConvertLayoutToExtended(layoutInfo);
+    SINGLE_LIST_ENTRY deletedVolumes = { NULL };
 
     if (layoutEx == NULL)
     {
@@ -787,7 +848,7 @@ FdoIoctlDiskSetDriveLayout(
     }
 
     // this in fact updates the bus relations
-    PartMgrUpdatePartitionDevices(FdoExtension, layoutEx);
+    PartMgrUpdatePartitionDevices(FdoExtension, layoutEx, &deletedVolumes);
 
     // write the partition table to the disk
     NTSTATUS status = IoWritePartitionTableEx(FdoExtension->LowerDevice, layoutEx);
@@ -810,6 +871,8 @@ FdoIoctlDiskSetDriveLayout(
     }
 
     PartMgrReleaseLayoutLock(FdoExtension);
+
+    PartMgrDeleteMountPoints(&deletedVolumes);
 
     IoInvalidateDeviceRelations(FdoExtension->PhysicalDiskDO, BusRelations);
 
@@ -839,6 +902,7 @@ FdoIoctlDiskSetDriveLayoutEx(
     _In_ PIRP Irp)
 {
     PDRIVE_LAYOUT_INFORMATION_EX layoutEx, layoutUser = Irp->AssociatedIrp.SystemBuffer;
+    SINGLE_LIST_ENTRY deletedVolumes = { NULL };
     NTSTATUS status;
 
     PAGED_CODE();
@@ -897,7 +961,7 @@ FdoIoctlDiskSetDriveLayoutEx(
     else
     {
         // this in fact updates the bus relations
-        PartMgrUpdatePartitionDevices(FdoExtension, layoutEx);
+        PartMgrUpdatePartitionDevices(FdoExtension, layoutEx, &deletedVolumes);
 
         // write the partition table to the disk
         status = IoWritePartitionTableEx(FdoExtension->LowerDevice, layoutEx);
@@ -924,6 +988,8 @@ FdoIoctlDiskSetDriveLayoutEx(
     }
 
     PartMgrReleaseLayoutLock(FdoExtension);
+
+    PartMgrDeleteMountPoints(&deletedVolumes);
 
     IoInvalidateDeviceRelations(FdoExtension->PhysicalDiskDO, BusRelations);
 
@@ -1293,9 +1359,10 @@ FdoHandleDeviceRelations(
         // PartMgrRefreshDiskData() calls PartMgrGetDriveLayout() inside
         // so we're sure here that it returns only the cached layout.
         PDRIVE_LAYOUT_INFORMATION_EX layoutEx;
+        SINGLE_LIST_ENTRY deletedVolumes = { NULL };
         PartMgrGetDriveLayout(FdoExtension, &layoutEx);
 
-        PartMgrUpdatePartitionDevices(FdoExtension, layoutEx);
+        PartMgrUpdatePartitionDevices(FdoExtension, layoutEx, &deletedVolumes);
 
         // now fill the DeviceRelations structure
         TRACE("Reporting %u partitions\n", FdoExtension->EnumeratedPartitionsTotal);
@@ -1311,6 +1378,7 @@ FdoHandleDeviceRelations(
         if (!deviceRelations)
         {
             PartMgrReleaseLayoutLock(FdoExtension);
+            PartMgrDeleteMountPoints(&deletedVolumes);
             Irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
             Irp->IoStatus.Information = 0;
             IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -1337,6 +1405,7 @@ FdoHandleDeviceRelations(
         ASSERT(deviceRelations->Count == FdoExtension->EnumeratedPartitionsTotal);
 
         PartMgrReleaseLayoutLock(FdoExtension);
+        PartMgrDeleteMountPoints(&deletedVolumes);
 
         Irp->IoStatus.Information = (ULONG_PTR)deviceRelations;
         Irp->IoStatus.Status = STATUS_SUCCESS;
