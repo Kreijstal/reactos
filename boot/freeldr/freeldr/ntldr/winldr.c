@@ -365,10 +365,22 @@ WinLdrLoadDeviceDriver(PLIST_ENTRY LoadOrderListHead,
         return FALSE;
     }
 
+    /*
+     * Record the full NT name of the image the way the kernel builds it for
+     * a service (IopNormalizeImagePath): a relative ImagePath lives under
+     * \SystemRoot. MmLoadSystemImage identifies an already loaded image by
+     * this name, so a later ZwLoadDriver of a boot driver (e.g. fs_rec
+     * loading the boot file system it recognized) must not load it again.
+     */
+    if (FilePath->Length && (FilePath->Buffer[0] == L'\\'))
+        RtlStringCbPrintfA(FullPath, sizeof(FullPath), "%wZ", FilePath);
+    else
+        RtlStringCbPrintfA(FullPath, sizeof(FullPath), "\\SystemRoot\\%wZ", FilePath);
+
     // Allocate a DTE for it
     Success = PeLdrAllocateDataTableEntry(LoadOrderListHead,
                                           DllName,
-                                          DllName,
+                                          FullPath,
                                           PaToVa(DriverBase),
                                           DriverDTE);
     if (!Success)
