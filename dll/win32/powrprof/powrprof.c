@@ -730,32 +730,379 @@ IsPwrSuspendAllowed(VOID)
     return IS_PWR_SUSPEND_ALLOWED(&PowerCaps);
 }
 
+/*
+ * Power schemes (Vista+). The store is the one the kernel reads,
+ * HKLM\SYSTEM\CurrentControlSet\Control\Power:
+ *   User\PowerSchemes                          ActivePowerScheme (REG_SZ GUID)
+ *   User\PowerSchemes\<scheme>                 FriendlyName, Description
+ *   User\PowerSchemes\<scheme>\<sub>\<setting> ACSettingIndex, DCSettingIndex (the scheme's own values)
+ *   PowerSettings\<sub>                        FriendlyName, Description
+ *   PowerSettings\<sub>\<setting>              FriendlyName, ValueMin/Max/Increment/Units, PossibleValues
+ *   PowerSettings\<sub>\<setting>\DefaultPowerSchemeValues\<scheme>  ACSettingIndex, DCSettingIndex
+ * GUIDs are written without braces. The kernel watches the store, so a
+ * written value of the active scheme takes effect right away.
+ */
+
+static const WCHAR szPowerKey[] = L"SYSTEM\\CurrentControlSet\\Control\\Power";
+static const WCHAR szSchemesKey[] = L"User\\PowerSchemes";
+static const WCHAR szSettingsKey[] = L"PowerSettings";
+static const WCHAR szActivePowerScheme[] = L"ActivePowerScheme";
+static const WCHAR szAcSettingIndex[] = L"ACSettingIndex";
+static const WCHAR szDcSettingIndex[] = L"DCSettingIndex";
+
+/* fea3413e-7e05-4911-9a71-700331f1c294 */
+static const GUID PowrProfNoSubgroupGuid =
+    { 0xfea3413e, 0x7e05, 0x4911, { 0x9a, 0x71, 0x70, 0x03, 0x31, 0xf1, 0xc2, 0x94 } };
+
+#define GUID_STRING_CHARS 37 /* 36 characters and the terminator */
+
+static
+VOID
+PowrProfGuidToString(
+    _In_ const GUID *Guid,
+    _Out_writes_(GUID_STRING_CHARS) PWSTR Buffer)
+{
+    swprintf(Buffer, L"%08lx-%04hx-%04hx-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             Guid->Data1, Guid->Data2, Guid->Data3,
+             Guid->Data4[0], Guid->Data4[1], Guid->Data4[2], Guid->Data4[3],
+             Guid->Data4[4], Guid->Data4[5], Guid->Data4[6], Guid->Data4[7]);
+}
+
+static
+BOOL
+PowrProfStringToGuid(
+    _In_ PCWSTR String,
+    _Out_ GUID *Guid)
+{
+    WCHAR Braced[GUID_STRING_CHARS + 2];
+    UNICODE_STRING GuidString;
+
+    if (wcslen(String) != GUID_STRING_CHARS - 1)
+        return FALSE;
+
+    swprintf(Braced, L"{%s}", String);
+    RtlInitUnicodeString(&GuidString, Braced);
+    return NT_SUCCESS(RtlGUIDFromString(&GuidString, Guid));
+}
+
+/* Opens <Power>\<Base>[\<g1>[\<g2>[\<g3>]]][\<Suffix>] */
+static
+LONG
+PowrProfOpenKey(
+    _In_ PCWSTR Base,
+    _In_opt_ const GUID *Guid1,
+    _In_opt_ const GUID *Guid2,
+    _In_opt_ const GUID *Guid3,
+    _In_opt_ PCWSTR Suffix,
+    _In_ REGSAM Access,
+    _In_ BOOL Create,
+    _Out_ PHKEY Key)
+{
+    WCHAR Path[MAX_PATH];
+    WCHAR GuidString[GUID_STRING_CHARS];
+    const GUID *Guids[3] = { Guid1, Guid2, Guid3 };
+    ULONG i;
+
+    swprintf(Path, L"%s\\%s", szPowerKey, Base);
+    for (i = 0; i < ARRAYSIZE(Guids) && Guids[i]; i++)
+    {
+        PowrProfGuidToString(Guids[i], GuidString);
+        wcscat(Path, L"\\");
+        wcscat(Path, GuidString);
+    }
+    if (Suffix)
+    {
+        wcscat(Path, L"\\");
+        wcscat(Path, Suffix);
+    }
+
+    if (Create)
+        return RegCreateKeyExW(HKEY_LOCAL_MACHINE, Path, 0, NULL, 0, Access, NULL, Key, NULL);
+    return RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, Access, Key);
+}
+
+static
+LONG
+PowrProfGetActiveScheme(
+    _Out_ GUID *Scheme)
+{
+    WCHAR Buffer[GUID_STRING_CHARS + 1];
+    DWORD Size = sizeof(Buffer) - sizeof(WCHAR), Type;
+    HKEY Key;
+    LONG Error;
+
+    Error = PowrProfOpenKey(szSchemesKey, NULL, NULL, NULL, NULL, KEY_QUERY_VALUE, FALSE, &Key);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    ZeroMemory(Buffer, sizeof(Buffer));
+    Error = RegQueryValueExW(Key, szActivePowerScheme, NULL, &Type, (PBYTE)Buffer, &Size);
+    RegCloseKey(Key);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    if (Type != REG_SZ || !PowrProfStringToGuid(Buffer, Scheme))
+        return ERROR_INVALID_DATA;
+
+    return ERROR_SUCCESS;
+}
+
+/* A setting outside every subgroup lives under NO_SUBGROUP_GUID */
+static
+const GUID *
+PowrProfSubgroup(
+    _In_opt_ const GUID *SubGroup)
+{
+    return SubGroup ? SubGroup : &PowrProfNoSubgroupGuid;
+}
+
+/* The scheme's own index, else the setting's default for that scheme */
+static
+DWORD
+PowrProfReadValueIndex(
+    _In_opt_ const GUID *Scheme,
+    _In_opt_ const GUID *SubGroup,
+    _In_opt_ const GUID *Setting,
+    _In_ PCWSTR ValueName,
+    _Out_ LPDWORD Index)
+{
+    GUID ActiveScheme;
+    HKEY Key;
+    DWORD Size, Type, Value;
+    LONG Error;
+
+    if (!Setting || !Index)
+        return ERROR_INVALID_PARAMETER;
+
+    if (!Scheme)
+    {
+        Error = PowrProfGetActiveScheme(&ActiveScheme);
+        if (Error != ERROR_SUCCESS)
+            return Error;
+        Scheme = &ActiveScheme;
+    }
+    SubGroup = PowrProfSubgroup(SubGroup);
+
+    /* The setting must exist */
+    Error = PowrProfOpenKey(szSettingsKey, SubGroup, Setting, NULL, NULL, KEY_QUERY_VALUE, FALSE, &Key);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    RegCloseKey(Key);
+
+    Error = PowrProfOpenKey(szSchemesKey, Scheme, SubGroup, Setting, NULL, KEY_QUERY_VALUE, FALSE, &Key);
+    if (Error == ERROR_SUCCESS)
+    {
+        Size = sizeof(Value);
+        Error = RegQueryValueExW(Key, ValueName, NULL, &Type, (PBYTE)&Value, &Size);
+        RegCloseKey(Key);
+        if (Error == ERROR_SUCCESS && Type == REG_DWORD && Size == sizeof(Value))
+        {
+            *Index = Value;
+            return ERROR_SUCCESS;
+        }
+    }
+
+    Error = PowrProfOpenKey(szSettingsKey, SubGroup, Setting, NULL, L"DefaultPowerSchemeValues",
+                            KEY_QUERY_VALUE, FALSE, &Key);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    /* The default of this scheme lives in a key named after it */
+    {
+        HKEY SchemeKey;
+        WCHAR SchemeString[GUID_STRING_CHARS];
+
+        PowrProfGuidToString(Scheme, SchemeString);
+        Error = RegOpenKeyExW(Key, SchemeString, 0, KEY_QUERY_VALUE, &SchemeKey);
+        RegCloseKey(Key);
+        if (Error != ERROR_SUCCESS)
+            return Error;
+
+        Size = sizeof(Value);
+        Error = RegQueryValueExW(SchemeKey, ValueName, NULL, &Type, (PBYTE)&Value, &Size);
+        RegCloseKey(SchemeKey);
+    }
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    if (Type != REG_DWORD || Size != sizeof(Value))
+        return ERROR_INVALID_DATA;
+
+    *Index = Value;
+    return ERROR_SUCCESS;
+}
+
+static
+DWORD
+PowrProfWriteValueIndex(
+    _In_ const GUID *Scheme,
+    _In_opt_ const GUID *SubGroup,
+    _In_ const GUID *Setting,
+    _In_ PCWSTR ValueName,
+    _In_ DWORD Index)
+{
+    HKEY Key;
+    LONG Error;
+
+    if (!Scheme || !Setting)
+        return ERROR_INVALID_PARAMETER;
+    SubGroup = PowrProfSubgroup(SubGroup);
+
+    /* Only existing schemes and settings take values */
+    Error = PowrProfOpenKey(szSchemesKey, Scheme, NULL, NULL, NULL, KEY_QUERY_VALUE, FALSE, &Key);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    RegCloseKey(Key);
+    Error = PowrProfOpenKey(szSettingsKey, SubGroup, Setting, NULL, NULL, KEY_QUERY_VALUE, FALSE, &Key);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    RegCloseKey(Key);
+
+    Error = PowrProfOpenKey(szSchemesKey, Scheme, SubGroup, Setting, NULL, KEY_SET_VALUE, TRUE, &Key);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    Error = RegSetValueExW(Key, ValueName, 0, REG_DWORD, (const BYTE *)&Index, sizeof(Index));
+    RegCloseKey(Key);
+    return Error;
+}
+
+/* The value of a power setting, given as a DWORD index */
+static
+DWORD
+PowrProfReadValue(
+    _In_opt_ const GUID *Scheme,
+    _In_opt_ const GUID *SubGroup,
+    _In_opt_ const GUID *Setting,
+    _In_ PCWSTR ValueName,
+    _Out_opt_ PULONG Type,
+    _Out_writes_bytes_opt_(*BufferSize) LPBYTE Buffer,
+    _Inout_opt_ LPDWORD BufferSize)
+{
+    DWORD Index, Error;
+
+    if (!BufferSize)
+        return ERROR_INVALID_PARAMETER;
+
+    Error = PowrProfReadValueIndex(Scheme, SubGroup, Setting, ValueName, &Index);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    if (Type)
+        *Type = REG_DWORD;
+
+    if (!Buffer)
+    {
+        *BufferSize = sizeof(Index);
+        return ERROR_SUCCESS;
+    }
+    if (*BufferSize < sizeof(Index))
+    {
+        *BufferSize = sizeof(Index);
+        return ERROR_MORE_DATA;
+    }
+
+    memcpy(Buffer, &Index, sizeof(Index));
+    *BufferSize = sizeof(Index);
+    return ERROR_SUCCESS;
+}
+
 DWORD WINAPI
 PowerGetActiveScheme(HKEY UserRootPowerKey, GUID **polguid)
 {
-   FIXME("(%p,%p) stub!\n", UserRootPowerKey, polguid);
-   return ERROR_CALL_NOT_IMPLEMENTED;
+    GUID Scheme;
+    LONG Error;
+
+    TRACE("(%p,%p)\n", UserRootPowerKey, polguid);
+
+    if (!polguid)
+        return ERROR_INVALID_PARAMETER;
+
+    Error = PowrProfGetActiveScheme(&Scheme);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    /* The caller frees it with LocalFree */
+    *polguid = LocalAlloc(LMEM_FIXED, sizeof(GUID));
+    if (!*polguid)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    **polguid = Scheme;
+    return ERROR_SUCCESS;
 }
 
-DWORD WINAPI PowerSetActiveScheme(HKEY UserRootPowerKey, GUID *polguid)
+DWORD WINAPI PowerSetActiveScheme(HKEY UserRootPowerKey, const GUID *polguid)
 {
-   FIXME("(%p,%s) stub!\n", UserRootPowerKey, wine_dbgstr_guid(polguid));
-   return ERROR_SUCCESS;
+    WCHAR SchemeString[GUID_STRING_CHARS];
+    HKEY Key;
+    LONG Error;
+
+    TRACE("(%p,%s)\n", UserRootPowerKey, wine_dbgstr_guid(polguid));
+
+    if (!polguid)
+        return ERROR_INVALID_PARAMETER;
+
+    /* The scheme must exist */
+    Error = PowrProfOpenKey(szSchemesKey, polguid, NULL, NULL, NULL, KEY_QUERY_VALUE, FALSE, &Key);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    RegCloseKey(Key);
+
+    Error = PowrProfOpenKey(szSchemesKey, NULL, NULL, NULL, NULL, KEY_SET_VALUE, FALSE, &Key);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    PowrProfGuidToString(polguid, SchemeString);
+    Error = RegSetValueExW(Key, szActivePowerScheme, 0, REG_SZ, (const BYTE *)SchemeString,
+                           (wcslen(SchemeString) + 1) * sizeof(WCHAR));
+    RegCloseKey(Key);
+    return Error;
 }
 
 DWORD WINAPI
 PowerReadDCValue(HKEY RootPowerKey, const GUID *Scheme, const GUID *SubGroup, const GUID *PowerSettings, PULONG Type, PUCHAR Buffer, DWORD *BufferSize)
 {
-   FIXME("(%p,%s,%s,%s,%p,%p,%p) stub!\n", RootPowerKey, debugstr_guid(Scheme), debugstr_guid(SubGroup), debugstr_guid(PowerSettings), Type, Buffer, BufferSize);
-   return ERROR_CALL_NOT_IMPLEMENTED;
+    TRACE("(%p,%s,%s,%s,%p,%p,%p)\n", RootPowerKey, debugstr_guid(Scheme), debugstr_guid(SubGroup), debugstr_guid(PowerSettings), Type, Buffer, BufferSize);
+    return PowrProfReadValue(Scheme, SubGroup, PowerSettings, szDcSettingIndex, Type, Buffer, BufferSize);
 }
 
 DWORD WINAPI PowerReadFriendlyName(HKEY RootPowerKey, const GUID *Scheme,
 	const GUID *SubGroup, const GUID *PowerSettings, UCHAR *Buffer,
 	DWORD *BufferSize)
 {
-   FIXME("(%p,%s,%s,%s,%p,%p) stub!\n", RootPowerKey, debugstr_guid(Scheme), debugstr_guid(SubGroup), debugstr_guid(PowerSettings), Buffer, BufferSize);
-   return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY Key;
+    DWORD Size, Type;
+    LONG Error;
+
+    TRACE("(%p,%s,%s,%s,%p,%p)\n", RootPowerKey, debugstr_guid(Scheme), debugstr_guid(SubGroup), debugstr_guid(PowerSettings), Buffer, BufferSize);
+
+    if (!BufferSize)
+        return ERROR_INVALID_PARAMETER;
+
+    /* The scheme's name, or the name of a subgroup or a setting */
+    if (PowerSettings)
+        Error = PowrProfOpenKey(szSettingsKey, PowrProfSubgroup(SubGroup), PowerSettings, NULL, NULL,
+                                KEY_QUERY_VALUE, FALSE, &Key);
+    else if (SubGroup)
+        Error = PowrProfOpenKey(szSettingsKey, SubGroup, NULL, NULL, NULL, KEY_QUERY_VALUE, FALSE, &Key);
+    else if (Scheme)
+        Error = PowrProfOpenKey(szSchemesKey, Scheme, NULL, NULL, NULL, KEY_QUERY_VALUE, FALSE, &Key);
+    else
+        return ERROR_INVALID_PARAMETER;
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    Size = Buffer ? *BufferSize : 0;
+    Error = RegQueryValueExW(Key, L"FriendlyName", NULL, &Type, Buffer, &Size);
+    RegCloseKey(Key);
+    if (Error == ERROR_SUCCESS && Type != REG_SZ && Type != REG_EXPAND_SZ)
+        return ERROR_INVALID_DATA;
+    if (Error == ERROR_SUCCESS || Error == ERROR_MORE_DATA)
+    {
+        *BufferSize = Size;
+        if (!Buffer)
+            return ERROR_SUCCESS;
+    }
+    return Error;
 }
 
 POWER_PLATFORM_ROLE WINAPI PowerDeterminePlatformRole(void)
@@ -770,12 +1117,91 @@ POWER_PLATFORM_ROLE WINAPI PowerDeterminePlatformRoleEx(ULONG version)
     return PlatformRoleDesktop;
 }
 
+/* The Index-th subkey of an open key whose name is a GUID */
+static
+DWORD
+PowrProfEnumGuidKey(
+    _In_ HKEY Key,
+    _In_ ULONG Index,
+    _Out_writes_bytes_opt_(*BufferSize) UCHAR *Buffer,
+    _Inout_ DWORD *BufferSize)
+{
+    WCHAR Name[GUID_STRING_CHARS + 1];
+    DWORD NameLength;
+    ULONG SubKey, Found = 0;
+    GUID Guid;
+    LONG Error;
+
+    /* Keys whose names are not GUIDs (none in a well-formed store) do not count */
+    for (SubKey = 0; ; SubKey++)
+    {
+        NameLength = ARRAYSIZE(Name);
+        Error = RegEnumKeyExW(Key, SubKey, Name, &NameLength, NULL, NULL, NULL, NULL);
+        if (Error == ERROR_MORE_DATA)
+            continue;
+        if (Error != ERROR_SUCCESS)
+            return Error;
+        if (!PowrProfStringToGuid(Name, &Guid))
+            continue;
+        if (Found++ == Index)
+            break;
+    }
+
+    if (!Buffer || *BufferSize < sizeof(GUID))
+    {
+        *BufferSize = sizeof(GUID);
+        return ERROR_MORE_DATA;
+    }
+
+    memcpy(Buffer, &Guid, sizeof(GUID));
+    *BufferSize = sizeof(GUID);
+    return ERROR_SUCCESS;
+}
+
 DWORD WINAPI PowerEnumerate(HKEY key, const GUID *scheme, const GUID *subgroup, POWER_DATA_ACCESSOR flags,
                         ULONG index, UCHAR *buffer, DWORD *buffer_size)
 {
-   FIXME("(%p,%s,%s,%d,%ld,%p,%p) stub!\n", key, debugstr_guid(scheme), debugstr_guid(subgroup),
-                flags, index, buffer, buffer_size);
-   return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY Key;
+    LONG Error;
+
+    TRACE("(%p,%s,%s,%d,%ld,%p,%p)\n", key, debugstr_guid(scheme), debugstr_guid(subgroup),
+          flags, index, buffer, buffer_size);
+
+    if (!buffer_size)
+        return ERROR_INVALID_PARAMETER;
+
+    switch (flags)
+    {
+        case ACCESS_SCHEME:
+            Error = PowrProfOpenKey(szSchemesKey, NULL, NULL, NULL, NULL,
+                                    KEY_ENUMERATE_SUB_KEYS, FALSE, &Key);
+            break;
+
+        /* Every subgroup and setting the store defines applies to every scheme */
+        case ACCESS_SUBGROUP:
+            if (!scheme)
+                return ERROR_INVALID_PARAMETER;
+            Error = PowrProfOpenKey(szSettingsKey, NULL, NULL, NULL, NULL,
+                                    KEY_ENUMERATE_SUB_KEYS, FALSE, &Key);
+            break;
+
+        case ACCESS_INDIVIDUAL_SETTING:
+            if (!scheme)
+                return ERROR_INVALID_PARAMETER;
+            Error = PowrProfOpenKey(szSettingsKey, PowrProfSubgroup(subgroup), NULL, NULL, NULL,
+                                    KEY_ENUMERATE_SUB_KEYS, FALSE, &Key);
+            break;
+
+        default:
+            FIXME("Unsupported access flags %d\n", flags);
+            return ERROR_INVALID_PARAMETER;
+    }
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    Error = PowrProfEnumGuidKey(Key, index, buffer, buffer_size);
+    RegCloseKey(Key);
+    return Error;
 }
 
 DWORD WINAPI PowerRegisterSuspendResumeNotification(DWORD flags, HANDLE recipient, PHPOWERNOTIFY handle)
@@ -806,8 +1232,8 @@ DWORD WINAPI PowerSettingUnregisterNotification(HPOWERNOTIFY handle)
 
 DWORD WINAPI PowerWriteACValueIndex(HKEY key, const GUID *scheme, const GUID *subgroup, const GUID *setting, DWORD index)
 {
-   FIXME("(%p,%s,%s,%s,0x%08lx) stub!\n", key, debugstr_guid(scheme), debugstr_guid(subgroup), debugstr_guid(setting), index);
-   return ERROR_SUCCESS;
+    TRACE("(%p,%s,%s,%s,0x%08lx)\n", key, debugstr_guid(scheme), debugstr_guid(subgroup), debugstr_guid(setting), index);
+    return PowrProfWriteValueIndex(scheme, subgroup, setting, szAcSettingIndex, index);
 }
 
 DWORD WINAPI PowerWriteDCValueIndex(
@@ -818,8 +1244,8 @@ DWORD WINAPI PowerWriteDCValueIndex(
    DWORD      index
 )
 {
-   FIXME("(%p,%s,%s,%s,0x%08lx) stub!\n", key, debugstr_guid(scheme), debugstr_guid(subgroup), debugstr_guid(setting), index);
-   return ERROR_SUCCESS;
+    TRACE("(%p,%s,%s,%s,0x%08lx)\n", key, debugstr_guid(scheme), debugstr_guid(subgroup), debugstr_guid(setting), index);
+    return PowrProfWriteValueIndex(scheme, subgroup, setting, szDcSettingIndex, index);
 }
 
 DWORD WINAPI PowerReadACValueIndex(
@@ -830,8 +1256,8 @@ DWORD WINAPI PowerReadACValueIndex(
    LPDWORD    AcValueIndex
 )
 {
-    FIXME("(%p,%s,%s,%s,0x%08lx) stub!\n", key, debugstr_guid(scheme), debugstr_guid(subgroup), debugstr_guid(setting));
-    return ERROR_SUCCESS;
+    TRACE("(%p,%s,%s,%s,%p)\n", key, debugstr_guid(scheme), debugstr_guid(subgroup), debugstr_guid(setting), AcValueIndex);
+    return PowrProfReadValueIndex(scheme, subgroup, setting, szAcSettingIndex, AcValueIndex);
 }
 
 DWORD WINAPI PowerReadDCValueIndex(
@@ -839,18 +1265,18 @@ DWORD WINAPI PowerReadDCValueIndex(
     const GUID *scheme,
     const GUID *subgroup,
     const GUID *setting,
-    LPDWORD    DcValuetIndex
+    LPDWORD    DcValueIndex
 )
 {
-    FIXME("(%p,%s,%s,%s,0x%08lx) stub!\n", key, debugstr_guid(scheme), debugstr_guid(subgroup), debugstr_guid(setting));
-    return ERROR_SUCCESS;
+    TRACE("(%p,%s,%s,%s,%p)\n", key, debugstr_guid(scheme), debugstr_guid(subgroup), debugstr_guid(setting), DcValueIndex);
+    return PowrProfReadValueIndex(scheme, subgroup, setting, szDcSettingIndex, DcValueIndex);
 }
 
 DWORD WINAPI
 PowerReadACValue(HKEY RootPowerKey, const GUID *Scheme, const GUID *SubGroup, const GUID *PowerSettings, PULONG Type, PUCHAR Buffer, DWORD *BufferSize)
 {
-   FIXME("(%p,%s,%s,%s,%p,%p,%p) stub!\n", RootPowerKey, debugstr_guid(Scheme), debugstr_guid(SubGroup), debugstr_guid(PowerSettings), Type, Buffer, BufferSize);
-   return ERROR_CALL_NOT_IMPLEMENTED;
+    TRACE("(%p,%s,%s,%s,%p,%p,%p)\n", RootPowerKey, debugstr_guid(Scheme), debugstr_guid(SubGroup), debugstr_guid(PowerSettings), Type, Buffer, BufferSize);
+    return PowrProfReadValue(Scheme, SubGroup, PowerSettings, szAcSettingIndex, Type, Buffer, BufferSize);
 }
 
 BOOLEAN WINAPI
