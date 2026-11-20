@@ -97,6 +97,9 @@ NTSTATUS LdrPerformRelocations(PIMAGE_NT_HEADERS NTHeaders, PVOID ImageBase);
 NTSTATUS NTAPI RtlpInitializeActCtx(PVOID* pOldShimData);
 extern BOOLEAN RtlpUse16ByteSLists;
 
+/* Set once LdrpInitializeProcess has set up the NLS tables */
+static BOOLEAN LdrpNlsInitialized;
+
 #ifdef _M_AMD64
 extern ULONG NTAPI RtlGetCurrentDirectory_U_RtlpMsysDecoy(ULONG MaximumLength, PWSTR Buffer);
 VOID (*LdrpWow64LdrpInitialize)(PVOID) = NULL;
@@ -2246,6 +2249,7 @@ LdrpInitializeProcess(IN PCONTEXT Context,
 
     /* Reset NLS Translations */
     RtlResetRtlTranslations(&NlsTable);
+    LdrpNlsInitialized = TRUE;
 
     /* Get the Image Config Directory */
     LoadConfig = RtlImageDirectoryEntryToData(Peb->ImageBaseAddress,
@@ -2985,9 +2989,18 @@ LdrpInitFailure(NTSTATUS Status)
     ULONG Response;
     PPEB Peb = NtCurrentPeb();
 
-    /* Print a debug message */
-    DPRINT1("LDR: Process initialization failure for %wZ; NTSTATUS = %08lx\n",
-            &Peb->ProcessParameters->ImagePathName, Status);
+    /* Print a debug message. Printing the image name (%wZ) converts it with
+       the NLS tables, so it has to wait until they are set up; the process
+       parameters are normalized by then too. */
+    if (LdrpNlsInitialized && Peb->ProcessParameters)
+    {
+        DPRINT1("LDR: Process initialization failure for %wZ; NTSTATUS = %08lx\n",
+                &Peb->ProcessParameters->ImagePathName, Status);
+    }
+    else
+    {
+        DPRINT1("LDR: Early process initialization failure; NTSTATUS = %08lx\n", Status);
+    }
 
     /* Raise a hard error */
     if (!LdrpFatalHardErrorCount)
