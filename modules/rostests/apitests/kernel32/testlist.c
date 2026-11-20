@@ -50,6 +50,8 @@ extern void func_Pipes(void);
 extern void func_PrivateNamespace(void);
 extern void func_PrivMoveFileIdentityW(void);
 extern void func_QueueUserAPC(void);
+extern void func_ScsiAdapter(void);
+extern void func_ScsiConcurrentInquiry(void);
 extern void func_SetComputerNameExW(void);
 extern void func_SetConsoleWindowInfo(void);
 extern void func_SetCurrentDirectory(void);
@@ -117,6 +119,8 @@ const struct test winetest_testlist[] =
     { "PrivateNamespace",            func_PrivateNamespace },
     { "PrivMoveFileIdentityW",       func_PrivMoveFileIdentityW },
     { "QueueUserAPC",                func_QueueUserAPC },
+    { "ScsiAdapter",                 func_ScsiAdapter },
+    { "ScsiConcurrentInquiry",       func_ScsiConcurrentInquiry },
     { "SetComputerNameExW",          func_SetComputerNameExW },
     { "SetConsoleWindowInfo",        func_SetConsoleWindowInfo },
     { "SetCurrentDirectory",         func_SetCurrentDirectory },

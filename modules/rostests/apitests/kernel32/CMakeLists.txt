@@ -52,6 +52,8 @@ list(APPEND SOURCE
     PrivMoveFileIdentityW.c
     QueueUserAPC.c
     ReadFile.c
+    ScsiAdapter.c
+    ScsiConcurrentInquiry.c
     SetComputerNameExW.c
     SetConsoleWindowInfo.c
     SetCurrentDirectory.c
