@@ -11,6 +11,7 @@ extern void func_CreateProcessDos(void);
 extern void func_CreateProcessWow64(void);
 extern void func_DefaultActCtx(void);
 extern void func_DeviceIoControl(void);
+extern void func_DiskLargeTransfer(void);
 extern void func_dosdev(void);
 extern void func_EnumSystemCodePages(void);
 extern void func_ExceptionFpuState(void);
@@ -81,6 +82,7 @@ const struct test winetest_testlist[] =
     { "CreateProcessWow64",          func_CreateProcessWow64 },
     { "DefaultActCtx",               func_DefaultActCtx },
     { "DeviceIoControl",             func_DeviceIoControl },
+    { "DiskLargeTransfer",           func_DiskLargeTransfer },
     { "dosdev",                      func_dosdev },
     { "EnumSystemCodePages",         func_EnumSystemCodePages },
     { "ExceptionFpuState",           func_ExceptionFpuState },

@@ -12,6 +12,7 @@ list(APPEND SOURCE
     CdRomMedia.c
     DefaultActCtx.c
     DeviceIoControl.c
+    DiskLargeTransfer.c
     dosdev.c
     EnumSystemCodePages.c
     ExceptionFpuState.c
