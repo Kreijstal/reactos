@@ -750,6 +750,11 @@ PortScheduleComingRequestsOnCompletion(
         NT_ASSERT(PdoExtension->FlowControl.OutstandingRequestCount <=
                   PdoExtension->OutstandingRequestMax);
 
+        /* It goes to the miniport, so the FDO counts it too, as for a request issued at once */
+        ++FdoExtension->FlowControl.OutstandingRequestCount;
+        NT_ASSERT(FdoExtension->FlowControl.OutstandingRequestCount <=
+                  FdoExtension->OutstandingRequestMax);
+
         /* FIXME: should be false. Allocate resource if it is determined required */
         if (RequestReference->Srb->SrbExtension == NULL)
         {
