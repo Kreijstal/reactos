@@ -2950,6 +2950,80 @@ static BOOL CNG_VerifySignature(HCRYPTPROV_LEGACY hCryptProv, DWORD dwCertEncodi
     return ret;
 }
 
+/* Verifies an RSASSA-PSS (RFC 4055/8017) signature. The hash algorithm, mask
+ * generation function and salt length come from the signature algorithm's
+ * RSASSA-PSS-params. CNG only implements MGF1 with the same hash as the
+ * message digest, which is also what RFC 4055 recommends. */
+static BOOL CNG_VerifyPssSignature(CERT_PUBLIC_KEY_INFO *pubKeyInfo, const CERT_SIGNED_CONTENT_INFO *signedCert)
+{
+    CRYPT_RSA_SSA_PSS_PARAMETERS *params;
+    BCRYPT_PSS_PADDING_INFO pad;
+    BCRYPT_KEY_HANDLE key = NULL;
+    BYTE *hash_value, *sig_value;
+    DWORD size, hash_len, sig_len;
+    PCCRYPT_OID_INFO hash_info;
+    NTSTATUS status;
+    BOOL ret;
+
+    if (strcmp(pubKeyInfo->Algorithm.pszObjId, szOID_RSA_RSA))
+    {
+        FIXME("Unsupported RSASSA-PSS public key type: %s\n", debugstr_a(pubKeyInfo->Algorithm.pszObjId));
+        SetLastError(NTE_BAD_ALGID);
+        return FALSE;
+    }
+
+    if (!CryptDecodeObjectEx(X509_ASN_ENCODING, PKCS_RSA_SSA_PSS_PARAMETERS,
+            signedCert->SignatureAlgorithm.Parameters.pbData, signedCert->SignatureAlgorithm.Parameters.cbData,
+            CRYPT_DECODE_ALLOC_FLAG, NULL, &params, &size))
+    {
+        WARN("Failed to decode RSASSA-PSS parameters: %08lx\n", GetLastError());
+        return FALSE;
+    }
+
+    hash_info = CryptFindOIDInfo(CRYPT_OID_INFO_OID_KEY, params->HashAlgorithm.pszObjId, CRYPT_HASH_ALG_OID_GROUP_ID);
+    if (!hash_info || !hash_info->pwszCNGAlgid || !hash_info->pwszCNGAlgid[0] ||
+        strcmp(params->MaskGenAlgorithm.pszObjId, szOID_RSA_MGF1) ||
+        !params->MaskGenAlgorithm.HashAlgorithm.pszObjId ||
+        strcmp(params->MaskGenAlgorithm.HashAlgorithm.pszObjId, params->HashAlgorithm.pszObjId) ||
+        params->dwTrailerField != PKCS_RSA_SSA_PSS_TRAILER_FIELD_BC)
+    {
+        FIXME("Unsupported RSASSA-PSS parameters: hash %s, mgf %s(%s), trailer %lu\n",
+              debugstr_a(params->HashAlgorithm.pszObjId), debugstr_a(params->MaskGenAlgorithm.pszObjId),
+              debugstr_a(params->MaskGenAlgorithm.HashAlgorithm.pszObjId), params->dwTrailerField);
+        LocalFree(params);
+        SetLastError(NTE_BAD_ALGID);
+        return FALSE;
+    }
+    pad.pszAlgId = hash_info->pwszCNGAlgid;
+    pad.cbSalt = params->dwSaltLength;
+    LocalFree(params);
+
+    ret = CNG_ImportPubKey(pubKeyInfo, &key);
+    if (ret)
+    {
+        ret = CNG_CalcHash(pad.pszAlgId, signedCert, &hash_value, &hash_len);
+        if (ret)
+        {
+            ret = CNG_PrepareCertSignature(pubKeyInfo, signedCert, &sig_value, &sig_len);
+            if (ret)
+            {
+                status = BCryptVerifySignature(key, &pad, hash_value, hash_len, sig_value, sig_len, BCRYPT_PAD_PSS);
+                if (status)
+                {
+                    WARN("Failed to verify RSASSA-PSS signature: %08lx\n", status);
+                    SetLastError(RtlNtStatusToDosError(status));
+                    ret = FALSE;
+                }
+                CryptMemFree(sig_value);
+            }
+            CryptMemFree(hash_value);
+        }
+        BCryptDestroyKey(key);
+    }
+
+    return ret;
+}
+
 static BOOL CRYPT_VerifyCertSignatureFromPublicKeyInfo(HCRYPTPROV_LEGACY hCryptProv, DWORD dwCertEncodingType,
     CERT_PUBLIC_KEY_INFO *pubKeyInfo, const CERT_SIGNED_CONTENT_INFO *signedCert)
 {
@@ -2962,6 +3036,8 @@ static BOOL CRYPT_VerifyCertSignatureFromPublicKeyInfo(HCRYPTPROV_LEGACY hCryptP
         return FALSE;
     }
 
+    if (info->Algid == CALG_OID_INFO_PARAMETERS && !strcmp(info->pszOID, szOID_RSA_SSA_PSS))
+        return CNG_VerifyPssSignature(pubKeyInfo, signedCert);
     if (info->Algid == CALG_OID_INFO_CNG_ONLY)
         return CNG_VerifySignature(hCryptProv, dwCertEncodingType, pubKeyInfo, signedCert, info);
     else

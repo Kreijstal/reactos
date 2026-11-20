@@ -1239,16 +1239,16 @@ static const struct OIDInfoConstructor {
     const WCHAR *pwszCNGAlgid;
     const WCHAR *pwszCNGExtraAlgid;
 } oidInfoConstructors[] = {
- { 1, szOID_OIWSEC_sha1,               CALG_SHA1,     L"sha1", NULL },
- { 1, szOID_OIWSEC_sha1,               CALG_SHA1,     L"sha", NULL },
+ { 1, szOID_OIWSEC_sha1,               CALG_SHA1,     L"sha1", NULL, BCRYPT_SHA1_ALGORITHM },
+ { 1, szOID_OIWSEC_sha1,               CALG_SHA1,     L"sha", NULL, BCRYPT_SHA1_ALGORITHM },
  { 1, szOID_OIWSEC_sha,                CALG_SHA,      L"sha", NULL },
  { 1, szOID_RSA_MD5,                   CALG_MD5,      L"md5", NULL },
  { 1, szOID_RSA_MD4,                   CALG_MD4,      L"md4", NULL },
  { 1, szOID_RSA_MD2,                   CALG_MD2,      L"md2", NULL },
  /* NOTE: Windows Vista+ uses -1 instead of CALG_SHA_* following SHA entries. */
- { 1, szOID_NIST_sha256,               CALG_SHA_256,  L"sha256", NULL },
- { 1, szOID_NIST_sha384,               CALG_SHA_384,  L"sha384", NULL },
- { 1, szOID_NIST_sha512,               CALG_SHA_512,  L"sha512", NULL },
+ { 1, szOID_NIST_sha256,               CALG_SHA_256,  L"sha256", NULL, BCRYPT_SHA256_ALGORITHM },
+ { 1, szOID_NIST_sha384,               CALG_SHA_384,  L"sha384", NULL, BCRYPT_SHA384_ALGORITHM },
+ { 1, szOID_NIST_sha512,               CALG_SHA_512,  L"sha512", NULL, BCRYPT_SHA512_ALGORITHM },
 
  { 2, szOID_OIWSEC_desCBC,             CALG_DES,      L"des", NULL },
  { 2, szOID_RSA_DES_EDE3_CBC,          CALG_3DES,     L"3des", NULL },
@@ -1281,6 +1281,8 @@ static const struct OIDInfoConstructor {
    BCRYPT_SHA384_ALGORITHM },
  { 4, szOID_RSA_SHA512RSA,             CALG_OID_INFO_CNG_ONLY, L"sha512RSA", &rsaSignBlob,
    BCRYPT_SHA512_ALGORITHM },
+ { 4, szOID_RSA_SSA_PSS,               CALG_OID_INFO_PARAMETERS, L"RSASSA-PSS", &rsaSignBlob,
+   CRYPT_OID_INFO_HASH_PARAMETERS_ALGORITHM, BCRYPT_RSA_ALGORITHM },
  { 4, szOID_RSA_MD5RSA,                CALG_MD5,      L"md5RSA", &rsaSignBlob },
  { 4, szOID_X957_SHA1DSA,              CALG_SHA1,     L"sha1DSA", &dssSignBlob },
  { 4, szOID_OIWSEC_sha1RSASign,        CALG_SHA1,     L"sha1RSA", &rsaSignBlob },

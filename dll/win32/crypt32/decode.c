@@ -6743,6 +6743,168 @@ static BOOL WINAPI CRYPT_AsnDecodeOCSPBasicResponse(DWORD dwCertEncodingType,
     return ret;
 }
 
+/* Decodes the value of an EXPLICIT context-specific tag with decodeFunc. The
+ * tagged value must fill the tag's contents exactly. */
+static BOOL CRYPT_AsnDecodeExplicitTag(InternalDecodeFunc decodeFunc,
+ const BYTE *pbEncoded, DWORD cbEncoded, DWORD dwFlags, void *pvStructInfo,
+ DWORD *pcbStructInfo, DWORD *pcbDecoded)
+{
+    BOOL ret;
+    DWORD dataLen, innerDecoded;
+
+    if ((ret = CRYPT_GetLen(pbEncoded, cbEncoded, &dataLen)))
+    {
+        BYTE lenBytes = GET_LEN_BYTES(pbEncoded[1]);
+
+        ret = decodeFunc(pbEncoded + 1 + lenBytes, dataLen, dwFlags,
+         pvStructInfo, pcbStructInfo, &innerDecoded);
+        if (ret && innerDecoded != dataLen)
+        {
+            SetLastError(CRYPT_E_ASN1_CORRUPT);
+            ret = FALSE;
+        }
+        if (ret && pcbDecoded)
+            *pcbDecoded = 1 + lenBytes + dataLen;
+    }
+    return ret;
+}
+
+static BOOL CRYPT_AsnDecodeExplicitAlgorithmId(const BYTE *pbEncoded,
+ DWORD cbEncoded, DWORD dwFlags, void *pvStructInfo, DWORD *pcbStructInfo,
+ DWORD *pcbDecoded)
+{
+    return CRYPT_AsnDecodeExplicitTag(CRYPT_AsnDecodeAlgorithmId, pbEncoded,
+     cbEncoded, dwFlags, pvStructInfo, pcbStructInfo, pcbDecoded);
+}
+
+static BOOL CRYPT_AsnDecodeMaskGenAlgorithm(const BYTE *pbEncoded,
+ DWORD cbEncoded, DWORD dwFlags, void *pvStructInfo, DWORD *pcbStructInfo,
+ DWORD *pcbDecoded)
+{
+    CRYPT_MASK_GEN_ALGORITHM *mgf = pvStructInfo;
+    struct AsnDecodeSequenceItem items[] = {
+     { ASN_OBJECTIDENTIFIER, offsetof(CRYPT_MASK_GEN_ALGORITHM, pszObjId),
+       CRYPT_AsnDecodeOidIgnoreTag, sizeof(LPSTR), FALSE, TRUE,
+       offsetof(CRYPT_MASK_GEN_ALGORITHM, pszObjId), 0 },
+     { ASN_SEQUENCEOF, offsetof(CRYPT_MASK_GEN_ALGORITHM, HashAlgorithm),
+       CRYPT_AsnDecodeAlgorithmId, sizeof(CRYPT_ALGORITHM_IDENTIFIER), TRUE,
+       TRUE, offsetof(CRYPT_MASK_GEN_ALGORITHM, HashAlgorithm.pszObjId), 0 },
+    };
+
+    return CRYPT_AsnDecodeSequence(items, ARRAY_SIZE(items), pbEncoded,
+     cbEncoded, dwFlags, NULL, pvStructInfo, pcbStructInfo, pcbDecoded,
+     mgf ? mgf->pszObjId : NULL);
+}
+
+static BOOL CRYPT_AsnDecodeExplicitMaskGenAlgorithm(const BYTE *pbEncoded,
+ DWORD cbEncoded, DWORD dwFlags, void *pvStructInfo, DWORD *pcbStructInfo,
+ DWORD *pcbDecoded)
+{
+    return CRYPT_AsnDecodeExplicitTag(CRYPT_AsnDecodeMaskGenAlgorithm,
+     pbEncoded, cbEncoded, dwFlags, pvStructInfo, pcbStructInfo, pcbDecoded);
+}
+
+static BOOL CRYPT_AsnDecodeIntTagged(const BYTE *pbEncoded, DWORD cbEncoded,
+ DWORD dwFlags, void *pvStructInfo, DWORD *pcbStructInfo, DWORD *pcbDecoded)
+{
+    if (!cbEncoded || pbEncoded[0] != ASN_INTEGER)
+    {
+        SetLastError(CRYPT_E_ASN1_BADTAG);
+        return FALSE;
+    }
+    return CRYPT_AsnDecodeIntInternal(pbEncoded, cbEncoded, dwFlags,
+     pvStructInfo, pcbStructInfo, pcbDecoded);
+}
+
+static BOOL CRYPT_AsnDecodeExplicitInt(const BYTE *pbEncoded, DWORD cbEncoded,
+ DWORD dwFlags, void *pvStructInfo, DWORD *pcbStructInfo, DWORD *pcbDecoded)
+{
+    return CRYPT_AsnDecodeExplicitTag(CRYPT_AsnDecodeIntTagged, pbEncoded,
+     cbEncoded, dwFlags, pvStructInfo, pcbStructInfo, pcbDecoded);
+}
+
+/* RFC 8017 A.2.3:
+ * RSASSA-PSS-params ::= SEQUENCE {
+ *     hashAlgorithm      [0] HashAlgorithm      DEFAULT sha1,
+ *     maskGenAlgorithm   [1] MaskGenAlgorithm   DEFAULT mgf1SHA1,
+ *     saltLength         [2] INTEGER            DEFAULT 20,
+ *     trailerField       [3] TrailerField       DEFAULT trailerFieldBC }
+ * The module uses EXPLICIT tags. Absent fields are returned with their
+ * default values filled in. */
+static BOOL WINAPI CRYPT_AsnDecodeRsaSsaPssParameters(DWORD dwCertEncodingType,
+ LPCSTR lpszStructType, const BYTE *pbEncoded, DWORD cbEncoded, DWORD dwFlags,
+ PCRYPT_DECODE_PARA pDecodePara, void *pvStructInfo, DWORD *pcbStructInfo)
+{
+    struct AsnDecodeSequenceItem items[] = {
+     { ASN_CONTEXT | ASN_CONSTRUCTOR | 0,
+       offsetof(CRYPT_RSA_SSA_PSS_PARAMETERS, HashAlgorithm),
+       CRYPT_AsnDecodeExplicitAlgorithmId, sizeof(CRYPT_ALGORITHM_IDENTIFIER),
+       TRUE, TRUE, offsetof(CRYPT_RSA_SSA_PSS_PARAMETERS, HashAlgorithm.pszObjId), 0 },
+     { ASN_CONTEXT | ASN_CONSTRUCTOR | 1,
+       offsetof(CRYPT_RSA_SSA_PSS_PARAMETERS, MaskGenAlgorithm),
+       CRYPT_AsnDecodeExplicitMaskGenAlgorithm, sizeof(CRYPT_MASK_GEN_ALGORITHM),
+       TRUE, TRUE, offsetof(CRYPT_RSA_SSA_PSS_PARAMETERS, MaskGenAlgorithm.pszObjId), 0 },
+     { ASN_CONTEXT | ASN_CONSTRUCTOR | 2,
+       offsetof(CRYPT_RSA_SSA_PSS_PARAMETERS, dwSaltLength),
+       CRYPT_AsnDecodeExplicitInt, sizeof(DWORD), TRUE, FALSE, 0, 0 },
+     { ASN_CONTEXT | ASN_CONSTRUCTOR | 3,
+       offsetof(CRYPT_RSA_SSA_PSS_PARAMETERS, dwTrailerField),
+       CRYPT_AsnDecodeExplicitInt, sizeof(DWORD), TRUE, FALSE, 0, 0 },
+    };
+    BOOL ret;
+
+    __TRY
+    {
+        ret = CRYPT_AsnDecodeSequence(items, ARRAY_SIZE(items),
+         pbEncoded, cbEncoded, dwFlags, pDecodePara, pvStructInfo,
+         pcbStructInfo, NULL, NULL);
+        if (ret && pvStructInfo)
+        {
+            CRYPT_RSA_SSA_PSS_PARAMETERS *params;
+            BYTE present = 0;
+            DWORD dataLen, offset, end;
+
+            if (dwFlags & CRYPT_DECODE_ALLOC_FLAG)
+                params = *(CRYPT_RSA_SSA_PSS_PARAMETERS **)pvStructInfo;
+            else
+                params = pvStructInfo;
+
+            /* The sequence decoded, so its items are well-formed; note
+             * which of the optional fields are present. */
+            if (CRYPT_GetLengthIndefinite(pbEncoded, cbEncoded, &dataLen))
+            {
+                offset = 1 + GET_LEN_BYTES(pbEncoded[1]);
+                end = dataLen == CMSG_INDEFINITE_LENGTH ? cbEncoded : offset + dataLen;
+                while (offset < end && pbEncoded[offset] &&
+                 CRYPT_GetLen(pbEncoded + offset, end - offset, &dataLen))
+                {
+                    if ((pbEncoded[offset] & ~3) == (ASN_CONTEXT | ASN_CONSTRUCTOR))
+                        present |= 1 << (pbEncoded[offset] & 3);
+                    offset += 1 + GET_LEN_BYTES(pbEncoded[offset + 1]) + dataLen;
+                }
+            }
+            if (!(present & (1 << 0)))
+                params->HashAlgorithm.pszObjId = (LPSTR)szOID_OIWSEC_sha1;
+            if (!(present & (1 << 1)))
+            {
+                params->MaskGenAlgorithm.pszObjId = (LPSTR)szOID_RSA_MGF1;
+                params->MaskGenAlgorithm.HashAlgorithm.pszObjId = (LPSTR)szOID_OIWSEC_sha1;
+            }
+            if (!(present & (1 << 2)))
+                params->dwSaltLength = 20;
+            if (!(present & (1 << 3)))
+                params->dwTrailerField = PKCS_RSA_SSA_PSS_TRAILER_FIELD_BC;
+        }
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        SetLastError(STATUS_ACCESS_VIOLATION);
+        ret = FALSE;
+    }
+    __ENDTRY
+    return ret;
+}
+
 static CryptDecodeObjectExFunc CRYPT_GetBuiltinDecoder(DWORD dwCertEncodingType,
  LPCSTR lpszStructType)
 {
@@ -6885,6 +7047,9 @@ static CryptDecodeObjectExFunc CRYPT_GetBuiltinDecoder(DWORD dwCertEncodingType,
         case LOWORD(X509_OBJECT_IDENTIFIER):
             decodeFunc = CRYPT_AsnDecodeObjectIdentifier;
             break;
+        case LOWORD(PKCS_RSA_SSA_PSS_PARAMETERS):
+            decodeFunc = CRYPT_AsnDecodeRsaSsaPssParameters;
+            break;
         case LOWORD(X509_ECC_SIGNATURE):
             decodeFunc = CRYPT_AsnDecodeEccSignature;
             break;
@@ -6958,6 +7123,8 @@ static CryptDecodeObjectExFunc CRYPT_GetBuiltinDecoder(DWORD dwCertEncodingType,
         decodeFunc = CRYPT_AsnDecodeCTL;
     else if (!strcmp(lpszStructType, szOID_ECC_PUBLIC_KEY))
         decodeFunc = CRYPT_AsnDecodeObjectIdentifier;
+    else if (!strcmp(lpszStructType, szOID_RSA_SSA_PSS))
+        decodeFunc = CRYPT_AsnDecodeRsaSsaPssParameters;
     return decodeFunc;
 }
 
