@@ -249,7 +249,7 @@ MmFindGap(
  * Translate a ZeroBits count/mask into the highest address a blind allocation
  * may occupy, returning FALSE for an invalid ZeroBits value.
  *
- * On x64 Windows a small ZeroBits value N (1..21) is a count: the upper
+ * On 64-bit Windows (x64 and ARM64) a small ZeroBits value N (1..21) is a count: the upper
  * (32 + N) address bits must be zero, giving a ceiling of MAXULONG_PTR >>
  * (32 + N). Values 22..31 are neither a usable count nor a mask and are
  * rejected. Values >= 32 act as a bit-mask of high zero bits (32 is the WoW64
@@ -266,7 +266,7 @@ MiZeroBitsToHighestAddress(
         return TRUE;
     }
 
-#ifdef _M_AMD64
+#ifdef _WIN64
     if (ZeroBits <= 21)
     {
         *HighestAddress = MAXULONG_PTR >> (32 + ZeroBits);
@@ -288,9 +288,7 @@ MiZeroBitsToHighestAddress(
         Highest |= Highest >> 4;
         Highest |= Highest >> 8;
         Highest |= Highest >> 16;
-#ifdef _WIN64
         Highest |= Highest >> 32;
-#endif
         *HighestAddress = Highest;
         return TRUE;
     }
