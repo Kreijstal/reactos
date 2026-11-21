@@ -121,6 +121,9 @@ TestStackWalk3(VOID)
 {
     ReturnAddresses[2] = _ReturnAddress();
     TestStackWalk4();
+    /* Also keeps the call above from becoming a tail call, which would
+     * drop this frame from the chain being walked */
+    ok_eq_pointer(_ReturnAddress(), ReturnAddresses[2]);
 }
 
 DECLSPEC_NOINLINE
@@ -130,6 +133,9 @@ TestStackWalk2(VOID)
 {
     ReturnAddresses[1] = _ReturnAddress();
     TestStackWalk3();
+    /* Also keeps the call above from becoming a tail call, which would
+     * drop this frame from the chain being walked */
+    ok_eq_pointer(_ReturnAddress(), ReturnAddresses[1]);
 }
 
 DECLSPEC_NOINLINE
@@ -139,6 +145,9 @@ TestStackWalk1(VOID)
 {
     ReturnAddresses[0] = _ReturnAddress();
     TestStackWalk2();
+    /* Also keeps the call above from becoming a tail call, which would
+     * drop this frame from the chain being walked */
+    ok_eq_pointer(_ReturnAddress(), ReturnAddresses[0]);
 }
 
 #ifdef _M_AMD64
