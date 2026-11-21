@@ -44,10 +44,24 @@ START_TEST(KeIrql)
         KeRaiseIrql(Irqls[i], &Irql2);
         ok_eq_uint(Irql2, PrevIrql);
         ok_irql(Irqls[i]);
+        /* IRQL masks interrupts by priority, never through the CPU flag */
+        ok_bool_true(KmtAreInterruptsEnabled(), "Interrupts enabled:");
         KeLowerIrql(Irql2);
         ok_irql(PrevIrql);
+        ok_bool_true(KmtAreInterruptsEnabled(), "Interrupts enabled:");
     }
     }
+
+    /* ...and lowering IRQL does not enable interrupts the caller disabled */
+    _disable();
+    KeRaiseIrql(HIGH_LEVEL, &Irql);
+    ok_bool_false(KmtAreInterruptsEnabled(), "Interrupts enabled:");
+    KeLowerIrql(DISPATCH_LEVEL);
+    ok_bool_false(KmtAreInterruptsEnabled(), "Interrupts enabled:");
+    KeLowerIrql(Irql);
+    ok_bool_false(KmtAreInterruptsEnabled(), "Interrupts enabled:");
+    _enable();
+    ok_irql(PASSIVE_LEVEL);
 
     /* raising/lowering to the current level should have no effect */
     ok_irql(PASSIVE_LEVEL);
