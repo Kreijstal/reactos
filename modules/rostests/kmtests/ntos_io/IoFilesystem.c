@@ -11,10 +11,12 @@ typedef enum
 {
     NTFS,
     FAT32,
+    CDFS,
     Unknown
 } FSType;
 
 static FSType g_Filesystem;
+static BOOLEAN g_ReadOnlyVolume;
 
 static
 NTSTATUS
@@ -131,6 +133,8 @@ TestAllInformation(VOID)
                                           FileFsAttributeInformation);
     if (NT_SUCCESS(Status))
     {
+        g_ReadOnlyVolume = BooleanFlagOn(FsAttributeInfo->FileSystemAttributes,
+                                         FILE_READ_ONLY_VOLUME);
         if (FsAttributeInfo->FileSystemNameLength >= 8 &&
             RtlCompareMemory(FsAttributeInfo->FileSystemName, L"NTFS", 8) == 8)
         {
@@ -142,6 +146,12 @@ TestAllInformation(VOID)
         {
             g_Filesystem = FAT32;
             trace("Filesystem: FAT32\n");
+        }
+        else if (FsAttributeInfo->FileSystemNameLength == 8 &&
+                 RtlCompareMemory(FsAttributeInfo->FileSystemName, L"CDFS", 8) == 8)
+        {
+            g_Filesystem = CDFS;
+            trace("Filesystem: CDFS\n");
         }
         else
         {
@@ -552,6 +562,33 @@ TestRelativeNames(VOID)
         if (wcslen(Buffer) && Buffer[wcslen(Buffer) - 1] == L'\\')
             TrailingBackslash = TRUE;
 
+        if (g_Filesystem == CDFS)
+        {
+            /* The open results below are file system specific and the table
+             * only holds FAT32 and NTFS columns. CDFS (CdCommonCreate) fails
+             * every FILE_CREATE with STATUS_ACCESS_DENIED before it looks at
+             * the name, so that much holds for every entry. */
+            AllocationSize.QuadPart = 0;
+            Status = ZwCreateFile(&FileHandle,
+                                  GENERIC_READ | DELETE,
+                                  &ObjectAttributes,
+                                  &IoStatus,
+                                  &AllocationSize,
+                                  FILE_ATTRIBUTE_NORMAL,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  FILE_CREATE,
+                                  0,
+                                  NULL,
+                                  0);
+            ok(Status == STATUS_ACCESS_DENIED,
+               "[%lu] Status = %lx, expected STATUS_ACCESS_DENIED\n", i, Status);
+            if (NT_SUCCESS(Status))
+                ObCloseHandle(FileHandle, KernelMode);
+            if (ParentHandle)
+                ObCloseHandle(ParentHandle, KernelMode);
+            continue;
+        }
+
         /* (1) No flags */
         Status = ZwOpenFile(&FileHandle,
                             GENERIC_READ,
@@ -681,6 +718,20 @@ TestRelativeNames(VOID)
 
 static
 VOID
+CheckDirectorySectionObjectPointer(
+    _In_ PFILE_OBJECT DirectoryObject)
+{
+    /* CDFS points every file object it opens, directories included, at the
+     * Fcb's section object pointers (CdCompleteFcbOpen); FAT and NTFS leave
+     * them NULL on a directory open */
+    if (g_Filesystem == CDFS)
+        ok(DirectoryObject->SectionObjectPointer != NULL, "Directory SectionObjectPointer = NULL\n");
+    else
+        ok_eq_pointer(DirectoryObject->SectionObjectPointer, NULL);
+}
+
+static
+VOID
 TestSharedCacheMap(VOID)
 {
     NTSTATUS Status;
@@ -707,7 +758,12 @@ TestSharedCacheMap(VOID)
     UCHAR Buffer[32];
     HANDLE EventHandle;
     LARGE_INTEGER FileOffset;
+    ACCESS_MASK FileAccess;
     ULONG i;
+
+    /* A read-only volume refuses write access (CDFS: CdIllegalFcbAccess),
+     * and reading is all this test needs */
+    FileAccess = g_ReadOnlyVolume ? GENERIC_READ : FILE_ALL_ACCESS;
 
     /* We need an event for ZwReadFile */
     InitializeObjectAttributes(&ObjectAttributes,
@@ -752,7 +808,7 @@ TestSharedCacheMap(VOID)
                                    ParentHandle[i],
                                    NULL);
         Status = ZwOpenFile(&FileHandle[i],
-                            FILE_ALL_ACCESS,
+                            FileAccess,
                             &ObjectAttributes,
                             &IoStatus,
                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -762,7 +818,7 @@ TestSharedCacheMap(VOID)
             goto Cleanup;
 
         Status = ObReferenceObjectByHandle(FileHandle[i],
-                                           FILE_ALL_ACCESS,
+                                           FileAccess,
                                            *IoFileObjectType,
                                            KernelMode,
                                            (PVOID*)&FileObject[i],
@@ -784,7 +840,7 @@ TestSharedCacheMap(VOID)
         goto Cleanup;
 
     /* Before read, caching is not initialized */
-    ok_eq_pointer(SystemRootObject->SectionObjectPointer, NULL);
+    CheckDirectorySectionObjectPointer(SystemRootObject);
     for (i = 0; i < RTL_NUMBER_OF(Tests); i++)
     {
         ok(FileObject[i]->SectionObjectPointer != NULL, "FileObject[%lu]->SectionObjectPointer = NULL\n", i);
@@ -815,7 +871,7 @@ TestSharedCacheMap(VOID)
     ok_eq_hex(Status, STATUS_SUCCESS);
 
     /* Now we see a SharedCacheMap for the file */
-    ok_eq_pointer(SystemRootObject->SectionObjectPointer, NULL);
+    CheckDirectorySectionObjectPointer(SystemRootObject);
     for (i = 0; i < RTL_NUMBER_OF(Tests); i++)
     {
         ok(FileObject[i]->SectionObjectPointer != NULL, "FileObject[%lu]->SectionObjectPointer = NULL\n", i);
