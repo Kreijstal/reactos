@@ -2696,6 +2696,10 @@ UserFault:
                  * (e.g. image .data first write / MSYS2 process churn).
                  */
                 MI_MAKE_WRITE_PAGE(&TempPte);
+                /* The private copy is written right away. ARM64 has no
+                 * hardware dirty bit (NotDirty is AP[2]), so a clean PTE would
+                 * stay read-only and the retried write would fault forever. */
+                MI_MAKE_DIRTY_PAGE(&TempPte);
                 TempPte.u.Hard.CopyOnWrite = 0;
 
                 MI_WRITE_VALID_PTE(PointerPte, TempPte);

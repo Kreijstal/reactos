@@ -904,6 +904,8 @@ MI_MAKE_HARDWARE_PTE(IN PMMPTE NewPte,
     NewPte->u.Hard.NotLargePage = 1;
     NewPte->u.Hard.Accessed = 1;
     NewPte->u.Hard.Shareability = 3;
+    /* NotDirty is AP[2]: a clear bit makes the page writable by the hardware */
+    NewPte->u.Hard.NotDirty = (NewPte->u.Hard.Writable == 0);
 #endif
 }
 
@@ -937,6 +939,10 @@ MI_MAKE_HARDWARE_PTE_USER(IN PMMPTE NewPte,
 #endif
     NewPte->u.Hard.PageFrameNumber = PageFrameNumber;
     NewPte->u.Long |= MmProtectToPteMask[ProtectionMask];
+#if defined(_M_ARM64)
+    /* NotDirty is AP[2]: a clear bit makes the page writable by the hardware */
+    NewPte->u.Hard.NotDirty = (NewPte->u.Hard.Writable == 0);
+#endif
 }
 
 #if !defined(_M_AMD64) && !defined(_M_ARM64)
