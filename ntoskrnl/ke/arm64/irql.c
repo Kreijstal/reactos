@@ -206,9 +206,10 @@ KeGetCurrentProcessorNumberEx(
  *   IRQL 14    PMR 0x10   IPI blocked
  *   IRQL 15    PMR 0x00   everything blocked
  *
- * Callers order the PCR IRQL store against this call (raise: mask first, then
- * IRQL; lower: IRQL first, then mask), so an interrupt is never taken while
- * the PCR claims a level that should have blocked it, and an interrupt taken
+ * Callers order the PCR IRQL store against this call (raise: mask and IRQL
+ * together with interrupts off; lower: IRQL first, then mask), so an interrupt
+ * is never taken while the PCR claims a level that should have blocked it, nor
+ * while it still claims the level being raised from, and an interrupt taken
  * just after the mask opens finds the lowered IRQL already in place. An
  * interrupt the CPU had already latched when PMR was raised acknowledges as
  * spurious (1023), since the CPU interface re-checks PMR on acknowledge.
@@ -350,8 +351,29 @@ KfRaiseIrql(
      */
     __asm__ __volatile__("dmb ish" ::: "memory");
 
-    KiApplyIrqMaskForIrqlTransition(OldIrql, NewIrql);
-    KiSetCurrentIrql(NewIrql);
+    /*
+     * IRQL lives in two places, the GIC priority mask and the PCR, and they
+     * must change as one, as CR8 does on x64. An interrupt the raised mask
+     * still admits (an IPI raising to 9, say) taken between the two writes
+     * would read the old PCR IRQL, and its exit would lower to it: reopening
+     * the mask and running DPCs in the middle of this raise, which then
+     * leaves the PCR at NewIrql over an open mask -- an interrupt-lock holder
+     * at DIRQL gets its own device interrupt. Keep interrupts off across both.
+     * (Before the HAL is up the transition is the DAIF mask itself.)
+     */
+    if (KiHalInitialized)
+    {
+        BOOLEAN InterruptsWereEnabled = KeDisableInterrupts();
+
+        KiApplyIrqMaskForIrqlTransition(OldIrql, NewIrql);
+        KiSetCurrentIrql(NewIrql);
+        KeRestoreInterrupts(InterruptsWereEnabled);
+    }
+    else
+    {
+        KiApplyIrqMaskForIrqlTransition(OldIrql, NewIrql);
+        KiSetCurrentIrql(NewIrql);
+    }
 
     /*
      * ARM64 Instruction Barrier: Ensure IRQL change and GIC PMR update take
