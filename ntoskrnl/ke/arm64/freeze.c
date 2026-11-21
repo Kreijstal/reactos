@@ -118,12 +118,11 @@ KiProcessorFreezeHandler(
 
 /*
  * Freeze in place on behalf of a freeze SGI this processor cannot take,
- * because it spins with interrupts masked. The debugger sees the context
- * of the spin loop.
+ * because it spins with interrupts masked or at or above IPI_LEVEL. The
+ * debugger sees the context of the spin loop.
  */
-static
 VOID
-KiArm64PollFreeze(
+KiPollFreezeExecution(
     _In_ PKPRCB CurrentPrcb)
 {
     RtlCaptureContext(&CurrentPrcb->ProcessorState.ContextFrame);
@@ -275,7 +274,7 @@ KxFreezeExecution(
              */
             if (CurrentPrcb->IpiFrozen == IPI_FROZEN_STATE_TARGET_FREEZE)
             {
-                KiArm64PollFreeze(CurrentPrcb);
+                KiPollFreezeExecution(CurrentPrcb);
             }
 
             YieldProcessor();
@@ -306,17 +305,8 @@ KxFreezeExecution(
         }
     }
 
-    /*
-     * Send IPI directly via HalRequestIpi, NOT through KiIpiSend.
-     *
-     * KiIpiSend uses InterlockedBitTestAndSet on IpiFrozen to signal the
-     * IPI type, but the freeze code uses IpiFrozen as a STATE value
-     * (IPI_FROZEN_STATE_TARGET_FREEZE = 5). KiIpiSend would corrupt the
-     * state by setting bit IPI_FREEZE (bit 4), changing 5 → 21.
-     *
-     * The freeze state is already communicated via IpiFrozen assignment above.
-     * We just need the SGI to interrupt the target CPUs.
-     */
+    /* The request is the IpiFrozen state set above; the SGI only interrupts
+       the targets (KiIpiServiceRoutine checks IpiFrozen first) */
     HalRequestIpi(TargetProcessors);
     KiArm64WaitForFrozenTargets(TargetProcessors);
 }

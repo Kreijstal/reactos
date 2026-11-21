@@ -408,6 +408,14 @@ HalpArm64SendSgi(
     if ((TargetSet == 0) || (SgiId > 15))
         return;
 
+    /*
+     * The target acts on what the sender stored before the SGI (request bits,
+     * a packet). Neither the GICD_SGIR store (Device memory) nor the
+     * ICC_SGI1R_EL1 write is ordered after earlier Normal-memory stores
+     * without a DSB.
+     */
+    __asm__ __volatile__("dsb ish" ::: "memory");
+
     if (HalpGicUseSysRegs)
     {
         /* GICv3: Use ICC_SGI1R_EL1 system register */

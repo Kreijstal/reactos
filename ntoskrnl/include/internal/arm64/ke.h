@@ -582,6 +582,14 @@ KiProcessorFreezeHandler(
     _In_ PKTRAP_FRAME TrapFrame,
     _In_ PKEXCEPTION_FRAME ExceptionFrame);
 
+#ifdef CONFIG_SMP
+/* Freeze in place when a freeze was requested while the freeze SGI cannot be
+   taken (spinning at or above IPI_LEVEL) */
+VOID
+KiPollFreezeExecution(
+    _In_ PKPRCB CurrentPrcb);
+#endif
+
 /* Debug CPU features banner */
 #if DBG
 VOID KiReportCpuFeatures(IN PKPRCB Prcb);
