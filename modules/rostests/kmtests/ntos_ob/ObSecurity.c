@@ -127,6 +127,10 @@ START_TEST(ObSecurity)
     NTSTATUS Status;
     /* Assume yes, that's the default on W2K3 */
     ULONG LUIDMappingsEnabled = 1, ReturnLength;
+    PACCESS_TOKEN Token;
+    LUID LogonId;
+    LUID SystemLuid = SYSTEM_LUID;
+    BOOLEAN IsSystemLogon;
 
 #define DIRECTORY_GENERIC_READ      STANDARD_RIGHTS_READ | DIRECTORY_TRAVERSE | DIRECTORY_QUERY
 #define DIRECTORY_GENERIC_WRITE     STANDARD_RIGHTS_WRITE | DIRECTORY_CREATE_SUBDIRECTORY | DIRECTORY_CREATE_OBJECT
@@ -140,7 +144,19 @@ START_TEST(ObSecurity)
     ok(NT_SUCCESS(Status), "NtQueryInformationProcess failed: 0x%x\n", Status);
 
     trace("LUID mappings are enabled: %d\n", LUIDMappingsEnabled);
-    if (LUIDMappingsEnabled != 0)
+
+    /* The LocalSystem logon session has no device map of its own: with LUID
+     * device maps on, \?? is still the global \GLOBAL?? directory for it
+     * (ObSystemDeviceMap), as when the mappings are off. kmtestcd runs the
+     * tests from a SYSTEM shell. */
+    Token = PsReferencePrimaryToken(PsGetCurrentProcess());
+    Status = SeQueryAuthenticationIdToken(Token, &LogonId);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    PsDereferencePrimaryToken(Token);
+    IsSystemLogon = NT_SUCCESS(Status) && RtlEqualLuid(&LogonId, &SystemLuid);
+    trace("Running in the SYSTEM logon session: %d\n", IsSystemLogon);
+
+    if (LUIDMappingsEnabled != 0 && !IsSystemLogon)
     {
         CheckDirectorySecurityWithOwnerAndGroup(L"\\??", SeExports->SeAliasAdminsSid, NULL, // Group is "Domain Users"
                                4, ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE |
