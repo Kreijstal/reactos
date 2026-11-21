@@ -549,6 +549,36 @@ SepShouldPropagateAce(
 
 /**
  * @brief
+ * Determines whether an ACE type has the plain ACE layout: an ACE_HEADER,
+ * an ACCESS_MASK and a SID, optionally followed by application data
+ * (callback ACEs). Inheritance applies to these the same way as to the
+ * four NT 3.x ACE types.
+ */
+static
+BOOLEAN
+SepIsPlainLayoutAce(
+    _In_ UCHAR AceType)
+{
+    switch (AceType)
+    {
+        case ACCESS_ALLOWED_ACE_TYPE:
+        case ACCESS_DENIED_ACE_TYPE:
+        case SYSTEM_AUDIT_ACE_TYPE:
+        case SYSTEM_ALARM_ACE_TYPE:
+        case ACCESS_ALLOWED_CALLBACK_ACE_TYPE:
+        case ACCESS_DENIED_CALLBACK_ACE_TYPE:
+        case SYSTEM_AUDIT_CALLBACK_ACE_TYPE:
+        case SYSTEM_ALARM_CALLBACK_ACE_TYPE:
+        case SYSTEM_MANDATORY_LABEL_ACE_TYPE:
+            return TRUE;
+
+        default:
+            return FALSE;
+    }
+}
+
+/**
+ * @brief
  * Propagates (copies) an access control list.
  *
  * @param[out] AclDest
@@ -604,6 +634,7 @@ SepPropagateAcl(
     UCHAR AceFlags;
     USHORT AceSize;
     USHORT AceCount = 0;
+    USHORT TrailerSize;
     PSID Sid;
     BOOLEAN WriteTwoAces;
 
@@ -630,7 +661,7 @@ SepPropagateAcl(
         AceDest = (PACCESS_ALLOWED_ACE)CurrentDest;
         AceSource = (PACCESS_ALLOWED_ACE)CurrentSource;
 
-        if (AceSource->Header.AceType > ACCESS_MAX_MS_V2_ACE_TYPE)
+        if (!SepIsPlainLayoutAce(AceSource->Header.AceType))
         {
             /* FIXME: handle object & compound ACEs */
             AceSize = AceSource->Header.AceSize;
@@ -646,12 +677,7 @@ SepPropagateAcl(
             continue;
         }
 
-        /* These all have the same structure */
-        ASSERT(AceSource->Header.AceType == ACCESS_ALLOWED_ACE_TYPE ||
-               AceSource->Header.AceType == ACCESS_DENIED_ACE_TYPE ||
-               AceSource->Header.AceType == SYSTEM_AUDIT_ACE_TYPE ||
-               AceSource->Header.AceType == SYSTEM_ALARM_ACE_TYPE);
-
+        /* All of these have the ACCESS_ALLOWED_ACE layout */
         ASSERT(AceSource->Header.AceSize % sizeof(ULONG) == 0);
         ASSERT(AceSource->Header.AceSize >= sizeof(*AceSource));
         if (!SepShouldPropagateAce(AceSource->Header.AceFlags,
@@ -669,12 +695,21 @@ SepPropagateAcl(
         Sid = (PSID)&AceSource->SidStart;
         ASSERT(AceSize >= FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + RtlLengthSid(Sid));
 
+        /* Callback ACEs carry application data after the SID */
+        TrailerSize = AceSize - FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) - (USHORT)RtlLengthSid(Sid);
+        ASSERT(TrailerSize % sizeof(ULONG) == 0);
+
         WriteTwoAces = FALSE;
         /* Map effective ACE to specific rights */
         if (!(AceFlags & INHERIT_ONLY_ACE))
         {
-            RtlMapGenericMask(&Mask, GenericMapping);
-            Mask &= GenericMapping->GenericAll;
+            /* A mandatory label holds SYSTEM_MANDATORY_LABEL_* policy bits,
+             * not access rights, so there is nothing to map */
+            if (AceSource->Header.AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+            {
+                RtlMapGenericMask(&Mask, GenericMapping);
+                Mask &= GenericMapping->GenericAll;
+            }
 
             if (IsInherited)
             {
@@ -682,7 +717,7 @@ SepPropagateAcl(
                     Sid = Owner;
                 else if (RtlEqualSid(Sid, SeCreatorGroupSid))
                     Sid = Group;
-                AceSize = FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + RtlLengthSid(Sid);
+                AceSize = FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + RtlLengthSid(Sid) + TrailerSize;
 
                 /*
                  * A generic container ACE becomes two ACEs:
@@ -702,14 +737,19 @@ SepPropagateAcl(
         {
             if (*AclLength >= Written + AceSize)
             {
+                ULONG SidLength = RtlLengthSid(Sid);
+
                 AceDest->Header.AceType = AceSource->Header.AceType;
                 AceDest->Header.AceFlags = WriteTwoAces ? AceFlags & ~VALID_INHERIT_FLAGS
                                                         : AceFlags;
                 AceDest->Header.AceSize = AceSize;
                 AceDest->Mask = Mask;
-                RtlCopySid(AceSize - FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart),
+                RtlCopySid(SidLength,
                            (PSID)&AceDest->SidStart,
                            Sid);
+                RtlCopyMemory((PUCHAR)&AceDest->SidStart + SidLength,
+                              (PUCHAR)AceSource + AceSource->Header.AceSize - TrailerSize,
+                              TrailerSize);
             }
             Written += AceSize;
 
