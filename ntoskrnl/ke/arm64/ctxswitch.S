@@ -269,6 +269,16 @@ KiSwapContextInternal:
        new frame afterwards */
     mov     x19, x30
 
+    /*
+     * A thread woken while still current and re-selected on its own
+     * processor switches to itself: the SwapBusy bit is its own, set on the
+     * way into the wait, and would be waited on forever. The save/restore
+     * below is an identity then and KiSwapContextResume clears the bit (as
+     * on amd64).
+     */
+    cmp     x1, x2
+    b.eq    .Lswapbusy_clear
+
     /* Wait until the incoming thread clears its SwapBusy bit */
 .Lswapbusy_wait:
     ldrb    w3, [x2, #ThSwapBusy]
