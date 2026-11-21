@@ -2054,6 +2054,9 @@ extern PFN_NUMBER MmPagerHardReserve;
 #define MI_PAGER_HARD_RESERVE_MIN_PAGES 1024  /*   4 MB */
 #define MI_PAGER_HARD_RESERVE_MAX_PAGES 8192  /*  32 MB */
 
+/* Resident available pages MmAllocatePagesForMdl(Ex) never charges */
+#define MI_MDL_RESIDENT_AVAILABLE_RESERVE 256
+
 /* How many 10ms rounds a throttled thread waits before giving up */
 #define MI_THROTTLE_MAX_ROUNDS 500            /*   5 s  */
 

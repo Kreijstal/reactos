@@ -224,6 +224,30 @@ MiIsPfnInUse(IN PMMPFN Pfn1)
     return !MiIsPfnFree(Pfn1);
 }
 
+/*
+ * The available pages an MDL allocation leaves to everybody else.
+ *
+ * MDL pages are locked: nothing can trim or page them out until the caller
+ * frees them. So, like Windows, MmAllocatePagesForMdl(Ex) never takes the
+ * last of memory; it stops short and hands back a partial MDL (or none)
+ * instead.
+ *
+ * The floor is the pager's reserve, the level of available pages it works
+ * towards (see MmInitializeBalancer). Below it every allocation wakes the
+ * pager, and since pages taken here are the one kind it can never get back,
+ * all it could do is evict everybody else's: with no paging file there is
+ * nowhere to put them, and the balancer ends in NO_PAGES_AVAILABLE.
+ */
+static
+PFN_NUMBER
+MiMdlAvailablePagesFloor(VOID)
+{
+    /* The balancer sets the reserve; until it has, use its smallest value */
+    if (MmPagerReserve < MI_PAGER_RESERVE_MIN_PAGES)
+        return MI_PAGER_RESERVE_MIN_PAGES;
+    return MmPagerReserve;
+}
+
 PMDL
 NTAPI
 MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
@@ -234,7 +258,9 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
                       IN ULONG MdlFlags)
 {
     PMDL Mdl;
-    PFN_NUMBER PageCount, LowPage, HighPage, SkipPages, PagesFound = 0, Page;
+    PFN_NUMBER PageCount, MdlPageCount, LowPage, HighPage, SkipPages, PagesFound = 0, Page;
+    PFN_NUMBER Floor;
+    SPFN_NUMBER Allowed;
     PPFN_NUMBER MdlPage, LastMdlPage;
     KIRQL OldIrql;
     PMMPFN Pfn1;
@@ -267,6 +293,19 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
     // Now compute the number of pages the MDL will cover
     //
     PageCount = (PFN_NUMBER)ADDRESS_AND_SIZE_TO_SPAN_PAGES(0, TotalBytes);
+
+    /* An MDL's byte count is a ULONG, so that is the most one can describe */
+    if (PageCount > (MAXULONG >> PAGE_SHIFT)) PageCount = MAXULONG >> PAGE_SHIFT;
+
+    //
+    // Don't size the MDL for pages we will not hand out anyway. This is only
+    // an estimate, the real limit is applied under the PFN lock below.
+    //
+    Floor = MiMdlAvailablePagesFloor();
+    Allowed = (SPFN_NUMBER)MmAvailablePages - (SPFN_NUMBER)Floor;
+    if (Allowed <= 0) return NULL;
+    if (PageCount > (PFN_NUMBER)Allowed) PageCount = (PFN_NUMBER)Allowed;
+
     do
     {
         //
@@ -293,11 +332,32 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
     // This is where the page array starts....
     //
     MdlPage = (PPFN_NUMBER)(Mdl + 1);
+    MdlPageCount = PageCount;
 
     //
     // Lock the PFN database
     //
     OldIrql = MiAcquirePfnLock();
+
+    //
+    // The pages are nonpageable for as long as the caller holds them, so
+    // charge them to resident available memory, keeping the same reserve
+    // MmAdjustWorkingSetSize does. Charge the whole request now and give
+    // back what we did not find at the end.
+    //
+    Allowed = (SPFN_NUMBER)MmResidentAvailablePages -
+              (SPFN_NUMBER)MmSystemLockPagesCount -
+              MI_MDL_RESIDENT_AVAILABLE_RESERVE;
+    if (Allowed <= 0)
+    {
+        MiReleasePfnLock(OldIrql);
+        DPRINT1("MDL allocation refused: resident available %Iu, locked %Iu\n",
+                MmResidentAvailablePages, MmSystemLockPagesCount);
+        ExFreePoolWithTag(Mdl, TAG_MDL);
+        return NULL;
+    }
+    if (PageCount > (PFN_NUMBER)Allowed) PageCount = (PFN_NUMBER)Allowed;
+    InterlockedExchangeAddSizeT(&MmResidentAvailablePages, -(SSIZE_T)PageCount);
 
     //
     // Are we looking for any pages, without discriminating?
@@ -313,20 +373,12 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
             MI_SET_USAGE(MI_USAGE_MDL);
             MI_SET_PROCESS2("Kernel");
 
-            /* FIXME: This check should be smarter */
-            Page = 0;
-            if (MmAvailablePages != 0)
-                Page = MiRemoveAnyPage(0);
+            /* Stop at the reserve: the caller gets a partial MDL (or none),
+             * which MmAllocatePagesForMdl's contract requires it to handle */
+            if (MmAvailablePages <= Floor) break;
 
-            if (Page == 0)
-            {
-                /* Out of free pages - caller is expected to handle a short
-                 * MDL (including zero-length) per MmAllocatePagesForMdl's
-                 * documented contract, so this is not an invariant violation
-                 * even when PagesFound is still zero (e.g. on a low-memory
-                 * box with a large request). */
-                break;
-            }
+            Page = MiRemoveAnyPage(0);
+            ASSERT(Page != 0);
 
             /* Grab the page entry for it */
             Pfn1 = MiGetPfnEntry(Page);
@@ -382,6 +434,9 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
                 if (MiIsPfnInUse(Pfn1)) continue;
                 if ((Pfn1->u3.e1.PageLocation == ZeroedPageList) != LookForZeroedPages) continue;
 
+                /* Leave the reserve alone, as above */
+                if (MmAvailablePages <= Floor) break;
+
                 /* Remove the page from the free or zero list */
                 ASSERT(Pfn1->u3.e1.ReadInProgress == 0);
                 MI_SET_USAGE(MI_USAGE_MDL);
@@ -415,7 +470,18 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
             // If the first pass was enough, don't keep going, otherwise, go again
             //
             if (PagesFound == PageCount) break;
+            if (MmAvailablePages <= Floor) break;
         }
+    }
+
+    //
+    // Give back the resident available charge for the pages we didn't find
+    //
+    ASSERT(PagesFound <= PageCount);
+    if (PagesFound != PageCount)
+    {
+        InterlockedExchangeAddSizeT(&MmResidentAvailablePages,
+                                    (SSIZE_T)(PageCount - PagesFound));
     }
 
     //
@@ -426,7 +492,6 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
     //
     // We might've found less pages, but not more ;-)
     //
-    if (PagesFound != PageCount) ASSERT(PagesFound < PageCount);
     if (!PagesFound)
     {
         //
@@ -445,7 +510,7 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
     //
     // Terminate the MDL array if there's certain missing pages
     //
-    if (PagesFound != PageCount) *MdlPage = LIST_HEAD;
+    if (PagesFound != MdlPageCount) *MdlPage = LIST_HEAD;
 
     //
     // Now go back and loop over all the MDL pages

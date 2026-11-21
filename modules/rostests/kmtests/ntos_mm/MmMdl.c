@@ -199,6 +199,80 @@ TestMmAllocatePagesForMdl(VOID)
     }
 }
 
+/*
+ * Ask for more pages than the machine has. The MDL can only be partial, and
+ * it must not take the last of memory: its pages are locked, so whatever it
+ * takes nobody can page out, and a system without a reserve left cannot even
+ * page in what it needs to give the pages back.
+ */
+static
+VOID
+TestMmAllocatePagesForMdlReserve(VOID)
+{
+    NTSTATUS Status;
+    SYSTEM_BASIC_INFORMATION BasicInfo;
+    SYSTEM_PERFORMANCE_INFORMATION PerfInfo;
+    PHYSICAL_ADDRESS LowAddress;
+    PHYSICAL_ADDRESS HighAddress;
+    PHYSICAL_ADDRESS SkipBytes;
+    ULONGLONG Pages;
+    ULONG AvailableBefore;
+    PMDL Mdl;
+
+    LowAddress.QuadPart = 0;
+    HighAddress.QuadPart = -1;
+    SkipBytes.QuadPart = 0;
+
+    Status = ZwQuerySystemInformation(SystemBasicInformation,
+                                      &BasicInfo,
+                                      sizeof(BasicInfo),
+                                      NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (skip(NT_SUCCESS(Status), "No basic information\n"))
+        return;
+
+    /* All of RAM and then some, if one MDL can describe that much */
+    Pages = (ULONGLONG)BasicInfo.NumberOfPhysicalPages + 16 * 1024 * 1024 / PAGE_SIZE;
+    if (skip(Pages <= (MAXULONG >> PAGE_SHIFT), "%lu pages of RAM is too much for one MDL\n",
+             BasicInfo.NumberOfPhysicalPages))
+        return;
+
+    Status = ZwQuerySystemInformation(SystemPerformanceInformation,
+                                      &PerfInfo,
+                                      sizeof(PerfInfo),
+                                      NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (skip(NT_SUCCESS(Status), "No performance information\n"))
+        return;
+    AvailableBefore = PerfInfo.AvailablePages;
+
+    Mdl = MmAllocatePagesForMdl(LowAddress,
+                                HighAddress,
+                                SkipBytes,
+                                (SIZE_T)(Pages << PAGE_SHIFT));
+    Status = ZwQuerySystemInformation(SystemPerformanceInformation,
+                                      &PerfInfo,
+                                      sizeof(PerfInfo),
+                                      NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    trace("Available pages %lu before, %lu after taking %lu bytes of %I64u\n",
+          AvailableBefore, PerfInfo.AvailablePages,
+          Mdl ? MmGetMdlByteCount(Mdl) : 0, Pages << PAGE_SHIFT);
+
+    /* Not even the free list holds all of RAM, so this is partial or NULL */
+    if (Mdl != NULL)
+        ok(MmGetMdlByteCount(Mdl) < Pages << PAGE_SHIFT, "Byte count: %lu\n", MmGetMdlByteCount(Mdl));
+
+    /* And it left something behind for everybody else */
+    ok(PerfInfo.AvailablePages >= 128, "Only %lu pages left available\n", PerfInfo.AvailablePages);
+
+    if (Mdl != NULL)
+    {
+        MmFreePagesFromMdl(Mdl);
+        ExFreePoolWithTag(Mdl, 0);
+    }
+}
+
 static
 VOID
 TestMmBuildMdlForNonPagedPool(VOID)
@@ -254,5 +328,6 @@ TestMmBuildMdlForNonPagedPool(VOID)
 START_TEST(MmMdl)
 {
     TestMmAllocatePagesForMdl();
+    TestMmAllocatePagesForMdlReserve();
     TestMmBuildMdlForNonPagedPool();
 }

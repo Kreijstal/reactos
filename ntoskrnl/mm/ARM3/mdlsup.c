@@ -569,6 +569,7 @@ MmFreePagesFromMdl(IN PMDL Mdl)
     PVOID Base;
     PPFN_NUMBER Pages;
     LONG NumberOfPages;
+    PFN_NUMBER PagesFreed = 0;
     PMMPFN Pfn1;
     KIRQL OldIrql;
     DPRINT("Freeing MDL: %p\n", Mdl);
@@ -642,7 +643,14 @@ MmFreePagesFromMdl(IN PMDL Mdl)
         // Clear this page and move on
         //
         *Pages++ = LIST_HEAD;
+        PagesFreed++;
     } while (--NumberOfPages != 0);
+
+    //
+    // These pages were charged to resident available memory when
+    // MiAllocatePagesForMdl handed them out
+    //
+    InterlockedExchangeAddSizeT(&MmResidentAvailablePages, PagesFreed);
 
     //
     // Release the lock
