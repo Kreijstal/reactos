@@ -184,11 +184,13 @@ PspReapRoutine(IN PVOID Context)
             /* Get the first Thread Entry */
             Thread = CONTAINING_RECORD(NextEntry, ETHREAD, ReaperLink);
 
-#if defined(CONFIG_SMP) && defined(_M_AMD64)
+#if defined(CONFIG_SMP) && (defined(_M_AMD64) || defined(_M_ARM64))
             /* KeTerminateThread queues the reaper before its final context
              * switch. Another processor can run us while that thread still
              * uses its stack, including inside the TLB-shootdown IPI issued
-             * by MmDeleteKernelStack. Wait for the amd64 switch hand-off. */
+             * by MmDeleteKernelStack. Wait for the switch hand-off: the
+             * amd64 and arm64 context switch clear the flag only once they
+             * run on the next thread's stack. */
 #if (NTDDI_VERSION < NTDDI_WIN7)
             while (Thread->Tcb.SwapBusy)
 #else
