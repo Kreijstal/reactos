@@ -99,4 +99,3 @@ typedef struct _NETCXLOOP_STATE
 #define NETCX_TEST_MEDIUM               19
 
 #define NETCX_SERVICE_NAME              L"NetAdapterCx"
-#define NETCX_IMAGE_NAME                L"netadaptercx.sys"

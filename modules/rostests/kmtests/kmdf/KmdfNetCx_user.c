@@ -56,28 +56,47 @@ SetString(
                           (DWORD)((wcslen(Value) + 1) * sizeof(WCHAR)));
 }
 
+/*
+ * NetAdapterCx is an inbox driver. Its service, and the key through which
+ * WDFLDR finds it for a 2.x client, come with the system, as on Windows;
+ * there is no netadaptercx.sys next to kmtest.exe to register instead.
+ */
 static
 VOID
 RegisterClassExtension(
     _Out_ SC_HANDLE *Service)
 {
+    SC_HANDLE Manager;
+    WCHAR Name[32];
     HKEY Key;
-    DWORD Error;
+    DWORD Type, Size;
+    LONG Error;
 
     *Service = NULL;
 
-    Error = KmtCreateService(NETCX_SERVICE_NAME, NETCX_IMAGE_NAME, NULL, Service);
-    if (Error == ERROR_SERVICE_EXISTS)
-        Error = ERROR_SUCCESS;
-    ok_eq_int(Error, ERROR_SUCCESS);
+    Manager = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    ok(Manager != NULL, "OpenSCManager failed with %lu\n", GetLastError());
+    if (Manager)
+    {
+        *Service = OpenServiceW(Manager, NETCX_SERVICE_NAME, SERVICE_QUERY_STATUS);
+        ok(*Service != NULL, "Opening %S failed with %lu\n", NETCX_SERVICE_NAME, GetLastError());
+        CloseServiceHandle(Manager);
+    }
 
     /* What WDFLDR reads to find the class extension of a 2.x client */
-    Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, NETCX_VERSIONS_KEY, 0, NULL, 0,
-                            KEY_SET_VALUE, NULL, &Key, NULL);
+    Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, NETCX_VERSIONS_KEY, 0, KEY_QUERY_VALUE, &Key);
     ok_eq_int(Error, ERROR_SUCCESS);
     if (Error == ERROR_SUCCESS)
     {
-        ok_eq_int(SetString(Key, L"Service", NETCX_SERVICE_NAME), ERROR_SUCCESS);
+        Size = sizeof(Name) - sizeof(WCHAR);
+        Error = RegQueryValueExW(Key, L"Service", NULL, &Type, (PBYTE)Name, &Size);
+        ok_eq_int(Error, ERROR_SUCCESS);
+        if (Error == ERROR_SUCCESS)
+        {
+            Name[Size / sizeof(WCHAR)] = UNICODE_NULL;
+            ok_eq_ulong(Type, REG_SZ);
+            ok(!_wcsicmp(Name, NETCX_SERVICE_NAME), "Service = %S\n", Name);
+        }
         RegCloseKey(Key);
     }
 }
