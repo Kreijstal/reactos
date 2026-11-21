@@ -68,6 +68,7 @@ KMT_TESTFUNC Test_KeEvent;
 KMT_TESTFUNC Test_KeFloatPointState;
 KMT_TESTFUNC Test_KeGuardedMutex;
 KMT_TESTFUNC Test_KeIrql;
+KMT_TESTFUNC Test_KeIpi;
 KMT_TESTFUNC Test_KeMutex;
 KMT_TESTFUNC Test_KeProcessor;
 KMT_TESTFUNC Test_KeProcessorGroup;
@@ -224,6 +225,7 @@ const KMT_TEST TestList[] =
     { "KeEvent",                            Test_KeEvent },
     { "KeFloatPointState",                  Test_KeFloatPointState },
     { "KeGuardedMutex",                     Test_KeGuardedMutex },
+    { "KeIpi",                              Test_KeIpi },
     { "KeIrql",                             Test_KeIrql },
     { "KeMutex",                            Test_KeMutex },
     { "-KeProcessor",                       Test_KeProcessor },
