@@ -3698,21 +3698,21 @@ HalEnableSystemInterrupt(
     UCHAR priority;
     BOOLEAN EdgeTriggered;
 
-    /*
-     * SGIs (0-15) are always enabled in GICv3 and cannot be enabled/disabled.
-     * They are configured during redistributor initialization and are permanently enabled.
-     * Writing to ISENABLER for SGIs is architecturally permitted but has no effect.
-     * We skip the write to avoid confusion - SGIs are already enabled.
-     */
-    if (Vector < 16)
-    {
-        /* SGI: already enabled, no action needed */
-        return TRUE;
-    }
-
     /* Calculate GIC priority from IRQL */
     priority = HalpIrqlToGicPriority(Irql);
     EdgeTriggered = (InterruptMode == Latched);
+
+    /*
+     * SGIs (0-15) are always enabled and their trigger is fixed, but their
+     * priority is not: program it (in the current processor's bank) so the
+     * SGI is masked exactly at and above its IRQL like every other interrupt.
+     */
+    if (Vector < 16)
+    {
+        HalpGicSetInterruptPriority(Vector, priority);
+        __asm__ __volatile__("dsb sy" ::: "memory");
+        return TRUE;
+    }
 
     if (Vector >= HAL_ARM64_LPI_BASE)
     {

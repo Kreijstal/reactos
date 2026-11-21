@@ -24,6 +24,9 @@ extern ULONG FASTCALL HalGetInterruptSource(VOID);
 #define ARM64_SGI_IPI 0
 #define ARM64_SGI_APC 1
 #define ARM64_SGI_DPC 2
+#define ARM64_FIRST_SPI 32
+
+extern BOOLEAN KiHalInitialized;
 static PKINTERRUPT KiArm64IntTable[ARM64_MAX_INTID] = {0};
 static KSPIN_LOCK KiArm64IntTableLock;
 /* Simple timer wiring for bring-up */
@@ -408,18 +411,45 @@ KiArm64StartLocalTimer(VOID)
     KiTimerStartedFlag = 1;
 }
 
+/*
+ * SGIs and PPIs are banked: their enable and priority registers exist once per
+ * processor. Their interrupt objects are connected once, on the boot
+ * processor and before the HAL has initialized the GIC (whose per-processor
+ * bank setup then resets every priority), so each processor must program its
+ * own bank once its GIC CPU interface is up. Without this the IPI SGI keeps
+ * the bank's default priority and is masked far below IPI_LEVEL: a processor
+ * spinning at SYNCH_LEVEL for another one never takes the IPI that one waits
+ * on.
+ */
+VOID
+NTAPI
+KiArm64EnableBankedInterrupts(VOID)
+{
+    ULONG IntId;
+
+    ASSERT(KiHalInitialized);
+
+    for (IntId = 0; IntId < ARM64_FIRST_SPI; IntId++)
+    {
+        PKINTERRUPT Interrupt = KiArm64LoadInterruptHeadNoFence(IntId);
+
+        if (Interrupt != NULL)
+        {
+            HalEnableSystemInterrupt(IntId, Interrupt->Irql, Interrupt->Mode);
+        }
+    }
+}
+
 VOID
 NTAPI
 KeStartArm64ProcessorTimer(VOID)
 {
-    ULONG TimerIntId = KiArm64UseVirtualTimer ? 27 : 30;
-
     /*
      * The ARM generic timer is a per-CPU PPI. The interrupt object is
      * connected once on the BSP, but every processor must enable its own PPI
      * bank and program its own local timer registers.
      */
-    HalEnableSystemInterrupt(TimerIntId, CLOCK_LEVEL, LevelSensitive);
+    KiArm64EnableBankedInterrupts();
     KiArm64StartLocalTimer();
 }
 

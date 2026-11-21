@@ -493,6 +493,11 @@ NTAPI
 KeStartArm64ProcessorTimer(
     VOID);
 
+VOID
+NTAPI
+KiArm64EnableBankedInterrupts(
+    VOID);
+
 ULONG
 FASTCALL
 HalGetGicPriorityMask(VOID);

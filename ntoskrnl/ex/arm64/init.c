@@ -98,4 +98,7 @@ ExArchPostHalInitSystemPhase1(
      * PPI has been re-enabled, so IRQL transitions may use HAL's GIC PMR path.
      */
     KiHalInitialized = TRUE;
+
+    /* Program the boot processor's SGI/PPI bank now that its GIC is up */
+    KiArm64EnableBankedInterrupts();
 }
