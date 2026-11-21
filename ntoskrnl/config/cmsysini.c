@@ -1828,6 +1828,38 @@ CmpInitializeHiveList(VOID)
     CmpNoVolatileCreates = TRUE;
 }
 
+/*
+ * Keep a master key (\REGISTRY\MACHINE, \REGISTRY\USER) referenced for the
+ * lifetime of the system, as CmpCreateRegistryRoot does for \REGISTRY.
+ *
+ * A KCB takes its name from the path component that created it. Once the
+ * key's last reference is gone (with lazy flush held, its KCB is freed at
+ * once), the next open re-creates the KCB with the case that caller spelled,
+ * renaming every key below it. On a multiprocessor system the object reaper
+ * ran on another processor right after the close here, linking
+ * "\Registry\Machine\SYSTEM" re-created the KCB as "Machine", and driver
+ * registry paths became "\REGISTRY\Machine\SYSTEM\...".
+ */
+CODE_SEG("INIT")
+static
+NTSTATUS
+CmpKeepMasterKey(
+    _In_ HANDLE KeyHandle)
+{
+    PCM_KEY_BODY KeyBody;
+    NTSTATUS Status;
+
+    /* This reference is never dropped */
+    Status = ObReferenceObjectByHandle(KeyHandle,
+                                       0,
+                                       CmpKeyObjectType,
+                                       KernelMode,
+                                       (PVOID*)&KeyBody,
+                                       NULL);
+    NtClose(KeyHandle);
+    return Status;
+}
+
 CODE_SEG("INIT")
 BOOLEAN
 NTAPI
@@ -1939,8 +1971,13 @@ CmInitSystem1(VOID)
         KeBugCheckEx(CONFIG_INITIALIZATION_FAILED, 1, 5, Status, 0);
     }
 
-    /* Close the handle */
-    NtClose(KeyHandle);
+    /* Keep the key, and with it its KCB, for the lifetime of the system */
+    Status = CmpKeepMasterKey(KeyHandle);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Bugcheck */
+        KeBugCheckEx(CONFIG_INITIALIZATION_FAILED, 1, 5, Status, 0);
+    }
 
     /* Create '\Registry\User' key */
     RtlInitUnicodeString(&KeyName, L"\\REGISTRY\\USER");
@@ -1962,8 +1999,13 @@ CmInitSystem1(VOID)
         KeBugCheckEx(CONFIG_INITIALIZATION_FAILED, 1, 6, Status, 0);
     }
 
-    /* Close the handle */
-    NtClose(KeyHandle);
+    /* Keep the key, and with it its KCB, for the lifetime of the system */
+    Status = CmpKeepMasterKey(KeyHandle);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Bugcheck */
+        KeBugCheckEx(CONFIG_INITIALIZATION_FAILED, 1, 6, Status, 0);
+    }
 
     /* After this point, do not allow creating keys in the master hive */
     CmpNoVolatileCreates = TRUE;
