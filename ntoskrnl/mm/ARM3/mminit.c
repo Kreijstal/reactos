@@ -1908,9 +1908,9 @@ MiBuildPagedPool(VOID)
         MmSizeOfPagedPoolInBytes = (ULONG_PTR)MmNonPagedPoolExpansionStart -
                                    (ULONG_PTR)MmPagedPoolStart;
     }
-#elif defined(_M_AMD64)
+#elif defined(_WIN64)
     //
-    // On x64 paged pool gets its whole VA window (128 GB) whatever the amount
+    // On x64 and ARM64 paged pool gets its whole VA window (128 GB) whatever the amount
     // of RAM, as on Windows: address space is not memory, only the pages in
     // use are backed. Sizing it after nonpaged pool (a few GB) made big
     // contiguous users fail early: the prototype PTEs of one 2 TB
