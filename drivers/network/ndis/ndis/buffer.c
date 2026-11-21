@@ -485,6 +485,7 @@ NdisAllocatePacketPoolEx(
 
         Length = sizeof(NDIS_PACKET) + sizeof(NDIS_PACKET_OOB_DATA) +
                  sizeof(NDIS_PACKET_EXTENSION) + ProtocolReservedLength;
+        Length = ALIGN_UP_BY(Length, MEMORY_ALLOCATION_ALIGNMENT);
         Size   = sizeof(NDISI_PACKET_POOL) + Length * NumberOfDescriptors;
 
         Pool   = ExAllocatePool(NonPagedPool, Size);
@@ -719,6 +720,7 @@ NdisDprAllocatePacketNonInterlocked(
                                             (sizeof(NDIS_PACKET_OOB_DATA) +
                                              sizeof(NDIS_PACKET_EXTENSION));
 
+        ASSERT(((ULONG_PTR)Temp & (MEMORY_ALLOCATION_ALIGNMENT - 1)) == 0);
         *Packet = Temp;
         *Status = NDIS_STATUS_SUCCESS;
     } else {

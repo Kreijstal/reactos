@@ -26,7 +26,10 @@ typedef struct _NDISI_PACKET_POOL {
   NDIS_SPIN_LOCK  SpinLock;
   struct _NDIS_PACKET *FreeList;
   UINT  PacketLength;
-  UCHAR  Buffer[1];
+  /* The descriptors, each PacketLength bytes: like any pool allocation they
+   * are MEMORY_ALLOCATION_ALIGNMENT aligned, which their interlocked fields
+   * need on architectures that fault on misaligned atomics */
+  DECLSPEC_ALIGN(MEMORY_ALLOCATION_ALIGNMENT) UCHAR Buffer[1];
 } NDISI_PACKET_POOL, * PNDISI_PACKET_POOL;
 
 UINT CopyBufferToBufferChain(
