@@ -737,10 +737,11 @@ KiSwapProcess(_Inout_ PKPROCESS NewProcess,
         {
             KAFFINITY Member = Pcr->Prcb.SetMember;
 
-            NewProcess->ActiveProcessors ^= Member;
+            /* Other processors switch the same processes concurrently */
+            InterlockedXor64((PLONG64)&NewProcess->ActiveProcessors, (LONG64)Member);
             if (OldProcess != NULL)
             {
-                OldProcess->ActiveProcessors ^= Member;
+                InterlockedXor64((PLONG64)&OldProcess->ActiveProcessors, (LONG64)Member);
             }
         }
     }
