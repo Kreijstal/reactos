@@ -15,6 +15,145 @@ static UNICODE_STRING SystemRootFoobar = RTL_CONSTANT_STRING(L"\\SystemRoot\\foo
 static UNICODE_STRING SystemRootFoobarFoobar = RTL_CONSTANT_STRING(L"\\SystemRoot\\foobar\\foobar.exe");
 static UNICODE_STRING FoobarFoobar = RTL_CONSTANT_STRING(L"foobar\\foobar.exe");
 
+/*
+ * kmtestcd keeps \SystemRoot on the CD. CDFS is read-only: CdCommonCreate
+ * refuses every SL_OPEN_TARGET_DIRECTORY open with STATUS_ACCESS_DENIED before
+ * it looks at the name, any write access is refused by CdIllegalFcbAccess,
+ * and a non-existent file can only be opened, never superseded or created.
+ */
+static BOOLEAN SystemRootIsCdfs;
+/* Access used to open \SystemRoot itself as the related directory */
+static ACCESS_MASK SystemRootAccess = GENERIC_WRITE | GENERIC_READ | SYNCHRONIZE;
+
+static
+VOID
+CheckSystemRootFileSystem(VOID)
+{
+    NTSTATUS Status;
+    IO_STATUS_BLOCK IoStatusBlock;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Handle;
+    struct
+    {
+        FILE_FS_ATTRIBUTE_INFORMATION Info;
+        WCHAR Name[16];
+    } FsAttribute;
+
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &SystemRoot,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL, NULL);
+    Status = ZwOpenFile(&Handle,
+                        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (skip(NT_SUCCESS(Status), "No \\SystemRoot\n"))
+        return;
+
+    Status = ZwQueryVolumeInformationFile(Handle,
+                                          &IoStatusBlock,
+                                          &FsAttribute,
+                                          sizeof(FsAttribute),
+                                          FileFsAttributeInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status) &&
+        FsAttribute.Info.FileSystemNameLength == 4 * sizeof(WCHAR) &&
+        RtlCompareMemory(FsAttribute.Info.FileSystemName, L"CDFS", 4 * sizeof(WCHAR)) == 4 * sizeof(WCHAR))
+    {
+        ok(BooleanFlagOn(FsAttribute.Info.FileSystemAttributes, FILE_READ_ONLY_VOLUME),
+           "CDFS volume not read-only: 0x%lx\n", FsAttribute.Info.FileSystemAttributes);
+        trace("\\SystemRoot is on CDFS\n");
+        SystemRootIsCdfs = TRUE;
+        SystemRootAccess = GENERIC_READ | SYNCHRONIZE;
+    }
+    ZwClose(Handle);
+}
+
+static
+VOID
+CheckCdfsTargetOpen(
+    _In_ PUNICODE_STRING Name,
+    _In_opt_ HANDLE RootDirectory)
+{
+    NTSTATUS Status;
+    IO_STATUS_BLOCK IoStatusBlock;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE ParentHandle;
+
+    IoStatusBlock.Status = 0xFFFFFFFF;
+    IoStatusBlock.Information = 0xFFFFFFFF;
+    InitializeObjectAttributes(&ObjectAttributes,
+                               Name,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               RootDirectory, NULL);
+    Status = IoCreateFile(&ParentHandle,
+                          GENERIC_READ | SYNCHRONIZE,
+                          &ObjectAttributes,
+                          &IoStatusBlock,
+                          NULL,
+                          0,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE,
+                          FILE_OPEN,
+                          FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+                          NULL,
+                          0,
+                          CreateFileTypeNone,
+                          NULL,
+                          IO_OPEN_TARGET_DIRECTORY);
+    ok(Status == STATUS_ACCESS_DENIED, "Target open of %wZ returned 0x%lx\n", Name, Status);
+    if (NT_SUCCESS(Status))
+        ObCloseHandle(ParentHandle, KernelMode);
+}
+
+/* CDFS cannot open a target directory at all, but its refusals are fixed */
+static
+VOID
+TestCdfsTargetOpens(VOID)
+{
+    NTSTATUS Status;
+    IO_STATUS_BLOCK IoStatusBlock;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE SystemRootHandle;
+
+    /* Write access to the read-only volume is refused */
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &SystemRoot,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL, NULL);
+    Status = ZwOpenFile(&SystemRootHandle,
+                        GENERIC_WRITE | GENERIC_READ | SYNCHRONIZE,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+    if (NT_SUCCESS(Status))
+        ObCloseHandle(SystemRootHandle, KernelMode);
+
+    /* Existing, missing and missing-parent targets, direct and relative */
+    CheckCdfsTargetOpen(&SystemRootRegedit, NULL);
+    CheckCdfsTargetOpen(&SystemRootFoobar, NULL);
+    CheckCdfsTargetOpen(&SystemRootFoobarFoobar, NULL);
+
+    Status = ZwOpenFile(&SystemRootHandle,
+                        SystemRootAccess,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        CheckCdfsTargetOpen(&Regedit, SystemRootHandle);
+        CheckCdfsTargetOpen(&Foobar, SystemRootHandle);
+        CheckCdfsTargetOpen(&FoobarFoobar, SystemRootHandle);
+        ObCloseHandle(SystemRootHandle, KernelMode);
+    }
+}
+
 static
 VOID
 NTAPI
@@ -30,6 +169,12 @@ KernelModeTest(IN PVOID Context)
 
     /* Kernelmode mandatory for IoCreateFile */
     ok(ExGetPreviousMode() == KernelMode, "UserMode returned!\n");
+
+    if (SystemRootIsCdfs)
+    {
+        TestCdfsTargetOpens();
+        return;
+    }
 
     /* First of all, open \\SystemRoot
      * We're interested in 3 pieces of information about it:
@@ -529,7 +674,8 @@ TestSymlinks(VOID)
                           FILE_NON_DIRECTORY_FILE,
                           NULL,
                           0);
-    ok_eq_hex(Status, STATUS_SUCCESS);
+    /* CDFS supersedes nothing and has no reparse points to test */
+    ok_eq_hex(Status, SystemRootIsCdfs ? STATUS_ACCESS_DENIED : STATUS_SUCCESS);
     if (skip(NT_SUCCESS(Status), "Creating file failed: %lx\n", Status))
     {
         ExFreePool(Regedit.Buffer);
@@ -848,7 +994,7 @@ UserModeTest(VOID)
                                OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
                                NULL, NULL);
     Status = ZwOpenFile(&SystemRootHandle,
-                        GENERIC_WRITE | GENERIC_READ | SYNCHRONIZE,
+                        SystemRootAccess,
                         &ObjectAttributes,
                         &IoStatusBlock,
                         FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -891,6 +1037,8 @@ UserModeTest(VOID)
 START_TEST(IoCreateFile)
 {
     PKTHREAD ThreadHandle;
+
+    CheckSystemRootFileSystem();
 
     TestSymlinks();
 
