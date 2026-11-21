@@ -139,9 +139,20 @@ typedef struct _LOGICAL_ADAPTER
 
 #define GET_LOGICAL_ADAPTER(Handle)((PLOGICAL_ADAPTER)Handle)
 
-/* A received packet waiting to be returned to a busy serialized miniport:
- * WrapperReservedEx belongs to NDIS in both MiniportReserved layouts */
+/*
+ * WrapperReservedEx belongs to NDIS in both MiniportReserved layouts.
+ *
+ * While a received packet is out with the protocols it holds the packet's
+ * references: one for each that a protocol kept, and MINI_INDICATION_REFS
+ * that the indication holds until it is done with the packet. Whoever drops
+ * the last one gives the packet back to the miniport, exactly once.
+ * Afterwards, while the packet waits to be returned to a busy serialized
+ * miniport, the same field links it into the adapter's return queue.
+ */
+#define MINI_PACKET_REFS(Packet) (*(volatile LONG *)(Packet)->WrapperReservedEx)
+#define MINI_INDICATION_REFS     0x10000
 #define MINI_RETURN_LINK(Packet) (*(PNDIS_PACKET *)(Packet)->WrapperReservedEx)
+C_ASSERT(sizeof(((PNDIS_PACKET)NULL)->WrapperReservedEx) >= sizeof(LONG));
 
 /*
  * Makes the caller the owner of a serialized miniport, if nobody is.

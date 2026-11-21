@@ -193,7 +193,7 @@ typedef struct _NDIS6_ADAPTER_EXT
     /* Phase 3 RX thunk: legacy NDIS_PACKET / NDIS_BUFFER pools used to
      * wrap incoming NET_BUFFERs when indicating receives up to a legacy
      * NDIS 5 protocol (tcpip.sys). One legacy packet per NB; per-NBL
-     * outstanding refcount lives in NBL->MiniportReserved[2]. */
+     * outstanding refcount lives in NBL->Scratch. */
     NDIS_HANDLE                     RxLegacyPacketPool;
     NDIS_HANDLE                     RxLegacyBufferPool;
 

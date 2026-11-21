@@ -46,9 +46,9 @@ MiniIndicateReceivePacket(
  *  The wrapper is allocated from Ext->RxLegacyPacketPool, with a single
  *  NDIS_BUFFER chained on that re-uses the NB's CurrentMdl directly (no
  *  copy). The original NBL pointer is stashed in Reserved[0] so the
- *  return path can find it; the indicating adapter is in Reserved[1]. The legacy
- *  WrapperReserved[0] starts at zero and is incremented by the existing
- *  protocol-bind logic in MiniIndicateReceivePacket.
+ *  return path can find it; the indicating adapter is in Reserved[1]. The
+ *  packet's references are MiniIndicateReceivePacket's: it hands the packet
+ *  to Ndis6RxReturnLegacyPacket once, when the last one is dropped.
  *
  *  Returns NULL on allocation failure (caller drops the NB).
  * ============================================================================ */
@@ -208,10 +208,6 @@ Ndis6RxBuildLegacyPacket(
             NDIS_PER_PACKET_INFO_FROM_PACKET(Packet, Ieee8021QInfo) = VlanValue;
     }
 
-    /* Initial refcount of zero — protocols increment as they hold the
-     * packet across async work. */
-    Packet->WrapperReserved[0] = 0;
-
     NDIS_SET_PACKET_STATUS(Packet,
         ResourcesFlag ? NDIS_STATUS_RESOURCES : NDIS_STATUS_SUCCESS);
     /* Ethernet II, or nothing in front of a raw IP packet */
@@ -253,7 +249,7 @@ Ndis6RxFreeLegacyPacket(
  *  Ndis6RxReturnLegacyPacket — called from miniport.c:NdisReturnPackets via
  *  the IsNdis6 gate when a legacy protocol releases a held wrapper packet.
  *
- *  Decrements the per-NBL refcount stored in NBL->MiniportReserved[2]; when
+ *  Decrements the per-NBL refcount stored in NBL->Scratch; when
  *  it hits zero, returns the entire NBL to the miniport via its
  *  ReturnNetBufferListsHandler.
  * ============================================================================ */
@@ -274,12 +270,15 @@ Ndis6RxReturnLegacyPacket(
 
     Ndis6RxFreeLegacyPacket(Packet);
 
+    /* Every wrapper comes back here exactly once, for the NBL it wraps */
+    ASSERT(Nbl != NULL && Adapter != NULL && Adapter->IsNdis6);
+    ASSERT(((ULONG_PTR)Nbl & (sizeof(PVOID) - 1)) == 0);
     if (Nbl == NULL || Adapter == NULL || !Adapter->IsNdis6)
         return;
 
-    /* Atomic decrement of the per-NBL refcount stashed in MiniportReserved[2]. */
-    RemainingRefs = (ULONG_PTR)InterlockedDecrementSizeT(
-        (volatile SIZE_T*)&Nbl->MiniportReserved[2]);
+    /* Atomic decrement of the per-NBL refcount stashed in Scratch. */
+    RemainingRefs = (ULONG_PTR)InterlockedDecrementSizeT((volatile SIZE_T*)&Nbl->Scratch);
+    ASSERT(RemainingRefs != (ULONG_PTR)-1);
 
     if (RemainingRefs == 0)
     {
@@ -463,14 +462,16 @@ Ndis6FilterTerminalReceive(
 
         /* Stash the per-NBL outstanding refcount BEFORE indicating, so
          * Ndis6RxReturnLegacyPacket can decrement it as wrappers come back.
-         * Use MiniportReserved[2] which is unused on the RX side. */
-        *(volatile SIZE_T*)&CurrentNbl->MiniportReserved[2] = (SIZE_T)PacketCount;
+         * Scratch belongs to the NBL's current owner: NDIS, while the NBL
+         * is indicated to the legacy protocols. */
+        *(volatile SIZE_T*)&CurrentNbl->Scratch = (SIZE_T)PacketCount;
 
-        /* Push the wrapper packets up the legacy protocol chain. The
-         * existing MiniIndicateReceivePacket increments WrapperReserved[0]
-         * for each protocol that holds the packet. Packets that no
-         * protocol holds (refcount stays 0) need to be freed immediately
-         * and counted as one fewer outstanding NBL ref. */
+        /* Push the wrapper packets up the legacy protocol chain. Each
+         * wrapper comes back to Ndis6RxReturnLegacyPacket once its last
+         * reference is gone: from MiniIndicateReceivePacket if no protocol
+         * kept it, else from the NdisReturnPackets of the last protocol that
+         * did, which may already run on another processor. Except in the
+         * RESOURCES case, the wrappers must not be touched after this. */
         MiniIndicateReceivePacket((NDIS_HANDLE)Adapter, PacketArray, PacketCount);
 
         /* B3: RESOURCES path — the miniport needs the NBL back before
@@ -489,23 +490,6 @@ Ndis6FilterTerminalReceive(
             }
             Ndis6FilterDispatchReturn(Adapter, CurrentNbl, 0);
             continue;
-        }
-
-        /* Normal path: walk the array; for unheld wrappers (refcount==0),
-         * free now and decrement the per-NBL refcount. For held wrappers,
-         * the protocol will eventually call NdisReturnPackets which routes
-         * through the IsNdis6 gate to Ndis6RxReturnLegacyPacket. */
-        {
-            UINT j;
-            for (j = 0; j < PacketCount; j++)
-            {
-                if (PacketArray[j]->WrapperReserved[0] == 0)
-                {
-                    /* No protocol held it — free wrapper and drop the
-                     * outstanding-NBL ref. Last decrement returns NBL. */
-                    Ndis6RxReturnLegacyPacket(PacketArray[j]);
-                }
-            }
         }
     }
 }
