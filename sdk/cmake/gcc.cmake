@@ -282,7 +282,10 @@ elseif(ARCH STREQUAL "amd64")
         add_compile_options(-mpreferred-stack-boundary=4)
     endif()
 elseif(ARCH STREQUAL "arm64")
-    add_compile_options(-mstrict-align)
+    # The Windows ARM64 ABI requires x29 to point at the {x29, x30} frame
+    # record of every non-leaf function (fast stack walks, RtlWalkFrameChain).
+    # Clang omits frame records by default for aarch64-windows.
+    add_compile_options(-mstrict-align -fno-omit-frame-pointer)
 endif()
 
 # Other
