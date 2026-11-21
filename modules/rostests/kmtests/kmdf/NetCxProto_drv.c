@@ -7,7 +7,8 @@
 
 /*
  * Opens the NetAdapterCx loopback adapter as an NDIS 6 protocol, sends
- * numbered packets through it and checks that each comes back unchanged:
+ * numbered packets through it and checks that each comes back unchanged
+ * (and does the same as an NDIS 5 protocol, further below):
  *
  *   NdisSendNetBufferLists -> NDIS -> NetAdapterCx miniport -> Tx ring
  *   -> loopback client -> Rx ring -> NetAdapterCx -> NDIS -> here
@@ -597,6 +598,560 @@ FreePool:
     NblPool = NULL;
 }
 
+/*
+ * NDIS 5 side: what tcpip sees of an NDIS 6 adapter. Two bindings of one
+ * legacy protocol open the adapter; NDIS wraps every received frame in an
+ * NDIS_PACKET and indicates it to both. The first binding keeps the packet.
+ *
+ * First the second binding gives the first one's packet back while the
+ * indication is still going on, the way a protocol that keeps a packet
+ * for a worker thread can see it returned from another processor before
+ * NDIS is done indicating it: the packet must still go back once, not
+ * once from NdisReturnPackets and again when the indication ends. Then
+ * the first binding keeps a few packets at a time: NDIS must not hand
+ * out one that is still kept, which it does once a packet went back to
+ * its pool twice.
+ */
+#define LEGACY_EARLY_FRAMES     8
+#define LEGACY_HELD_FRAMES      8
+#define LEGACY_FRAMES           (LEGACY_EARLY_FRAMES + LEGACY_HELD_FRAMES)
+#define LEGACY_FRAME_MAX        256
+#define LEGACY_SEQUENCE_BASE    100
+
+static NDIS_HANDLE LegacyProtocolHandle;
+static NDIS_HANDLE LegacyBinding[2];
+static NDIS_HANDLE LegacyPacketPool;
+static NDIS_HANDLE LegacyBufferPool;
+static KSPIN_LOCK LegacyLock;
+static PNDIS_PACKET LegacyHeld[LEGACY_FRAMES];
+static BOOLEAN LegacyReturnEarly;
+static volatile LONG LegacyReceived;
+static volatile LONG LegacyEarlyReturns;
+static volatile LONG LegacyKeptTwice;
+static volatile LONG LegacyMismatched;
+static volatile LONG LegacySendsOutstanding;
+
+/* Copies the start of the packet's data; returns its total length */
+static
+ULONG
+LegacyCopyPacket(
+    _In_ PNDIS_PACKET Packet,
+    _Out_writes_bytes_(Size) PUCHAR Data,
+    _In_ ULONG Size)
+{
+    PNDIS_BUFFER Buffer;
+    UINT Total, Length, Copied = 0;
+    PVOID Va;
+
+    NdisQueryPacket(Packet, NULL, NULL, &Buffer, &Total);
+    while (Buffer != NULL && Copied < Size)
+    {
+        NdisQueryBufferSafe(Buffer, &Va, &Length, NormalPagePriority);
+        if (Va == NULL)
+            break;
+        Length = min(Length, Size - Copied);
+        RtlCopyMemory(Data + Copied, Va, Length);
+        Copied += Length;
+        NdisGetNextBuffer(Buffer, &Buffer);
+    }
+    return Total;
+}
+
+/* Our frame, intact: returns its index, or MAXULONG */
+static
+ULONG
+LegacyFrameIndex(
+    _In_ PNDIS_PACKET Packet,
+    _Out_ PBOOLEAN Damaged)
+{
+    UCHAR Data[LEGACY_FRAME_MAX];
+    ULONG Length, Sequence;
+
+    *Damaged = FALSE;
+    Length = LegacyCopyPacket(Packet, Data, sizeof(Data));
+    if (Length < 16 || Length > sizeof(Data) || *(PULONG)&Data[4] != PROTO_MAGIC)
+        return MAXULONG;
+
+    if (!ProtoCheckFrame(Data, Length, &Sequence) ||
+        Sequence < LEGACY_SEQUENCE_BASE ||
+        Sequence >= LEGACY_SEQUENCE_BASE + LEGACY_FRAMES)
+    {
+        *Damaged = TRUE;
+        return MAXULONG;
+    }
+    return Sequence - LEGACY_SEQUENCE_BASE;
+}
+
+static
+INT
+NTAPI
+LegacyReceivePacket(
+    _In_ NDIS_HANDLE ProtocolBindingContext,
+    _In_ PNDIS_PACKET Packet)
+{
+    ULONG Binding = (ULONG)(ULONG_PTR)ProtocolBindingContext;
+    PNDIS_PACKET Return = NULL;
+    BOOLEAN Damaged;
+    KIRQL OldIrql;
+    ULONG Index, i;
+    INT Kept = 0;
+
+    Index = LegacyFrameIndex(Packet, &Damaged);
+    if (Damaged)
+        InterlockedIncrement(&LegacyMismatched);
+    if (Index == MAXULONG)
+        return 0;
+
+    KeAcquireSpinLock(&LegacyLock, &OldIrql);
+    if (Binding == 0)
+    {
+        /* A packet we keep must not come back in another indication */
+        for (i = 0; i < LEGACY_FRAMES; i++)
+        {
+            if (LegacyHeld[i] == Packet)
+                InterlockedIncrement(&LegacyKeptTwice);
+        }
+
+        if (LegacyHeld[Index] == NULL)
+        {
+            LegacyHeld[Index] = Packet;
+            InterlockedIncrement(&LegacyReceived);
+            Kept = 1;
+        }
+    }
+    else if (LegacyReturnEarly && LegacyHeld[Index] == Packet)
+    {
+        /* Give back what the first binding keeps, before the indication ends */
+        LegacyHeld[Index] = NULL;
+        Return = Packet;
+    }
+    KeReleaseSpinLock(&LegacyLock, OldIrql);
+
+    if (Return != NULL)
+    {
+        NdisReturnPackets(&Return, 1);
+        InterlockedIncrement(&LegacyEarlyReturns);
+
+        /*
+         * Other protocols bound to the adapter (tcpip) keep the packet too,
+         * and return it from a worker thread: give them the time to, so
+         * the packet has no references left but the indication's own.
+         */
+        for (i = 0; i < 20; i++)
+            KeStallExecutionProcessor(500);
+    }
+
+    return Kept;
+}
+
+static
+NDIS_STATUS
+NTAPI
+LegacyReceive(
+    _In_ NDIS_HANDLE ProtocolBindingContext,
+    _In_ NDIS_HANDLE MacReceiveContext,
+    _In_ PVOID HeaderBuffer,
+    _In_ UINT HeaderBufferSize,
+    _In_ PVOID LookaheadBuffer,
+    _In_ UINT LookaheadBufferSize,
+    _In_ UINT PacketSize)
+{
+    UNREFERENCED_PARAMETER(ProtocolBindingContext);
+    UNREFERENCED_PARAMETER(MacReceiveContext);
+    UNREFERENCED_PARAMETER(HeaderBuffer);
+    UNREFERENCED_PARAMETER(HeaderBufferSize);
+    UNREFERENCED_PARAMETER(LookaheadBuffer);
+    UNREFERENCED_PARAMETER(LookaheadBufferSize);
+    UNREFERENCED_PARAMETER(PacketSize);
+    return NDIS_STATUS_NOT_ACCEPTED;
+}
+
+static
+VOID
+LegacyFreeSendPacket(
+    _In_ PNDIS_PACKET Packet)
+{
+    PNDIS_BUFFER Buffer;
+    PVOID Va;
+    UINT Length;
+
+    NdisUnchainBufferAtFront(Packet, &Buffer);
+    if (Buffer != NULL)
+    {
+        NdisQueryBufferSafe(Buffer, &Va, &Length, NormalPagePriority);
+        NdisFreeBuffer(Buffer);
+        if (Va != NULL)
+            ExFreePoolWithTag(Va, TAG_PROTO);
+    }
+    NdisFreePacket(Packet);
+}
+
+static
+VOID
+NTAPI
+LegacySendComplete(
+    _In_ NDIS_HANDLE ProtocolBindingContext,
+    _In_ PNDIS_PACKET Packet,
+    _In_ NDIS_STATUS Status)
+{
+    UNREFERENCED_PARAMETER(ProtocolBindingContext);
+    ok_eq_hex(Status, NDIS_STATUS_SUCCESS);
+    LegacyFreeSendPacket(Packet);
+    InterlockedDecrement(&LegacySendsOutstanding);
+}
+
+static
+VOID
+NTAPI
+LegacyOpenAdapterComplete(
+    _In_ NDIS_HANDLE ProtocolBindingContext,
+    _In_ NDIS_STATUS Status,
+    _In_ NDIS_STATUS OpenErrorStatus)
+{
+    UNREFERENCED_PARAMETER(ProtocolBindingContext);
+    UNREFERENCED_PARAMETER(Status);
+    UNREFERENCED_PARAMETER(OpenErrorStatus);
+}
+
+static
+VOID
+NTAPI
+LegacyStatusOnly(
+    _In_ NDIS_HANDLE ProtocolBindingContext,
+    _In_ NDIS_STATUS Status)
+{
+    UNREFERENCED_PARAMETER(ProtocolBindingContext);
+    UNREFERENCED_PARAMETER(Status);
+}
+
+static
+VOID
+NTAPI
+LegacyRequestComplete(
+    _In_ NDIS_HANDLE ProtocolBindingContext,
+    _In_ PNDIS_REQUEST NdisRequest,
+    _In_ NDIS_STATUS Status)
+{
+    UNREFERENCED_PARAMETER(ProtocolBindingContext);
+    UNREFERENCED_PARAMETER(NdisRequest);
+    UNREFERENCED_PARAMETER(Status);
+}
+
+static
+VOID
+NTAPI
+LegacyTransferDataComplete(
+    _In_ NDIS_HANDLE ProtocolBindingContext,
+    _In_ PNDIS_PACKET Packet,
+    _In_ NDIS_STATUS Status,
+    _In_ UINT BytesTransferred)
+{
+    UNREFERENCED_PARAMETER(ProtocolBindingContext);
+    UNREFERENCED_PARAMETER(Packet);
+    UNREFERENCED_PARAMETER(Status);
+    UNREFERENCED_PARAMETER(BytesTransferred);
+}
+
+static
+VOID
+NTAPI
+LegacyBindingOnly(
+    _In_ NDIS_HANDLE ProtocolBindingContext)
+{
+    UNREFERENCED_PARAMETER(ProtocolBindingContext);
+}
+
+static
+VOID
+NTAPI
+LegacyStatus(
+    _In_ NDIS_HANDLE ProtocolBindingContext,
+    _In_ NDIS_STATUS GeneralStatus,
+    _In_ PVOID StatusBuffer,
+    _In_ UINT StatusBufferSize)
+{
+    UNREFERENCED_PARAMETER(ProtocolBindingContext);
+    UNREFERENCED_PARAMETER(GeneralStatus);
+    UNREFERENCED_PARAMETER(StatusBuffer);
+    UNREFERENCED_PARAMETER(StatusBufferSize);
+}
+
+/* Opens our target adapter twice, nothing else */
+static
+VOID
+NTAPI
+LegacyBindAdapter(
+    _Out_ PNDIS_STATUS Status,
+    _In_ NDIS_HANDLE BindContext,
+    _In_ PNDIS_STRING DeviceName,
+    _In_ PVOID SystemSpecific1,
+    _In_ PVOID SystemSpecific2)
+{
+    NDIS_MEDIUM Medium = (NDIS_MEDIUM)NETCX_TEST_MEDIUM;
+    NDIS_STATUS OpenError;
+    UNICODE_STRING Target;
+    UINT SelectedMedium;
+    ULONG i;
+
+    UNREFERENCED_PARAMETER(BindContext);
+    UNREFERENCED_PARAMETER(SystemSpecific1);
+    UNREFERENCED_PARAMETER(SystemSpecific2);
+
+    RtlInitUnicodeString(&Target, TargetAdapter);
+    if (DeviceName == NULL || !RtlEqualUnicodeString(DeviceName, &Target, TRUE) ||
+        LegacyBinding[0] != NULL)
+    {
+        *Status = NDIS_STATUS_NOT_ACCEPTED;
+        return;
+    }
+
+    for (i = 0; i < 2; i++)
+    {
+        SelectedMedium = MAXULONG;
+        NdisOpenAdapter(Status, &OpenError, &LegacyBinding[i], &SelectedMedium,
+                        &Medium, 1, LegacyProtocolHandle, (NDIS_HANDLE)(ULONG_PTR)i,
+                        DeviceName, 0, NULL);
+        ok_eq_hex(*Status, NDIS_STATUS_SUCCESS);
+        ok_eq_uint(SelectedMedium, 0);
+        if (*Status != NDIS_STATUS_SUCCESS)
+        {
+            LegacyBinding[i] = NULL;
+            return;
+        }
+    }
+}
+
+static
+VOID
+NTAPI
+LegacyUnbindAdapter(
+    _Out_ PNDIS_STATUS Status,
+    _In_ NDIS_HANDLE ProtocolBindingContext,
+    _In_ NDIS_HANDLE UnbindContext)
+{
+    UNREFERENCED_PARAMETER(ProtocolBindingContext);
+    UNREFERENCED_PARAMETER(UnbindContext);
+    *Status = NDIS_STATUS_SUCCESS;
+}
+
+static
+NDIS_STATUS
+NTAPI
+LegacyPnPEvent(
+    _In_ NDIS_HANDLE ProtocolBindingContext,
+    _In_ PNET_PNP_EVENT NetPnPEvent)
+{
+    UNREFERENCED_PARAMETER(ProtocolBindingContext);
+    UNREFERENCED_PARAMETER(NetPnPEvent);
+    return NDIS_STATUS_SUCCESS;
+}
+
+static
+VOID
+NTAPI
+LegacyUnload(VOID)
+{
+}
+
+/* Sends frame Index through the first binding; the adapter loops it back */
+static
+BOOLEAN
+LegacySend(
+    _In_ ULONG Index)
+{
+    ULONG Length = 64 + Index * 8;
+    PNDIS_PACKET Packet;
+    PNDIS_BUFFER Buffer;
+    NDIS_STATUS Status;
+    PUCHAR Frame;
+
+    Frame = ExAllocatePoolWithTag(NonPagedPool, Length, TAG_PROTO);
+    if (Frame == NULL)
+        return FALSE;
+    ProtoFillFrame(Frame, Length, LEGACY_SEQUENCE_BASE + Index);
+
+    NdisAllocatePacket(&Status, &Packet, LegacyPacketPool);
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        ExFreePoolWithTag(Frame, TAG_PROTO);
+        return FALSE;
+    }
+    NdisAllocateBuffer(&Status, &Buffer, LegacyBufferPool, Frame, Length);
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        NdisFreePacket(Packet);
+        ExFreePoolWithTag(Frame, TAG_PROTO);
+        return FALSE;
+    }
+    NdisChainBufferAtFront(Packet, Buffer);
+
+    InterlockedIncrement(&LegacySendsOutstanding);
+    NdisSend(&Status, LegacyBinding[0], Packet);
+    if (Status != NDIS_STATUS_PENDING)
+    {
+        ok_eq_hex(Status, NDIS_STATUS_SUCCESS);
+        LegacyFreeSendPacket(Packet);
+        InterlockedDecrement(&LegacySendsOutstanding);
+    }
+    return TRUE;
+}
+
+/* Waits for Count frames to be received, and for the sends to complete */
+static
+BOOLEAN
+LegacyWaitReceived(
+    _In_ LONG Count)
+{
+    LARGE_INTEGER Interval;
+    ULONG i;
+
+    Interval.QuadPart = -10LL * 1000 * 10;
+    for (i = 0; i < 500; i++)
+    {
+        if (LegacyReceived >= Count && LegacySendsOutstanding == 0)
+            return TRUE;
+        KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+    }
+    return FALSE;
+}
+
+static
+VOID
+LegacyReturnHeld(VOID)
+{
+    PNDIS_PACKET Packet;
+    KIRQL OldIrql;
+    ULONG i;
+
+    for (i = 0; i < LEGACY_FRAMES; i++)
+    {
+        KeAcquireSpinLock(&LegacyLock, &OldIrql);
+        Packet = LegacyHeld[i];
+        LegacyHeld[i] = NULL;
+        KeReleaseSpinLock(&LegacyLock, OldIrql);
+        if (Packet != NULL)
+            NdisReturnPackets(&Packet, 1);
+    }
+}
+
+static
+VOID
+LegacyRunTest(VOID)
+{
+    NDIS_PROTOCOL_CHARACTERISTICS Characteristics;
+    NDIS_STRING Name = RTL_CONSTANT_STRING(L"KmtNetCxProto5");
+    NDIS_STATUS Status;
+    BOOLEAN Damaged;
+    ULONG i, j;
+
+    KeInitializeSpinLock(&LegacyLock);
+    RtlZeroMemory(LegacyHeld, sizeof(LegacyHeld));
+    LegacyBinding[0] = LegacyBinding[1] = NULL;
+    LegacyReturnEarly = TRUE;
+    LegacyReceived = LegacyEarlyReturns = LegacyKeptTwice = 0;
+    LegacyMismatched = LegacySendsOutstanding = 0;
+
+    NdisAllocatePacketPool(&Status, &LegacyPacketPool, LEGACY_FRAMES, 4 * sizeof(PVOID));
+    ok_eq_hex(Status, NDIS_STATUS_SUCCESS);
+    if (Status != NDIS_STATUS_SUCCESS)
+        return;
+    NdisAllocateBufferPool(&Status, &LegacyBufferPool, LEGACY_FRAMES);
+    ok_eq_hex(Status, NDIS_STATUS_SUCCESS);
+
+    RtlZeroMemory(&Characteristics, sizeof(Characteristics));
+    Characteristics.MajorNdisVersion = 4;
+    Characteristics.MinorNdisVersion = 0;
+    Characteristics.Name = Name;
+    Characteristics.OpenAdapterCompleteHandler = LegacyOpenAdapterComplete;
+    Characteristics.CloseAdapterCompleteHandler = LegacyStatusOnly;
+    Characteristics.SendCompleteHandler = LegacySendComplete;
+    Characteristics.TransferDataCompleteHandler = LegacyTransferDataComplete;
+    Characteristics.ResetCompleteHandler = LegacyStatusOnly;
+    Characteristics.RequestCompleteHandler = LegacyRequestComplete;
+    Characteristics.ReceiveHandler = LegacyReceive;
+    Characteristics.ReceiveCompleteHandler = LegacyBindingOnly;
+    Characteristics.StatusHandler = LegacyStatus;
+    Characteristics.StatusCompleteHandler = LegacyBindingOnly;
+    Characteristics.ReceivePacketHandler = LegacyReceivePacket;
+    Characteristics.BindAdapterHandler = LegacyBindAdapter;
+    Characteristics.UnbindAdapterHandler = LegacyUnbindAdapter;
+    Characteristics.PnPEventHandler = LegacyPnPEvent;
+    Characteristics.UnloadHandler = LegacyUnload;
+
+    NdisRegisterProtocol(&Status, &LegacyProtocolHandle, &Characteristics, sizeof(Characteristics));
+    ok_eq_hex(Status, NDIS_STATUS_SUCCESS);
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        LegacyProtocolHandle = NULL;
+        goto FreePools;
+    }
+
+    /* NDIS binds us to its adapters as we register */
+    ok(LegacyBinding[0] != NULL && LegacyBinding[1] != NULL, "Adapter %S not opened twice\n", TargetAdapter);
+    if (LegacyBinding[0] == NULL || LegacyBinding[1] == NULL)
+        goto Close;
+
+    /* The second binding returns the packets the first one keeps */
+    for (i = 0; i < LEGACY_EARLY_FRAMES; i++)
+    {
+        ok(LegacySend(i), "Frame %lu not sent\n", i);
+        ok(LegacyWaitReceived((LONG)i + 1), "Frame %lu not received\n", i);
+    }
+    ok_eq_long(LegacyReceived, (LONG)LEGACY_EARLY_FRAMES);
+    ok_eq_long(LegacyEarlyReturns, (LONG)LEGACY_EARLY_FRAMES);
+    for (i = 0; i < LEGACY_EARLY_FRAMES; i++)
+        ok(LegacyHeld[i] == NULL, "Frame %lu still kept\n", i);
+
+    /* The first binding keeps them all */
+    LegacyReturnEarly = FALSE;
+    for (i = LEGACY_EARLY_FRAMES; i < LEGACY_FRAMES; i++)
+    {
+        ok(LegacySend(i), "Frame %lu not sent\n", i);
+        ok(LegacyWaitReceived((LONG)i + 1), "Frame %lu not received\n", i);
+    }
+    ok_eq_long(LegacyReceived, (LONG)LEGACY_FRAMES);
+    ok_eq_long(LegacyKeptTwice, 0L);
+    for (i = LEGACY_EARLY_FRAMES; i < LEGACY_FRAMES; i++)
+    {
+        ok(LegacyHeld[i] != NULL, "Frame %lu not kept\n", i);
+        if (LegacyHeld[i] == NULL)
+            continue;
+        for (j = i + 1; j < LEGACY_FRAMES; j++)
+            ok(LegacyHeld[i] != LegacyHeld[j], "Frames %lu and %lu in one packet %p\n", i, j, LegacyHeld[i]);
+        /* Nothing was received into a packet we keep */
+        ok_eq_ulong(LegacyFrameIndex(LegacyHeld[i], &Damaged), i);
+        ok(!Damaged, "Frame %lu damaged\n", i);
+    }
+    ok_eq_long(LegacyMismatched, 0L);
+    trace("Legacy protocol: %ld frames received, %ld returned early\n",
+          LegacyReceived, LegacyEarlyReturns);
+
+    LegacyReturnHeld();
+
+Close:
+    for (i = 0; i < 2; i++)
+    {
+        if (LegacyBinding[i] != NULL)
+        {
+            NdisCloseAdapter(&Status, LegacyBinding[i]);
+            ok_eq_hex(Status, NDIS_STATUS_SUCCESS);
+            LegacyBinding[i] = NULL;
+        }
+    }
+    NdisDeregisterProtocol(&Status, LegacyProtocolHandle);
+    ok_eq_hex(Status, NDIS_STATUS_SUCCESS);
+    LegacyProtocolHandle = NULL;
+
+FreePools:
+    if (LegacySendsOutstanding == 0)
+    {
+        NdisFreeBufferPool(LegacyBufferPool);
+        NdisFreePacketPool(LegacyPacketPool);
+    }
+    LegacyBufferPool = NULL;
+    LegacyPacketPool = NULL;
+}
+
 static
 NTSTATUS
 TestMessageHandler(
@@ -620,6 +1175,10 @@ TestMessageHandler(
 
         case IOCTL_NETCXPROTO_RUN:
             ProtoRunTest();
+            return STATUS_SUCCESS;
+
+        case IOCTL_NETCXPROTO_RUN_LEGACY:
+            LegacyRunTest();
             return STATUS_SUCCESS;
 
         default:
@@ -647,6 +1206,8 @@ TestEntry(
     Status = KmtRegisterMessageHandler(IOCTL_NETCXPROTO_SET_ADAPTER, NULL, TestMessageHandler);
     if (NT_SUCCESS(Status))
         Status = KmtRegisterMessageHandler(IOCTL_NETCXPROTO_RUN, NULL, TestMessageHandler);
+    if (NT_SUCCESS(Status))
+        Status = KmtRegisterMessageHandler(IOCTL_NETCXPROTO_RUN_LEGACY, NULL, TestMessageHandler);
     return Status;
 }
 

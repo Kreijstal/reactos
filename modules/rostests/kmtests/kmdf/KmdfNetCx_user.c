@@ -262,7 +262,8 @@ NdisAdapterPresent(
 static
 VOID
 RunTraffic(
-    _In_ PCWSTR ExportName)
+    _In_ PCWSTR ExportName,
+    _In_ BOOLEAN Legacy)
 {
     DWORD Error;
 
@@ -273,7 +274,7 @@ RunTraffic(
 
     Error = KmtSendWStringToDriver(IOCTL_NETCXPROTO_SET_ADAPTER, ExportName);
     ok_eq_int(Error, ERROR_SUCCESS);
-    Error = KmtSendToDriver(IOCTL_NETCXPROTO_RUN);
+    Error = KmtSendToDriver(Legacy ? IOCTL_NETCXPROTO_RUN_LEGACY : IOCTL_NETCXPROTO_RUN);
     ok_eq_int(Error, ERROR_SUCCESS);
     KmtCloseDriver();
     KmtUnloadDriver();
@@ -438,7 +439,7 @@ TestVersion(
     ok(NdisAdapterPresent(Device.ExportName), "No NDIS adapter %S\n", Device.ExportName);
 
     /* Traffic through NDIS */
-    RunTraffic(Device.ExportName);
+    RunTraffic(Device.ExportName, FALSE);
     if (LoopIoctl(Minor, IOCTL_NETCXLOOP_GET_STATE, &State))
     {
         /*
@@ -453,6 +454,16 @@ TestVersion(
         trace("Tx %I64d/%I64d bytes, Rx %I64d/%I64d bytes, armed tx %ld rx %ld\n",
               State.TxPackets, State.TxBytes, State.RxPackets, State.RxBytes,
               State.TxArmed, State.RxArmed);
+    }
+
+    /* The same through the NDIS 5 thunks, the way tcpip uses the adapter */
+    Before = State.TxPackets;
+    RunTraffic(Device.ExportName, TRUE);
+    if (LoopIoctl(Minor, IOCTL_NETCXLOOP_GET_STATE, &State))
+    {
+        ok(State.TxPackets >= Before + 16, "Only %I64d packets sent\n", State.TxPackets - Before);
+        ok_eq_longlong(State.RxPackets, State.TxPackets);
+        ok_eq_longlong(State.Dropped, 0LL);
     }
 
     /* NetAdapterStop: NDIS halts the adapter, the queues go away */
@@ -476,7 +487,7 @@ TestVersion(
     }
 
     Before = State.TxPackets;
-    RunTraffic(Device.ExportName);
+    RunTraffic(Device.ExportName, FALSE);
     if (LoopIoctl(Minor, IOCTL_NETCXLOOP_GET_STATE, &State))
     {
         ok(State.TxPackets >= Before + 36, "Only %I64d packets sent\n", State.TxPackets - Before);

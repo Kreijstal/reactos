@@ -15,7 +15,8 @@
  *   it is given to transmit back as received. User mode reads its state
  *   through \\.\KmtNetCxLoop2x.
  * - netcxproto_drv: an NDIS 6 protocol driver that opens the loopback
- *   adapter, sends packets through it and checks what comes back.
+ *   adapter, sends packets through it and checks what comes back, and
+ *   as an NDIS 5 protocol does the same through the NDIS 5 thunks.
  * - KmdfNetCx_user.c: installs the class extension and the device and
  *   drives the two drivers.
  */
@@ -89,6 +90,8 @@ typedef struct _NETCXLOOP_STATE
 /* netcxproto_drv */
 #define IOCTL_NETCXPROTO_SET_ADAPTER    1
 #define IOCTL_NETCXPROTO_RUN            2
+/* The same as an NDIS 5 protocol with two bindings */
+#define IOCTL_NETCXPROTO_RUN_LEGACY     3
 
 #define NETCXPROTO_SERVICE_NAME         L"NetCxProto"
 
