@@ -625,6 +625,22 @@ KiArm64DispatchChain(_In_ ULONG IntId,
 
     if (IsListEmpty(ListHead))
     {
+        /*
+         * SGIs and PPIs (the IPI, the per-processor timer) are banked: every
+         * processor takes its own. Like the x64 IPI and clock vectors they
+         * are not serialized across processors, which the one shared
+         * interrupt lock of their kernel-owned interrupt object would do --
+         * deadlocking as soon as a processor waits for another one inside
+         * such an interrupt: a target freezing in its IPI, or a generic-call
+         * target in its timer interrupt waiting for an initiator that takes
+         * its own timer interrupt.
+         */
+        if (IntId < ARM64_FIRST_SPI)
+        {
+            (VOID)Head->ServiceRoutine(Head, Head->ServiceContext);
+            goto Done;
+        }
+
         /* Single ISR */
         KxAcquireSpinLock(Head->ActualLock);
         (VOID)Head->ServiceRoutine(Head, Head->ServiceContext);
