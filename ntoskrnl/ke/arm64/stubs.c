@@ -673,7 +673,16 @@ KeStartAllProcessors(
              * 3. Jump to the kernel entry point
              */
             ProcessorState->ContextFrame.Pc = (DWORD64)KiInitializeSystem;
-            ProcessorState->ContextFrame.Sp = (DWORD64)KernelStack;
+            /*
+             * The AP runs KiInitializeSystem on the stack that becomes its
+             * idle thread's, and KeInitializeThread builds that thread's
+             * switch/start frame at the top of it. Start below that frame
+             * (amd64 reserves the same room in KiSwitchToBootStack), or
+             * KeInitializeThread zeroes the live frames of its own caller.
+             */
+            ProcessorState->ContextFrame.Sp =
+                (DWORD64)KernelStack -
+                ALIGN_UP_BY(sizeof(KSWITCH_FRAME) + sizeof(KSTART_FRAME), 16);
 
             /* Store ARM64 system registers if needed */
             ProcessorState->ArchState.Ttbr0_El1 = 0; /* HAL will use BSP's value */
