@@ -709,8 +709,8 @@ KiArm64InterruptDispatchEntry(_In_ ULONG VectorId)
     /*
      * Deliver pending kernel APCs before returning to user mode. On x86/x64
      * the APC software interrupt fires as IRQL drops during interrupt exit;
-     * our HalRequestSoftwareInterrupt is a no-op and KeLowerIrql skips
-     * delivery while DAIF.I is masked (which it is on this path). Without
+     * HalEndSystemInterrupt's KeLowerIrql does the same here, and this
+     * catches an APC queued to the thread after that lowering. Without
      * this, a thread that never re-enters the kernel through a syscall —
      * e.g. one spinning in user mode — can never be terminated, because
      * PsExitSpecialApc is a kernel-mode APC. User APCs are intentionally

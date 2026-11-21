@@ -440,14 +440,11 @@ KiSwapContextResume(
     /*
      * The switch may have been initiated from an interrupt handler, where
      * the exception entry set PSTATE.I. That CPU-level mask belongs to the
-     * interrupted context, not to the incoming thread: below HIGH_LEVEL the
-     * IRQL is represented by the GIC PMR alone, with DAIF.I clear. Restore
-     * that invariant here, or the resumed thread keeps running with
-     * interrupts hard-masked at any IRQL, which silently defers kernel APC
-     * delivery (KeLowerIrql skips it while DAIF.I is set) and breaks the
-     * promise that an IRP completion APC fires before IoCompleteRequest's
-     * caller returns. The PMR still gates interrupts by IRQL, and the
-     * HIGH_LEVEL paths re-mask DAIF explicitly.
+     * interrupted context, not to the incoming thread: IRQL is represented by
+     * the GIC PMR alone, and a thread blocks and resumes with interrupts
+     * enabled, as on x64. Restore that invariant here, or the resumed thread
+     * keeps running with interrupts hard-masked at any IRQL. The PMR still
+     * gates interrupts by the IRQL the thread resumes at.
      */
     __asm__ __volatile__("msr daifclr, #0xb" ::: "memory");
     __asm__ __volatile__("isb" ::: "memory");

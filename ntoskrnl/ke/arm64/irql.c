@@ -2,38 +2,25 @@
  * PROJECT:         ReactOS Kernel (ARM64)
  * PURPOSE:         Interrupt request level management for ARM64
  *
- * ARCHITECTURAL NOTES (from expert review):
+ * DESIGN:
  *
- * 1. FIXED: Per-CPU re-entrancy guard
- *    - Now using Prcb->InHighLevelTransition instead of global variable
- *    - Prevents false re-entrancy on SMP when multiple CPUs lower IRQL concurrently
+ * IRQL is the GIC CPU-interface priority mask (ICC_PMR_EL1 on GICv3, GICC_PMR
+ * on GICv2), exactly as it is CR8/TPR on x64: raising IRQL to N stops the GIC
+ * from signalling any interrupt whose priority maps to IRQL <= N, and HIGH_LEVEL
+ * programs PMR 0x00, which no interrupt can pass. IRQL transitions never touch
+ * PSTATE.I (DAIF.I) -- like RFLAGS.IF on x64 it belongs to the exception entry
+ * and to explicit _disable()/_enable() regions, so KeRaiseIrql(HIGH_LEVEL)
+ * leaves interrupts "enabled" from the CPU's point of view, as on Windows.
  *
- * 2. TODO: GIC Priority Masking (ICC_PMR_EL1)
- *    - Current implementation uses binary DAIF masking (all IRQs on/off)
- *    - For production SMP, should use GIC priority masking via ICC_PMR_EL1
- *    - This allows high-priority interrupts (clock, IPI) to nest/preempt lower-priority ISRs
- *    - Need IRQL->GIC priority mapping table and PMR manipulation in KiApplyIrqMaskForIrqlTransition
+ * PASSIVE/APC/DISPATCH all use PMR 0xFF; the software interrupts at those
+ * levels are requested through PRCB/thread state (HalRequestSoftwareInterrupt
+ * sends no SGI) and delivered by KfLowerIrql, in the manner of the x86 PIC HAL:
+ * with interrupts enabled while the handler runs and the caller's interrupt
+ * state restored afterwards.
  *
- * 3. DONE: TPIDR_EL1 per-CPU PCR access
- *    - KiInitializePcr() writes TPIDR_EL1 = Pcr (see kiinit.c)
- *    - KeGetPcr() in ketypes.h reads tpidr_el1 with NULL fallback to global
- *    - KeGetCurrentIrql/Thread/DPC macros now read from PCR/PRCB directly
- *
- * 4. TODO: Explicit memory barriers
- *    - Consider adding KeMemoryBarrier() or __dmb(_ARM64_BARRIER_SY) around CurrentIrql updates
- *    - Windows uses barriers for ordering IRQL writes vs interrupt unmasking
- *
- * 5. SError policy
- *    - Keep SError (DAIF.A bit) masked during normal IRQL transitions
- *    - The earlier PASSIVE_LEVEL unmask policy delivered pending async aborts
- *      during idle/context-switch paths without reliable source attribution
- *    - Revisit only after the ARM64 port has validated SError attribution and
- *      a deliberate handling policy beyond fatal bugcheck
- *
- * 6. TODO: Scheduler triggers on IRQL lowering
- *    - Windows checks Prcb->QuantumEnd and Prcb->NextThread on IRQL lowering
- *    - May need reschedule IPI or software interrupt trigger
- *    - Currently only handling DPCs/Timers
+ * Until the executive sets KiHalInitialized (after HAL phase 1) the HAL's PMR
+ * path cannot be used yet, so HIGH_LEVEL is honoured with DAIF instead (see
+ * the early path in KiApplyIrqMaskForIrqlTransition).
  */
 
 #include <ntoskrnl.h>
@@ -149,8 +136,6 @@ KiPmrTraceDump(VOID)
 #undef KeRaiseIrql
 #undef KeGetCurrentIrql
 
-#define ARM64_MASK_IRQ()   __asm__ __volatile__("msr daifset, #0x3" ::: "memory") /* mask IRQ+FIQ */
-#define ARM64_UNMASK_IRQ() __asm__ __volatile__("msr daifclr, #0x3" ::: "memory") /* unmask IRQ+FIQ */
 #define ARM64_MASK_ALL()   __asm__ __volatile__("msr daifset, #0xf" ::: "memory")
 #define ARM64_MASK_SERROR() __asm__ __volatile__("msr daifset, #0x4" ::: "memory")
 /*
@@ -159,17 +144,25 @@ KiPmrTraceDump(VOID)
  * Immediate 0xB = bits 3,1,0 (D,I,F).
  */
 #define ARM64_UNMASK_ALL_NO_SERROR() __asm__ __volatile__("msr daifclr, #0xb" ::: "memory")
+/*
+ * The PCR IRQL is read and written with single x18-relative instructions.
+ * Below DISPATCH_LEVEL the thread can be preempted between any two
+ * instructions and resume on another processor (x18 then names the new
+ * processor's PCR): a PCR address computed into another register beforehand
+ * would read, or write, the previous processor's IRQL. The value itself is
+ * the thread's own IRQL wherever it runs, so a separate read and write are
+ * fine as long as each is one instruction against the current x18.
+ */
 FORCEINLINE
 KIRQL
 KiQueryCurrentIrql(VOID)
 {
-    PKIPCR Pcr = KeGetPcr();
-    if (Pcr != NULL)
+    if (__getReg(18) != 0)
     {
-        return Pcr->CurrentIrql;
+        return KiArm64ReadCurrentIrql();
     }
 
-    /* Fallback for very early boot (before TPIDR_EL1 init) */
+    /* Fallback for very early boot (before the PCR is installed in x18) */
     return KeArm64CurrentIrql;
 }
 
@@ -177,14 +170,16 @@ VOID
 KiSetCurrentIrql(
     _In_ KIRQL Irql)
 {
-    PKIPCR Pcr = KeGetPcr();
-    if (Pcr != NULL)
+    if (__getReg(18) != 0)
     {
-        Pcr->CurrentIrql = Irql;
+        __asm__ __volatile__("strb %w0, [x18, #%c1]"
+                             :
+                             : "r"(Irql), "i"(FIELD_OFFSET(KIPCR, CurrentIrql))
+                             : "memory");
         return;
     }
 
-    /* Fallback for very early boot (before TPIDR_EL1 init) */
+    /* Fallback for very early boot (before the PCR is installed in x18) */
     KeArm64CurrentIrql = Irql;
 }
 
@@ -213,26 +208,6 @@ KiTraceSerrorPolicy(
  * over when GIC priority masking becomes active.
  */
 
-/*
- * KiUpdateDaifForIrql - Update DAIF mask bits based on IRQL level
- *
- * SERROR HANDLING POLICY:
- * =======================
- * SError (System Error, asynchronous external abort) is ARM64's mechanism for
- * reporting asynchronous hardware errors like:
- *   - External memory parity errors
- *   - Cache ECC errors
- *   - Bus/interconnect errors
- *   - RAS (Reliability, Availability, Serviceability) events
- *
- * For bring-up we keep DAIF.A masked across normal IRQL transitions. The prior
- * PASSIVE_LEVEL unmask policy caused boot-critical async abort delivery at the
- * exact DAIF clear instruction, while FAR_EL1 still reflected the most recent
- * paged-pool access rather than a reliable faulting source.
- *
- * Until the ARM64 port has validated SError attribution and deliberate recovery
- * behavior, IRQL transitions should only control IRQ/FIQ delivery here.
- */
 FORCEINLINE
 BOOLEAN
 KiIrqlTransitionNeedsGicPmrUpdate(
@@ -241,30 +216,9 @@ KiIrqlTransitionNeedsGicPmrUpdate(
 {
     /*
      * PASSIVE/APC/DISPATCH all use the unmasked GIC PMR value. Avoid the
-     * system-register/MMIO PMR write on normal thread and spinlock transitions,
-     * while still letting the DAIF/SError policy below run.
+     * system-register/MMIO PMR write on normal thread and spinlock transitions.
      */
     return !((OldIrql <= DISPATCH_LEVEL) && (NewIrql <= DISPATCH_LEVEL));
-}
-
-FORCEINLINE
-VOID
-KiUpdateDaifForIrql(
-    _In_ KIRQL NewIrql,
-    _In_ BOOLEAN IsHighLevelTransition)
-{
-    if (IsHighLevelTransition)
-    {
-        /* HIGH_LEVEL transitions are handled separately with full masking */
-        return;
-    }
-
-    UNREFERENCED_PARAMETER(NewIrql);
-
-    /* Normal IRQL transitions unmask D/I/F but keep SError masked (A stays set). */
-    ARM64_UNMASK_ALL_NO_SERROR();
-
-    __asm__ __volatile__("isb" ::: "memory");
 }
 
 FORCEINLINE
@@ -306,66 +260,30 @@ KeGetCurrentProcessorNumberEx(
 }
 
 /*
- * KiApplyIrqMaskForIrqlTransition - Apply ARM64 GIC priority mask for IRQL changes
+ * KiApplyIrqMaskForIrqlTransition - make the interrupt mask match a new IRQL
  *
- * ARCHITECTURAL DESIGN:
- * ====================
- * ARM64 uses the GIC (Generic Interrupt Controller) priority masking to implement
- * Windows IRQL semantics. Unlike x86 where the PIC/APIC mask individual interrupt
- * vectors, ARM64 uses a priority threshold register (ICC_PMR_EL1) that blocks
- * interrupts below a certain priority level.
+ * IRQL maps to the GIC priority mask (HalpArm64IrqlToPmr / HalpIrqlToGicPriority
+ * in the HAL; an interrupt is signalled only if its priority value is below
+ * PMR):
  *
- * GIC Priority Mapping (lower priority number = higher urgency):
- *   IRQL 15 (HIGH_LEVEL)  -> GIC priority 0x00 (highest, masks all)
- *   IRQL 14 (IPI_LEVEL)   -> GIC priority 0x10
- *   IRQL 13 (CLOCK_LEVEL) -> GIC priority 0x20
- *   IRQL 12-3 (DEVICE)    -> GIC priority 0x30-0xC0
- *   IRQL 2-0 (PASSIVE/DISPATCH) -> GIC priority 0xFF (lowest, allows all)
+ *   IRQL 0-2   PMR 0xFF   every hardware interrupt passes
+ *   IRQL 3-12  PMR 0xC0-0x30, devices at or below the IRQL blocked
+ *   IRQL 13    PMR 0x20   clock blocked, IPI passes
+ *   IRQL 14    PMR 0x10   IPI blocked
+ *   IRQL 15    PMR 0x00   everything blocked
  *
- * CRITICAL FIX FOR TIMER INTERRUPTS:
- * ===================================
- * The old implementation used binary DAIF masking (all IRQs on/off) which meant
- * that raising IRQL to DISPATCH_LEVEL would mask ALL interrupts, including the
- * timer interrupt at CLOCK_LEVEL. This caused timer interrupts to never fire,
- * preventing waiting threads from waking up.
- *
- * The new implementation uses GIC priority masking, which allows high-priority
- * interrupts (timer, IPI) to preempt low-priority code (device ISRs, DPCs).
- *
- * For example:
- *   - At PASSIVE_LEVEL (IRQL=0): PMR=0xFF, all interrupts allowed
- *   - At DISPATCH_LEVEL (IRQL=2): PMR=0xFF, all hardware interrupts still allowed
- *   - At DEVICE_LEVEL (IRQL=5): PMR=0x80, blocks lower device interrupts, allows timer/IPI
- *   - At CLOCK_LEVEL (IRQL=13): PMR=0x20, blocks all except IPI
- *   - At HIGH_LEVEL (IRQL=15): PMR=0x00, blocks all interrupts (via DAIF.I)
- *
- * DAIF USAGE:
- * ===========
- * DAIF.I (bit 7 in DAIF) is only used at HIGH_LEVEL to completely disable interrupt
- * delivery at the CPU core. At all other IRQLs, DAIF.I is cleared and the GIC
- * priority mask controls which interrupts are delivered.
- *
- * This matches Windows 11 ARM64 behavior where:
- *   - HIGH_LEVEL: DAIF.I=1 (CPU-level masking, no interrupts at all)
- *   - All other levels: DAIF.I=0 (CPU accepts interrupts), ICC_PMR_EL1 controls filtering
- *
- * MEMORY ORDERING:
- * ================
- * We use DSB SY barriers to ensure:
- *   1. IRQL value writes are visible before ICC_PMR_EL1 writes
- *   2. ICC_PMR_EL1 writes complete before any subsequent code executes
- *
- * This prevents race conditions where an interrupt fires before the new IRQL
- * is visible, causing incorrect IRQL checks in the ISR.
+ * Callers order the PCR IRQL store against this call (raise: mask first, then
+ * IRQL; lower: IRQL first, then mask), so an interrupt is never taken while
+ * the PCR claims a level that should have blocked it, and an interrupt taken
+ * just after the mask opens finds the lowered IRQL already in place. An
+ * interrupt the CPU had already latched when PMR was raised acknowledges as
+ * spurious (1023), since the CPU interface re-checks PMR on acknowledge.
  */
-
 VOID
 KiApplyIrqMaskForIrqlTransition(
     _In_ KIRQL OldIrql,
     _In_ KIRQL NewIrql)
 {
-    BOOLEAN NeedsPmrUpdate;
-
     /*
      * EARLY BOOT GUARD: Before HAL is initialized, use DAIF masking exclusively.
      *
@@ -434,139 +352,17 @@ KiApplyIrqMaskForIrqlTransition(
     }
 
     /*
-     * HAL IS INITIALIZED: Use GIC priority masking for fine-grained IRQL control.
-     *
-     * For HIGH_LEVEL transitions, we still use DAIF masking to completely
-     * disable interrupts at the CPU core. This is the most restrictive level.
+     * The GIC priority mask is the whole of IRQL, as CR8 is on x64. PSTATE.I
+     * is not IRQL state and is left exactly as the caller has it: raising to
+     * HIGH_LEVEL with interrupts enabled keeps them enabled (PMR 0x00 already
+     * blocks every interrupt), and lowering never enables interrupts a
+     * _disable() or an exception entry turned off.
      */
-    if (NewIrql >= HIGH_LEVEL && OldIrql < HIGH_LEVEL)
-    {
-        /* Raising to HIGH_LEVEL: Mask all interrupts via DAIF */
-        ARM64_MASK_ALL();
-        ARM64_SYNC_BARRIER();
-        /* Also set GIC PMR to most restrictive for defense in depth */
-        HalSetGicPriorityMask(HIGH_LEVEL);
-        KI_PMR_TRACE(OldIrql, NewIrql, 1);
-        KiTraceSerrorPolicy("high-raise", OldIrql, NewIrql);
-        return;
-    }
-
-    if (OldIrql >= HIGH_LEVEL && NewIrql < HIGH_LEVEL)
-    {
-        PKPRCB Prcb = KeGetCurrentPrcb();
-
-        /*
-         * Lowering from HIGH_LEVEL: Unmask interrupts via DAIF and set GIC PMR.
-         *
-         * Re-entrancy guard: the per-CPU flag tracks which transition owns the
-         * InHighLevelTransition state so that only its winner clears the flag.
-         * Re-entrant callers must NOT touch the flag.
-         *
-         * They MUST, however, still drop the CPU interrupt mask for the level we
-         * are lowering to. DAIF.I is only meant to be set at HIGH_LEVEL; once we
-         * lower below it the GIC PMR alone gates interrupts by priority and the
-         * CPU mask has to be cleared. Skipping the DAIF unmask on the re-entrant
-         * path (and trusting "the outer transition" to do it) can leave the CPU
-         * stranded with interrupts masked at a sub-HIGH IRQL such as PASSIVE - if
-         * the owning transition is descheduled, or the flag is observed set by an
-         * unrelated lowering on this CPU, DAIF.I never gets cleared. That strands
-         * timer/SGI delivery and blocks special-kernel-APC completion (observed as
-         * DAIF=0x3c0 at IRQL 0, which corrupts synchronous-IRP UserEvent signaling).
-         * The unmask is idempotent, so performing it here as well as in the owning
-         * transition is safe.
-         */
-        if (Prcb)
-        {
-            LONG OldFlag = InterlockedCompareExchange(&Prcb->InHighLevelTransition, 1, 0);
-            if (OldFlag != 0)
-            {
-                /* Re-entrancy: update the GIC PMR and unmask DAIF for the target
-                 * IRQL, but leave the flag to its owning transition. */
-                HalSetGicPriorityMask(NewIrql);
-                KI_PMR_TRACE(OldIrql, NewIrql, 2);
-                ARM64_SYNC_BARRIER();
-                KiUpdateDaifForIrql(NewIrql, FALSE);
-                ARM64_SYNC_BARRIER();
-                return;
-            }
-
-            /* We won the race - perform full unmask sequence and clear flag */
-            HalSetGicPriorityMask(NewIrql);
-            KI_PMR_TRACE(OldIrql, NewIrql, 3);
-            ARM64_SYNC_BARRIER();
-            /* Apply SError policy based on new IRQL */
-            KiUpdateDaifForIrql(NewIrql, FALSE);
-            ARM64_SYNC_BARRIER();
-            KiTraceSerrorPolicy("high-drop", OldIrql, NewIrql);
-
-            /*
-             * Clear re-entrancy flag unconditionally. We MUST clear it because
-             * we're the thread that set it. No early returns between setting
-             * and clearing to prevent flag leakage.
-             */
-            InterlockedExchange(&Prcb->InHighLevelTransition, 0);
-        }
-        else
-        {
-            /*
-             * No PRCB available (very early boot). Just do the transition
-             * without re-entrancy protection. This is safe because we're
-             * single-threaded at this stage.
-             */
-            HalSetGicPriorityMask(NewIrql);
-            KI_PMR_TRACE(OldIrql, NewIrql, 4);
-            ARM64_SYNC_BARRIER();
-            /* Apply SError policy based on new IRQL */
-            KiUpdateDaifForIrql(NewIrql, FALSE);
-            ARM64_SYNC_BARRIER();
-            KiTraceSerrorPolicy("high-drop-noprcb", OldIrql, NewIrql);
-        }
-        return;
-    }
-
-    /*
-     * For all other IRQL transitions (not involving HIGH_LEVEL), use GIC
-     * priority masking exclusively.
-     *
-     * This allows high-priority interrupts (timer at CLOCK_LEVEL=13) to
-     * preempt lower-priority code (device ISRs, DPCs at DISPATCH_LEVEL=2).
-     *
-     * ARM64 CRITICAL FIX: When LOWERING IRQL, we must ensure DAIF.I is cleared!
-     *
-     * That only applies to DAIF.I state owned by IRQL masking itself: the
-     * HIGH_LEVEL drop path above clears it after programming the GIC PMR.
-     * Normal non-HIGH_LEVEL transitions must not undo a caller's explicit
-     * _disable(); those callers reopen the interrupt window themselves.
-     */
-    NeedsPmrUpdate = KiIrqlTransitionNeedsGicPmrUpdate(OldIrql, NewIrql);
-    if (NeedsPmrUpdate)
+    if (KiIrqlTransitionNeedsGicPmrUpdate(OldIrql, NewIrql))
     {
         HalSetGicPriorityMask(NewIrql);
-        KI_PMR_TRACE(OldIrql, NewIrql, 5);
+        KI_PMR_TRACE(OldIrql, NewIrql, 1);
         ARM64_SYNC_BARRIER();
-    }
-
-    /*
-     * Enforce SError policy on transitions that actually touch the GIC PMR.
-     * DAIF.I is left unchanged here; non-HIGH_LEVEL IRQL is represented by PMR.
-     */
-    if (NewIrql < OldIrql)
-    {
-        if (NeedsPmrUpdate)
-        {
-            KiUpdateSerrorMaskOnlyForIrql(NewIrql);
-            ARM64_SYNC_BARRIER();
-        }
-        KiTraceSerrorPolicy("lower", OldIrql, NewIrql);
-    }
-    else if (NewIrql > OldIrql)
-    {
-        if (NeedsPmrUpdate)
-        {
-            KiUpdateSerrorMaskOnlyForIrql(NewIrql);
-            ARM64_SYNC_BARRIER();
-        }
-        KiTraceSerrorPolicy("raise", OldIrql, NewIrql);
     }
 }
 
@@ -635,6 +431,74 @@ KfRaiseIrql(
     return OldIrql;
 }
 
+/*
+ * KiDeliverSoftwareInterrupts - run the software interrupts a lowering unmasks
+ *
+ * ARM64 has no self-interrupt that the GIC priority mask could hold pending
+ * until IRQL drops (PASSIVE..DISPATCH share PMR 0xFF), so DISPATCH and APC
+ * requests live in PRCB/thread state and are delivered here. As in the x86 PIC
+ * HAL (KfLowerIrql / _HalpDispatchInterruptHandler / HalpApcInterruptHandler),
+ * a handler always runs with interrupts enabled -- the DPC and APC routines
+ * may wait on interrupt-driven progress -- and the caller's PSTATE.I is put
+ * back afterwards, so a KeLowerIrql issued with interrupts disabled (an
+ * interrupt exit, KeThawExecution) neither loses the request nor returns with
+ * interrupts enabled.
+ */
+static
+VOID
+KiDeliverSoftwareInterrupts(
+    _In_ KIRQL OldIrql,
+    _In_ KIRQL NewIrql)
+{
+    PKPRCB Prcb;
+    PKTHREAD Thread;
+    BOOLEAN InterruptsWereEnabled;
+
+    /* Nothing can be pending before the PCR is installed */
+    if (__getReg(18) == 0)
+        return;
+
+    /* Pin the thread to this processor before looking at its PRCB */
+    InterruptsWereEnabled = KeDisableInterrupts();
+    Prcb = KeGetCurrentPrcb();
+
+    if ((NewIrql < DISPATCH_LEVEL) &&
+        (Prcb->DpcInterruptRequested ||
+         Prcb->TimerRequest ||
+         (Prcb->DpcData[0].DpcQueueDepth > 0) ||
+         Prcb->QuantumEnd ||
+         Prcb->NextThread))
+    {
+        /*
+         * Consume the request before running it; a DPC queued while the
+         * dispatcher runs sets it again and the dispatcher's own lowering
+         * delivers it. KiDispatchInterrupt raises to DISPATCH_LEVEL, enables
+         * interrupts around its work and restores NewIrql when done. It may
+         * switch threads, so nothing PRCB-derived is reused after it.
+         */
+        Prcb->DpcInterruptRequested = FALSE;
+        KiDispatchInterrupt();
+        _disable();
+    }
+
+    if ((NewIrql < APC_LEVEL) && (OldIrql >= APC_LEVEL))
+    {
+        Thread = KeGetCurrentThread();
+        if ((Thread != NULL) &&
+            Thread->ApcState.KernelApcPending &&
+            !Thread->SpecialApcDisable)
+        {
+            KiSetCurrentIrql(APC_LEVEL);
+            _enable();
+            KiDeliverApc(KernelMode, NULL, NULL);
+            _disable();
+            KiSetCurrentIrql(NewIrql);
+        }
+    }
+
+    KeRestoreInterrupts(InterruptsWereEnabled);
+}
+
 VOID
 FASTCALL
 KfLowerIrql(
@@ -642,247 +506,27 @@ KfLowerIrql(
 {
     KIRQL OldIrql = KiQueryCurrentIrql();
 
-    if (NewIrql > HIGH_LEVEL)
-    {
-        PVOID RetAddr = _ReturnAddress();
-        PVOID FramePtr;
-        ULONG64 LinkReg;
-
-        /* Get frame pointer and link register for stack analysis */
-        __asm__ __volatile__("mov %0, x29" : "=r"(FramePtr));
-        __asm__ __volatile__("mov %0, x30" : "=r"(LinkReg));
-
-        KeBugCheckEx(IRQL_NOT_GREATER_OR_EQUAL, NewIrql, OldIrql, (ULONG_PTR)RetAddr, (ULONG_PTR)LinkReg);
-    }
-
     if (NewIrql > OldIrql)
     {
-        KeBugCheckEx(IRQL_NOT_GREATER_OR_EQUAL, NewIrql, OldIrql, 0, 0);
-    }
-
-    {
-        static LONG MaskTraceCount = 0;
-        ULONG64 DiagDaif;
-        __asm__ __volatile__("mrs %0, daif" : "=r"(DiagDaif));
-        if ((DiagDaif & (1ULL << 7)) && KiHalInitialized &&
-            (NewIrql == PASSIVE_LEVEL) &&
-            (MaskTraceCount < 8))
-        {
-            PKPRCB DiagPrcb = KeGetCurrentPrcb();
-            MaskTraceCount++;
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
-                       "MASK-TRACE: lower %u->0 with DAIF=%llx caller=%p thread=%p HLT=%ld\n",
-                       OldIrql, DiagDaif, _ReturnAddress(), KeGetCurrentThread(),
-                       DiagPrcb ? DiagPrcb->InHighLevelTransition : -1);
-        }
+        KeBugCheckEx(IRQL_NOT_GREATER_OR_EQUAL, NewIrql, OldIrql,
+                     (ULONG_PTR)_ReturnAddress(), 0);
     }
 
     /*
-     * CRITICAL ARM64 IRQL LOWERING SEQUENCE:
-     *
-     * On ARM64, we must set the new IRQL value BEFORE unmasking interrupts.
-     * This is critical because:
-     *
-     * 1. When we unmask interrupts (via KiApplyIrqMaskForIrqlTransition), any
-     *    pending hardware interrupts (including SGIs for DPC/APC) may fire
-     *    immediately.
-     *
-     * 2. The interrupt handler (KiArm64InterruptDispatchEntry) calls
-     *    HalBeginSystemInterrupt, which calls KfRaiseIrql to raise to the
-     *    interrupt's synchronization level.
-     *
-     * 3. KfRaiseIrql returns immediately if NewIrql <= OldIrql. If we haven't
-     *    updated the IRQL value yet, it will see the OLD (high) IRQL and fail
-     *    to raise, leaving the ISR executing at the wrong IRQL.
-     *
-     * The correct sequence is:
-     * 1. Set the new IRQL value (KiSetCurrentIrql)
-     * 2. Unmask interrupts (KiApplyIrqMaskForIrqlTransition)
-     * 3. Check for pending software DPC delivery
-     *
-     * This ensures that if a hardware interrupt fires after step 2, the IRQL
-     * state is already consistent and HalBeginSystemInterrupt will work correctly.
-     *
-     * For software interrupt delivery (via DpcInterruptRequested flag), we also
-     * check after unmasking to handle the case where DPCs were queued but no
-     * hardware SGI was sent.
+     * Publish the new IRQL before opening the mask: an interrupt the lowered
+     * PMR lets through must find the PCR at the level it interrupted, or
+     * HalBeginSystemInterrupt's raise would see the old, higher IRQL and not
+     * raise at all.
      */
-
-    /* Set the new IRQL FIRST, before unmasking interrupts */
     KiSetCurrentIrql(NewIrql);
-
-    /*
-     * ARM64 Memory Barrier: Ensure IRQL write is visible before unmasking.
-     * DMB (lighter than DSB) is sufficient here - we just need the IRQL write
-     * to be visible before GIC PMR update allows interrupts to fire.
-     */
     __asm__ __volatile__("dmb ish" ::: "memory");
 
-    /* Now unmask interrupts - any pending hardware interrupts may fire here */
     KI_PMR_TRACE_SET_OUTER();
     KiApplyIrqMaskForIrqlTransition(OldIrql, NewIrql);
 
-    /*
-     * After lowering IRQL, check for pending dispatch work.
-     * Only deliver it if we're now at a low enough IRQL (< DISPATCH_LEVEL).
-     *
-     * SCHEDULER INTEGRATION:
-     *   - DpcInterruptRequested: Software interrupt flag for DPC delivery
-     *   - TimerRequest: Pending timer expiration
-     *   - DpcData[0].DpcQueueDepth: Normal-priority DPC queue
-     *   - DpcData[1].DpcQueueDepth: High-priority DPC queue
-     *   - QuantumEnd: Thread quantum expired, need reschedule
-     *   - NextThread: Different thread ready to run
-     *
-     * If any condition is true, call KiDispatchInterrupt() to process
-     * DPCs and potentially switch threads.
-     */
     if (NewIrql < DISPATCH_LEVEL)
     {
-        PKPRCB Prcb = KeGetCurrentPrcb();
-        BOOLEAN NeedDispatch = FALSE;
-
-        /* Debug: Periodically log when we check for DPC delivery (disabled for performance) */
-#if 0
-        static ULONG DpcCheckCounter = 0;
-        DpcCheckCounter++;
-        if (DpcCheckCounter % 10000 == 1 && Prcb)
-        {
-            DPRINT1("[arm64] KfLowerIrql DPC check: Old=%u New=%u TimerReq=%p DpcReq=%d DpcDepth[0]=%lu DpcDepth[1]=%lu\n",
-                    OldIrql, NewIrql, (PVOID)Prcb->TimerRequest,
-                    Prcb->DpcInterruptRequested,
-                    Prcb->DpcData[0].DpcQueueDepth,
-                    Prcb->DpcData[1].DpcQueueDepth);
-        }
-#endif
-
-        if (Prcb)
-        {
-            /* Check all dispatch triggers */
-            if (Prcb->DpcInterruptRequested)
-                NeedDispatch = TRUE;
-
-            if (Prcb->TimerRequest)
-                NeedDispatch = TRUE;
-
-            /*
-             * Check normal DPC queue (index 0).
-             * Note: DpcData[1] is for threaded DPCs which are not implemented in ReactOS.
-             * The dispatcher only processes DpcData[0], so checking DpcData[1] would
-             * cause unnecessary KiDispatchInterrupt calls that do nothing.
-             */
-            if (Prcb->DpcData[0].DpcQueueDepth > 0)
-                NeedDispatch = TRUE;
-
-            /* Check scheduler state */
-            if (Prcb->QuantumEnd || Prcb->NextThread)
-                NeedDispatch = TRUE;
-        }
-
-        if (NeedDispatch)
-        {
-            /*
-             * Clear the DpcInterruptRequested flag FIRST to prevent re-delivery.
-             * Note: TimerRequest is cleared by KiDispatchInterrupt itself.
-             * If DPCs are queued again during KiDispatchInterrupt,
-             * the flag will be set again and we'll deliver on the next IRQL lowering.
-             */
-            if (Prcb->DpcInterruptRequested)
-                Prcb->DpcInterruptRequested = FALSE;
-
-            /*
-             * Dispatch the DPC interrupt.
-             * This will call KiDispatchInterrupt() which processes the DPC queue.
-             * KiDispatchInterrupt also checks TimerRequest and calls KiTimerExpiration.
-             *
-             * NOTE: We call this directly at the newly lowered IRQL.
-             * KiDispatchInterrupt() will raise IRQL to DISPATCH_LEVEL internally
-             * before processing DPCs, then restore it back to the current level.
-             * This is critical to avoid IRQL violations when DPCs execute.
-             *
-             * See thrdini.c KiDispatchInterrupt() for the IRQL management logic.
-             */
-            extern VOID NTAPI KiDispatchInterrupt(VOID);
-            KiDispatchInterrupt();
-
-            /*
-             * TODO (Future SMP Support):
-             * For cross-CPU reschedules, need to send IPI to target CPU:
-             *
-             *   if (Prcb->NextThread &&
-             *       Prcb->NextThread->NextProcessor != KeGetCurrentProcessorNumber())
-             *   {
-             *       KiIpiSend(Prcb->NextThread->NextProcessor, IPI_RESCHEDULE);
-             *   }
-             *
-             * Current single-CPU implementation relies on timer tick to pick up
-             * NextThread, which is sufficient for UP but adds latency on SMP.
-             */
-
-            /*
-             * ARM64 Instruction Barrier: Ensure DPC dispatch effects (which may
-             * include software interrupts or thread switches) complete before
-             * returning to caller. Prevents speculative execution across the
-             * dispatch boundary.
-             */
-            __asm__ __volatile__("isb" ::: "memory");
-        }
-    }
-
-    /*
-     * ARM64 APC DELIVERY:
-     *
-     * On x86/x64, HalRequestSoftwareInterrupt(APC_LEVEL) sets a pending APC
-     * interrupt that fires when IRQL drops below APC_LEVEL. The hardware APIC
-     * handles this automatically.
-     *
-     * ARM64 has no equivalent hardware mechanism. Without explicit APC delivery
-     * here, kernel APCs are never dispatched when lowering IRQL without a
-     * context switch. This causes infinite loops in KeRemoveQueue (and similar
-     * wait functions) when KernelApcPending is set: the wait loop detects the
-     * pending APC, calls KiExitDispatcher to lower IRQL and deliver it, but
-     * KiExitDispatcher just calls KeLowerIrql which returns without delivering
-     * the APC. The loop repeats forever.
-     *
-     * Fix: After DPC dispatch, check for pending kernel APCs and deliver them
-     * at APC_LEVEL, matching the x86/x64 software interrupt behavior.
-     */
-    if (NewIrql < APC_LEVEL && OldIrql >= APC_LEVEL)
-    {
-        PKTHREAD Thread = KeGetCurrentThread();
-
-        /*
-         * Only deliver APCs when interrupts are enabled. During
-         * KeThawExecution (KdExitDebugger path), KeLowerIrql is called
-         * while DAIF.I is still set. Delivering APCs with interrupts
-         * disabled can hang because APC routines may need I/O interrupts.
-         * Also skip if lowering from HIGH_LEVEL (debugger/freeze context)
-         * to avoid re-entrancy in the KD path.
-         */
-        if (Thread &&
-            Thread->ApcState.KernelApcPending &&
-            !Thread->SpecialApcDisable)
-        {
-            ULONG64 Daif;
-            __asm__ __volatile__("mrs %0, daif" : "=r"(Daif));
-            if (!(Daif & (1ULL << 7)))  /* Check DAIF.I (bit 7) - IRQ not masked */
-            {
-                /* Deliver kernel APCs at APC_LEVEL */
-                KiSetCurrentIrql(APC_LEVEL);
-                KiDeliverApc(KernelMode, NULL, NULL);
-                KiSetCurrentIrql(PASSIVE_LEVEL);
-            }
-            else
-            {
-                static LONG DiagSkips = 0;
-                if (DiagSkips < 5)
-                {
-                    DiagSkips++;
-                    DPRINT1("IRQL-DIAG: APC delivery skipped, DAIF=%llx Old=%u New=%u\n",
-                            Daif, OldIrql, NewIrql);
-                }
-            }
-        }
+        KiDeliverSoftwareInterrupts(OldIrql, NewIrql);
     }
 }
 

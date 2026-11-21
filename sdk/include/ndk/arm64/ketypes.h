@@ -607,9 +607,27 @@ KeGetCurrentPrcb(VOID)
 }
 
 //
-// Just read it from the PCR
+// Just read it from the PCR, in one x18-relative load: below DISPATCH_LEVEL
+// the thread may move to another processor between two instructions, so a
+// PCR address the compiler kept in another register could be stale (the
+// __readx18byte builtin is an ordinary load the compiler may split that way)
 //
-#define KeGetCurrentIrql()             KeGetPcr()->CurrentIrql
+FORCEINLINE
+KIRQL
+KiArm64ReadCurrentIrql(VOID)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    KIRQL Irql;
+    __asm__ __volatile__("ldrb %w0, [x18, #%c1]"
+                         : "=r"(Irql)
+                         : "i"(FIELD_OFFSET(KIPCR, CurrentIrql))
+                         : "memory");
+    return Irql;
+#else
+    return __readx18byte(FIELD_OFFSET(KIPCR, CurrentIrql));
+#endif
+}
+#define KeGetCurrentIrql()             KiArm64ReadCurrentIrql()
 #define _KeIsExecutingDpc()            (KeGetCurrentPrcb()->DpcRoutineActive != 0)
 
 #endif // !NTOS_MODE_USER
