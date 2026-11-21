@@ -686,7 +686,10 @@ KiArm64PermVectorIrqSp0_Handler:
     isb
     ARM64_RESTORE_FP_CONTROL ARM64_IRQ_FPCR, ARM64_IRQ_FPSR
     ARM64_RESTORE_NEON sp, ARM64_IRQ_NEON
-    ldp x18, x19, [sp, #0x90]
+    /* x18 is this processor's PCR, not the saved value: a context switch
+       in the dispatch path may have moved the thread to another CPU */
+    ldr x19, [sp, #0x98]
+    mrs x18, tpidr_el1
     ldp x16, x17, [sp, #0x80]
     ldp x14, x15, [sp, #0x70]
     ldp x12, x13, [sp, #0x60]
@@ -744,7 +747,10 @@ KiArm64PermVectorFiqSp0_Handler:
     isb
     ARM64_RESTORE_FP_CONTROL ARM64_IRQ_FPCR, ARM64_IRQ_FPSR
     ARM64_RESTORE_NEON sp, ARM64_IRQ_NEON
-    ldp x18, x19, [sp, #0x90]
+    /* x18 is this processor's PCR, not the saved value: a context switch
+       in the dispatch path may have moved the thread to another CPU */
+    ldr x19, [sp, #0x98]
+    mrs x18, tpidr_el1
     ldp x16, x17, [sp, #0x80]
     ldp x14, x15, [sp, #0x70]
     ldp x12, x13, [sp, #0x60]
@@ -802,7 +808,10 @@ KiArm64PermVectorIrqSpx_Handler:
     isb
     ARM64_RESTORE_FP_CONTROL ARM64_IRQ_FPCR, ARM64_IRQ_FPSR
     ARM64_RESTORE_NEON sp, ARM64_IRQ_NEON
-    ldp x18, x19, [sp, #0x90]
+    /* x18 is this processor's PCR, not the saved value: a context switch
+       in the dispatch path may have moved the thread to another CPU */
+    ldr x19, [sp, #0x98]
+    mrs x18, tpidr_el1
     ldp x16, x17, [sp, #0x80]
     ldp x14, x15, [sp, #0x70]
     ldp x12, x13, [sp, #0x60]
@@ -860,7 +869,10 @@ KiArm64PermVectorFiqSpx_Handler:
     isb
     ARM64_RESTORE_FP_CONTROL ARM64_IRQ_FPCR, ARM64_IRQ_FPSR
     ARM64_RESTORE_NEON sp, ARM64_IRQ_NEON
-    ldp x18, x19, [sp, #0x90]
+    /* x18 is this processor's PCR, not the saved value: a context switch
+       in the dispatch path may have moved the thread to another CPU */
+    ldr x19, [sp, #0x98]
+    mrs x18, tpidr_el1
     ldp x16, x17, [sp, #0x80]
     ldp x14, x15, [sp, #0x70]
     ldp x12, x13, [sp, #0x60]
