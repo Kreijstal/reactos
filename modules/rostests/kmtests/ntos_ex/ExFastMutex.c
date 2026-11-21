@@ -244,6 +244,32 @@ FinishThread(
 
 static
 VOID
+WaitForMutexContention(
+    IN PFAST_MUTEX Mutex,
+    IN PKEVENT AcquiredEvent,
+    IN ULONG ExpectedContention)
+{
+    LARGE_INTEGER Delay;
+    ULONG i;
+
+    /* StartThread's short OutEvent wait timing out only proves the worker has
+     * not acquired the mutex, not that it already reached the contended wait
+     * in ExAcquireFastMutex (slow or loaded machines). Contention is bumped
+     * right before that wait, after Count -- wait for it instead of sampling
+     * once. */
+    Delay.QuadPart = -1 * 1000 * 10; /* 1 ms */
+    for (i = 0; i < 10000; i++)
+    {
+        if (Mutex->Contention >= ExpectedContention)
+            break;
+        if (KeReadStateEvent(AcquiredEvent))
+            break;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+}
+
+static
+VOID
 TestFastMutexConcurrent(
     PFAST_MUTEX Mutex)
 {
@@ -280,6 +306,7 @@ TestFastMutexConcurrent(
     /* have another thread acquire it -- should block */
     Status = StartThread(&ThreadData2, &Timeout, APC_LEVEL, FALSE, FALSE);
     ok_eq_hex(Status, STATUS_TIMEOUT);
+    WaitForMutexContention(Mutex, &ThreadData2.OutEvent, 1LU);
     CheckMutex(Mutex, -1L, ThreadData.Thread, 1LU, PASSIVE_LEVEL, PASSIVE_LEVEL);
 
     /* finish the first thread -- now the second should become available */
@@ -291,10 +318,12 @@ TestFastMutexConcurrent(
     /* block two more threads */
     Status = StartThread(&ThreadDataUnsafe, &Timeout, APC_LEVEL, FALSE, FALSE);
     ok_eq_hex(Status, STATUS_TIMEOUT);
+    WaitForMutexContention(Mutex, &ThreadDataUnsafe.OutEvent, 2LU);
     CheckMutex(Mutex, -1L, ThreadData2.Thread, 2LU, APC_LEVEL, PASSIVE_LEVEL);
 
     Status = StartThread(&ThreadData, &Timeout, PASSIVE_LEVEL, FALSE, FALSE);
     ok_eq_hex(Status, STATUS_TIMEOUT);
+    WaitForMutexContention(Mutex, &ThreadData.OutEvent, 3LU);
     CheckMutex(Mutex, -2L, ThreadData2.Thread, 3LU, APC_LEVEL, PASSIVE_LEVEL);
 
     /* finish 1 */
