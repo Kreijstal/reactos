@@ -152,6 +152,86 @@ KiInitializeContextThread(_Inout_ PKTHREAD Thread,
     SwitchFrame->ApcBypass = APC_LEVEL;
 }
 
+#ifdef CONFIG_SMP
+/*
+ * Multiprocessor idle loop.
+ *
+ * As on x64, the idle thread runs at DISPATCH_LEVEL. Other processors hand it
+ * work by setting NextThread or by inserting into this processor's ready
+ * queues, both under the PRCB lock, so the idle thread claims work under that
+ * lock too. A thread first scheduled from here starts in KiThreadStartup,
+ * which lowers to APC_LEVEL, so it must be entered at DISPATCH_LEVEL, never at
+ * PASSIVE_LEVEL. The clock, device and IPI interrupts are all above
+ * DISPATCH_LEVEL and wake the WFE; DPCs requested for this processor are
+ * polled through DpcInterruptRequested, since software interrupts are only
+ * delivered by KfLowerIrql and nothing here lowers below DISPATCH_LEVEL.
+ */
+static
+DECLSPEC_NORETURN
+VOID
+KiIdleLoopMp(
+    _In_ PKPRCB Prcb)
+{
+    PKTHREAD OldThread, NewThread;
+    KIRQL Irql;
+
+    /* Run at DISPATCH_LEVEL, whatever level the start-up path left */
+    Irql = KeGetCurrentIrql();
+    if (Irql > DISPATCH_LEVEL)
+        KeLowerIrql(DISPATCH_LEVEL);
+    else if (Irql < DISPATCH_LEVEL)
+        KfRaiseIrql(DISPATCH_LEVEL);
+
+    for (;;)
+    {
+        ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+        ASSERT(Prcb->CurrentThread == Prcb->IdleThread);
+
+        /* Retire DPCs, timers and deferred-ready threads with interrupts off */
+        _disable();
+        __asm__ __volatile__("dmb ish" ::: "memory");
+        if (Prcb->DpcData[0].DpcQueueDepth ||
+            Prcb->TimerRequest ||
+            Prcb->DeferredReadyListHead.Next ||
+            Prcb->DpcInterruptRequested)
+        {
+            HalClearSoftwareInterrupt(DISPATCH_LEVEL);
+            Prcb->DpcInterruptRequested = FALSE;
+            KiRetireDpcList(Prcb);
+        }
+        _enable();
+
+        /* Claim the next thread, or a ready one that did not preempt us */
+        KiAcquirePrcbLock(Prcb);
+        NewThread = Prcb->NextThread;
+        if (NewThread != NULL)
+        {
+            Prcb->NextThread = NULL;
+        }
+        else
+        {
+            NewThread = KiSelectReadyThread(0, Prcb);
+        }
+
+        if (NewThread != NULL)
+        {
+            OldThread = Prcb->CurrentThread;
+            Prcb->CurrentThread = NewThread;
+            NewThread->State = Running;
+            KiReleasePrcbLock(Prcb);
+
+            /* Switch away; the idle thread resumes here at DISPATCH_LEVEL */
+            KiSwapContext(APC_LEVEL, OldThread);
+            continue;
+        }
+        KiReleasePrcbLock(Prcb);
+
+        /* Nothing to run: wait for an interrupt or an event */
+        __asm__ __volatile__("wfe" ::: "memory");
+    }
+}
+#endif
+
 DECLSPEC_NORETURN
 VOID
 KiIdleLoop(VOID)
@@ -168,7 +248,9 @@ KiIdleLoop(VOID)
      * On an SMP kernel (CONFIG_SMP), APs run the full idle loop below
      * so they can receive IPIs and dispatch threads.
      */
-#ifndef CONFIG_SMP
+#ifdef CONFIG_SMP
+    KiIdleLoopMp(Prcb);
+#else
     if (Prcb != NULL && Prcb->Number != 0)
     {
         __asm__ __volatile__("msr daifset, #3" ::: "memory");
