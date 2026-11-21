@@ -131,6 +131,21 @@ KiProcessorFreezeHandler(
     return TRUE;
 }
 
+/*
+ * Freeze in place on behalf of a freeze SGI this processor cannot take,
+ * because it spins with interrupts masked. The debugger sees the context
+ * of the spin loop.
+ */
+static
+VOID
+KiArm64PollFreeze(
+    _In_ PKPRCB CurrentPrcb)
+{
+    RtlCaptureContext(&CurrentPrcb->ProcessorState.ContextFrame);
+    KiSaveProcessorControlState(&CurrentPrcb->ProcessorState);
+    NT_VERIFY(KiProcessorFreezeHandler(NULL, NULL));
+}
+
 static
 VOID
 KiArm64WaitForFrozenTargets(
@@ -267,6 +282,17 @@ KxFreezeExecution(
     {
         while (KiFreezeOwner != NULL)
         {
+            /*
+             * Another processor owns the freeze and waits for us to be
+             * FROZEN. On x64 its NMI reaches us even here; the freeze SGI does
+             * not, because we spin with interrupts masked. Answer the request
+             * by polling, or both processors spin forever.
+             */
+            if (CurrentPrcb->IpiFrozen == IPI_FROZEN_STATE_TARGET_FREEZE)
+            {
+                KiArm64PollFreeze(CurrentPrcb);
+            }
+
             YieldProcessor();
             KeMemoryBarrier();
         }
