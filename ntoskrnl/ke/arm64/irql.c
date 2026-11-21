@@ -66,72 +66,6 @@ BOOLEAN KiHalInitialized = FALSE;
  */
 static BOOLEAN KiEarlyHighLevelIrqsWereEnabled = FALSE;
 
-#if DBG
-/*
- * PMR-TRACE diagnostic: ring of the most recent IRQL transitions that
- * programmed the GIC priority mask, with a PMR read-back after each write.
- * Dumped from the interrupt dispatcher when a spinlock-already-owned state
- * is detected, to identify who left PMR unmasked at elevated IRQL.
- */
-typedef struct _KI_PMR_TRACE_ENTRY
-{
-    PVOID Inner;     /* caller of KiApplyIrqMaskForIrqlTransition */
-    PVOID Outer;     /* caller of KfRaiseIrql/KfLowerIrql, if any */
-    UCHAR OldIrql;
-    UCHAR NewIrql;
-    UCHAR PmrAfter;  /* PMR read back right after the transition */
-    UCHAR Path;      /* which branch programmed the PMR */
-} KI_PMR_TRACE_ENTRY;
-
-#define KI_PMR_TRACE_DEPTH 16
-static KI_PMR_TRACE_ENTRY KiPmrTrace[KI_PMR_TRACE_DEPTH];
-static volatile LONG KiPmrTraceIndex = 0;
-static PVOID KiPmrTraceOuterCaller = NULL;
-
-VOID
-KiPmrTraceLog(
-    _In_ PVOID Inner,
-    _In_ KIRQL OldIrql,
-    _In_ KIRQL NewIrql,
-    _In_ UCHAR Path)
-{
-    ULONG Slot = (ULONG)(InterlockedIncrement(&KiPmrTraceIndex) - 1) %
-                 KI_PMR_TRACE_DEPTH;
-    KiPmrTrace[Slot].Inner = Inner;
-    KiPmrTrace[Slot].Outer = KiPmrTraceOuterCaller;
-    KiPmrTrace[Slot].OldIrql = OldIrql;
-    KiPmrTrace[Slot].NewIrql = NewIrql;
-    KiPmrTrace[Slot].PmrAfter = (UCHAR)HalGetGicPriorityMask();
-    KiPmrTrace[Slot].Path = Path;
-}
-
-VOID
-KiPmrTraceDump(VOID)
-{
-    LONG Total = KiPmrTraceIndex;
-    LONG First = (Total > KI_PMR_TRACE_DEPTH) ? (Total - KI_PMR_TRACE_DEPTH) : 0;
-    LONG i;
-
-    DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
-               "PMR-TRACE: %ld transitions total, dumping %ld..%ld\n",
-               Total, First, Total - 1);
-    for (i = First; i < Total; i++)
-    {
-        KI_PMR_TRACE_ENTRY *E = &KiPmrTrace[i % KI_PMR_TRACE_DEPTH];
-        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
-                   "PMR-TRACE[%ld]: %u->%u pmr=%02x path=%u inner=%p outer=%p\n",
-                   i, E->OldIrql, E->NewIrql, E->PmrAfter, E->Path,
-                   E->Inner, E->Outer);
-    }
-}
-#define KI_PMR_TRACE_SET_OUTER() (KiPmrTraceOuterCaller = _ReturnAddress())
-#define KI_PMR_TRACE(Old, New, Path) \
-    KiPmrTraceLog(_ReturnAddress(), (Old), (New), (Path))
-#else
-#define KI_PMR_TRACE_SET_OUTER()
-#define KI_PMR_TRACE(Old, New, Path)
-#endif
-
 #undef KeLowerIrql
 #undef KeRaiseIrql
 #undef KeGetCurrentIrql
@@ -361,7 +295,6 @@ KiApplyIrqMaskForIrqlTransition(
     if (KiIrqlTransitionNeedsGicPmrUpdate(OldIrql, NewIrql))
     {
         HalSetGicPriorityMask(NewIrql);
-        KI_PMR_TRACE(OldIrql, NewIrql, 1);
         ARM64_SYNC_BARRIER();
     }
 }
@@ -417,7 +350,6 @@ KfRaiseIrql(
      */
     __asm__ __volatile__("dmb ish" ::: "memory");
 
-    KI_PMR_TRACE_SET_OUTER();
     KiApplyIrqMaskForIrqlTransition(OldIrql, NewIrql);
     KiSetCurrentIrql(NewIrql);
 
@@ -521,7 +453,6 @@ KfLowerIrql(
     KiSetCurrentIrql(NewIrql);
     __asm__ __volatile__("dmb ish" ::: "memory");
 
-    KI_PMR_TRACE_SET_OUTER();
     KiApplyIrqMaskForIrqlTransition(OldIrql, NewIrql);
 
     if (NewIrql < DISPATCH_LEVEL)

@@ -9,15 +9,6 @@
 
 extern BOOLEAN KiHalInitialized;
 
-#if DBG
-VOID
-KiPmrTraceLog(
-    _In_ PVOID Inner,
-    _In_ KIRQL OldIrql,
-    _In_ KIRQL NewIrql,
-    _In_ UCHAR Path);
-#endif
-
 KIRQL
 NTAPI
 KxFreezeExecutionRaiseIrql(
@@ -35,9 +26,6 @@ KxFreezeExecutionRaiseIrql(
     if (KiHalInitialized)
     {
         HalSetGicPriorityMask(HIGH_LEVEL);
-#if DBG
-        KiPmrTraceLog(_ReturnAddress(), OldIrql, HIGH_LEVEL, 6);
-#endif
     }
     KiSetCurrentIrql(HIGH_LEVEL);
     __asm__ __volatile__("isb" ::: "memory");
@@ -58,9 +46,6 @@ KxFreezeExecutionLowerIrql(
     if (KiHalInitialized)
     {
         HalSetGicPriorityMask(OldIrql);
-#if DBG
-        KiPmrTraceLog(_ReturnAddress(), HIGH_LEVEL, OldIrql, 7);
-#endif
     }
     __asm__ __volatile__("dsb sy\n\tisb" ::: "memory");
 }
