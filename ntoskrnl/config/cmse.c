@@ -388,14 +388,23 @@ CmpAssignSecurityDescriptor(IN PCM_KEY_CONTROL_BLOCK Kcb,
     return CmpAssignSecurityToCell(Kcb->KeyHive, Kcb->KeyCell, SecurityDescriptor);
 }
 
-#if (NTDDI_VERSION >= NTDDI_WIN8)
-
 typedef struct _CMP_KEY_ACE
 {
     PSID *Sid;
     ACCESS_MASK AccessMask;
     UCHAR AceFlags;
 } CMP_KEY_ACE;
+
+#if (NTDDI_VERSION < NTDDI_VISTA)
+/* S-1-5-13 "Terminal Server Users" has no SeExports entry */
+static SID CmpTerminalServerUsersSid =
+{
+    SID_REVISION, 1, { SECURITY_NT_AUTHORITY }, { SECURITY_TERMINAL_SERVER_RID }
+};
+static PSID CmpTerminalServerUsersSidPointer = &CmpTerminalServerUsersSid;
+#endif
+
+#define CMP_INHERIT_ONLY (INHERIT_ONLY_ACE | CONTAINER_INHERIT_ACE)
 
 /*
  * Build a self-relative key security descriptor from a table of allowed-access
@@ -474,17 +483,26 @@ CmpBuildKeySelfRelativeSd(IN const CMP_KEY_ACE *Aces,
 }
 
 /*
- * Stamp a boot hive root cell with the Windows 8 default key security. The
- * persistent machine/user hives are baked by mkhive with legacy (WS03-era)
- * descriptors; on an NT 6.2 target the kernel owns the canonical security, so
- * we reassign the correct shape to each hive root once at load time.
+ * Stamp a boot hive root cell with the default key security of the targeted
+ * Windows version. The persistent machine/user hives are baked by mkhive with
+ * approximated descriptors (their group is a foreign "Domain Users" SID and
+ * the ACEs are the merged, security-editor form), so the kernel reassigns the
+ * shape Windows ships to each hive root once at load time.
  */
 VOID
 NTAPI
 CmpAssignBootHiveRootSecurity(IN PCMHIVE CmHive,
-                              IN BOOLEAN SecurityHive)
+                              IN PCWSTR HiveName)
 {
-    /* Standard machine/user hive root: SAM, SOFTWARE, SYSTEM, .DEFAULT */
+    /* The SECURITY hive is locked down to SYSTEM, with admins able only to
+     * read/take ownership of the descriptor itself. */
+    static const CMP_KEY_ACE SecurityAces[] =
+    {
+        { &SeLocalSystemSid, KEY_ALL_ACCESS,           CONTAINER_INHERIT_ACE },
+        { &SeAliasAdminsSid, WRITE_DAC | READ_CONTROL, CONTAINER_INHERIT_ACE },
+    };
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* SAM, SOFTWARE, SYSTEM and .DEFAULT share one root descriptor */
     static const CMP_KEY_ACE StandardAces[] =
     {
         { &SeAliasUsersSid,     KEY_READ,       CONTAINER_INHERIT_ACE },
@@ -493,22 +511,85 @@ CmpAssignBootHiveRootSecurity(IN PCMHIVE CmHive,
         { &SeCreatorOwnerSid,   KEY_ALL_ACCESS, CONTAINER_INHERIT_ACE },
         { &SeAllAppPackagesSid, KEY_READ,       CONTAINER_INHERIT_ACE },
     };
-    /* The SECURITY hive is locked down to SYSTEM, with admins able only to
-     * read/take ownership of the descriptor itself. */
-    static const CMP_KEY_ACE SecurityAces[] =
+#elif (NTDDI_VERSION >= NTDDI_VISTA)
+    /* SAM, SOFTWARE, SYSTEM and .DEFAULT: each grant is split into an
+     * effective ACE and an inherit-only ACE that keeps the generic rights */
+    static const CMP_KEY_ACE StandardAces[] =
     {
-        { &SeLocalSystemSid, KEY_ALL_ACCESS,           CONTAINER_INHERIT_ACE },
-        { &SeAliasAdminsSid, WRITE_DAC | READ_CONTROL, CONTAINER_INHERIT_ACE },
+        { &SeAliasUsersSid,   KEY_READ,       0 },
+        { &SeAliasUsersSid,   GENERIC_READ,   CMP_INHERIT_ONLY },
+        { &SeAliasAdminsSid,  KEY_ALL_ACCESS, 0 },
+        { &SeAliasAdminsSid,  GENERIC_ALL,    CMP_INHERIT_ONLY },
+        { &SeLocalSystemSid,  KEY_ALL_ACCESS, 0 },
+        { &SeLocalSystemSid,  GENERIC_ALL,    CMP_INHERIT_ONLY },
+        { &SeAliasAdminsSid,  KEY_ALL_ACCESS, 0 },
+        { &SeCreatorOwnerSid, GENERIC_ALL,    CMP_INHERIT_ONLY },
     };
+#else
+    /* SAM keeps the registry root descriptor on Server 2003 */
+    static const CMP_KEY_ACE SamAces[] =
+    {
+        { &SeLocalSystemSid, KEY_ALL_ACCESS, CONTAINER_INHERIT_ACE },
+        { &SeAliasAdminsSid, KEY_ALL_ACCESS, CONTAINER_INHERIT_ACE },
+        { &SeWorldSid,       KEY_READ,       CONTAINER_INHERIT_ACE },
+        { &SeRestrictedSid,  KEY_READ,       CONTAINER_INHERIT_ACE },
+    };
+    /* SYSTEM and .DEFAULT also grant Power Users read access */
+    static const CMP_KEY_ACE StandardAces[] =
+    {
+        { &SeAliasUsersSid,      KEY_READ,       0 },
+        { &SeAliasUsersSid,      GENERIC_READ,   CMP_INHERIT_ONLY },
+        { &SeAliasPowerUsersSid, KEY_READ,       0 },
+        { &SeAliasPowerUsersSid, GENERIC_READ,   CMP_INHERIT_ONLY },
+        { &SeAliasAdminsSid,     KEY_ALL_ACCESS, 0 },
+        { &SeAliasAdminsSid,     GENERIC_ALL,    CMP_INHERIT_ONLY },
+        { &SeLocalSystemSid,     KEY_ALL_ACCESS, 0 },
+        { &SeLocalSystemSid,     GENERIC_ALL,    CMP_INHERIT_ONLY },
+        { &SeAliasAdminsSid,     KEY_ALL_ACCESS, 0 },
+        { &SeCreatorOwnerSid,    GENERIC_ALL,    CMP_INHERIT_ONLY },
+    };
+    /* SOFTWARE lets Power Users and Terminal Server Users modify it */
+    static const CMP_KEY_ACE SoftwareAces[] =
+    {
+        { &SeAliasUsersSid,                  KEY_READ,                            0 },
+        { &SeAliasUsersSid,                  GENERIC_READ,                        CMP_INHERIT_ONLY },
+        { &SeAliasPowerUsersSid,             KEY_READ | KEY_WRITE | DELETE,       0 },
+        { &SeAliasPowerUsersSid,             GENERIC_READ | GENERIC_WRITE | DELETE, CMP_INHERIT_ONLY },
+        { &SeAliasAdminsSid,                 KEY_ALL_ACCESS,                      0 },
+        { &SeAliasAdminsSid,                 GENERIC_ALL,                         CMP_INHERIT_ONLY },
+        { &SeLocalSystemSid,                 KEY_ALL_ACCESS,                      0 },
+        { &SeLocalSystemSid,                 GENERIC_ALL,                         CMP_INHERIT_ONLY },
+        { &SeAliasAdminsSid,                 KEY_ALL_ACCESS,                      0 },
+        { &SeCreatorOwnerSid,                GENERIC_ALL,                         CMP_INHERIT_ONLY },
+        { &CmpTerminalServerUsersSidPointer, KEY_READ | KEY_WRITE | DELETE,       0 },
+        { &CmpTerminalServerUsersSidPointer, GENERIC_READ | GENERIC_WRITE | DELETE, CMP_INHERIT_ONLY },
+    };
+#endif
+    const CMP_KEY_ACE *Aces = StandardAces;
+    ULONG AceCount = RTL_NUMBER_OF(StandardAces);
     PSECURITY_DESCRIPTOR SelfRelativeSd;
 
     PAGED_CODE();
 
-    if (SecurityHive)
-        SelfRelativeSd = CmpBuildKeySelfRelativeSd(SecurityAces, RTL_NUMBER_OF(SecurityAces));
-    else
-        SelfRelativeSd = CmpBuildKeySelfRelativeSd(StandardAces, RTL_NUMBER_OF(StandardAces));
+    if (!_wcsicmp(HiveName, L"SECURITY"))
+    {
+        Aces = SecurityAces;
+        AceCount = RTL_NUMBER_OF(SecurityAces);
+    }
+#if (NTDDI_VERSION < NTDDI_VISTA)
+    else if (!_wcsicmp(HiveName, L"SAM"))
+    {
+        Aces = SamAces;
+        AceCount = RTL_NUMBER_OF(SamAces);
+    }
+    else if (!_wcsicmp(HiveName, L"SOFTWARE"))
+    {
+        Aces = SoftwareAces;
+        AceCount = RTL_NUMBER_OF(SoftwareAces);
+    }
+#endif
 
+    SelfRelativeSd = CmpBuildKeySelfRelativeSd(Aces, AceCount);
     if (SelfRelativeSd != NULL)
     {
         CmpAssignSecurityToCell(&CmHive->Hive,
@@ -517,8 +598,6 @@ CmpAssignBootHiveRootSecurity(IN PCMHIVE CmHive,
         ExFreePoolWithTag(SelfRelativeSd, TAG_CMSD);
     }
 }
-
-#endif /* (NTDDI_VERSION >= NTDDI_WIN8) */
 
 NTSTATUS
 NTAPI
