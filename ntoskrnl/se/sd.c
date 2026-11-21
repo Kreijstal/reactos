@@ -1349,10 +1349,15 @@ SeAssignSecurityEx(
 
     PAGED_CODE();
 
-    *NewDescriptor = NULL;
-
+    /*
+     * The new descriptor is only written once the subject context has been
+     * locked and the owner and group are known: a fault in that part (a NULL
+     * token or a NULL token owner) leaves the caller's pointer untouched,
+     * while every failure we return reports a NULL descriptor.
+     */
     if (!ARGUMENT_PRESENT(SubjectContext))
     {
+        *NewDescriptor = NULL;
         return STATUS_NO_TOKEN;
     }
 
@@ -1382,6 +1387,7 @@ SeAssignSecurityEx(
             if (!ARGUMENT_PRESENT(ParentDescriptor))
             {
                 SeUnlockSubjectContext(SubjectContext);
+                *NewDescriptor = NULL;
                 return STATUS_INVALID_OWNER;
             }
 
@@ -1389,6 +1395,7 @@ SeAssignSecurityEx(
             if (!Owner)
             {
                 SeUnlockSubjectContext(SubjectContext);
+                *NewDescriptor = NULL;
                 return STATUS_INVALID_OWNER;
             }
         }
@@ -1414,6 +1421,7 @@ SeAssignSecurityEx(
             if (!ARGUMENT_PRESENT(ParentDescriptor))
             {
                 SeUnlockSubjectContext(SubjectContext);
+                *NewDescriptor = NULL;
                 return STATUS_INVALID_PRIMARY_GROUP;
             }
 
@@ -1421,6 +1429,7 @@ SeAssignSecurityEx(
             if (!Group)
             {
                 SeUnlockSubjectContext(SubjectContext);
+                *NewDescriptor = NULL;
                 return STATUS_INVALID_PRIMARY_GROUP;
             }
         }
@@ -1433,6 +1442,7 @@ SeAssignSecurityEx(
     if (!Group)
     {
         SeUnlockSubjectContext(SubjectContext);
+        *NewDescriptor = NULL;
         return STATUS_INVALID_PRIMARY_GROUP;
     }
     GroupLength = RtlLengthSid(Group);
@@ -1524,6 +1534,7 @@ SeAssignSecurityEx(
     {
         DPRINT1("ExAlloctePool() failed\n");
         SeUnlockSubjectContext(SubjectContext);
+        *NewDescriptor = NULL;
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
