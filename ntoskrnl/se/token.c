@@ -21,9 +21,16 @@ LUID SeSystemAuthenticationId = SYSTEM_LUID;
 LUID SeAnonymousAuthenticationId = ANONYMOUS_LOGON_LUID;
 
 static GENERIC_MAPPING SepTokenMapping = {
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+    /* Vista added these rights to the generic mapping of tokens */
     TOKEN_READ | TOKEN_QUERY_SOURCE | TOKEN_DUPLICATE,
     TOKEN_WRITE | TOKEN_ADJUST_SESSIONID,
     TOKEN_EXECUTE | TOKEN_IMPERSONATE | TOKEN_ASSIGN_PRIMARY,
+#else
+    TOKEN_READ,
+    TOKEN_WRITE,
+    TOKEN_EXECUTE,
+#endif
     TOKEN_ALL_ACCESS
 };
 
