@@ -60,6 +60,15 @@ BOOLEAN KmtAreInterruptsEnabled(VOID)
 {
 #if defined(_M_IX86) || defined(_M_AMD64)
     return (__readeflags() & EFLAGS_INTERRUPT_MASK) != 0;
+#elif defined(_M_ARM64)
+    ULONG64 Daif;
+#ifdef _MSC_VER
+    Daif = _ReadStatusReg(ARM64_SYSREG(3, 3, 4, 2, 1));
+#else
+    __asm__ __volatile__("mrs %0, daif" : "=r"(Daif));
+#endif
+    /* PSTATE.I (bit 7) masks IRQs */
+    return (Daif & (1ULL << 7)) == 0;
 #else
 #pragma message(__FILE__ ": warning : 'KmtAreInterruptsEnabled()' is UNIMPLEMENTED for this architecture")
     // HACK: trivial stub. Used by ok_bool_true(KmtAreInterruptsEnabled(), ...).
@@ -73,7 +82,7 @@ typedef struct _POOL_HEADER
     {
         struct
         {
-#ifdef _M_AMD64
+#ifdef _WIN64
             USHORT PreviousSize:8;
             USHORT PoolIndex:8;
             USHORT BlockSize:8;
@@ -87,12 +96,12 @@ typedef struct _POOL_HEADER
         };
         ULONG Ulong1;
     };
-#ifdef _M_AMD64
+#ifdef _WIN64
     ULONG PoolTag;
 #endif
     union
     {
-#ifdef _M_AMD64
+#ifdef _WIN64
         PEPROCESS ProcessBilled;
 #else
         ULONG PoolTag;
