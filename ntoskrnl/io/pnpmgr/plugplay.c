@@ -162,7 +162,9 @@ IopQueueDevicePropertyChangeEvent(
     RtlCopyMemory(EventEntry->Event.TargetDevice.DeviceIds,
                   DeviceId->Buffer, DeviceId->Length);
 
+    KeAcquireGuardedMutex(&IopPnpEventQueueLock);
     InsertHeadList(&IopPnpEventQueueHead, &EventEntry->ListEntry);
+    KeReleaseGuardedMutex(&IopPnpEventQueueLock);
     KeSetEvent(&IopPnpNotifyEvent, 0, FALSE);
 
     return STATUS_SUCCESS;

@@ -768,6 +768,86 @@ Test_RootDevice(
     ExpectNoProperty(&Target, &TestKeyLocalized, LCID_EN_US);
 }
 
+/*
+ * Every set on a started device queues a property change event for the user
+ * mode PnP manager, which takes them off the same queue at the same time. The
+ * queueing has to hold the event queue lock like every other event: without
+ * it, a set racing umpnpmgr's removal can corrupt the queue (a full kmtest
+ * run once had NtGetPlugPlayEvent pick up an entry with TotalSize 0, ASSERT
+ * NumberOfBytes != 0 in ExAllocatePool, during this test).
+ */
+#define CONCURRENT_THREADS  4
+#define CONCURRENT_SETS     1000
+
+typedef struct _CONCURRENT_SETTER
+{
+    PDEVICE_OBJECT Pdo;
+    ULONG Processor;
+    ULONG Failures;
+} CONCURRENT_SETTER, *PCONCURRENT_SETTER;
+
+static
+VOID
+NTAPI
+ConcurrentSetter(
+    _In_ PVOID Context)
+{
+    PCONCURRENT_SETTER Setter = Context;
+    ULONG i, Number;
+
+    KeSetSystemAffinityThread(AFFINITY_MASK(Setter->Processor));
+    for (i = 0; i < CONCURRENT_SETS; i++)
+    {
+        Number = i;
+        if (!NT_SUCCESS(IoSetDevicePropertyData(Setter->Pdo, &TestKeyNumber, LOCALE_NEUTRAL, 0,
+                                                DEVPROP_TYPE_UINT32, sizeof(Number), &Number)))
+        {
+            Setter->Failures++;
+        }
+    }
+    KeRevertToUserAffinityThread();
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+static
+VOID
+Test_ConcurrentSets(
+    _In_ PDEVICE_OBJECT Pdo)
+{
+    CONCURRENT_SETTER Setters[CONCURRENT_THREADS];
+    PVOID Threads[CONCURRENT_THREADS];
+    ULONG Count, i;
+    HANDLE Handle;
+    NTSTATUS Status;
+
+    Count = min(max(KeNumberProcessors, 2), CONCURRENT_THREADS);
+    for (i = 0; i < Count; i++)
+    {
+        Setters[i].Pdo = Pdo;
+        Setters[i].Processor = i % KeNumberProcessors;
+        Setters[i].Failures = 0;
+        Threads[i] = NULL;
+        Status = PsCreateSystemThread(&Handle, SYNCHRONIZE, NULL, NULL, NULL, ConcurrentSetter, &Setters[i]);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            break;
+        Status = ObReferenceObjectByHandle(Handle, SYNCHRONIZE, *PsThreadType, KernelMode, &Threads[i], NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(Handle);
+    }
+    for (i = 0; i < Count; i++)
+    {
+        if (!Threads[i])
+            continue;
+        KeWaitForSingleObject(Threads[i], Executive, KernelMode, FALSE, NULL);
+        ObDereferenceObject(Threads[i]);
+        ok(Setters[i].Failures == 0, "Setter %lu: %lu sets failed\n", i, Setters[i].Failures);
+    }
+
+    Status = IoSetDevicePropertyData(Pdo, &TestKeyNumber, LOCALE_NEUTRAL, 0, DEVPROP_TYPE_EMPTY, 0, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+}
+
 START_TEST(IoDeviceProperty)
 {
     PROPERTY_TARGET DeviceTarget = { "device", NULL, NULL };
@@ -805,6 +885,7 @@ START_TEST(IoDeviceProperty)
         Test_DeviceBuiltins(&DeviceTarget);
         Test_RootDevice(Pdo);
     }
+    Test_ConcurrentSets(Pdo);
 
     if (!skip(HaveInterfaceRoutines, "Device interface property routines unavailable\n"))
     {
