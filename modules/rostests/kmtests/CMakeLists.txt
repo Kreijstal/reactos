@@ -185,7 +185,6 @@ list(APPEND KMTEST_DRV_SOURCE
 
 if(ARCH STREQUAL "arm64")
     list(REMOVE_ITEM KMTEST_DRV_SOURCE ntos_ex/ExSequencedList.c)
-    list(APPEND KMTEST_DRV_SOURCE hal/HalScatterGatherReuse.c)
 endif()
 
 if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
@@ -197,6 +196,10 @@ if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
         hal/HalRealTimeClock.c
         hal/HalAdapterChannel.c
         hal/HalScatterGather.c)
+endif()
+
+if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64" OR ARCH STREQUAL "arm64")
+    list(APPEND KMTEST_DRV_SOURCE hal/HalScatterGatherReuse.c)
 endif()
 
 add_library(kmtest_drv MODULE ${KMTEST_DRV_SOURCE})
