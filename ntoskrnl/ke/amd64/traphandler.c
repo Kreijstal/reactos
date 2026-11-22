@@ -77,6 +77,11 @@ KiDpcInterruptHandler(VOID)
         }
         else
         {
+            /* The old thread is queued ready below, and another processor
+             * may pick it up before its context is saved here: mark it swap
+             * busy so that processor waits for the save (KiSwapContext) */
+            KiSetThreadSwapBusy(OldThread);
+
             /* Set new thread data */
             Prcb->NextThread = NULL;
             Prcb->CurrentThread = NewThread;

@@ -713,6 +713,11 @@ KiDispatchInterrupt(VOID)
         OldThread = Prcb->CurrentThread;
         NewThread = Prcb->NextThread;
 
+        /* The old thread is queued ready below, and another processor may
+         * pick it up before its context is saved here: mark it swap busy so
+         * that processor waits for the save (KiSwapContext) */
+        KiSetThreadSwapBusy(OldThread);
+
         Prcb->NextThread = NULL;
         Prcb->CurrentThread = NewThread;
 
