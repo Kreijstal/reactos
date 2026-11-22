@@ -227,6 +227,7 @@ static volatile LONG BlockersNoWait;
 static KDPC HogDpc;
 static volatile LONG HogRelease, HogRunning;
 static GRANT Big;
+static PETHREAD PinnedThread;
 
 static
 VOID
@@ -237,14 +238,26 @@ BlockerRoutine(
     PBLOCKER Blocker = Context;
 
     InterlockedExchange(&Blocker->Started, 1);
-    if (Blocker->Role == RoleWait && !BlockersNoWait)
+    if ((Blocker->Role == RoleWait || Blocker->Role == RoleUnpin) && !BlockersNoWait)
         KeWaitForSingleObject(&Blocker->Release, Executive, KernelMode, FALSE, NULL);
     if (Blocker->Role == RolePin)
-        KeSetSystemAffinityThread(Blocker->Affinity);
-    else if (Blocker->Role == RoleUnpin)
     {
-        /* Only one worker was pinned; reverting needs a system affinity */
-        KeSetSystemAffinityThread(KeQueryActiveProcessors());
+        /* The worker keeps this affinity when it goes back to wait for work */
+        PinnedThread = PsGetCurrentThread();
+        ObReferenceObject(PinnedThread);
+        KeSetSystemAffinityThread(Blocker->Affinity);
+    }
+    else if (Blocker->Role == RoleUnpin && PsGetCurrentThread() == PinnedThread)
+    {
+        /*
+         * Only the pinned worker reverts, and it must: a system affinity left
+         * behind by a work item stays with the thread, and every work item of
+         * other drivers it runs from then on runs with SystemAffinityActive
+         * set (KeFlushQueuedDpcs asserts on it; ASSERT in KmdfRemove).
+         * Every worker is parked in an unpin blocker, so the pinned one is
+         * sure to get one: blockers that do not wait were all taken by the
+         * worker that waited last, and the pin was left behind.
+         */
         KeRevertToUserAffinityThread();
     }
     InterlockedExchange(&Blocker->Done, 1);
@@ -367,12 +380,15 @@ TestGrowthOutOfOrder(VOID)
     for (i = 0; i < MAX_PROBES; i++)
         Probes[i].Granted = Probes[i].Requested = 0;
 
-    /* Stay on one processor; hog another one */
-    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
-    Self = KeGetCurrentProcessorNumber();
-    KeLowerIrql(OldIrql);
+    /*
+     * Stay on the boot processor and hog another one. The boot processor
+     * takes the clock interrupt and expires the timers of every processor,
+     * those of our own waits included: with the hog on it, nothing that
+     * waits with a timeout (all of WaitFor) ever wakes up again.
+     */
+    Self = 0;
     KeSetSystemAffinityThread(AFFINITY_MASK(Self));
-    Hog = (Self + 1) % KeNumberProcessors;
+    Hog = 1;
 
     Workers = ParkWorkers(RoleWait);
     trace("%lu delayed worker threads parked\n", Workers);
@@ -489,11 +505,17 @@ TestGrowthOutOfOrder(VOID)
         if (!Probes[i].Granted) Ok = FALSE;
     ok(Ok, "Requests still wait after everything was freed\n");
 
-    /* Undo the pin: every worker reverts its affinity once */
+    /* Undo the pin: the pinned worker reverts in the blocker it is parked in */
     ReleaseWorkers(Workers);
     Workers = ParkWorkers(RoleUnpin);
     ReleaseWorkers(Workers);
     KeRevertToUserAffinityThread();
+    if (PinnedThread)
+    {
+        ok(!PinnedThread->Tcb.SystemAffinityActive, "The held-up worker thread kept its system affinity\n");
+        ObDereferenceObject(PinnedThread);
+        PinnedThread = NULL;
+    }
 
     if (Ok)
     {
