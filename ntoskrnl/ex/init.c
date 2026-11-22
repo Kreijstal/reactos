@@ -1698,6 +1698,15 @@ Phase1InitializationDiscard(IN PVOID Context)
     if (!HalAllProcessorsStarted()) KeBugCheck(HAL1_INITIALIZATION_FAILED);
 
 #ifdef CONFIG_SMP
+    /*
+     * The System process was created in phase 0, when only the boot
+     * processor was active, and every thread created in it (worker threads,
+     * driver system threads) and every process descending from it took that
+     * one-processor affinity. Give it, and its threads, all of them, as NT
+     * does once the application processors are started.
+     */
+    KeSetAffinityProcess(&PsInitialSystemProcess->Pcb, KeActiveProcessors);
+
     /* HACK: We should use RtlFindMessage and not only fallback to this */
     MpString = "MultiProcessor Kernel\r\n";
 #endif

@@ -146,6 +146,7 @@ KMT_TESTFUNC Test_PoFxCallbacks;
 KMT_TESTFUNC Test_PoPowerSettingCallback;
 KMT_TESTFUNC Test_PsNotify;
 KMT_TESTFUNC Test_PsQuota;
+KMT_TESTFUNC Test_PsSystemAffinity;
 KMT_TESTFUNC Test_SeInheritance;
 KMT_TESTFUNC Test_SeLogonSession;
 KMT_TESTFUNC Test_SeQueryInfoToken;
@@ -310,6 +311,7 @@ const KMT_TEST TestList[] =
     { "PoPowerSettingCallback",             Test_PoPowerSettingCallback },
     { "PsNotify",                           Test_PsNotify },
     { "PsQuota",                            Test_PsQuota },
+    { "PsSystemAffinity",                   Test_PsSystemAffinity },
     { "RtlAvlTreeKM",                       Test_RtlAvlTree },
     { "RtlExceptionKM",                     Test_RtlException },
     { "RtlIntSafeKM",                       Test_RtlIntSafe },

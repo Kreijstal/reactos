@@ -170,6 +170,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_po/PoPowerSettingCallback.c
     ntos_ps/PsNotify.c
     ntos_ps/PsQuota.c
+    ntos_ps/PsSystemAffinity.c
     ntos_se/SeHelpers.c
     ntos_se/SeInheritance.c
     ntos_se/SeLogonSession.c
