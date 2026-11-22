@@ -122,6 +122,30 @@ KeGetPreviousMode(VOID)
     KeLeaveCriticalRegionThread(_Thread);                                   \
 }
 
+//
+// Lock order of the per-thread locks (NT 6.2+):
+//
+//   process lock -> [APC queue lock] -> thread lock -> dispatcher lock
+//                -> dispatcher object locks -> PRCB lock
+//
+// The NT 6.2+ KTHREAD has no separate APC queue lock: the APC lock is the
+// thread lock (KiApcLockOf), and KeInsertQueueApc holds it while it signals
+// the target. Every path that needs both the thread lock and the dispatcher
+// lock therefore takes the thread lock first; taking it with the dispatcher
+// lock held deadlocks against an APC being queued to that thread. A path that
+// must reach a thread lock against this order (a waiter boost under a wait
+// object lock) may only try for it (KiTryToAcquireThreadLock).
+//
+// The spin lock owner tag (KxAcquireSpinLock) is only kept on DBG builds.
+//
+#if DBG
+#define KiIsDispatcherLockOwnedByCurrentThread()                            \
+    (*KeGetCurrentPrcb()->LockQueue[LockQueueDispatcherLock].Lock ==        \
+     ((KSPIN_LOCK)KeGetCurrentThread() | 1))
+#else
+#define KiIsDispatcherLockOwnedByCurrentThread() FALSE
+#endif
+
 #ifndef CONFIG_SMP
 
 //
@@ -251,6 +275,8 @@ KiReleaseThreadLock(IN PKTHREAD Thread)
 {
     UNREFERENCED_PARAMETER(Thread);
 }
+
+#define KiAssertThreadLockHeld(Thread) UNREFERENCED_PARAMETER(Thread)
 
 //
 // This routine protects against multiple CPU acquires, it's meaningless on UP.
@@ -510,9 +536,17 @@ KiAcquireThreadLock(IN PKTHREAD Thread)
     /* Make sure we're at a safe level to touch the thread lock */
     ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
 
+    /* The thread lock ranks above the dispatcher lock */
+    ASSERT(!KiIsDispatcherLockOwnedByCurrentThread());
+
     /* Start acquire loop */
     KxAcquireSpinLock(&Thread->ThreadLock);
 }
+
+//
+// The thread lock is held by someone (in practice: by the caller).
+//
+#define KiAssertThreadLockHeld(Thread) ASSERT((Thread)->ThreadLock & 1)
 
 //
 // This routine releases the thread lock so that other callers can touch
@@ -615,6 +649,9 @@ KiReleaseTimerLock(IN PKSPIN_LOCK_QUEUE LockQueue)
  * tests/libntos-user/test_apc_stress.c): 2048 APCs across 8 producer
  * threads deliver exactly once at both ApcQueueLock and ThreadLock
  * branches without losses or double-deliveries.
+ *
+ * With the fold the APC lock and the thread lock are one lock, so both rank
+ * above the dispatcher lock; see the lock order at the top of this file.
  */
 #if (NTDDI_VERSION >= NTDDI_WIN8)
 #define KiApcLockOf(Thread) (&(Thread)->ThreadLock)
@@ -627,6 +664,9 @@ VOID
 KiAcquireApcLockRaiseToSynch(IN PKTHREAD Thread,
                  IN PKLOCK_QUEUE_HANDLE Handle)
 {
+    /* The APC lock ranks above the dispatcher lock */
+    ASSERT(!KiIsDispatcherLockOwnedByCurrentThread());
+
     /* Acquire the lock and raise to synchronization level */
     KeAcquireInStackQueuedSpinLockRaiseToSynch(KiApcLockOf(Thread), Handle);
 }
@@ -638,6 +678,7 @@ KiAcquireApcLockAtSynchLevel(IN PKTHREAD Thread,
 {
     /* Acquire the lock */
     ASSERT(KeGetCurrentIrql() >= SYNCH_LEVEL);
+    ASSERT(!KiIsDispatcherLockOwnedByCurrentThread());
     KeAcquireInStackQueuedSpinLockAtDpcLevel(KiApcLockOf(Thread), Handle);
 }
 
@@ -647,6 +688,7 @@ KiAcquireApcLockRaiseToDpc(IN PKTHREAD Thread,
                            IN PKLOCK_QUEUE_HANDLE Handle)
 {
     /* Acquire the lock */
+    ASSERT(!KiIsDispatcherLockOwnedByCurrentThread());
     KeAcquireInStackQueuedSpinLock(KiApcLockOf(Thread), Handle);
 }
 

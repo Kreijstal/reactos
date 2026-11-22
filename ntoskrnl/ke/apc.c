@@ -193,8 +193,17 @@ KiInsertQueueApc(IN PKAPC Apc,
         }
         else
         {
+            /* The thread lock ranks above the dispatcher lock. At NTDDI_WIN8+
+             * it is the APC lock our caller already holds (KiApcLockOf());
+             * before that it is a lock of its own, which the gate-wait case
+             * below needs, so take it here, ahead of the dispatcher lock. */
+#if (NTDDI_VERSION < NTDDI_WIN8)
+            KiAcquireThreadLock(Thread);
+#endif
+            KiAssertThreadLockHeld(Thread);
+
             /* Acquire the dispatcher lock */
-            KiAcquireDispatcherLock();
+            KiAcquireDispatcherLockAtSynchLevel();
 
             /* Check if this is a kernel-mode APC */
             if (ApcMode == KernelMode)
@@ -235,18 +244,8 @@ KiInsertQueueApc(IN PKAPC Apc,
                 }
                 else if (Thread->State == GateWait)
                 {
-                    /* Lock the thread.
-                     * On NTDDI_WIN8+, KTHREAD::ApcQueueLock has been
-                     * consolidated into KTHREAD::ThreadLock - the caller of
-                     * KiInsertQueueApc (KeInsertQueueApc et al.) already holds
-                     * this thread's ApcLock, which IS the ThreadLock at Win8+,
-                     * so a second acquire would self-deadlock. See
-                     * KiApcLockOf() in ke_x.h. */
-#if (NTDDI_VERSION < NTDDI_WIN8)
-                    KiAcquireThreadLock(Thread);
-#endif
-
-                    /* Essentially do the same check as above */
+                    /* The thread lock is held (see above). Essentially do the
+                     * same check as above */
                     if ((Thread->State == GateWait) &&
                         (Thread->WaitIrql == PASSIVE_LEVEL) &&
                         !(Thread->SpecialApcDisable) &&
@@ -281,11 +280,6 @@ KiInsertQueueApc(IN PKAPC Apc,
                         Thread->WaitStatus = STATUS_KERNEL_APC;
                         KiInsertDeferredReadyList(Thread);
                     }
-
-                    /* Release the thread lock (only acquired pre-Win8). */
-#if (NTDDI_VERSION < NTDDI_WIN8)
-                    KiReleaseThreadLock(Thread);
-#endif
                 }
             }
             else if ((Thread->State == Waiting) &&
@@ -303,6 +297,9 @@ KiInsertQueueApc(IN PKAPC Apc,
 
             /* Release dispatcher lock */
             KiReleaseDispatcherLockFromSynchLevel();
+#if (NTDDI_VERSION < NTDDI_WIN8)
+            KiReleaseThreadLock(Thread);
+#endif
 
             /* Check if an interrupt was requested */
             KiRequestApcInterrupt(RequestInterrupt, RequestProcessor);

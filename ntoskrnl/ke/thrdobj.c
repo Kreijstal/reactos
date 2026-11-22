@@ -243,42 +243,36 @@ KeBoostPriorityThread(IN PKTHREAD Thread,
     KPRIORITY Priority;
     ASSERT_IRQL_LESS_OR_EQUAL(DISPATCH_LEVEL);
 
-    /* Lock the Dispatcher Database */
-    OldIrql = KiAcquireDispatcherLock();
+    /* Lock the thread, then the dispatcher database */
+    OldIrql = KeRaiseIrqlToSynchLevel();
+    KiAcquireThreadLock(Thread);
+    KiAcquireDispatcherLockAtSynchLevel();
 
-    /* Only threads in the dynamic range get boosts */
-    if (Thread->Priority < LOW_REALTIME_PRIORITY)
+    /* Only threads in the dynamic range get boosts, and only one boost */
+    if ((Thread->Priority < LOW_REALTIME_PRIORITY) &&
+        !(Thread->PriorityDecrement))
     {
-        /* Lock the thread */
-        KiAcquireThreadLock(Thread);
-
-        /* Check again, and make sure there's not already a boost */
-        if ((Thread->Priority < LOW_REALTIME_PRIORITY) &&
-            !(Thread->PriorityDecrement))
+        /* Compute the new priority and see if it's higher */
+        Priority = Thread->BasePriority + Increment;
+        if (Priority > Thread->Priority)
         {
-            /* Compute the new priority and see if it's higher */
-            Priority = Thread->BasePriority + Increment;
-            if (Priority > Thread->Priority)
+            if (Priority >= LOW_REALTIME_PRIORITY)
             {
-                if (Priority >= LOW_REALTIME_PRIORITY)
-                {
-                    Priority = LOW_REALTIME_PRIORITY - 1;
-                }
-
-                /* Reset the quantum */
-                Thread->Quantum = Thread->QuantumReset;
-
-                /* Set the new Priority */
-                KiSetPriorityThread(Thread, Priority);
+                Priority = LOW_REALTIME_PRIORITY - 1;
             }
-        }
 
-        /* Release thread lock */
-        KiReleaseThreadLock(Thread);
+            /* Reset the quantum */
+            Thread->Quantum = Thread->QuantumReset;
+
+            /* Set the new Priority */
+            KiSetPriorityThread(Thread, Priority);
+        }
     }
 
-    /* Release the dispatcher lokc */
-    KiReleaseDispatcherLock(OldIrql);
+    /* Release the dispatcher and thread locks */
+    KiReleaseDispatcherLockFromSynchLevel();
+    KiReleaseThreadLock(Thread);
+    KiExitDispatcher(OldIrql);
 }
 
 ULONG
@@ -1184,8 +1178,11 @@ KeRevertToUserAffinityThread(VOID)
     ASSERT_IRQL_LESS_OR_EQUAL(DISPATCH_LEVEL);
     ASSERT(CurrentThread->SystemAffinityActive != FALSE);
 
-    /* Lock the Dispatcher Database */
-    OldIrql = KiAcquireDispatcherLock();
+    /* Lock the thread (the affinity is guarded by it, see
+     * KiSetAffinityThread), then the dispatcher database */
+    OldIrql = KeRaiseIrqlToSynchLevel();
+    KiAcquireThreadLock(CurrentThread);
+    KiAcquireDispatcherLockAtSynchLevel();
 
     /* Set the user affinity and processor and disable system affinity.
      * On Win7+, Affinity/UserAffinity are GROUP_AFFINITY (16 bytes) whose
@@ -1228,8 +1225,10 @@ KeRevertToUserAffinityThread(VOID)
         KiReleasePrcbLock(Prcb);
     }
 
-    /* Unlock dispatcher database */
-    KiReleaseDispatcherLock(OldIrql);
+    /* Unlock the dispatcher database and the thread */
+    KiReleaseDispatcherLockFromSynchLevel();
+    KiReleaseThreadLock(CurrentThread);
+    KiExitDispatcher(OldIrql);
 }
 
 /*
@@ -1395,8 +1394,11 @@ KeSetSystemAffinityThread(IN KAFFINITY Affinity)
     ASSERT_IRQL_LESS_OR_EQUAL(DISPATCH_LEVEL);
     ASSERT((Affinity & KeActiveProcessors) != 0);
 
-    /* Lock the Dispatcher Database */
-    OldIrql = KiAcquireDispatcherLock();
+    /* Lock the thread (the affinity is guarded by it, see
+     * KiSetAffinityThread), then the dispatcher database */
+    OldIrql = KeRaiseIrqlToSynchLevel();
+    KiAcquireThreadLock(CurrentThread);
+    KiAcquireDispatcherLockAtSynchLevel();
 
     /* Restore the affinity and enable system affinity */
 #if (NTDDI_VERSION >= NTDDI_WIN7)
@@ -1436,8 +1438,10 @@ KeSetSystemAffinityThread(IN KAFFINITY Affinity)
         KiReleasePrcbLock(Prcb);
     }
 
-    /* Unlock dispatcher database */
-    KiReleaseDispatcherLock(OldIrql);
+    /* Unlock the dispatcher database and the thread */
+    KiReleaseDispatcherLockFromSynchLevel();
+    KiReleaseThreadLock(CurrentThread);
+    KiExitDispatcher(OldIrql);
 }
 
 /*
@@ -1458,11 +1462,10 @@ KeSetBasePriorityThread(IN PKTHREAD Thread,
     /* Get the process */
     Process = Thread->ApcState.Process;
 
-    /* Lock the Dispatcher Database */
-    OldIrql = KiAcquireDispatcherLock();
-
-    /* Lock the thread */
+    /* Lock the thread, then the dispatcher database */
+    OldIrql = KeRaiseIrqlToSynchLevel();
     KiAcquireThreadLock(Thread);
+    KiAcquireDispatcherLockAtSynchLevel();
 
     /* Save the old base priority and increment */
     OldBasePriority = Thread->BasePriority;
@@ -1551,11 +1554,10 @@ KeSetBasePriorityThread(IN PKTHREAD Thread,
         KiSetPriorityThread(Thread, Priority);
     }
 
-    /* Release thread lock */
+    /* Release the dispatcher database and the thread lock */
+    KiReleaseDispatcherLockFromSynchLevel();
     KiReleaseThreadLock(Thread);
-
-    /* Release the dispatcher database and return old increment */
-    KiReleaseDispatcherLock(OldIrql);
+    KiExitDispatcher(OldIrql);
     return OldIncrement;
 }
 
@@ -1572,14 +1574,18 @@ KeSetAffinityThread(IN PKTHREAD Thread,
     ASSERT_THREAD(Thread);
     ASSERT_IRQL_LESS_OR_EQUAL(DISPATCH_LEVEL);
 
-    /* Lock the dispatcher database */
-    OldIrql = KiAcquireDispatcherLock();
+    /* Lock the thread, then the dispatcher database */
+    OldIrql = KeRaiseIrqlToSynchLevel();
+    KiAcquireThreadLock(Thread);
+    KiAcquireDispatcherLockAtSynchLevel();
 
     /* Call the internal function */
     OldAffinity = KiSetAffinityThread(Thread, Affinity);
 
-    /* Release the dispatcher database and return old affinity */
-    KiReleaseDispatcherLock(OldIrql);
+    /* Release the locks and return old affinity */
+    KiReleaseDispatcherLockFromSynchLevel();
+    KiReleaseThreadLock(Thread);
+    KiExitDispatcher(OldIrql);
     return OldAffinity;
 }
 
@@ -1598,11 +1604,10 @@ KeSetPriorityThread(IN PKTHREAD Thread,
     ASSERT((Priority <= HIGH_PRIORITY) && (Priority >= LOW_PRIORITY));
     ASSERT(KeIsExecutingDpc() == FALSE);
 
-    /* Lock the Dispatcher Database */
-    OldIrql = KiAcquireDispatcherLock();
-
-    /* Lock the thread */
+    /* Lock the thread, then the dispatcher database */
+    OldIrql = KeRaiseIrqlToSynchLevel();
     KiAcquireThreadLock(Thread);
+    KiAcquireDispatcherLockAtSynchLevel();
 
     /* Save the old Priority and reset decrement */
     OldPriority = Thread->Priority;
@@ -1621,11 +1626,10 @@ KeSetPriorityThread(IN PKTHREAD Thread,
         KiSetPriorityThread(Thread, Priority);
     }
 
-    /* Release thread lock */
+    /* Release the dispatcher database and the thread lock */
+    KiReleaseDispatcherLockFromSynchLevel();
     KiReleaseThreadLock(Thread);
-
-    /* Release the dispatcher database */
-    KiReleaseDispatcherLock(OldIrql);
+    KiExitDispatcher(OldIrql);
 
     /* Return Old Priority */
     return OldPriority;

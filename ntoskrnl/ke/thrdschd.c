@@ -632,6 +632,9 @@ KiSetPriorityThread(IN PKTHREAD Thread,
     PKTHREAD NewThread;
     ASSERT((Priority >= 0) && (Priority <= HIGH_PRIORITY));
 
+    /* The caller holds the thread lock */
+    KiAssertThreadLockHeld(Thread);
+
     /* Check if priority changed */
     if (Thread->Priority != Priority)
     {
@@ -808,8 +811,8 @@ KiUpdateEffectiveAffinityThread(
     PKPRCB Prcb;
     BOOLEAN RequestInterrupt = FALSE;
 
-    /* Acquire the thread lock */
-    KiAcquireThreadLock(Thread);
+    /* The caller holds the thread lock, then the dispatcher lock */
+    KiAssertThreadLockHeld(Thread);
 
     /* Get the PRCB that the thread is to be run on and lock it */
     Prcb = KiProcessorBlock[Thread->NextProcessor];
@@ -884,19 +887,26 @@ KiUpdateEffectiveAffinityThread(
     }
 
     KiReleasePrcbLock(Prcb);
-    KiReleaseThreadLock(Thread);
 
     if (RequestInterrupt)
         HalRequestSoftwareInterrupt(DISPATCH_LEVEL);
 }
 #endif // CONFIG_SMP
 
+//
+// Called with the thread lock and then the dispatcher lock held. The thread
+// lock is the APC lock on the NT 6.2+ KTHREAD (KiApcLockOf()), which
+// KeInsertQueueApc holds while it takes the dispatcher lock, so it can not be
+// taken in here under the dispatcher lock.
+//
 KAFFINITY
 FASTCALL
 KiSetAffinityThread(IN PKTHREAD Thread,
                     IN KAFFINITY Affinity)
 {
     KAFFINITY OldAffinity;
+
+    KiAssertThreadLockHeld(Thread);
 
     /* Get the current affinity */
 #if (NTDDI_VERSION >= NTDDI_WIN7)

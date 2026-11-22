@@ -292,9 +292,6 @@ KeSetAffinityProcess(IN PKPROCESS Process,
     /* Lock the process */
     KiAcquireProcessLockRaiseToSynch(Process, &ProcessLock);
 
-    /* Acquire the dispatcher lock */
-    KiAcquireDispatcherLockAtSynchLevel();
-
     /* Capture old affinity and update it */
     OldAffinity = Process->Affinity;
     Process->Affinity = Affinity;
@@ -307,13 +304,15 @@ KeSetAffinityProcess(IN PKPROCESS Process,
         /* Get the thread */
         Thread = CONTAINING_RECORD(NextEntry, KTHREAD, ThreadListEntry);
 
-        /* Set affinity on it */
+        /* Set affinity on it, under its thread lock and then the
+         * dispatcher lock (see the lock order in ke_x.h) */
+        KiAcquireThreadLock(Thread);
+        KiAcquireDispatcherLockAtSynchLevel();
         KiSetAffinityThread(Thread, Affinity);
+        KiReleaseDispatcherLockFromSynchLevel();
+        KiReleaseThreadLock(Thread);
         NextEntry = NextEntry->Flink;
     }
-
-    /* Release Dispatcher Database */
-    KiReleaseDispatcherLockFromSynchLevel();
 
     /* Release the process lock */
     KiReleaseProcessLockFromSynchLevel(&ProcessLock);
@@ -382,9 +381,6 @@ KeSetPriorityAndQuantumProcess(IN PKPROCESS Process,
     /* Lock the process */
     KiAcquireProcessLockRaiseToSynch(Process, &ProcessLock);
 
-    /* Acquire the dispatcher lock */
-    KiAcquireDispatcherLockAtSynchLevel();
-
     /* Check if we are modifying the quantum too */
     if (Quantum) Process->QuantumReset = Quantum;
 
@@ -411,8 +407,9 @@ KeSetPriorityAndQuantumProcess(IN PKPROCESS Process,
             /* Update the quantum if we had one */
             if (Quantum) Thread->QuantumReset = Quantum;
 
-            /* Acquire the thread lock */
+            /* Acquire the thread lock, then the dispatcher lock */
             KiAcquireThreadLock(Thread);
+            KiAcquireDispatcherLockAtSynchLevel();
 
             /* Calculate the new priority */
             NewPriority = Thread->BasePriority + Delta;
@@ -454,7 +451,8 @@ KeSetPriorityAndQuantumProcess(IN PKPROCESS Process,
                 KiSetPriorityThread(Thread, NewPriority);
             }
 
-            /* Release the thread lock */
+            /* Release the dispatcher and thread locks */
+            KiReleaseDispatcherLockFromSynchLevel();
             KiReleaseThreadLock(Thread);
 
             /* Go to the next thread */
@@ -472,8 +470,9 @@ KeSetPriorityAndQuantumProcess(IN PKPROCESS Process,
             /* Update the quantum if we had one */
             if (Quantum) Thread->QuantumReset = Quantum;
 
-            /* Lock the thread */
+            /* Lock the thread, then the dispatcher */
             KiAcquireThreadLock(Thread);
+            KiAcquireDispatcherLockAtSynchLevel();
 
             /* Calculate the new priority */
             NewPriority = Thread->BasePriority + Delta;
@@ -516,16 +515,14 @@ KeSetPriorityAndQuantumProcess(IN PKPROCESS Process,
                 KiSetPriorityThread(Thread, NewPriority);
             }
 
-            /* Release the thread lock */
+            /* Release the dispatcher and thread locks */
+            KiReleaseDispatcherLockFromSynchLevel();
             KiReleaseThreadLock(Thread);
 
             /* Go to the next thread */
             NextEntry = NextEntry->Flink;
         }
     }
-
-    /* Release Dispatcher Database */
-    KiReleaseDispatcherLockFromSynchLevel();
 
     /* Release the process lock */
     KiReleaseProcessLockFromSynchLevel(&ProcessLock);

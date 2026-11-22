@@ -583,8 +583,13 @@ ExpBoostOwnerThread(IN PKTHREAD Thread,
         if ((OwnerThread->Priority < Thread->Priority) &&
             (OwnerThread->Priority < 14))
         {
-            /* Acquire the owner thread lock */
-            KiAcquireThreadLock(OwnerThread);
+            /* ExpWaitForResource holds the dispatcher lock here, which ranks
+             * below the thread lock (see ke_x.h): the owner's thread lock may
+             * be held by a processor that is waiting for the dispatcher lock
+             * (KeInsertQueueApc to the owner), so only try for it. The boost
+             * is a starvation hint; the waiter retries it on its next
+             * timeout. */
+            if (!KiTryToAcquireThreadLock(OwnerThread)) return;
 
             /* Set the new priority */
             OwnerThread->PriorityDecrement += 14 - OwnerThread->Priority;

@@ -56,18 +56,16 @@ KeWaitForGate(IN PKGATE Gate,
         }
         else
         {
-            /* Check if we have a queue and lock the dispatcher if so */
-            Queue = Thread->Queue;
-            if (Queue) KiAcquireDispatcherLockAtSynchLevel();
-
-            /* Lock the thread.
-             * On NTDDI_WIN8+, KTHREAD::ApcQueueLock has been consolidated into
-             * KTHREAD::ThreadLock - the queued ApcLock acquired above already
-             * holds the only per-thread lock, so a second acquire would
-             * self-deadlock against itself. See KiApcLockOf() in ke_x.h. */
+            /* Lock the thread, ahead of the dispatcher lock. On NTDDI_WIN8+
+             * the APC lock acquired above is the thread lock (KiApcLockOf()
+             * in ke_x.h). */
 #if (NTDDI_VERSION < NTDDI_WIN8)
             KiAcquireThreadLock(Thread);
 #endif
+
+            /* Check if we have a queue and lock the dispatcher if so */
+            Queue = Thread->Queue;
+            if (Queue) KiAcquireDispatcherLockAtSynchLevel();
 
             /* Lock the gate */
             KiAcquireDispatcherObject(&Gate->Header);
@@ -78,14 +76,12 @@ KeWaitForGate(IN PKGATE Gate,
                 /* Unsignal it */
                 Gate->Header.SignalState = 0;
 
-                /* Release the gate and thread locks */
+                /* Release the gate, dispatcher and thread locks */
                 KiReleaseDispatcherObject(&Gate->Header);
+                if (Queue) KiReleaseDispatcherLockFromSynchLevel();
 #if (NTDDI_VERSION < NTDDI_WIN8)
                 KiReleaseThreadLock(Thread);
 #endif
-
-                /* Release the gate lock */
-                if (Queue) KiReleaseDispatcherLockFromSynchLevel();
 
                 /* Release the APC lock and return */
                 KiReleaseApcLock(&ApcLock);
@@ -119,11 +115,6 @@ KeWaitForGate(IN PKGATE Gate,
             /* Set swap busy */
             KiSetThreadSwapBusy(Thread);
 
-            /* Release the thread lock (only acquired pre-Win8 - see above). */
-#if (NTDDI_VERSION < NTDDI_WIN8)
-            KiReleaseThreadLock(Thread);
-#endif
-
             /* Check if we had a queue */
             if (Queue)
             {
@@ -133,6 +124,11 @@ KeWaitForGate(IN PKGATE Gate,
                 /* Release the dispatcher lock */
                 KiReleaseDispatcherLockFromSynchLevel();
             }
+
+            /* Release the thread lock (only acquired pre-Win8 - see above). */
+#if (NTDDI_VERSION < NTDDI_WIN8)
+            KiReleaseThreadLock(Thread);
+#endif
 
             /* Release the APC lock but stay at DPC level */
             KiReleaseApcLockFromSynchLevel(&ApcLock);
