@@ -187,12 +187,16 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
     ASSERT(Thread->State == DeferredReady);
     ASSERT((Thread->Priority >= 0) && (Thread->Priority <= HIGH_PRIORITY));
 
+    /* Lock the thread until it is on a processor's ready list or about to
+     * run there: the processor is chosen from its affinity, which
+     * KiSetAffinityThread changes under the thread lock. Otherwise the thread
+     * can be queued to a processor its new affinity excludes. The thread
+     * lock ranks above the PRCB lock. */
+    KiAcquireThreadLock(Thread);
+
     /* Check if we have any adjusts to do */
     if (Thread->AdjustReason == AdjustBoost)
     {
-        /* Lock the thread */
-        KiAcquireThreadLock(Thread);
-
         /* Check if the priority is low enough to qualify for boosting */
         if ((Thread->Priority <= Thread->AdjustIncrement) &&
             (Thread->Priority < (LOW_REALTIME_PRIORITY - 3)) &&
@@ -224,14 +228,12 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
         /* Make sure the priority is still valid */
         ASSERT((Thread->Priority >= 0) && (Thread->Priority <= HIGH_PRIORITY));
 
-        /* Release the lock and clear the adjust reason */
-        KiReleaseThreadLock(Thread);
+        /* Clear the adjust reason */
         Thread->AdjustReason = AdjustNone;
     }
     else if (Thread->AdjustReason == AdjustUnwait)
     {
-        /* Acquire the thread lock and check if this is a real-time thread */
-        KiAcquireThreadLock(Thread);
+        /* Check if this is a real-time thread */
         if (Thread->Priority < LOW_REALTIME_PRIORITY)
         {
             /* It's not real time, but is it time critical? */
@@ -317,8 +319,7 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
         /* Make sure the priority makes sense */
         ASSERT((Thread->Priority >= 0) && (Thread->Priority <= HIGH_PRIORITY));
 
-        /* Release the thread lock and reset the adjust reason */
-        KiReleaseThreadLock(Thread);
+        /* Reset the adjust reason */
         Thread->AdjustReason = AdjustNone;
     }
 
@@ -344,8 +345,9 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
         Thread->State = Standby;
         Prcb->NextThread = Thread;
 
-        /* Unlock the PRCB and return */
+        /* Unlock the PRCB and the thread and return */
         KiReleasePrcbLock(Prcb);
+        KiReleaseThreadLock(Thread);
         return;
     }
 #endif // !CONFIG_SMP
@@ -385,6 +387,7 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
             Prcb->ReadySummary |= PRIORITY_MASK(NextThread->Priority);
 
             KiReleasePrcbLock(Prcb);
+            KiReleaseThreadLock(Thread);
             return;
         }
     }
@@ -401,14 +404,15 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
             Thread->State = Standby;
             Prcb->NextThread = Thread;
 
-            /* Release the lock */
+            /* Release the locks */
             KiReleasePrcbLock(Prcb);
+            KiReleaseThreadLock(Thread);
 
             /* Check if we're running on another CPU */
-            if (KeGetCurrentProcessorNumber() != Thread->NextProcessor)
+            if (KeGetCurrentProcessorNumber() != Processor)
             {
                 /* We are, send an IPI */
-                KiIpiSend(AFFINITY_MASK(Thread->NextProcessor), IPI_DPC);
+                KiIpiSend(AFFINITY_MASK(Processor), IPI_DPC);
             }
             return;
         }
@@ -433,8 +437,9 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
     /* Sanity check */
     ASSERT(OldPriority == Thread->Priority);
 
-    /* Release the lock */
+    /* Release the locks */
     KiReleasePrcbLock(Prcb);
+    KiReleaseThreadLock(Thread);
 }
 
 PKTHREAD
@@ -814,33 +819,58 @@ KiUpdateEffectiveAffinityThread(
     /* The caller holds the thread lock, then the dispatcher lock */
     KiAssertThreadLockHeld(Thread);
 
-    /* Get the PRCB that the thread is to be run on and lock it */
-    Prcb = KiProcessorBlock[Thread->NextProcessor];
-    KiAcquirePrcbLock(Prcb);
-
-    /* Set the thread's affinity and ideal processor.
-     * NB: On Win7+, Affinity/UserAffinity are GROUP_AFFINITY (16 bytes).
-     * The trailing Reserved[] bytes overlap distinct KTHREAD fields in
-     * each union (Affinity hides ApcStateIndex/WaitBlockCount/IdealProcessor;
-     * UserAffinity hides PreviousMode/BasePriority/PriorityDecrement/...).
-     * A whole-struct copy would clobber ApcStateIndex with PreviousMode and
-     * crash KiInsertQueueApc the next time the thread receives an APC with
-     * a matching ApcStateIndex. Copy only the affinity bits. */
-#if (NTDDI_VERSION >= NTDDI_WIN7)
-    Thread->Affinity.Mask = Thread->UserAffinity.Mask;
-    Thread->Affinity.Group = Thread->UserAffinity.Group;
-#else
-    Thread->Affinity = Thread->UserAffinity;
-#endif
-    Thread->IdealProcessor = Thread->UserIdealProcessor;
-
-    /* Check if the affinity doesn't match with the current processor */
-#if (NTDDI_VERSION >= NTDDI_WIN7)
-    if ((Prcb->SetMember & Thread->Affinity.Mask) == 0)
-#else
-    if ((Prcb->SetMember & Thread->Affinity) == 0)
-#endif
+    /* A Running, Standby or Ready thread is owned by the PRCB of its next
+     * processor, which switches it in and out and queues it under that PRCB's
+     * lock. Neither the thread lock nor the dispatcher lock keeps the thread
+     * on that PRCB, so lock the PRCB the thread points at, make sure the thread
+     * is still in that state there, and start over if it moved, as
+     * KiSetPriorityThread does. Acting on a PRCB the thread is not on unlinks
+     * it from another processor's ready list without that processor's lock,
+     * or readies a thread that is another processor's next thread, and the
+     * thread then runs on two processors. The affinity is changed under that
+     * PRCB lock too, or the processor can select the thread from its ready
+     * list after its new affinity excludes it. In any other state the thread
+     * can not get onto a PRCB while the caller holds its thread lock and the
+     * dispatcher lock (KiDeferredReadyThread takes the thread lock), and it
+     * picks up the affinity when it is readied. */
+    for (;;)
     {
+        Prcb = KiProcessorBlock[Thread->NextProcessor];
+        KiAcquirePrcbLock(Prcb);
+
+        if (((Thread->State == Running) && (Prcb->CurrentThread != Thread)) ||
+            ((Thread->State == Standby) && (Prcb->NextThread != Thread)) ||
+            ((Thread->State == Ready) && (Thread->NextProcessor != Prcb->Number)))
+        {
+            /* It moved, retry */
+            KiReleasePrcbLock(Prcb);
+            continue;
+        }
+
+        /* Set the thread's affinity and ideal processor.
+         * NB: On Win7+, Affinity/UserAffinity are GROUP_AFFINITY (16 bytes).
+         * The trailing Reserved[] bytes overlap distinct KTHREAD fields in
+         * each union (Affinity hides ApcStateIndex/WaitBlockCount/IdealProcessor;
+         * UserAffinity hides PreviousMode/BasePriority/PriorityDecrement/...).
+         * A whole-struct copy would clobber ApcStateIndex with PreviousMode and
+         * crash KiInsertQueueApc the next time the thread receives an APC with
+         * a matching ApcStateIndex. Copy only the affinity bits. */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+        Thread->Affinity.Mask = Thread->UserAffinity.Mask;
+        Thread->Affinity.Group = Thread->UserAffinity.Group;
+#else
+        Thread->Affinity = Thread->UserAffinity;
+#endif
+        Thread->IdealProcessor = Thread->UserIdealProcessor;
+
+        /* Nothing to do if the thread may stay on that processor */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+        if ((Prcb->SetMember & Thread->Affinity.Mask) != 0)
+#else
+        if ((Prcb->SetMember & Thread->Affinity) != 0)
+#endif
+            break;
+
         if (Thread->State == Running)
         {
             /* Check if there is the next thread is selected already */
@@ -855,7 +885,7 @@ KiUpdateEffectiveAffinityThread(
             if (Prcb != KeGetCurrentPrcb())
             {
                 /* It is, send an IPI */
-                KiIpiSend(AFFINITY_MASK(Thread->NextProcessor), IPI_DPC);
+                KiIpiSend(AFFINITY_MASK(Prcb->Number), IPI_DPC);
             }
             else
             {
@@ -875,6 +905,7 @@ KiUpdateEffectiveAffinityThread(
         else if (Thread->State == Ready)
         {
             /* Remove it from the list */
+            ASSERT(Prcb->ReadySummary & PRIORITY_MASK(Thread->Priority));
             if (RemoveEntryList(&Thread->WaitListEntry))
             {
                 /* The list is empty now, reset the ready summary */
@@ -884,6 +915,8 @@ KiUpdateEffectiveAffinityThread(
             /* Insert the thread back into the ready list */
             KiInsertDeferredReadyList(Thread);
         }
+
+        break;
     }
 
     KiReleasePrcbLock(Prcb);
