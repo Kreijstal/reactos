@@ -504,6 +504,17 @@ KiInitializeKernel(_Inout_ PKPROCESS InitProcess,
     ExpInitializeExecutive(Number, LoaderBlock);
 
     /*
+     * An application processor's GIC CPU interface is up now (HalInitSystem
+     * in ExpInitializeExecutive): program its banked SGI/PPI priorities and
+     * start its local clock, which charges run time and ends quanta here.
+     * The boot processor did both in KeInitInterrupts and HAL phase 1.
+     */
+    if (Number != 0)
+    {
+        KeStartArm64ProcessorTimer();
+    }
+
+    /*
      * ARM64 parity with amd64: Do NOT invoke Phase1Initialization directly
      * from the Idle thread. PsInitSystem (phase 0) creates a dedicated
      * system thread to run Phase1Initialization. The scheduler will pick it
@@ -1205,11 +1216,6 @@ KiInitializeSystem(_Inout_ PLOADER_PARAMETER_BLOCK LoaderBlock)
             KeSetPriorityThread(Thread, 0);
             Thread->WaitIrql = DISPATCH_LEVEL;
         }
-    }
-
-    if (ProcessorNumber != 0)
-    {
-        KeStartArm64ProcessorTimer();
     }
 
     KiIdleLoop();
