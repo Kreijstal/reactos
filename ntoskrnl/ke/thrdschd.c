@@ -25,30 +25,6 @@
 KAFFINITY KiIdleSummary;
 KAFFINITY KiIdleSMTSummary;
 
-static
-BOOLEAN
-KiIsThreadCurrentOnAnyProcessor(
-    _In_ PKTHREAD Thread)
-{
-#ifdef CONFIG_SMP
-    CCHAR Cpu;
-    PKPRCB Prcb;
-
-    for (Cpu = 0; Cpu < KeNumberProcessors; Cpu++)
-    {
-        Prcb = KiProcessorBlock[Cpu];
-        if ((Prcb != NULL) && (Prcb->CurrentThread == Thread))
-        {
-            return TRUE;
-        }
-    }
-#else
-    UNREFERENCED_PARAMETER(Thread);
-#endif
-
-    return FALSE;
-}
-
 /* FUNCTIONS *****************************************************************/
 
 PKTHREAD
@@ -352,17 +328,11 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
     }
 #endif // !CONFIG_SMP
 
-    /* Get the next scheduled thread */
+    /* Get the next scheduled thread. It can be the processor's current
+     * thread: one readied while it was still switching out and selected to
+     * run again (see the self-swap in KiSwapContext). Leave it alone then: it
+     * is on standby and the switch in progress consumes it. */
     NextThread = Prcb->NextThread;
-    if ((NextThread != NULL) &&
-        ((NextThread == Prcb->CurrentThread) ||
-         ((NextThread->State != Standby) &&
-          KiIsThreadCurrentOnAnyProcessor(NextThread))))
-    {
-        Prcb->NextThread = NULL;
-        NextThread = NULL;
-    }
-
     if (NextThread)
     {
         /* Sanity check */
@@ -372,6 +342,9 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
         if ((OldPriority > NextThread->Priority) &&
             (KeGetCurrentProcessorNumber() == Processor))
         {
+            /* This processor is not switching out its current thread */
+            ASSERT(NextThread != Prcb->CurrentThread);
+
             /* Preempt the thread */
             NextThread->Preempted = TRUE;
 
