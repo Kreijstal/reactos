@@ -904,12 +904,6 @@ extern volatile ULONG_PTR MiArm64SessionWsLr;
 extern volatile ULONG_PTR MiArm64SessionWsSavedFp;
 extern volatile ULONG_PTR MiArm64SessionWsSavedLr;
 extern volatile ULONG_PTR MiArm64SessionWsSp;
-/*
- * One-shot trap guard per CPU to prevent recursive exception storms before
- * the debugger is fully operational. Set on first entry; any re-entry while
- * set triggers an immediate bugcheck with the captured context.
- */
-static volatile LONG KiArm64TrapActive[MAXIMUM_PROCESSORS] = {0};
 
 VOID
 KiArm64DeliverPendingUserApc(
@@ -1013,17 +1007,6 @@ KiArm64ReleaseWorkingSetsForBugCheck(VOID)
     if (Raised)
     {
         KeLowerIrql(PreviousIrql);
-    }
-}
-
-static __inline VOID
-KiArm64ClearTrapActive(VOID)
-{
-    ULONG ProcessorIndex = KeGetCurrentProcessorNumber();
-
-    if (ProcessorIndex < MAXIMUM_PROCESSORS)
-    {
-        InterlockedExchange(&KiArm64TrapActive[ProcessorIndex], 0);
     }
 }
 
@@ -1211,36 +1194,6 @@ KiArm64HandleSynchronousException(
     Context->TrapFramePointer = NULL;
     Context->ExceptionFramePointer = NULL;
 
-    /*
-     * One-shot guard to avoid recursive exception storms - KERNEL MODE ONLY.
-     *
-     * User-mode faults (ELR in user range, SPSR.M=EL0) must NOT trigger
-     * this guard because each user-mode exception entry is independent.
-     * A second user-mode fault at the same VA after ERET (e.g., stale
-     * I-cache causing EC=0x00 after a resolved EC=0x20) is a new fault,
-     * not a recursive kernel exception storm.
-     *
-     * Previously this guard fired for ALL faults, causing spurious
-     * "Invalid Opcode" bugchecks when lsass.exe/services.exe re-faulted
-     * at KiUserApcDispatcher after instruction abort resolution.
-     */
-    {
-        ULONG CpuIndex = KeGetCurrentProcessorNumber();
-        KPROCESSOR_MODE FaultMode = KiArm64PreviousModeFromContext(
-            Context->State.Spsr, Context->State.Elr);
-
-        if ((EsrClass != ESR_EC_BRK) &&
-            (CpuIndex < MAXIMUM_PROCESSORS) &&
-            (FaultMode == KernelMode))
-        {
-            if (InterlockedCompareExchange(&KiArm64TrapActive[CpuIndex], 1, 0) != 0)
-            {
-                KiArm64BugCheckSynchronousException(Context);
-                return TRUE; /* not reached */
-            }
-        }
-    }
-
     switch (EsrClass)
     {
                 case ESR_EC_FP_TRAP:  /* FP/ASIMD access when trapped */
@@ -1254,7 +1207,6 @@ KiArm64HandleSynchronousException(
                     {
                         Context->TrapFramePointer = TrapFrame;
                         Context->ExceptionFramePointer = &Context->ExceptionFrame;
-                        KiArm64ClearTrapActive();
                         return TRUE;
                     }
 
@@ -1344,25 +1296,6 @@ KiArm64HandleSynchronousException(
              */
             Instruction = (ULONG)(TrapFrame->X[8] & 0x1FFF);
 
-            /*
-             * ARM64 FIX: Clear trap-active BEFORE calling KiSystemService.
-             *
-             * System calls can legitimately call nested system calls (e.g.,
-             * NtCreateSymbolicLinkObject calls ObInsertObject which calls
-             * other Nt* functions via Zw* wrappers). Each Zw* wrapper uses
-             * SVC #0 to enter the kernel, even when already in kernel mode.
-             *
-             * If we don't clear the trap flag before KiSystemService, the
-             * nested SVC will see KiArm64TrapActive as set and incorrectly
-             * treat it as a recursive exception, causing a spurious crash.
-             *
-             * This is safe because:
-             * 1. The trap frame is already initialized
-             * 2. KiSystemService handles its own exception safety
-             * 3. Any real fault during the syscall will set its own flag
-             */
-            KiArm64ClearTrapActive();
-
             NeedGuiConvert = KiSystemService(Thread,
                                              TrapFrame,
                                              Instruction,
@@ -1423,19 +1356,6 @@ KiArm64HandleSynchronousException(
 
 	            PreviousMode = KiArm64PreviousModeFromContext(Context->State.Spsr, Context->State.Elr);
 	            WriteAccess = FALSE;
-
-            /*
-             * ARM64: Clear trap-active and data abort owner flags BEFORE MmAccessFault.
-             *
-             * MmAccessFault can trigger nested page faults (e.g., SYSCACHE faults
-             * during file I/O when reading a code page from disk). If we don't clear
-             * KiArm64TrapActive, the nested fault will see the flag set and incorrectly
-             * bugcheck as a recursive exception.
-             *
-             * This matches the data abort handler which also clears these before
-             * calling MmAccessFault.
-             */
-            KiArm64ClearTrapActive();
 
             /*
              * ARM64: Handle access flag faults for user instruction fetches.
@@ -1511,7 +1431,6 @@ KiArm64HandleSynchronousException(
 
                 Context->TrapFramePointer = TrapFrame;
                 Context->ExceptionFramePointer = &Context->ExceptionFrame;
-                KiArm64ClearTrapActive();
                 return TRUE;
             }
 
@@ -1541,7 +1460,6 @@ KiArm64HandleSynchronousException(
 
             Context->TrapFramePointer = TrapFrame;
             Context->ExceptionFramePointer = &Context->ExceptionFrame;
-            KiArm64ClearTrapActive();
             return TRUE;
         }
 
@@ -1599,10 +1517,8 @@ KiArm64HandleSynchronousException(
 
                 Context->TrapFramePointer = TrapFrame;
                 Context->ExceptionFramePointer = &Context->ExceptionFrame;
-                KiArm64ClearTrapActive();
                 return TRUE;
             }
-
 
             TrapFrame = &Context->TrapFrame;
             KiArm64InitializeTrapFrame(Context, TrapFrame);
@@ -1656,7 +1572,6 @@ KiArm64HandleSynchronousException(
                 }
             }
 
-
             WriteAccess = (Iss & (1u << 6)) != 0;
 
             /* ARM64: skip accessed-bit fast path to avoid dereferencing
@@ -1697,29 +1612,9 @@ KiArm64HandleSynchronousException(
                         {
                             Context->TrapFramePointer = TrapFrame;
                             Context->ExceptionFramePointer = &Context->ExceptionFrame;
-                            KiArm64ClearTrapActive();
                             return TRUE;
                         }
                     }
-
-                    /*
-                     * ARM64: Clear trap-active flag BEFORE calling MmAccessFault.
-                     *
-                     * MmAccessFault can legitimately cause nested page faults. For example:
-                     * - User page fault on DLL section
-                     * - MmNotPresentFaultSectionView calls MmMakeSegmentResident
-                     * - MmMakeSegmentResident triggers file I/O
-                     * - File I/O accesses System Cache (VACB)
-                     * - System Cache page fault on a different address
-                     *
-                     * If we don't clear KiArm64TrapActive, the second fault will see
-                     * the flag set and incorrectly treat it as a recursive exception,
-                     * causing a spurious bugcheck.
-                     *
-                     * This mirrors the SVC handling (line ~734) which clears the flag
-                     * before calling KiSystemService.
-                     */
-                    KiArm64ClearTrapActive();
 
                     if ((MmSessionSpace != NULL) &&
                         ((ULONG_PTR)AddressArg >= (ULONG_PTR)MmSessionSpace) &&
@@ -1795,7 +1690,6 @@ KiArm64HandleSynchronousException(
                  */
                 Context->TrapFramePointer = TrapFrame;
                 Context->ExceptionFramePointer = &Context->ExceptionFrame;
-                KiArm64ClearTrapActive();
                 return TRUE;
             }
 
@@ -1827,7 +1721,6 @@ KiArm64HandleSynchronousException(
                     Context->State.Elr = TrapFrame->Pc;
                     Context->TrapFramePointer = TrapFrame;
                     Context->ExceptionFramePointer = &Context->ExceptionFrame;
-                    KiArm64ClearTrapActive();
                     return TRUE;
                 }
             }
@@ -2227,7 +2120,6 @@ KiArm64HandleSynchronousException(
                 /* Return with updated trap frame (either resumed, or KD/bugcheck handled). */
                 Context->TrapFramePointer = TrapFrame;
                 Context->ExceptionFramePointer = &Context->ExceptionFrame;
-                KiArm64ClearTrapActive();
                 return TRUE;
             }
         }
@@ -2261,7 +2153,6 @@ KiArm64HandleSynchronousException(
 
             Context->TrapFramePointer = TrapFrame;
             Context->ExceptionFramePointer = &Context->ExceptionFrame;
-            KiArm64ClearTrapActive();
             return TRUE;
         }
 
@@ -2280,7 +2171,6 @@ KiArm64HandleSynchronousException(
             {
                 Context->TrapFramePointer = TrapFrame;
                 Context->ExceptionFramePointer = &Context->ExceptionFrame;
-                KiArm64ClearTrapActive();
                 return TRUE;
             }
 
@@ -2397,7 +2287,6 @@ KiArm64HandleSynchronousException(
 
                 Context->TrapFramePointer = TrapFrame;
                 Context->ExceptionFramePointer = &Context->ExceptionFrame;
-                KiArm64ClearTrapActive();
                 return TRUE;
             }
 
@@ -2426,7 +2315,6 @@ KiArm64HandleSynchronousException(
 
             Context->TrapFramePointer = TrapFrame;
             Context->ExceptionFramePointer = &Context->ExceptionFrame;
-            KiArm64ClearTrapActive();
             return TRUE;
         }
 
@@ -2585,12 +2473,10 @@ KiArm64HandleSynchronousException(
 
             Context->TrapFramePointer = TrapFrame;
             Context->ExceptionFramePointer = &Context->ExceptionFrame;
-            KiArm64ClearTrapActive();
             return TRUE;
         }
     }
 
-    KiArm64ClearTrapActive();
     return FALSE;
 }
 

@@ -84,6 +84,7 @@ KMT_TESTFUNC Test_MmForceSectionClosed;
 KMT_TESTFUNC Test_MmCygwinSectionStress;
 KMT_TESTFUNC Test_MmFaultAtDispatch;
 KMT_TESTFUNC Test_MmFaultHoldingPfnLock;
+KMT_TESTFUNC Test_MmFaultPreempt;
 KMT_TESTFUNC Test_MmMdl;
 KMT_TESTFUNC Test_MmSection;
 KMT_TESTFUNC Test_MmSystemViewUnmap;
@@ -246,6 +247,7 @@ const KMT_TEST TestList[] =
     { "MmCygwinSectionStress",              Test_MmCygwinSectionStress },
     { "-MmFaultAtDispatch",                 Test_MmFaultAtDispatch },     // Bugchecks 0xD1 by design
     { "-MmFaultHoldingPfnLock",             Test_MmFaultHoldingPfnLock }, // Bugchecks 0xD1 by design
+    { "MmFaultPreempt",                     Test_MmFaultPreempt },
     { "MmMdl",                              Test_MmMdl },
     { "MmSection",                          Test_MmSection },
     { "MmSystemViewUnmap",                  Test_MmSystemViewUnmap },
