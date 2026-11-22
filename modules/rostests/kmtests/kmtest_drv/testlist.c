@@ -65,6 +65,7 @@ KMT_TESTFUNC Test_KdLoadSymbolsFrozen;
 KMT_TESTFUNC Test_KdSystemDebugControl;
 KMT_TESTFUNC Test_KseDeviceFlags;
 KMT_TESTFUNC Test_KeApc;
+KMT_TESTFUNC Test_KeApcAffinityStress;
 KMT_TESTFUNC Test_KeDeviceQueue;
 KMT_TESTFUNC Test_KeDpc;
 KMT_TESTFUNC Test_KeEvent;
@@ -228,6 +229,7 @@ const KMT_TEST TestList[] =
     { "KdSystemDebugControl",               Test_KdSystemDebugControl },
     { "KseDeviceFlags",                     Test_KseDeviceFlags },
     { "KeApc",                              Test_KeApc },
+    { "KeApcAffinityStress",                Test_KeApcAffinityStress },
     { "KeDeviceQueue",                      Test_KeDeviceQueue },
     { "KeDpc",                              Test_KeDpc },
     { "KeEvent",                            Test_KeEvent },
