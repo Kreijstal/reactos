@@ -37,7 +37,7 @@ LONG MmSysPteListBySizeCount[5];
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
-#ifdef CONFIG_SMP
+#if defined(CONFIG_SMP) && !MI_TB_FLUSH_IS_BROADCAST
 typedef struct _MI_TB_FLUSH_RANGE
 {
     ULONG_PTR BaseAddress;
@@ -78,9 +78,9 @@ MiFlushReleasedSystemPtes(
      * at the same VA see stale data and writes corrupt whoever owns that
      * page now.  KeFlushProcessTb() at reserve time only flushes the local
      * core, so the shootdown must happen here, before the PTEs become
-     * reusable.
+     * reusable. Where the invalidation is broadcast the local loop is it.
      */
-#ifdef CONFIG_SMP
+#if defined(CONFIG_SMP) && !MI_TB_FLUSH_IS_BROADCAST
     if (NumberOfPtes > 32)
     {
         KeFlushEntireTb(TRUE, TRUE);

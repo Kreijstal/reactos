@@ -105,6 +105,14 @@ C_ASSERT(PXE_SELFMAP == (PXE_BASE + (PXE_SELFMAP_INDEX * 8ULL)));
 C_ASSERT(ARM64_PTE_TABLE_DESCRIPTOR_ATTRS == 0x0060000000000F13ULL);
 
 #define KSEG0_BASE  0xFFFF800000000000ULL
+
+/*
+ * TLBI ...IS (KeInvalidateTlbEntry, KeFlushProcessTb, KeFlushEntireTb) is
+ * broadcast: it invalidates the entry on every processor of the inner
+ * shareable domain and its DSB waits for all of them. A TB shootdown needs no
+ * IPI, as on Windows ARM64.
+ */
+#define MI_TB_FLUSH_IS_BROADCAST 1
 #define MI_ARM64_BOOT_IMAGE_BASE       0xFFFFF80000000000ULL
 #define MI_ARM64_PHYS_MAP_BASE         0xFFFFFC0000000000ULL
 #define MI_ARM64_PHYS_ADDR_MASK        0x0000FFFFFFFFFFFFULL

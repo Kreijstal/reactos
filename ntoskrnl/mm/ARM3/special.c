@@ -72,7 +72,7 @@ typedef struct _MI_FREED_SPECIAL_POOL
 
 VOID NTAPI MiTestSpecialPool(VOID);
 
-#ifdef CONFIG_SMP
+#if defined(CONFIG_SMP) && !MI_TB_FLUSH_IS_BROADCAST
 static
 ULONG_PTR
 NTAPI
@@ -99,7 +99,7 @@ static
 VOID
 MiFlushSpecialPoolTbEntry(IN PVOID Address)
 {
-#ifdef CONFIG_SMP
+#if defined(CONFIG_SMP) && !MI_TB_FLUSH_IS_BROADCAST
     if (KeActiveProcessors & ~KeGetCurrentPrcb()->SetMember)
     {
         KeIpiGenericCall(MiSpecialPoolFlushSingleTbWorker, (ULONG_PTR)Address);

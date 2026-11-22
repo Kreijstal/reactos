@@ -33,7 +33,7 @@ static ULONG MiInPageErrorCount = 0;
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
-#ifdef CONFIG_SMP
+#if defined(CONFIG_SMP) && !MI_TB_FLUSH_IS_BROADCAST
 //
 // Invalidate a single VA in the TLB of every processor.  Runs on each core via
 // KeIpiGenericCall.  Used by the copy-on-write handler: after a private copy
@@ -1487,8 +1487,12 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
          * MiDeletePte above may have sent the old page to the standby list,
          * where it becomes repurposable the instant the lock drops.
          */
+#if MI_TB_FLUSH_IS_BROADCAST
+        KeInvalidateTlbEntry(PAGE_ALIGN(Address));
+#else
         KeIpiGenericCall(MiFlushSingleTbWorker,
                          (ULONG_PTR)PAGE_ALIGN(Address));
+#endif
 #endif
 
         /* The caller expects us to release the PFN lock */
@@ -2717,8 +2721,12 @@ UserFault:
                  * have sent the old page to the standby list, where it becomes
                  * repurposable the instant the lock drops.
                  */
+#if MI_TB_FLUSH_IS_BROADCAST
+                KeInvalidateTlbEntry(PAGE_ALIGN(Address));
+#else
                 KeIpiGenericCall(MiFlushSingleTbWorker,
                                  (ULONG_PTR)PAGE_ALIGN(Address));
+#endif
 #endif
 
                 MiReleasePfnLock(LockIrql);

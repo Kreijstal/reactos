@@ -2,6 +2,11 @@
 
 #include <internal/arch/mm.h>
 
+/* Whether invalidating a TB entry on this processor invalidates it on all */
+#ifndef MI_TB_FLUSH_IS_BROADCAST
+#define MI_TB_FLUSH_IS_BROADCAST 0
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
