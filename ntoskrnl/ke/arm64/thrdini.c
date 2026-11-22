@@ -307,8 +307,25 @@ KiIdleLoop(VOID)
 
         if (Prcb->NextThread)
         {
-            PKTHREAD OldThread = Prcb->CurrentThread;
-            PKTHREAD NewThread = Prcb->NextThread;
+            PKTHREAD OldThread, NewThread;
+            KIRQL OldIrql = KeGetCurrentIrql();
+
+            /* Take the next thread under the PRCB lock: other processors
+             * replace it, or ready it elsewhere, under that lock while it is
+             * on standby (KiUpdateEffectiveAffinityThread,
+             * KiSetPriorityThread, KiDeferredReadyThread), and a thread taken
+             * here without it runs on two processors */
+            if (OldIrql < DISPATCH_LEVEL)
+                KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+            KiAcquirePrcbLock(Prcb);
+            OldThread = Prcb->CurrentThread;
+            NewThread = Prcb->NextThread;
+            if (NewThread == NULL)
+            {
+                KiReleasePrcbLock(Prcb);
+                KeLowerIrql(OldIrql);
+                continue;
+            }
 
             if (KiArm64ShouldTraceIdle())
             {
@@ -335,6 +352,7 @@ KiIdleLoop(VOID)
             Prcb->NextThread = NULL;
             Prcb->CurrentThread = NewThread;
             NewThread->State = Running;
+            KiReleasePrcbLock(Prcb);
 
             ASSERT(OldThread != NULL);
             KiSwapContext(OldThread->WaitIrql, OldThread);
@@ -351,23 +369,33 @@ KiIdleLoop(VOID)
          * dispatched and the box would idle forever with runnable work pending
          * (this is exactly what hangs system shutdown, which waits on a worker
          * APC delivered to the zero-page thread). Select and dispatch it here,
-         * the same way KiSwapThread does. We run with interrupts disabled on
-         * this UP kernel, so the ready queue cannot change underneath us.
+         * the same way KiSwapThread does, under the PRCB lock: other
+         * processors queue threads to this processor's ready lists under it.
          */
         if (Prcb->ReadySummary)
         {
-            PKTHREAD OldThread = Prcb->CurrentThread;
-            PKTHREAD NewThread = KiSelectReadyThread(0, Prcb);
+            PKTHREAD OldThread, NewThread;
+            KIRQL OldIrql = KeGetCurrentIrql();
+
+            if (OldIrql < DISPATCH_LEVEL)
+                KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+            KiAcquirePrcbLock(Prcb);
+            OldThread = Prcb->CurrentThread;
+            NewThread = KiSelectReadyThread(0, Prcb);
 
             if (NewThread != NULL)
             {
                 NewThread->State = Running;
                 Prcb->CurrentThread = NewThread;
+                KiReleasePrcbLock(Prcb);
 
                 ASSERT(OldThread != NULL);
                 KiSwapContext(OldThread->WaitIrql, OldThread);
                 continue;
             }
+
+            KiReleasePrcbLock(Prcb);
+            KeLowerIrql(OldIrql);
         }
 
         /*
