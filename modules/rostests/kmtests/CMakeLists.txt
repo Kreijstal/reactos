@@ -183,6 +183,7 @@ list(APPEND KMTEST_DRV_SOURCE
 
 if(ARCH STREQUAL "arm64")
     list(REMOVE_ITEM KMTEST_DRV_SOURCE ntos_ex/ExSequencedList.c)
+    list(APPEND KMTEST_DRV_SOURCE hal/HalScatterGatherReuse.c)
 endif()
 
 if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")

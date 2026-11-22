@@ -4103,7 +4103,7 @@ static BOOLEAN HalpArm64DmaAdapterInitialized = FALSE;
 typedef struct _HAL_ARM64_SCATTER_GATHER_CONTEXT
 {
     BOOLEAN UsingUserBuffer;
-    NTSTATUS Status;
+    PSCATTER_GATHER_LIST ScatterGatherList;
     PADAPTER_OBJECT AdapterObject;
     PMDL Mdl;
     PVOID CurrentVa;
@@ -4295,6 +4295,16 @@ HalpArm64CalculateScatterGatherListSize(
     return STATUS_SUCCESS;
 }
 
+/*
+ * Fill the list for the map registers granted and hand it to the driver.
+ *
+ * Handing the list over passes the context to the driver as well: the
+ * transfer can complete, and PutScatterGatherList free both (or the caller
+ * reuse its own buffer), on another processor before AdapterListControl
+ * even returns here. Neither this routine nor HalpArm64BuildScatterGatherList
+ * may touch the context once the list was delivered, which is why the list
+ * is allocated up front and nothing can fail after the routine ran.
+ */
 static IO_ALLOCATION_ACTION NTAPI
 HalpArm64ScatterGatherAdapterControl(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -4303,31 +4313,12 @@ HalpArm64ScatterGatherAdapterControl(
     _In_ PVOID Context)
 {
     PHAL_ARM64_SCATTER_GATHER_CONTEXT SgContext = Context;
-    PSCATTER_GATHER_LIST ScatterGatherList;
-    ULONG ScatterGatherListSize;
+    PSCATTER_GATHER_LIST ScatterGatherList = SgContext->ScatterGatherList;
     ULONG ElementCount = 0;
     ULONG RemainingLength;
     PUCHAR CurrentVa;
 
-    if (!SgContext)
-        return DeallocateObject;
-
     SgContext->MapRegisterBase = MapRegisterBase;
-    SgContext->Status = STATUS_SUCCESS;
-
-    ScatterGatherListSize = FIELD_OFFSET(SCATTER_GATHER_LIST, Elements) +
-                            SgContext->MapRegisterCount * sizeof(SCATTER_GATHER_ELEMENT);
-
-    ScatterGatherList = ExAllocatePoolWithTag(NonPagedPool,
-                                              ScatterGatherListSize,
-                                              TAG_DMA_SGL);
-    if (!ScatterGatherList)
-    {
-        SgContext->Status = STATUS_INSUFFICIENT_RESOURCES;
-        return DeallocateObject;
-    }
-
-    RtlZeroMemory(ScatterGatherList, ScatterGatherListSize);
 
     RemainingLength = SgContext->Length;
     CurrentVa = SgContext->CurrentVa;
@@ -4343,12 +4334,9 @@ HalpArm64ScatterGatherAdapterControl(
                                 CurrentVa,
                                 &MappedLength,
                                 SgContext->WriteToDevice);
-        if (MappedLength == 0 || Address.QuadPart == 0)
-        {
-            SgContext->Status = STATUS_INSUFFICIENT_RESOURCES;
-            ExFreePoolWithTag(ScatterGatherList, TAG_DMA_SGL);
-            return DeallocateObject;
-        }
+
+        /* A page of a valid MDL always maps; the caller sized the registers */
+        ASSERT(MappedLength != 0 && Address.QuadPart != 0);
 
         ScatterGatherList->Elements[ElementCount].Address = Address;
         ScatterGatherList->Elements[ElementCount].Length = MappedLength;
@@ -4359,12 +4347,7 @@ HalpArm64ScatterGatherAdapterControl(
         ElementCount++;
     }
 
-    if (RemainingLength != 0)
-    {
-        SgContext->Status = STATUS_INSUFFICIENT_RESOURCES;
-        ExFreePoolWithTag(ScatterGatherList, TAG_DMA_SGL);
-        return DeallocateObject;
-    }
+    ASSERT(RemainingLength == 0);
 
     ScatterGatherList->NumberOfElements = ElementCount;
     ScatterGatherList->Reserved = (ULONG_PTR)SgContext;
@@ -4394,6 +4377,8 @@ HalpArm64BuildScatterGatherList(
     ULONG ContextSize;
     ULONG NumberOfMapRegisters;
     PHAL_ARM64_SCATTER_GATHER_CONTEXT SgContext;
+    PSCATTER_GATHER_LIST ScatterGatherList;
+    ULONG ScatterGatherListSize;
     BOOLEAN UsingUserBuffer;
 
     if (!DmaAdapter || !DeviceObject || !Mdl || !ExecutionRoutine || Length == 0)
@@ -4425,9 +4410,21 @@ HalpArm64BuildScatterGatherList(
         UsingUserBuffer = FALSE;
     }
 
+    /* Allocated before the channel: the adapter control routine cannot fail */
+    ScatterGatherListSize = FIELD_OFFSET(SCATTER_GATHER_LIST, Elements) +
+                            NumberOfMapRegisters * sizeof(SCATTER_GATHER_ELEMENT);
+    ScatterGatherList = ExAllocatePoolWithTag(NonPagedPool, ScatterGatherListSize, TAG_DMA_SGL);
+    if (!ScatterGatherList)
+    {
+        if (!UsingUserBuffer)
+            ExFreePoolWithTag(SgContext, TAG_DMA_SGL);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlZeroMemory(ScatterGatherList, ScatterGatherListSize);
+
     RtlZeroMemory(SgContext, ContextSize);
     SgContext->UsingUserBuffer = UsingUserBuffer;
-    SgContext->Status = STATUS_SUCCESS;
+    SgContext->ScatterGatherList = ScatterGatherList;
     SgContext->AdapterObject = (PADAPTER_OBJECT)DmaAdapter;
     SgContext->Mdl = Mdl;
     SgContext->CurrentVa = CurrentVa;
@@ -4446,16 +4443,14 @@ HalpArm64BuildScatterGatherList(
                                        HalpArm64ScatterGatherAdapterControl);
     if (!NT_SUCCESS(Status))
     {
+        ExFreePoolWithTag(ScatterGatherList, TAG_DMA_SGL);
         if (!UsingUserBuffer)
             ExFreePoolWithTag(SgContext, TAG_DMA_SGL);
         return Status;
     }
 
-    Status = SgContext->Status;
-    if (!NT_SUCCESS(Status) && !UsingUserBuffer)
-        ExFreePoolWithTag(SgContext, TAG_DMA_SGL);
-
-    return Status;
+    /* The list (and with it SgContext) belongs to the driver now, see above */
+    return STATUS_SUCCESS;
 }
 
 static NTSTATUS NTAPI
