@@ -15,9 +15,13 @@
 #ifdef _WIN64
 # define InterlockedOrSetMember(Destination, SetMember) \
     InterlockedOr64((PLONG64)Destination, SetMember);
+# define InterlockedClearSetMember(Destination, SetMember) \
+    InterlockedAnd64((PLONG64)Destination, ~(LONG64)(SetMember));
 #else
 # define InterlockedOrSetMember(Destination, SetMember) \
     InterlockedOr((PLONG)Destination, SetMember);
+# define InterlockedClearSetMember(Destination, SetMember) \
+    InterlockedAnd((PLONG)Destination, ~(LONG)(SetMember));
 #endif
 
 /* GLOBALS *******************************************************************/
@@ -370,6 +374,18 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
         NextThread = Prcb->CurrentThread;
         if (OldPriority > NextThread->Priority)
         {
+#ifdef CONFIG_SMP
+            /*
+             * An idle processor that gets a thread is no longer idle. The
+             * bit was set when it went idle (KiSwapThread, KiSelectNextThread)
+             * and nothing cleared it: every processor soon looked idle to
+             * KiSelectNextProcessor, which then always took the ideal
+             * processor, also when that one was busy and others were idle.
+             */
+            if (NextThread == Prcb->IdleThread)
+                InterlockedClearSetMember(&KiIdleSummary, Prcb->SetMember);
+#endif
+
             /* Preempt it if it's already running */
             if (NextThread->State == Running) NextThread->Preempted = TRUE;
 
