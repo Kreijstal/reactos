@@ -61,6 +61,7 @@ KMT_TESTFUNC Test_IoFilesystemStress;
 KMT_TESTFUNC Test_IoInterrupt;
 KMT_TESTFUNC Test_IoIrp;
 KMT_TESTFUNC Test_IoMdl;
+KMT_TESTFUNC Test_IoUsbDiskStress;
 KMT_TESTFUNC Test_IoVolume;
 KMT_TESTFUNC Test_KdLoadSymbolsFrozen;
 KMT_TESTFUNC Test_KdSystemDebugControl;
@@ -228,6 +229,7 @@ const KMT_TEST TestList[] =
     { "IoInterrupt",                        Test_IoInterrupt },
     { "IoIrp",                              Test_IoIrp },
     { "IoMdl",                              Test_IoMdl },
+    { "IoUsbDiskStress",                    Test_IoUsbDiskStress },
     { "IoVolume",                           Test_IoVolume },
     { "KdLoadSymbolsFrozen",                Test_KdLoadSymbolsFrozen },
     { "KdSystemDebugControl",               Test_KdSystemDebugControl },

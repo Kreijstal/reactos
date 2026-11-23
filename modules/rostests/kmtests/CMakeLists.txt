@@ -94,6 +94,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/IoInterrupt.c
     ntos_io/IoIrp.c
     ntos_io/IoMdl.c
+    ntos_io/IoUsbDiskStress.c
     ntos_io/IoVolume.c
     ntos_io/FatPerf.c
     ntos_io/NtfsAllocation.c
