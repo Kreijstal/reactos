@@ -170,8 +170,9 @@ CountEvents(
 /* Waits until the log holds Count D0Exit events */
 static
 BOOLEAN
-WaitForD0Exits(
+WaitForEvents(
     _In_ HANDLE Handle,
+    _In_ KMDFIDLE_EVENT Event,
     _In_ ULONG Count,
     _Out_ PKMDFIDLE_LOG Log)
 {
@@ -181,11 +182,21 @@ WaitForD0Exits(
     {
         if (!GetLog(Handle, Log))
             return FALSE;
-        if (CountEvents(Log, KmdfIdleEventD0Exit) >= Count)
+        if (CountEvents(Log, Event) >= Count)
             return TRUE;
         Sleep(100);
     }
     return FALSE;
+}
+
+static
+BOOLEAN
+WaitForD0Exits(
+    _In_ HANDLE Handle,
+    _In_ ULONG Count,
+    _Out_ PKMDFIDLE_LOG Log)
+{
+    return WaitForEvents(Handle, KmdfIdleEventD0Exit, Count, Log);
 }
 
 static
@@ -243,6 +254,10 @@ TestIdle(VOID)
     /* A wake-up makes the component active and the device D0 again */
     Ok = DeviceIoControl(Handle, IOCTL_KMDFIDLE_WAKE, NULL, 0, NULL, 0, &Returned, NULL);
     ok(Ok, "WAKE failed with %lu\n", GetLastError());
+    /* The wake-up returns once the device is in D0. The power framework
+     * reports the component active from its worker after the device said it
+     * is powered on, so on MP the callback may still be on its way. */
+    ok(WaitForEvents(Handle, KmdfIdleEventActive, 1, &Log), "No active condition after the wake-up\n");
     if (!GetLog(Handle, &Log))
         goto Close;
     TraceLog("After wake", &Log);
