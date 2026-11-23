@@ -1708,8 +1708,6 @@ NtNotifyChangeMultipleKeys(IN HANDLE MasterKeyHandle,
         InsertTailList(&CmHive->NotifyList, &NotifyBlock->HiveList);
         KeyBody->NotifyBlock = NotifyBlock;
     }
-    if (!KeyBody->KeyControlBlock->NotifyOwner)
-        KeyBody->KeyControlBlock->NotifyOwner = KeyBody;
     InsertTailList(&NotifyBlock->PostList, &PostBlock->PostList);
     CmpUnlockRegistry();
 

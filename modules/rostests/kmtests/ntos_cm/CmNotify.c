@@ -100,7 +100,98 @@ Cleanup:
         ZwClose(ParentEvent);
 }
 
+/*
+ * Two handles to one key, each watching it: a change completes both, and the
+ * watch of the handle that stays open keeps working after the other one is
+ * closed.
+ */
+static
+VOID
+TestSameKeyWatchers(VOID)
+{
+    HANDLE First = NULL, Second = NULL, FirstEvent = NULL, SecondEvent = NULL;
+    IO_STATUS_BLOCK FirstIosb, SecondIosb;
+    UNICODE_STRING ValueName;
+    LARGE_INTEGER Timeout;
+    ULONG Value = 1;
+    NTSTATUS Status;
+
+    Status = CreateVolatileKey(&First, NULL, TEST_KEY);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    Status = CreateVolatileKey(&Second, NULL, TEST_KEY);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    Status = CreateEventHandle(&FirstEvent);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = CreateEventHandle(&SecondEvent);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!FirstEvent || !SecondEvent)
+        goto Cleanup;
+    RtlInitUnicodeString(&ValueName, L"Value");
+    Timeout.QuadPart = -10000LL * 1000;
+
+    /* Both watch the same key */
+    Status = ZwNotifyChangeKey(First, FirstEvent, NULL, NULL, &FirstIosb,
+                               REG_NOTIFY_CHANGE_LAST_SET, FALSE, NULL, 0, TRUE);
+    ok_eq_hex(Status, STATUS_PENDING);
+    Status = ZwNotifyChangeKey(Second, SecondEvent, NULL, NULL, &SecondIosb,
+                               REG_NOTIFY_CHANGE_LAST_SET, FALSE, NULL, 0, TRUE);
+    ok_eq_hex(Status, STATUS_PENDING);
+
+    Status = ZwSetValueKey(First, &ValueName, 0, REG_DWORD, &Value, sizeof(Value));
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = ZwWaitForSingleObject(FirstEvent, FALSE, &Timeout);
+    ok(Status == STATUS_SUCCESS, "First watch not completed (0x%08lx)\n", Status);
+    Status = ZwWaitForSingleObject(SecondEvent, FALSE, &Timeout);
+    ok(Status == STATUS_SUCCESS, "Second watch not completed (0x%08lx)\n", Status);
+
+    /* Both watch again; the first handle goes away, the second one's watch stays */
+    ZwClearEvent(FirstEvent);
+    ZwClearEvent(SecondEvent);
+    Status = ZwNotifyChangeKey(First, FirstEvent, NULL, NULL, &FirstIosb,
+                               REG_NOTIFY_CHANGE_LAST_SET, FALSE, NULL, 0, TRUE);
+    ok_eq_hex(Status, STATUS_PENDING);
+    Status = ZwNotifyChangeKey(Second, SecondEvent, NULL, NULL, &SecondIosb,
+                               REG_NOTIFY_CHANGE_LAST_SET, FALSE, NULL, 0, TRUE);
+    ok_eq_hex(Status, STATUS_PENDING);
+
+    /* Closing the handle completes its own watch, not the other one */
+    ZwClose(First);
+    First = NULL;
+    Status = ZwWaitForSingleObject(FirstEvent, FALSE, &Timeout);
+    ok(Status == STATUS_SUCCESS, "Watch of the closed handle not completed (0x%08lx)\n", Status);
+    ok_eq_hex(FirstIosb.Status, STATUS_NOTIFY_CLEANUP);
+    Timeout.QuadPart = 0;
+    Status = ZwWaitForSingleObject(SecondEvent, FALSE, &Timeout);
+    ok_eq_hex(Status, STATUS_TIMEOUT);
+
+    Value = 2;
+    Status = ZwSetValueKey(Second, &ValueName, 0, REG_DWORD, &Value, sizeof(Value));
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Timeout.QuadPart = -10000LL * 1000;
+    Status = ZwWaitForSingleObject(SecondEvent, FALSE, &Timeout);
+    ok(Status == STATUS_SUCCESS, "Watch not completed after another handle was closed (0x%08lx)\n", Status);
+    ok_eq_hex(SecondIosb.Status, STATUS_SUCCESS);
+
+Cleanup:
+    if (Second)
+    {
+        ZwDeleteKey(Second);
+        ZwClose(Second);
+    }
+    if (First)
+        ZwClose(First);
+    if (SecondEvent)
+        ZwClose(SecondEvent);
+    if (FirstEvent)
+        ZwClose(FirstEvent);
+}
+
 START_TEST(CmNotify)
 {
     TestNestedWatchers();
+    TestSameKeyWatchers();
 }

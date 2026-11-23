@@ -305,7 +305,6 @@ typedef struct _CM_KEY_CONTROL_BLOCK
         LIST_ENTRY FreeListEntry;
     };
     PCM_KEY_BODY KeyBodyArray[4];
-    PCM_KEY_BODY NotifyOwner;
     PVOID DelayCloseEntry;
     LARGE_INTEGER KcbLastWriteTime;
     USHORT KcbMaxNameLen;

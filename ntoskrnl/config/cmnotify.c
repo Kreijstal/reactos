@@ -65,12 +65,6 @@ CmpReportNotify(IN PCM_KEY_CONTROL_BLOCK Kcb,
         NextEntry = ListEntry->Flink;
         NotifyBlock = CONTAINING_RECORD(ListEntry, CM_NOTIFY_BLOCK, HiveList);
 
-        if (NotifyBlock->KeyControlBlock->NotifyOwner != NotifyBlock->KeyBody)
-        {
-            ListEntry = NextEntry;
-            continue;
-        }
-
         CurrentKcb = Kcb;
         if ((Filter & REG_NOTIFY_CHANGE_NAME) && CurrentKcb->ParentKcb)
             CurrentKcb = CurrentKcb->ParentKcb;
@@ -131,8 +125,6 @@ CmpFlushNotify(IN PCM_KEY_BODY KeyBody,
         }
 
         RemoveEntryList(&NotifyBlock->HiveList);
-        if (NotifyBlock->KeyControlBlock->NotifyOwner == KeyBody)
-            NotifyBlock->KeyControlBlock->NotifyOwner = NULL;
         KeyBody->NotifyBlock = NULL;
         ExFreePoolWithTag(NotifyBlock, TAG_CM);
     }
