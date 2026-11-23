@@ -232,6 +232,10 @@ KiExitDispatcher(IN KIRQL OldIrql)
     NextThread = Prcb->NextThread;
     Thread = Prcb->CurrentThread;
 
+    /* Only this processor takes its next thread; others may replace it,
+     * never clear it, so the unlocked check above still holds */
+    ASSERT(NextThread != NULL);
+
     /* Set current thread's swap busy to true */
     KiSetThreadSwapBusy(Thread);
 

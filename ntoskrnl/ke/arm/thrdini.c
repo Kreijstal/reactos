@@ -341,6 +341,10 @@ KiDispatchInterrupt(VOID)
         OldThread = Prcb->CurrentThread;
         NewThread = Prcb->NextThread;
 
+        /* Only this processor takes its next thread; others may replace it,
+         * never clear it, so the unlocked check above still holds */
+        ASSERT(NewThread != NULL);
+
         /* The old thread is queued ready below, and another processor may
          * pick it up before its context is saved here: mark it swap busy */
         KiSetThreadSwapBusy(OldThread);

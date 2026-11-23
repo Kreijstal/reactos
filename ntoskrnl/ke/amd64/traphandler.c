@@ -64,6 +64,10 @@ KiDpcInterruptHandler(VOID)
         OldThread = Prcb->CurrentThread;
         NewThread = Prcb->NextThread;
 
+        /* Only this processor takes its next thread; others may replace it,
+         * never clear it, so the unlocked check above still holds */
+        ASSERT(NewThread != NULL);
+
         /*
          * If a reschedule IPI broke the idle halt (see KiIdleLoop, which now
          * idles at APC_LEVEL so this DISPATCH_VECTOR interrupt can be
