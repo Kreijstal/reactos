@@ -40,6 +40,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(schannel);
 
 #if defined(SONAME_LIBMBEDTLS) && !defined(HAVE_SECURITY_SECURITY_H) && !defined(SONAME_LIBGNUTLS)
 
+#include <assert.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/net_sockets.h>
 
@@ -75,6 +76,8 @@ typedef struct
     mbedtls_entropy_context  entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
     struct schan_transport  *transport;
+    mbedtls_ecp_group_id     ecdh_group; /* curve of the (EC)DH exchange, kept past the handshake */
+    const char             **alpn_list;  /* NULL-terminated ALPN protocol names offered, owned */
 } MBEDTLS_SESSION, *PMBEDTLS_SESSION;
 
 /* custom `net_recv` callback adapter, mbedTLS uses it in mbedtls_ssl_read for
@@ -244,6 +247,7 @@ void schan_imp_dispose_session(schan_imp_session session)
     //ssl_close_notify(&s->ssl);
 
     mbedtls_ssl_free(&s->ssl);
+    HeapFree(GetProcessHeap(), 0, (void *)s->alpn_list);
     mbedtls_ctr_drbg_free(&s->ctr_drbg);
     mbedtls_entropy_free(&s->entropy);
     mbedtls_ssl_config_free(&s->conf);
@@ -280,6 +284,11 @@ SECURITY_STATUS schan_imp_handshake(schan_imp_session session)
     MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
 
     int err = mbedtls_ssl_handshake(&s->ssl);
+
+    /* The handshake parameters are freed once it completes, remember the
+     * negotiated curve for SECPKG_ATTR_CIPHER_INFO while they are around. */
+    if (s->ssl.handshake && s->ssl.handshake->ecdh_ctx.grp.id != MBEDTLS_ECP_DP_NONE)
+        s->ecdh_group = s->ssl.handshake->ecdh_ctx.grp.id;
 
     TRACE("MBEDTLS schan_imp_handshake: %p  err: %#x \n", session, err);
 
@@ -577,6 +586,224 @@ SECURITY_STATUS schan_imp_get_connection_info(schan_imp_session session,
     info->aiExch           = schannel_get_kx_algid(ciphersuite_id);
     info->dwExchStrength   = schannel_get_kx_key_size(&s->ssl, &s->conf, ciphersuite_id);
 
+    return SEC_E_OK;
+}
+
+static void schannel_copy_alg_name(WCHAR *dst, const char *src, size_t len)
+{
+    size_t i;
+
+    for (i = 0; i + 1 < SZ_ALG_MAX_SIZE && i < len && src[i]; i++)
+        dst[i] = (src[i] == '-') ? L'_' : (WCHAR)src[i];
+    dst[i] = 0;
+}
+
+SECURITY_STATUS schan_imp_get_cipher_info(schan_imp_session session,
+                                          SecPkgContext_CipherInfo *info)
+{
+    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
+    const mbedtls_ssl_ciphersuite_t *suite;
+    const mbedtls_cipher_info_t *cipher;
+    const mbedtls_md_info_t *md;
+    const mbedtls_ecp_curve_info *curve;
+    const char *name, *dash;
+    BOOL aead;
+
+    TRACE("MBEDTLS schan_imp_get_cipher_info %p %p.\n", session, info);
+
+    if (s->ssl.state != MBEDTLS_SSL_HANDSHAKE_OVER || !s->ssl.session)
+        return SEC_E_INVALID_HANDLE;
+
+    suite = mbedtls_ssl_ciphersuite_from_id(s->ssl.session->ciphersuite);
+    assert(suite);
+    cipher = mbedtls_cipher_info_from_type(suite->cipher);
+    assert(cipher);
+
+    info->dwVersion = SECPKGCONTEXT_CIPHERINFO_V1;
+    /* The protocol version as it is on the wire (0x0303 for TLS 1.2), not an SP_PROT_* flag */
+    info->dwProtocol = (s->ssl.major_ver << 8) | s->ssl.minor_ver;
+    info->dwCipherSuite = suite->id;
+    info->dwBaseCipherSuite = suite->id;
+
+    /* mbedTLS names the suites like IANA does, with dashes: TLS-ECDHE-RSA-WITH-AES-256-GCM-SHA384 */
+    schannel_copy_alg_name(info->szCipherSuite, suite->name, strlen(suite->name));
+
+    switch (cipher->type)
+    {
+        case MBEDTLS_CIPHER_DES_EDE3_ECB:
+        case MBEDTLS_CIPHER_DES_EDE3_CBC:
+            schannel_copy_alg_name(info->szCipher, "3DES", 4);
+            break;
+        case MBEDTLS_CIPHER_ARC4_128:
+            schannel_copy_alg_name(info->szCipher, "RC4", 3);
+            break;
+        default:
+            /* "AES-256-GCM" -> "AES" */
+            name = cipher->name;
+            dash = strchr(name, '-');
+            schannel_copy_alg_name(info->szCipher, name, dash ? (size_t)(dash - name) : strlen(name));
+            break;
+    }
+    info->dwCipherLen = cipher->key_bitlen;
+    info->dwCipherBlockLen = cipher->block_size;
+
+    /* AEAD suites have no separate MAC: the hash of their name is the PRF hash */
+    aead = (cipher->mode == MBEDTLS_MODE_GCM || cipher->mode == MBEDTLS_MODE_CCM
+#ifdef MBEDTLS_CHACHAPOLY_C
+            || cipher->mode == MBEDTLS_MODE_CHACHAPOLY
+#endif
+           );
+    md = aead ? NULL : mbedtls_md_info_from_type(suite->mac);
+    if (md)
+    {
+        switch (suite->mac)
+        {
+            case MBEDTLS_MD_MD5:    schannel_copy_alg_name(info->szHash, "MD5", 3); break;
+            case MBEDTLS_MD_SHA1:   schannel_copy_alg_name(info->szHash, "SHA1", 4); break;
+            case MBEDTLS_MD_SHA256: schannel_copy_alg_name(info->szHash, "SHA256", 6); break;
+            case MBEDTLS_MD_SHA384: schannel_copy_alg_name(info->szHash, "SHA384", 6); break;
+            default:                schannel_copy_alg_name(info->szHash, md->name, strlen(md->name)); break;
+        }
+        info->dwHashLen = md->size * CHAR_BIT;
+    }
+    else
+    {
+        info->szHash[0] = 0;
+        info->dwHashLen = 0;
+    }
+
+    info->szExchange[0] = 0;
+    info->szCertificate[0] = 0;
+    info->dwKeyType = 0;
+    switch (suite->key_exchange)
+    {
+        case MBEDTLS_KEY_EXCHANGE_RSA:
+        case MBEDTLS_KEY_EXCHANGE_RSA_PSK:
+            schannel_copy_alg_name(info->szExchange, "RSA", 3);
+            schannel_copy_alg_name(info->szCertificate, "RSA", 3);
+            break;
+        case MBEDTLS_KEY_EXCHANGE_DHE_RSA:
+            schannel_copy_alg_name(info->szExchange, "DH", 2);
+            schannel_copy_alg_name(info->szCertificate, "RSA", 3);
+            break;
+        case MBEDTLS_KEY_EXCHANGE_DHE_PSK:
+            schannel_copy_alg_name(info->szExchange, "DH", 2);
+            break;
+        case MBEDTLS_KEY_EXCHANGE_ECDHE_RSA:
+        case MBEDTLS_KEY_EXCHANGE_ECDH_RSA:
+            schannel_copy_alg_name(info->szExchange, "ECDH", 4);
+            schannel_copy_alg_name(info->szCertificate, "RSA", 3);
+            break;
+        case MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA:
+        case MBEDTLS_KEY_EXCHANGE_ECDH_ECDSA:
+            schannel_copy_alg_name(info->szExchange, "ECDH", 4);
+            schannel_copy_alg_name(info->szCertificate, "ECDSA", 5);
+            break;
+        case MBEDTLS_KEY_EXCHANGE_ECDHE_PSK:
+            schannel_copy_alg_name(info->szExchange, "ECDH", 4);
+            break;
+        default:
+            break;
+    }
+    /* For an elliptic curve exchange, the TLS NamedGroup of the curve (0x17 secp256r1, 0x1d x25519, ...) */
+    if (s->ecdh_group != MBEDTLS_ECP_DP_NONE && (curve = mbedtls_ecp_curve_info_from_grp_id(s->ecdh_group)))
+        info->dwKeyType = curve->tls_id;
+
+    info->dwMinExchangeLen = 0;
+    info->dwMaxExchangeLen = 65536;
+
+    TRACE("suite %#lx %s, key type %#lx\n", info->dwCipherSuite, suite->name, info->dwKeyType);
+    return SEC_E_OK;
+}
+
+/* Takes the contents of a SECBUFFER_APPLICATION_PROTOCOLS buffer (SEC_APPLICATION_PROTOCOLS)
+ * and offers its ALPN protocol list in the ClientHello. */
+SECURITY_STATUS schan_imp_set_application_protocols(schan_imp_session session, const BYTE *buffer, ULONG size)
+{
+    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
+    const SEC_APPLICATION_PROTOCOLS *protocols = (const SEC_APPLICATION_PROTOCOLS *)buffer;
+    const SEC_APPLICATION_PROTOCOL_LIST *list;
+    const BYTE *p, *end, *ids = NULL;
+    ULONG ids_size = 0, count = 0, i;
+    const char **names;
+    char *strings;
+
+    if (size < FIELD_OFFSET(SEC_APPLICATION_PROTOCOLS, ProtocolLists) ||
+        protocols->ProtocolListsSize > size - FIELD_OFFSET(SEC_APPLICATION_PROTOCOLS, ProtocolLists))
+        return SEC_E_INVALID_TOKEN;
+
+    /* Find the ALPN list; an NPN one is not supported and ignored */
+    p = (const BYTE *)protocols->ProtocolLists;
+    end = p + protocols->ProtocolListsSize;
+    while (p + FIELD_OFFSET(SEC_APPLICATION_PROTOCOL_LIST, ProtocolList) <= end)
+    {
+        list = (const SEC_APPLICATION_PROTOCOL_LIST *)p;
+        if (list->ProtocolListSize > end - list->ProtocolList)
+            return SEC_E_INVALID_TOKEN;
+        if (list->ProtoNegoExt == SecApplicationProtocolNegotiationExt_ALPN)
+        {
+            ids = list->ProtocolList;
+            ids_size = list->ProtocolListSize;
+        }
+        else
+        {
+            FIXME("protocol negotiation extension %u not supported\n", list->ProtoNegoExt);
+        }
+        p = list->ProtocolList + list->ProtocolListSize;
+    }
+    if (!ids_size)
+        return SEC_E_OK;
+
+    /* The list is in wire format: a length byte before each protocol id */
+    for (i = 0; i < ids_size; i += 1 + ids[i])
+    {
+        if (!ids[i] || i + 1 + ids[i] > ids_size)
+            return SEC_E_INVALID_TOKEN;
+        count++;
+    }
+
+    /* One block: the pointer array, then the NUL-terminated names */
+    names = HeapAlloc(GetProcessHeap(), 0, (count + 1) * sizeof(*names) + ids_size + 1);
+    if (!names)
+        return SEC_E_INSUFFICIENT_MEMORY;
+    strings = (char *)(names + count + 1);
+    for (i = 0, count = 0; i < ids_size; i += 1 + ids[i])
+    {
+        names[count++] = strings;
+        memcpy(strings, ids + i + 1, ids[i]);
+        strings += ids[i];
+        *strings++ = 0;
+    }
+    names[count] = NULL;
+
+    if (mbedtls_ssl_conf_alpn_protocols(&s->conf, names))
+    {
+        HeapFree(GetProcessHeap(), 0, (void *)names);
+        return SEC_E_INVALID_TOKEN;
+    }
+    HeapFree(GetProcessHeap(), 0, (void *)s->alpn_list);
+    s->alpn_list = names;
+    return SEC_E_OK;
+}
+
+SECURITY_STATUS schan_imp_get_application_protocol(schan_imp_session session,
+                                                   SecPkgContext_ApplicationProtocol *protocol)
+{
+    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
+    const char *selected = mbedtls_ssl_get_alpn_protocol(&s->ssl);
+    size_t len;
+
+    memset(protocol, 0, sizeof(*protocol));
+    if (!selected)
+        return SEC_E_OK;
+
+    len = strlen(selected);
+    assert(len <= sizeof(protocol->ProtocolId));
+    protocol->ProtoNegoStatus = SecApplicationProtocolNegotiationStatus_Success;
+    protocol->ProtoNegoExt = SecApplicationProtocolNegotiationExt_ALPN;
+    protocol->ProtocolIdSize = (unsigned char)len;
+    memcpy(protocol->ProtocolId, selected, len);
+    TRACE("negotiated %s\n", debugstr_a(selected));
     return SEC_E_OK;
 }
 

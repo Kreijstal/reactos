@@ -832,6 +832,23 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
                 HeapFree( GetProcessHeap(), 0, target );
             }
         }
+
+        if (pInput)
+        {
+            int idx = schan_find_sec_buffer_idx(pInput, 0, SECBUFFER_APPLICATION_PROTOCOLS);
+            if (idx != -1)
+            {
+                SECURITY_STATUS status = schan_imp_set_application_protocols(ctx->session,
+                        pInput->pBuffers[idx].pvBuffer, pInput->pBuffers[idx].cbBuffer);
+                if (status != SEC_E_OK)
+                {
+                    schan_imp_dispose_session(ctx->session);
+                    schan_free_handle(handle, SCHAN_HANDLE_CTX);
+                    HeapFree(GetProcessHeap(), 0, ctx);
+                    return status;
+                }
+            }
+        }
         phNewContext->dwLower = handle;
         phNewContext->dwUpper = 0;
     }
@@ -1008,6 +1025,16 @@ SECURITY_STATUS SEC_ENTRY schan_QueryContextAttributesW(
             SecPkgContext_ConnectionInfo *info = buffer;
             return schan_imp_get_connection_info(ctx->session, info);
         }
+        case SECPKG_ATTR_APPLICATION_PROTOCOL:
+        {
+            SecPkgContext_ApplicationProtocol *protocol = buffer;
+            return schan_imp_get_application_protocol(ctx->session, protocol);
+        }
+        case SECPKG_ATTR_CIPHER_INFO:
+        {
+            SecPkgContext_CipherInfo *info = buffer;
+            return schan_imp_get_cipher_info(ctx->session, info);
+        }
 
         default:
             FIXME("Unhandled attribute %#x\n", attribute);
@@ -1029,6 +1056,9 @@ SECURITY_STATUS SEC_ENTRY schan_QueryContextAttributesA(
         case SECPKG_ATTR_REMOTE_CERT_CONTEXT:
             return schan_QueryContextAttributesW(context_handle, attribute, buffer);
         case SECPKG_ATTR_CONNECTION_INFO:
+            return schan_QueryContextAttributesW(context_handle, attribute, buffer);
+        case SECPKG_ATTR_APPLICATION_PROTOCOL:
+        case SECPKG_ATTR_CIPHER_INFO:
             return schan_QueryContextAttributesW(context_handle, attribute, buffer);
 
         default:

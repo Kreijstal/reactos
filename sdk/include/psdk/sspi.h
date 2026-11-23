@@ -171,6 +171,7 @@ typedef struct _SecBuffer {
 #define SECBUFFER_MECHLIST_SIGNATURE 12
 #define SECBUFFER_TARGET             13
 #define SECBUFFER_CHANNEL_BINDINGS   14
+#define SECBUFFER_APPLICATION_PROTOCOLS 18
 
 #define SECBUFFER_ATTRMASK               0xf0000000
 #define SECBUFFER_READONLY               0x80000000
@@ -549,6 +550,7 @@ typedef SECURITY_STATUS (SEC_ENTRY *QUERY_CONTEXT_ATTRIBUTES_FN_W)(PCtxtHandle,
 #define SECPKG_ATTR_NEGO_PKG_INFO      31
 #define SECPKG_ATTR_NEGO_STATUS        32
 #define SECPKG_ATTR_CONTEXT_DELETED    33
+#define SECPKG_ATTR_APPLICATION_PROTOCOL 35
 
 #define SECPKG_ATTR_SUBJECT_SECURITY_ATTRIBUTES 128
 #define SECPKG_ATTR_NEGO_INFO_FLAG_NO_KERBEROS 0x1
@@ -762,6 +764,44 @@ typedef struct _SecPkgContext_Bindings
     ULONG BindingsLength;
     SEC_CHANNEL_BINDINGS *Bindings;
 } SecPkgContext_Bindings, *PSecPkgContext_Bindings;
+
+typedef enum _SEC_APPLICATION_PROTOCOL_NEGOTIATION_STATUS
+{
+    SecApplicationProtocolNegotiationStatus_None,
+    SecApplicationProtocolNegotiationStatus_Success,
+    SecApplicationProtocolNegotiationStatus_SelectedClientOnly
+} SEC_APPLICATION_PROTOCOL_NEGOTIATION_STATUS, *PSEC_APPLICATION_PROTOCOL_NEGOTIATION_STATUS;
+
+typedef enum _SEC_APPLICATION_PROTOCOL_NEGOTIATION_EXT
+{
+    SecApplicationProtocolNegotiationExt_None,
+    SecApplicationProtocolNegotiationExt_NPN,
+    SecApplicationProtocolNegotiationExt_ALPN
+} SEC_APPLICATION_PROTOCOL_NEGOTIATION_EXT, *PSEC_APPLICATION_PROTOCOL_NEGOTIATION_EXT;
+
+/* Contents of a SECBUFFER_APPLICATION_PROTOCOLS buffer */
+typedef struct _SEC_APPLICATION_PROTOCOL_LIST
+{
+    SEC_APPLICATION_PROTOCOL_NEGOTIATION_EXT ProtoNegoExt;
+    unsigned short ProtocolListSize;
+    unsigned char ProtocolList[ANYSIZE_ARRAY];
+} SEC_APPLICATION_PROTOCOL_LIST, *PSEC_APPLICATION_PROTOCOL_LIST;
+
+typedef struct _SEC_APPLICATION_PROTOCOLS
+{
+    ULONG ProtocolListsSize;
+    SEC_APPLICATION_PROTOCOL_LIST ProtocolLists[ANYSIZE_ARRAY];
+} SEC_APPLICATION_PROTOCOLS, *PSEC_APPLICATION_PROTOCOLS;
+
+#define MAX_PROTOCOL_ID_SIZE 0xff
+
+typedef struct _SecPkgContext_ApplicationProtocol
+{
+    SEC_APPLICATION_PROTOCOL_NEGOTIATION_STATUS ProtoNegoStatus;
+    SEC_APPLICATION_PROTOCOL_NEGOTIATION_EXT ProtoNegoExt;
+    unsigned char ProtocolIdSize;
+    unsigned char ProtocolId[MAX_PROTOCOL_ID_SIZE];
+} SecPkgContext_ApplicationProtocol, *PSecPkgContext_ApplicationProtocol;
 
 _Check_return_
 SECURITY_STATUS
