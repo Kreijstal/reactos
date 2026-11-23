@@ -239,6 +239,7 @@ typedef struct
     KEVENT WaitEvent;
     ULONG Counter;
     KPRIORITY PriorityIncrement;
+    KAFFINITY Affinity;
     ULONG CounterValues[NUM_SCHED_TESTS];
 } COUNT_THREAD_DATA, *PCOUNT_THREAD_DATA;
 
@@ -257,12 +258,17 @@ CountThread(
     Priority = KeQueryPriorityThread(KeGetCurrentThread());
     ok_eq_long(Priority, 8L);
 
+    /* On the setter's processor, so that waking it means preempting the setter */
+    KeSetSystemAffinityThread(ThreadData->Affinity);
+
     while (CounterValue < &ThreadData->CounterValues[NUM_SCHED_TESTS])
     {
         KeSetEvent(&ThreadData->WaitEvent, IO_NO_INCREMENT, TRUE);
         KeWaitForSingleObject(Event, Executive, KernelMode, FALSE, NULL);
         *CounterValue++ = *Counter;
     }
+
+    KeRevertToUserAffinityThread();
 
     Priority = KeQueryPriorityThread(KeGetCurrentThread());
     ok_eq_long(Priority, 8L + min(ThreadData->PriorityIncrement, 7));
@@ -293,6 +299,15 @@ TestEventScheduling(
     KeInitializeEvent(&ThreadData->Event, SynchronizationEvent, FALSE);
     KeInitializeEvent(&ThreadData->WaitEvent, SynchronizationEvent, FALSE);
     Counter = &ThreadData->Counter;
+
+    /*
+     * The order of the counter values is that of one processor: the woken
+     * thread preempts the setter only if it has to share its processor. On
+     * MP it would otherwise be readied on an idle processor and run in
+     * parallel. Keep both threads on the same one.
+     */
+    ThreadData->Affinity = AFFINITY_MASK(0);
+    KeSetSystemAffinityThread(ThreadData->Affinity);
 
     for (PriorityIncrement = 0; PriorityIncrement <= 8; PriorityIncrement++)
     {
@@ -350,6 +365,7 @@ TestEventScheduling(
         }
     }
 
+    KeRevertToUserAffinityThread();
     ExFreePoolWithTag(ThreadData, 'CEmK');
 }
 
