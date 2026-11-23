@@ -15,6 +15,8 @@ START_TEST(IoIrp)
 {
     USHORT size;
     IRP *iorp;
+    KIRQL Irql;
+    LONG Float;
 
     // 1st test
     size = sizeof(IRP) + 5 * sizeof(IO_STACK_LOCATION);
@@ -66,8 +68,15 @@ START_TEST(IoIrp)
     }
 
     // 3rd test
+    /* A quota-charged IRP comes from the lookaside lists only while this
+     * processor has IRP credit left. The credit is per processor: an IRP
+     * allocated on one and freed on another moves it there, so once IRPs run
+     * on every processor, this one can have none. Stay on it to look. */
     size = sizeof(IRP) + 2 * sizeof(IO_STACK_LOCATION);
+    KeRaiseIrql(DISPATCH_LEVEL, &Irql);
+    Float = KeGetCurrentPrcb()->LookasideIrpFloat;
     iorp = IoAllocateIrp(2, TRUE);
+    KeLowerIrql(Irql);
 
     if (NULL != iorp)
     {
@@ -83,10 +92,20 @@ START_TEST(IoIrp)
         ok ((PIO_STACK_LOCATION)(iorp + 1) + 2 ==
             iorp->Tail.Overlay.CurrentStackLocation,
             "CurrentStackLocation mismatch\n");
-        ok((IRP_ALLOCATED_FIXED_SIZE & iorp->AllocationFlags),
-            "IRP Allocation flags lack fixed size attribute\n");
-        ok((IRP_LOOKASIDE_ALLOCATION & iorp->AllocationFlags),
-            "IRP Allocation flags lack lookaside allocation\n");
+        if (Float > 0)
+        {
+            ok((IRP_ALLOCATED_FIXED_SIZE & iorp->AllocationFlags),
+                "IRP Allocation flags lack fixed size attribute\n");
+            ok((IRP_LOOKASIDE_ALLOCATION & iorp->AllocationFlags),
+                "IRP Allocation flags lack lookaside allocation\n");
+        }
+        else
+        {
+            ok(!(IRP_ALLOCATED_FIXED_SIZE & iorp->AllocationFlags),
+                "IRP with no credit left has the fixed size attribute\n");
+            ok(!(IRP_LOOKASIDE_ALLOCATION & iorp->AllocationFlags),
+                "IRP with no credit left has lookaside allocation\n");
+        }
 
         IoFreeIrp(iorp);
     }
