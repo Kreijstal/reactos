@@ -71,11 +71,15 @@ RtlConsumePendingInterrupts (
     return TRUE;
 }
 
-static VOID
+/* Returns TRUE when it freed a descriptor after MiniportSend had refused a
+ * packet with NDIS_STATUS_RESOURCES */
+static BOOLEAN
 RtlServiceTx (
     IN PRTL_ADAPTER Adapter
     )
 {
+    BOOLEAN resourcesFreed = FALSE;
+
     while (Adapter->TxFull || Adapter->TxConsumer != Adapter->TxProducer)
     {
         PRTL_DESC d = &Adapter->TxRing[Adapter->TxConsumer];
@@ -98,7 +102,11 @@ RtlServiceTx (
         d->opts2 = 0;
 
         Adapter->TxConsumer = (Adapter->TxConsumer + 1) % TX_DESC_COUNT;
-        Adapter->TxFull = FALSE;
+        if (Adapter->TxFull)
+        {
+            resourcesFreed = TRUE;
+            Adapter->TxFull = FALSE;
+        }
     }
 
     /* 8168 erratum (Linux rtl_tx): "TxPoll requests are lost when the Tx
@@ -107,6 +115,8 @@ RtlServiceTx (
      * cannot strand the queue. */
     if (Adapter->TxFull || Adapter->TxConsumer != Adapter->TxProducer)
         RtlWriteReg8(Adapter, R_TXPOLL, B_TXP_NPQ);
+
+    return resourcesFreed;
 }
 
 static VOID
@@ -197,6 +207,7 @@ MiniportHandleInterrupt (
 {
     PRTL_ADAPTER adapter = (PRTL_ADAPTER)MiniportAdapterContext;
     RTL_ISR_SYNC_CONTEXT sync;
+    BOOLEAN sendResourcesFreed = FALSE;
 
     NdisDprAcquireSpinLock(&adapter->Lock);
 
@@ -223,7 +234,7 @@ MiniportHandleInterrupt (
     }
 
     if (sync.Pending & (R_I_TXOK | R_I_TXERR | R_I_TXDESCUNAVAIL))
-        RtlServiceTx(adapter);
+        sendResourcesFreed = RtlServiceTx(adapter);
 
     if (sync.Pending & (R_I_RXOK | R_I_RXERR | R_I_RXOVRFLW | R_I_RXFIFOOVR))
         RtlServiceRx(adapter);
@@ -247,6 +258,11 @@ MiniportHandleInterrupt (
     }
 
     NdisDprReleaseSpinLock(&adapter->Lock);
+
+    /* NDIS holds back the send we refused, and every send after it, until
+     * we say a descriptor is free again: we never call NdisMSendComplete */
+    if (sendResourcesFreed)
+        NdisMSendResourcesAvailable(adapter->MiniportAdapterHandle);
 }
 
 /*

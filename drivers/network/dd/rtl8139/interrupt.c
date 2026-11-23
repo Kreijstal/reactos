@@ -82,6 +82,7 @@ MiniportHandleInterrupt (
     UCHAR command;
     PPACKET_HEADER nicHeader;
     PETH_HEADER ethHeader;
+    BOOLEAN sendResourcesFreed = FALSE;
 
     NdisDprAcquireSpinLock(&adapter->Lock);
 
@@ -136,7 +137,12 @@ MiniportHandleInterrupt (
             adapter->DirtyTxDesc++;
             adapter->DirtyTxDesc %= TX_DESC_COUNT;
             adapter->InterruptPending &= ~(R_I_TXOK | R_I_TXERR);
-            adapter->TxFull = FALSE;
+            if (adapter->TxFull)
+            {
+                /* MiniportSend refused a packet with NDIS_STATUS_RESOURCES */
+                sendResourcesFreed = TRUE;
+                adapter->TxFull = FALSE;
+            }
         }
     }
 
@@ -214,4 +220,9 @@ MiniportHandleInterrupt (
     }
 
     NdisDprReleaseSpinLock(&adapter->Lock);
+
+    /* NDIS holds back the send we refused, and every send after it, until
+     * we say a descriptor is free again: we never call NdisMSendComplete */
+    if (sendResourcesFreed)
+        NdisMSendResourcesAvailable(adapter->MiniportAdapterHandle);
 }
