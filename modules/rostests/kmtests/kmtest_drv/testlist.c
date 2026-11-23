@@ -49,6 +49,7 @@ KMT_TESTFUNC Test_HalPortIo;
 KMT_TESTFUNC Test_HalRealTimeClock;
 KMT_TESTFUNC Test_HalAdapterChannel;
 KMT_TESTFUNC Test_HalScatterGather;
+KMT_TESTFUNC Test_HalScatterGatherLong;
 #endif
 KMT_TESTFUNC Test_HalSystemInfo;
 KMT_TESTFUNC Test_IoCreateFile;
@@ -215,6 +216,7 @@ const KMT_TEST TestList[] =
     { "HalRealTimeClock",                   Test_HalRealTimeClock },
     { "HalAdapterChannel",                  Test_HalAdapterChannel },
     { "HalScatterGather",                   Test_HalScatterGather },
+    { "HalScatterGatherLong",               Test_HalScatterGatherLong },
 #endif
     { "HalSystemInfo",                      Test_HalSystemInfo },
     { "IoCreateFile",                       Test_IoCreateFile },

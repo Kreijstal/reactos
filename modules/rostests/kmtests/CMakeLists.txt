@@ -198,7 +198,8 @@ if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
         hal/HalPortIo.c
         hal/HalRealTimeClock.c
         hal/HalAdapterChannel.c
-        hal/HalScatterGather.c)
+        hal/HalScatterGather.c
+        hal/HalScatterGatherLong.c)
 endif()
 
 if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64" OR ARCH STREQUAL "arm64")
