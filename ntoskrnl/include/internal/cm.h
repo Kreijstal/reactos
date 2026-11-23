@@ -894,6 +894,18 @@ CmpUnlockHiveFlusher(
     IN PCMHIVE Hive
 );
 
+VOID
+NTAPI
+CmpLockHive(
+    IN PCMHIVE Hive
+);
+
+VOID
+NTAPI
+CmpUnlockHive(
+    IN PCMHIVE Hive
+);
+
 //
 // Delay Functions
 //
@@ -1467,6 +1479,7 @@ extern ERESOURCE CmpRegistryLock;
 extern PCM_KEY_HASH_TABLE_ENTRY CmpCacheTable;
 extern PCM_NAME_HASH_TABLE_ENTRY CmpNameCacheTable;
 extern KGUARDED_MUTEX CmpDelayedCloseTableLock;
+extern KGUARDED_MUTEX CmpPostLock;
 extern CMHIVE CmControlHive;
 extern WCHAR CmDefaultLanguageId[];
 extern ULONG CmDefaultLanguageIdLength;

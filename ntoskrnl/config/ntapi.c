@@ -1699,6 +1699,7 @@ NtNotifyChangeMultipleKeys(IN HANDLE MasterKeyHandle,
     KeClearEvent(EventObject);
 
     CmpLockRegistryExclusive();
+    KeAcquireGuardedMutex(&CmpPostLock);
     NotifyBlock = KeyBody->NotifyBlock;
     if (!NotifyBlock)
     {
@@ -1709,6 +1710,7 @@ NtNotifyChangeMultipleKeys(IN HANDLE MasterKeyHandle,
         KeyBody->NotifyBlock = NotifyBlock;
     }
     InsertTailList(&NotifyBlock->PostList, &PostBlock->PostList);
+    KeReleaseGuardedMutex(&CmpPostLock);
     CmpUnlockRegistry();
 
     if (NewNotifyBlock)

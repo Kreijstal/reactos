@@ -1908,6 +1908,9 @@ CmInitSystem1(VOID)
     /* Initialize callbacks */
     CmpInitCallback();
 
+    /* Initialize the lock of the notify and post lists */
+    KeInitializeGuardedMutex(&CmpPostLock);
+
     /* Initialize self healing */
     KeInitializeGuardedMutex(&CmpSelfHealQueueLock);
     InitializeListHead(&CmpSelfHealQueueListHead);
@@ -2285,6 +2288,35 @@ CmpLockHiveFlusherShared(IN PCMHIVE Hive)
     ASSERT((ExIsResourceAcquiredShared(Hive->FlusherLock) == 0) &&
            (ExIsResourceAcquiredExclusiveLite(Hive->FlusherLock) == 0));
     ExAcquireResourceSharedLite(Hive->FlusherLock, TRUE);
+}
+
+/*
+ * The hive lock serializes changes to the hive's cells (allocation, the
+ * subkey lists, security cell reference counts) made with the registry lock
+ * held shared: key creation runs so, under the lock of its parent key only,
+ * and two keys created in one hive at the same time on two processors raced
+ * on the hive's free cell lists and security cells.
+ */
+VOID
+NTAPI
+CmpLockHive(IN PCMHIVE Hive)
+{
+    CMP_ASSERT_REGISTRY_LOCK_OR_LOADING(Hive);
+    ASSERT(Hive->HiveLockOwner != KeGetCurrentThread());
+    KeEnterCriticalRegion();
+    ExAcquirePushLockExclusive(&Hive->HiveLock);
+    ASSERT(Hive->HiveLockOwner == NULL);
+    Hive->HiveLockOwner = KeGetCurrentThread();
+}
+
+VOID
+NTAPI
+CmpUnlockHive(IN PCMHIVE Hive)
+{
+    ASSERT(Hive->HiveLockOwner == KeGetCurrentThread());
+    Hive->HiveLockOwner = NULL;
+    ExReleasePushLockExclusive(&Hive->HiveLock);
+    KeLeaveCriticalRegion();
 }
 
 VOID

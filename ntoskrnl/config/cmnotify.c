@@ -12,6 +12,17 @@
 #define NDEBUG
 #include "debug.h"
 
+/* GLOBALS *******************************************************************/
+
+/*
+ * Protects the hives' notify lists and every notify block's post list. Key
+ * creation reports its change with the registry lock held shared, so several
+ * processors can walk a notify list and complete posts at once; as in NT
+ * (CmpPostLock) they are serialized here. Taken after the registry lock and
+ * the KCB locks.
+ */
+KGUARDED_MUTEX CmpPostLock;
+
 /* FUNCTIONS *****************************************************************/
 
 static
@@ -19,6 +30,7 @@ VOID
 CmpCompletePost(IN PCM_POST_BLOCK PostBlock,
                 IN NTSTATUS Status)
 {
+    ASSERT(KeAreAllApcsDisabled());
     RemoveEntryList(&PostBlock->PostList);
 
     if (PostBlock->IoStatusBlock)
@@ -59,6 +71,7 @@ CmpReportNotify(IN PCM_KEY_CONTROL_BLOCK Kcb,
     UNREFERENCED_PARAMETER(Cell);
 
     CmHive = CONTAINING_RECORD(Hive, CMHIVE, Hive);
+    KeAcquireGuardedMutex(&CmpPostLock);
     ListEntry = CmHive->NotifyList.Flink;
     while (ListEntry != &CmHive->NotifyList)
     {
@@ -101,6 +114,7 @@ CmpReportNotify(IN PCM_KEY_CONTROL_BLOCK Kcb,
 
         ListEntry = NextEntry;
     }
+    KeReleaseGuardedMutex(&CmpPostLock);
 }
 
 VOID
@@ -113,6 +127,7 @@ CmpFlushNotify(IN PCM_KEY_BODY KeyBody,
     if (!LockHeld)
         CmpLockRegistryExclusive();
 
+    KeAcquireGuardedMutex(&CmpPostLock);
     if (KeyBody->NotifyBlock)
     {
         NotifyBlock = KeyBody->NotifyBlock;
@@ -128,6 +143,7 @@ CmpFlushNotify(IN PCM_KEY_BODY KeyBody,
         KeyBody->NotifyBlock = NULL;
         ExFreePoolWithTag(NotifyBlock, TAG_CM);
     }
+    KeReleaseGuardedMutex(&CmpPostLock);
 
     if (!LockHeld)
         CmpUnlockRegistry();

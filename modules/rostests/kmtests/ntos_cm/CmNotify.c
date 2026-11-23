@@ -190,8 +190,145 @@ Cleanup:
         ZwClose(FirstEvent);
 }
 
+/*
+ * Key creations below a watched tree, made in parallel: creating a key reports
+ * the change with the registry lock held shared, so several processors walk
+ * the notify list at once, and the watch's post must be completed once, not
+ * once per creator.
+ */
+#define CREATOR_THREADS 4
+
+typedef struct _CREATOR
+{
+    HANDLE Root;
+    ULONG Index;
+    volatile LONG *Stop;
+    ULONG Created;
+} CREATOR, *PCREATOR;
+
+static
+VOID
+NTAPI
+CreatorThread(
+    _In_ PVOID Context)
+{
+    PCREATOR Creator = Context;
+    HANDLE Parent = NULL, Child;
+    WCHAR Name[16];
+    NTSTATUS Status;
+    ULONG i;
+
+    /* One parent each, so the creators take different key locks */
+    RtlStringCbPrintfW(Name, sizeof(Name), L"P%lu", Creator->Index);
+    Status = CreateVolatileKey(&Parent, Creator->Root, Name);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    for (i = 0; !*Creator->Stop; i++)
+    {
+        RtlStringCbPrintfW(Name, sizeof(Name), L"C%lu", i % 8);
+        Status = CreateVolatileKey(&Child, Parent, Name);
+        if (!NT_SUCCESS(Status))
+        {
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            break;
+        }
+        ZwDeleteKey(Child);
+        ZwClose(Child);
+        Creator->Created++;
+    }
+
+    ZwDeleteKey(Parent);
+    ZwClose(Parent);
+}
+
+static
+VOID
+TestConcurrentReports(VOID)
+{
+    HANDLE Root = NULL, Event = NULL;
+    IO_STATUS_BLOCK Iosb;
+    CREATOR Creators[CREATOR_THREADS];
+    PKTHREAD Threads[CREATOR_THREADS];
+    volatile LONG Stop = 0;
+    LARGE_INTEGER Timeout, Start, Now;
+    ULONG i, Started = 0, Completions = 0, Created = 0;
+    NTSTATUS Status;
+
+    if (KeNumberProcessors < 2)
+    {
+        skip(FALSE, "Needs two processors\n");
+        return;
+    }
+
+    Status = CreateVolatileKey(&Root, NULL, TEST_KEY);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    Status = CreateEventHandle(&Event);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!Event)
+        goto Cleanup;
+
+    for (i = 0; i < CREATOR_THREADS; i++)
+    {
+        Creators[i].Root = Root;
+        Creators[i].Index = i;
+        Creators[i].Stop = &Stop;
+        Creators[i].Created = 0;
+        Threads[i] = KmtStartThread(CreatorThread, &Creators[i]);
+        if (Threads[i])
+            Started++;
+    }
+
+    /* Keep a watch armed over the tree for five seconds */
+    KeQuerySystemTime(&Start);
+    do
+    {
+        ZwClearEvent(Event);
+        Status = ZwNotifyChangeKey(Root, Event, NULL, NULL, &Iosb,
+                                   REG_NOTIFY_CHANGE_NAME, TRUE, NULL, 0, TRUE);
+        if (Status != STATUS_PENDING)
+        {
+            ok_eq_hex(Status, STATUS_PENDING);
+            break;
+        }
+        Timeout.QuadPart = -10000LL * 1000;
+        Status = ZwWaitForSingleObject(Event, FALSE, &Timeout);
+        if (Status != STATUS_SUCCESS)
+        {
+            ok(Status == STATUS_SUCCESS, "Watch not completed (0x%08lx)\n", Status);
+            break;
+        }
+        Completions++;
+        KeQuerySystemTime(&Now);
+    } while (Now.QuadPart - Start.QuadPart < 5 * 10000000LL);
+
+    InterlockedExchange(&Stop, 1);
+    for (i = 0; i < CREATOR_THREADS; i++)
+    {
+        if (Threads[i])
+            KmtFinishThread(Threads[i], NULL);
+        Created += Creators[i].Created;
+    }
+    trace("%lu creators, %lu keys created, %lu watch completions\n", Started, Created, Completions);
+    ok(Completions > 0, "No watch completed\n");
+
+Cleanup:
+    if (Root)
+    {
+        /* Closing the key cancels the last watch */
+        ZwDeleteKey(Root);
+        ZwClose(Root);
+    }
+    if (Event)
+        ZwClose(Event);
+}
+
 START_TEST(CmNotify)
 {
     TestNestedWatchers();
     TestSameKeyWatchers();
+    TestConcurrentReports();
 }

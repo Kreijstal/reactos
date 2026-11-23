@@ -419,9 +419,10 @@ CmpDoCreate(IN PHHIVE Hive,
     LARGE_INTEGER TimeStamp;
     PCM_KEY_NODE KeyNode;
 
-    /* Make sure the KCB is locked and lock the flusher */
+    /* Make sure the KCB is locked and lock the flusher, then the hive */
     CMP_ASSERT_KCB_LOCK(ParentKcb);
     CmpLockHiveFlusherShared((PCMHIVE)Hive);
+    CmpLockHive((PCMHIVE)Hive);
 
     /* Bail out on read-only KCBs */
     if (ParentKcb->ExtFlags & CM_KCB_READ_ONLY_KEY)
@@ -627,7 +628,8 @@ CmpDoCreate(IN PHHIVE Hive,
     }
 
 Exit:
-    /* Release the flusher lock and return status */
+    /* Release the hive and flusher locks and return status */
+    CmpUnlockHive((PCMHIVE)Hive);
     CmpUnlockHiveFlusher((PCMHIVE)Hive);
     return Status;
 }
@@ -908,6 +910,11 @@ CmpCreateLinkNode(IN PHHIVE Hive,
     CmpLockHiveFlusherShared((PCMHIVE)Hive);
     CmpLockHiveFlusherShared((PCMHIVE)Context->ChildHive.KeyHive);
 
+    /* Both hives get cells: the parent hive first, as everywhere */
+    ASSERT(Hive != Context->ChildHive.KeyHive);
+    CmpLockHive((PCMHIVE)Hive);
+    CmpLockHive((PCMHIVE)Context->ChildHive.KeyHive);
+
     /* Bail out on read-only KCBs */
     if (ParentKcb->ExtFlags & CM_KCB_READ_ONLY_KEY)
     {
@@ -1119,7 +1126,9 @@ CmpCreateLinkNode(IN PHHIVE Hive,
     }
 
 Exit:
-    /* Release the flusher locks and return status */
+    /* Release the hive and flusher locks and return status */
+    CmpUnlockHive((PCMHIVE)Context->ChildHive.KeyHive);
+    CmpUnlockHive((PCMHIVE)Hive);
     CmpUnlockHiveFlusher((PCMHIVE)Context->ChildHive.KeyHive);
     CmpUnlockHiveFlusher((PCMHIVE)Hive);
     return Status;
