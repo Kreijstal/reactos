@@ -60,6 +60,7 @@ KMT_TESTFUNC Test_PoIdle;
 KMT_TESTFUNC Test_PoIrp;
 KMT_TESTFUNC Test_RtlAvlTree;
 KMT_TESTFUNC Test_RtlCaptureContext;
+KMT_TESTFUNC Test_RtlCriticalSection;
 KMT_TESTFUNC Test_RtlException;
 KMT_TESTFUNC Test_RtlIntSafe;
 KMT_TESTFUNC Test_RtlMemory;
@@ -128,6 +129,7 @@ const KMT_TEST TestList[] =
     { "PoIdle",                       Test_PoIdle },
     { "PoIrp",                        Test_PoIrp },
     { "RtlAvlTree",                   Test_RtlAvlTree },
+    { "RtlCriticalSection",           Test_RtlCriticalSection },
     { "RtlException",                 Test_RtlException },
     { "RtlIntSafe",                   Test_RtlIntSafe },
     { "RtlMemory",                    Test_RtlMemory },

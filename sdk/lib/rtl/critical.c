@@ -21,7 +21,7 @@ static RTL_CRITICAL_SECTION RtlCriticalSectionLock;
 static LIST_ENTRY RtlCriticalSectionList = {&RtlCriticalSectionList, &RtlCriticalSectionList};
 static BOOLEAN RtlpCritSectInitialized = FALSE;
 static RTL_CRITICAL_SECTION_DEBUG RtlpStaticDebugInfo[MAX_STATIC_CS_DEBUG_OBJECTS];
-static BOOLEAN RtlpDebugInfoFreeList[MAX_STATIC_CS_DEBUG_OBJECTS];
+static LONG RtlpDebugInfoFreeList[MAX_STATIC_CS_DEBUG_OBJECTS];
 
 LARGE_INTEGER RtlpTimeout;
 BOOLEAN RtlpTimeoutDisable;
@@ -305,12 +305,12 @@ RtlpAllocateDebugInfo(VOID)
     /* Try to allocate from our buffer first */
     for (i = 0; i < MAX_STATIC_CS_DEBUG_OBJECTS; i++)
     {
-        /* Check if Entry is free */
-        if (!RtlpDebugInfoFreeList[i])
+        /* Claim a free entry: threads initialize critical sections at the
+         * same time, and two of them must not get the same one */
+        if (!RtlpDebugInfoFreeList[i] &&
+            !InterlockedCompareExchange(&RtlpDebugInfoFreeList[i], TRUE, FALSE))
         {
-            /* Mark entry in use */
             DPRINT("Using entry: %lu. Buffer: %p\n", i, &RtlpStaticDebugInfo[i]);
-            RtlpDebugInfoFreeList[i] = TRUE;
 
             /* Use free entry found */
             return &RtlpStaticDebugInfo[i];
@@ -358,7 +358,8 @@ RtlpFreeDebugInfo(PRTL_CRITICAL_SECTION_DEBUG DebugInfo)
                DebugInfo,
                EntryId,
                NtCurrentTeb()->ClientId.UniqueProcess);
-        RtlpDebugInfoFreeList[EntryId] = FALSE;
+        ASSERT(RtlpDebugInfoFreeList[EntryId]);
+        InterlockedExchange(&RtlpDebugInfoFreeList[EntryId], FALSE);
 
     }
     else if (!DebugInfo->Flags)

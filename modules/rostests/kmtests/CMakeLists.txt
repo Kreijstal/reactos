@@ -245,6 +245,7 @@ list(APPEND KMTEST_SOURCE
     hidparse/HidP_user.c
     kernel32/FileAttributes_user.c
     kernel32/FindFile_user.c
+    rtl/RtlCriticalSection_user.c
     kmdf/Kmdf133_user.c
     kmdf/KmdfIdle_user.c
     kmdf/KmdfNetCx_user.c
