@@ -1629,6 +1629,15 @@ HalpGrowMapBufferWorker(IN PVOID DeferredContext)
         NumberOfMapRegisters = Head->NumberOfMapRegisters;
         ASSERT(NumberOfMapRegisters != 0);
         ASSERT(NumberOfMapRegisters <= Head->MapRegistersPerChannel);
+        /*
+         * Only adapters that need map registers wait here, and HalGetAdapter
+         * gives them at most 16, one block: a growth of one block always
+         * serves the head. For a larger head every growth would succeed
+         * without serving it, and this loop would grow the pool until the
+         * map register table is full.
+         */
+        ASSERT(Head->NeedsMapRegisters);
+        ASSERT(NumberOfMapRegisters <= HALP_MAP_BUFFER_INCREMENT);
         HeadFits = (RtlFindClearBits(MasterAdapter->MapRegisters, NumberOfMapRegisters, 0) != MAXULONG);
         KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
 
@@ -1777,6 +1786,17 @@ HalAllocateAdapterChannel(IN PADAPTER_OBJECT AdapterObject,
 
     ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
 
+    /*
+     * A request for more map registers than one transfer may use is refused
+     * whether or not the channel is free: IoFreeAdapterChannel starts the
+     * requests queued on the channel without checking them again.
+     */
+    if ((NumberOfMapRegisters) && (AdapterObject->NeedsMapRegisters) &&
+        (NumberOfMapRegisters > AdapterObject->MapRegistersPerChannel))
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
     /* Set up the wait context block in case we can't run right away. */
     WaitContextBlock->DeviceRoutine = ExecutionRoutine;
     WaitContextBlock->NumberOfMapRegisters = NumberOfMapRegisters;
@@ -1795,13 +1815,6 @@ HalAllocateAdapterChannel(IN PADAPTER_OBJECT AdapterObject,
 
     if ((NumberOfMapRegisters) && (AdapterObject->NeedsMapRegisters))
     {
-        if (NumberOfMapRegisters > AdapterObject->MapRegistersPerChannel)
-        {
-            AdapterObject->NumberOfMapRegisters = 0;
-            IoFreeAdapterChannel(AdapterObject);
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
         /*
          * Get the map registers. This is partly complicated by the fact
          * that new map registers can only be allocated at PASSIVE_LEVEL
@@ -1972,8 +1985,22 @@ IoFreeAdapterChannel(IN PADAPTER_OBJECT AdapterObject)
          * previous one's (already freed) map registers without reserving them. */
         Index = MAXULONG;
 
-        if ((WaitContextBlock->NumberOfMapRegisters) && (AdapterObject->MasterAdapter))
+        /*
+         * Only an adapter that needs map registers takes any: the same rule
+         * HalAllocateAdapterChannel applies to a request it starts at once.
+         * A bus master that reaches all memory (64-bit scatter/gather) may
+         * map BYTES_TO_PAGES(MaximumLength) + 1 pages per transfer, more than
+         * a contiguous run of the pool ever holds (16, one 64 KB block).
+         * Its request queued on the busy channel went to the master queue
+         * for 31 registers instead, no growth could serve it, the pool grew
+         * until the map register table was full, and storahci's DMA never
+         * started again.
+         */
+        if ((WaitContextBlock->NumberOfMapRegisters) && (AdapterObject->NeedsMapRegisters))
         {
+            ASSERT(MasterAdapter != NULL);
+            ASSERT(WaitContextBlock->NumberOfMapRegisters <= AdapterObject->MapRegistersPerChannel);
+
             KeAcquireSpinLock(&MasterAdapter->SpinLock, &OldIrql);
 
             if (IsListEmpty(&MasterAdapter->AdapterQueue))

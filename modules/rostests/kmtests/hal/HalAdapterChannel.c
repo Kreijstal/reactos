@@ -680,6 +680,80 @@ TestGrowthCapacity(VOID)
     return TRUE;
 }
 
+/*
+ * A bus master that reaches every address (64-bit scatter/gather) needs no
+ * map registers. IoGetDmaAdapter still reports how many pages one transfer
+ * may span, BYTES_TO_PAGES(MaximumLength) + 1, which is more than any map
+ * register grant (16): 33 for storahci's 128 KB transfers. Such an adapter
+ * must never take map registers, whether its request starts at once or is
+ * started later from the adapter's channel queue by IoFreeAdapterChannel.
+ * A queued 31-page request that went to the shared pool instead waited for a
+ * contiguous run of 31 map registers, which the pool never has (it is made of
+ * 64 KB blocks), grew the pool until its table was full, and the disk's DMA
+ * never started again.
+ */
+#define NOMAP_LENGTH 0x20000
+
+static GRANT NoMapFirst, NoMapSecond;  /* the routine may still run after a failed test returns */
+
+static
+VOID
+TestNoMapRegisters(VOID)
+{
+    DEVICE_DESCRIPTION Description;
+    PDMA_ADAPTER Adapter;
+    ULONG NumberOfMapRegisters = 0;
+    KIRQL OldIrql;
+    BOOLEAN Served;
+
+    RtlZeroMemory(&Description, sizeof(Description));
+    Description.Version = DEVICE_DESCRIPTION_VERSION;
+    Description.Master = TRUE;
+    Description.ScatterGather = TRUE;
+    Description.Dma32BitAddresses = TRUE;
+    Description.Dma64BitAddresses = TRUE;
+    Description.InterfaceType = PCIBus;
+    Description.MaximumLength = NOMAP_LENGTH;
+    Adapter = IoGetDmaAdapter(NULL, &Description, &NumberOfMapRegisters);
+    ok(Adapter != NULL, "IoGetDmaAdapter failed\n");
+    if (skip(Adapter != NULL, "No adapter\n"))
+        return;
+    ok_eq_ulong(NumberOfMapRegisters, BYTES_TO_PAGES(NOMAP_LENGTH) + 1);
+
+    if (!InitGrant(&NoMapFirst, Adapter, NumberOfMapRegisters) ||
+        !InitGrant(&NoMapSecond, Adapter, NumberOfMapRegisters - 2))
+    {
+        skip(FALSE, "No device objects\n");
+        return;
+    }
+
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+    ok(Request(&NoMapFirst), "The first request did not start at once\n");
+    ok(NoMapFirst.Base == NULL, "The first request got map registers at %p\n", NoMapFirst.Base);
+    ok(!Request(&NoMapSecond), "The second request was not queued on the busy channel\n");
+    /* Starts the second request */
+    Adapter->DmaOperations->FreeAdapterChannel(Adapter);
+    KeLowerIrql(OldIrql);
+
+    Served = WaitFor(&NoMapSecond.Granted, 5000);
+    ok(Served, "The request started from the channel queue still waits for map registers\n");
+    if (!Served)
+    {
+        /* It would call back into freed objects */
+        trace("Leaking the adapter, its request still waits\n");
+        return;
+    }
+    ok(NoMapSecond.Base == NULL, "The request started from the channel queue got map registers at %p\n",
+       NoMapSecond.Base);
+
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+    Adapter->DmaOperations->FreeAdapterChannel(Adapter);
+    KeLowerIrql(OldIrql);
+    IoDeleteDevice(NoMapFirst.DeviceObject);
+    IoDeleteDevice(NoMapSecond.DeviceObject);
+    Adapter->DmaOperations->PutDmaAdapter(Adapter);
+}
+
 START_TEST(HalAdapterChannel)
 {
     PDMA_ADAPTER Shared;
@@ -824,4 +898,6 @@ START_TEST(HalAdapterChannel)
     IoDeleteDevice(Second.DeviceObject);
     IoDeleteDevice(Third.DeviceObject);
     Shared->DmaOperations->PutDmaAdapter(Shared);
+
+    TestNoMapRegisters();
 }
