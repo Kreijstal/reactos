@@ -353,18 +353,20 @@ MiInsertVadEx(
         StartingAddress = ALIGN_DOWN_BY(*BaseAddress, Alignment);
         EndingAddress = StartingAddress + ViewSize - 1;
 
-        /* Reject fixed allocations below the lowest user address */
-        if (StartingAddress < (ULONG_PTR)MM_LOWEST_USER_ADDRESS)
+        /*
+         * Reject fixed allocations below the lowest user address, except the
+         * reservation of the low 1 MB that RtlCreateUserProcess makes at
+         * address 4 for RTL_USER_PROCESS_PARAMETERS_RESERVE_1MB (the initial
+         * process and every subsystem, as for the DOS/VDM address space).
+         * Rejecting that one too made the initial process fail on every NT 5.x
+         * build that creates processes through RtlCreateUserProcess (i386):
+         * bugcheck 0x6F, "Failed to reserve 1MB of space".
+         */
+        if ((StartingAddress < (ULONG_PTR)MM_LOWEST_USER_ADDRESS) &&
+            !((*BaseAddress == 4) &&
+              ((AllocationType & MEM_RESERVE) != 0) &&
+              (EndingAddress < _1MB)))
         {
-#ifdef _M_ARM64
-            if ((*BaseAddress == 4) &&
-                ((AllocationType & MEM_RESERVE) != 0) &&
-                (EndingAddress < _1MB))
-            {
-                goto AllowLowReserve;
-            }
-#endif
-
             DPRINT("Given address is below the lowest user address\n");
             #if (NTDDI_VERSION >= NTDDI_LONGHORN)
     ExReleasePushLockExclusive(&CurrentProcess->AddressCreationLock);
@@ -373,10 +375,6 @@ MiInsertVadEx(
 #endif
             return STATUS_CONFLICTING_ADDRESSES;
         }
-
-#ifdef _M_ARM64
-AllowLowReserve:
-#endif
 
         /* Make sure it doesn't conflict with an existing allocation */
         Result = MiCheckForConflictingNode(StartingAddress >> PAGE_SHIFT,
