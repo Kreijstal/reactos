@@ -209,6 +209,7 @@ typedef enum _BLOCKER_ROLE
     RoleWait,
     RoleExit,
     RolePin,
+    RolePinFree,
     RoleUnpin
 } BLOCKER_ROLE;
 
@@ -227,7 +228,7 @@ static volatile LONG BlockersNoWait;
 static KDPC HogDpc;
 static volatile LONG HogRelease, HogRunning;
 static GRANT Big;
-static PETHREAD PinnedThread;
+static PETHREAD PinnedThread, FreeThread;
 
 static
 VOID
@@ -240,14 +241,18 @@ BlockerRoutine(
     InterlockedExchange(&Blocker->Started, 1);
     if ((Blocker->Role == RoleWait || Blocker->Role == RoleUnpin) && !BlockersNoWait)
         KeWaitForSingleObject(&Blocker->Release, Executive, KernelMode, FALSE, NULL);
-    if (Blocker->Role == RolePin)
+    if (Blocker->Role == RolePin || Blocker->Role == RolePinFree)
     {
         /* The worker keeps this affinity when it goes back to wait for work */
-        PinnedThread = PsGetCurrentThread();
-        ObReferenceObject(PinnedThread);
+        if (Blocker->Role == RolePin)
+            PinnedThread = PsGetCurrentThread();
+        else
+            FreeThread = PsGetCurrentThread();
+        ObReferenceObject(PsGetCurrentThread());
         KeSetSystemAffinityThread(Blocker->Affinity);
     }
-    else if (Blocker->Role == RoleUnpin && PsGetCurrentThread() == PinnedThread)
+    else if (Blocker->Role == RoleUnpin &&
+             (PsGetCurrentThread() == PinnedThread || PsGetCurrentThread() == FreeThread))
     {
         /*
          * Only the pinned worker reverts, and it must: a system affinity left
@@ -256,9 +261,12 @@ BlockerRoutine(
          * set (KeFlushQueuedDpcs asserts on it; ASSERT in KmdfRemove).
          * Every worker is parked in an unpin blocker, so the pinned one is
          * sure to get one: blockers that do not wait were all taken by the
-         * worker that waited last, and the pin was left behind.
+         * worker that waited last, and the pin was left behind. The blocker
+         * still queued after the parked ones does not wait either and can
+         * come to a pinned worker that has reverted already: revert once.
          */
-        KeRevertToUserAffinityThread();
+        if (PsGetCurrentThread()->Tcb.SystemAffinityActive)
+            KeRevertToUserAffinityThread();
     }
     InterlockedExchange(&Blocker->Done, 1);
 }
@@ -415,8 +423,14 @@ TestGrowthOutOfOrder(VOID)
     }
     KeLowerIrql(OldIrql);
 
-    /* The free worker: runs the queued blocker, the filler's growth, then waits */
-    Blockers[0].Role = RoleExit;
+    /*
+     * The free worker: runs the queued blocker, the filler's growth, then
+     * waits. It stays off the hogged processor: system threads may run on
+     * any processor, and one readied for the hogged one (its ideal
+     * processor, say) waits there behind the hog like the held-up worker.
+     */
+    Blockers[0].Affinity = AFFINITY_MASK(Self);
+    Blockers[0].Role = RolePinFree;
     KeSetEvent(&Blockers[0].Release, IO_NO_INCREMENT, FALSE);
     ok(WaitFor(&Fillers[Fill - 1].Granted, 5000), "The last filler was not served\n");
     ok(WaitFor(&Blockers[Workers].Done, 5000), "The queued blocker did not run\n");
@@ -515,6 +529,12 @@ TestGrowthOutOfOrder(VOID)
         ok(!PinnedThread->Tcb.SystemAffinityActive, "The held-up worker thread kept its system affinity\n");
         ObDereferenceObject(PinnedThread);
         PinnedThread = NULL;
+    }
+    if (FreeThread)
+    {
+        ok(!FreeThread->Tcb.SystemAffinityActive, "The free worker thread kept its system affinity\n");
+        ObDereferenceObject(FreeThread);
+        FreeThread = NULL;
     }
 
     if (Ok)
