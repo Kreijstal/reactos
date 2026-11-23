@@ -455,7 +455,9 @@ SystemProcessTestWorker(PVOID StartContext)
         Context->Bases[Index] = Base;
         if ((Index % 10) == 0)
         {
-            if (Context->AllocationType == MEM_COMMIT)
+            /* The loop runs until the commit limit is reached: the last
+             * allocation fails and leaves nothing to touch, as in StressTesting */
+            if (Context->AllocationType == MEM_COMMIT && NT_SUCCESS(Status))
             {
                 CheckBufferReadWrite(Base, TestString, TestStringSize, STATUS_SUCCESS);
             }
