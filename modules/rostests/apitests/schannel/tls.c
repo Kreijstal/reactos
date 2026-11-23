@@ -112,7 +112,7 @@ BOOL TlsConnectAlpn(PTLS_CONNECTION Connection, DWORD Protocols, const BYTE *Alp
     SecBuffer in_buffers[2], out_buffer;
     SecBufferDesc in_desc, out_desc;
     BYTE token[16384];
-    BYTE alpn_buffer[FIELD_OFFSET(SEC_APPLICATION_PROTOCOLS, ProtocolLists[0].ProtocolList) + 256];
+    BYTE alpn_buffer[sizeof(SEC_APPLICATION_PROTOCOLS) + 256];
     SEC_APPLICATION_PROTOCOLS *alpn = (SEC_APPLICATION_PROTOCOLS *)alpn_buffer;
     SecBuffer alpn_in;
     SecBufferDesc alpn_desc;
