@@ -43,6 +43,7 @@ extern void func_PrivateExtractIcons(void);
 extern void func_RealGetWindowClass(void);
 extern void func_RedrawWindow(void);
 extern void func_RegisterHotKey(void);
+extern void func_RegisterPowerSettingNotification(void);
 extern void func_RegisterClassEx(void);
 extern void func_ScrollBarRedraw(void);
 extern void func_ScrollBarWndExtra(void);
@@ -111,6 +112,7 @@ const struct test winetest_testlist[] =
     { "RealGetWindowClass", func_RealGetWindowClass },
     { "RedrawWindow", func_RedrawWindow },
     { "RegisterHotKey", func_RegisterHotKey },
+    { "RegisterPowerSettingNotification", func_RegisterPowerSettingNotification },
     { "RegisterClassEx", func_RegisterClassEx },
     { "ScrollBarRedraw", func_ScrollBarRedraw },
     { "ScrollBarWndExtra", func_ScrollBarWndExtra },

@@ -44,6 +44,7 @@ list(APPEND SOURCE
     RedrawWindow.c
     RegisterClassEx.c
     RegisterHotKey.c
+    RegisterPowerSettingNotification.c
     ScrollBarRedraw.c
     ScrollBarWndExtra.c
     ScrollDC.c
