@@ -106,6 +106,52 @@ TestNestedExceptionHandler(VOID)
     ok_eq_ulong(State, 8);
 }
 
+/*
+ * Locals that are set before a __try and not changed in it must still hold
+ * their values in the __except block. Values that live across calls go to
+ * callee-saved registers (ebx, esi, edi on x86); the exception handler jumps
+ * to the __except block from deep inside the dispatcher, where those
+ * registers hold the dispatcher's values, not the ones the function had.
+ * IopCreateFile freed such a register ("OpenPacket") in its __except block.
+ */
+static volatile ULONG_PTR NonVolatileSeed[3] = { 0x1111, 0x2222, 0x3333 };
+
+static
+VOID
+TestNonVolatilesInExcept(
+    _In_ BOOLEAN AccessViolation)
+{
+    ULONG_PTR First, Second, Third;
+    BOOLEAN Handled = FALSE;
+
+    First = NonVolatileSeed[0];
+    Second = NonVolatileSeed[1];
+    Third = NonVolatileSeed[2];
+    /* A call, so the three values have to survive one */
+    PossiblyRaise(FALSE);
+
+    _SEH2_TRY
+    {
+        if (AccessViolation)
+            (void)*(volatile CHAR *)NULL;
+        else
+            PossiblyRaise(TRUE);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Handled = TRUE;
+        ok_eq_ulongptr(First, 0x1111);
+        ok_eq_ulongptr(Second, 0x2222);
+        ok_eq_ulongptr(Third, 0x3333);
+    }
+    _SEH2_END;
+
+    ok_eq_bool(Handled, TRUE);
+    ok_eq_ulongptr(First, 0x1111);
+    ok_eq_ulongptr(Second, 0x2222);
+    ok_eq_ulongptr(Third, 0x3333);
+}
+
 START_TEST(RtlException)
 {
     PCHAR Buffer[128];
@@ -155,6 +201,8 @@ START_TEST(RtlException)
     KmtEndSeh(STATUS_GUARD_PAGE_VIOLATION);
 
     TestNestedExceptionHandler();
+    TestNonVolatilesInExcept(FALSE);
+    TestNonVolatilesInExcept(TRUE);
 
     /* We cannot test this in kernel mode easily - the stack is just "somewhere"
      * in system space, and there's no guard page below it */

@@ -57,8 +57,6 @@ C_ASSERT(SEH3_REGISTRATION_FRAME_AllocaFrame == FIELD_OFFSET(SEH3$_REGISTRATION_
 C_ASSERT(SEH3_REGISTRATION_FRAME_Ebx == FIELD_OFFSET(SEH3$_REGISTRATION_FRAME, Ebx));
 C_ASSERT(SEH3_REGISTRATION_FRAME_Esi == FIELD_OFFSET(SEH3$_REGISTRATION_FRAME, Esi));
 C_ASSERT(SEH3_REGISTRATION_FRAME_Edi == FIELD_OFFSET(SEH3$_REGISTRATION_FRAME, Edi));
-#endif
-#ifdef __clang__
 C_ASSERT(SEH3_REGISTRATION_FRAME_ReturnAddress == FIELD_OFFSET(SEH3$_REGISTRATION_FRAME, ReturnAddress));
 #endif
 C_ASSERT(SEH3_SCOPE_TABLE_Filter == FIELD_OFFSET(SEH3$_SCOPE_TABLE, Filter));
@@ -273,17 +271,40 @@ __attribute__((noreturn))
 static inline
 void
 _SEH3$_JumpToTarget(
-    PSEH3$_REGISTRATION_FRAME RegistrationFrame)
+    PSEH3$_REGISTRATION_FRAME RegistrationFrame,
+    int HandlerType)
 {
+    if (HandlerType == _SEH3$_NESTED_HANDLER)
+    {
+        /* GCC C registered the frame with a returns_twice call (see
+           _SEH3$_RegisterFrame_): return from it again, with 2 and the
+           non-volatiles it first returned with, like longjmp. */
+        asm volatile (
+            "movl 24(%%ecx), %%esp\n\t"
+            "movl 28(%%ecx), %%ebp\n\t"
+            "movl 40(%%ecx), %%ebx\n\t"
+            "movl 44(%%ecx), %%esi\n\t"
+            "movl 48(%%ecx), %%edi\n\t"
+
+            /* Esp was saved in the registration call, below its return address */
+            "addl $4, %%esp\n\t"
+            "movl $2, %%eax\n\t"
+            "jmp *52(%%ecx)"
+            : :
+            "c" (RegistrationFrame)
+        );
+        __builtin_unreachable();
+    }
+
 #ifdef __clang__
         asm volatile (
             /* Load the registers */
             "movl 24(%%ecx), %%esp\n\t"
             "movl 28(%%ecx), %%ebp\n\t"
 
-            "movl 36(%%ecx), %%ebx\n\t"
-            "movl 40(%%ecx), %%esi\n\t"
-            "movl 44(%%ecx), %%edi\n\t"
+            "movl 40(%%ecx), %%ebx\n\t"
+            "movl 44(%%ecx), %%esi\n\t"
+            "movl 48(%%ecx), %%edi\n\t"
 
             /* Stack pointer is 4 off from the call to __SEH3$_RegisterFrame */
             "addl $4, %%esp\n\t"
@@ -425,7 +446,7 @@ _SEH3$_common_except_handler(
     _SEH3$_Unregister(CurrentFrame);
 
     /* Jump to the __except block (does not return) */
-    _SEH3$_JumpToTarget(CurrentFrame);
+    _SEH3$_JumpToTarget(CurrentFrame, HandlerType);
 }
 
 int // EXCEPTION_DISPOSITION

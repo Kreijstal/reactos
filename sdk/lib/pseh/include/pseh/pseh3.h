@@ -17,8 +17,9 @@
 extern "C" {
 #endif
 
-/* CLANG must safe non-volatiles, because it uses a return-twice algorithm */
-#if defined(__clang__) && !defined(_SEH3$_FRAME_ALL_NONVOLATILES)
+/* CLANG and GCC C must save non-volatiles, because they use a return-twice
+   algorithm */
+#if (defined(__clang__) || !defined(__cplusplus)) && !defined(_SEH3$_FRAME_ALL_NONVOLATILES)
 #define _SEH3$_FRAME_ALL_NONVOLATILES 1
 #endif
 
@@ -65,8 +66,6 @@ typedef struct _SEH3$_REGISTRATION_FRAME
     unsigned long Ebx;
     unsigned long Esi;
     unsigned long Edi;
-#endif
-#ifdef __clang__
     void *ReturnAddress;
 #endif
 } SEH3$_REGISTRATION_FRAME ,*PSEH3$_REGISTRATION_FRAME;
@@ -194,17 +193,6 @@ _SEH3$_RegisterTryLevelWithNonVolatiles(
               : "eax", "edx", "memory" \
               : _SEH3$_l_BeforeTry, _SEH3$_l_HandlerTarget, _SEH3$_l_OnException, _SEH3$_l_BeforeFilterOrFinally, _SEH3$_l_FilterOrFinally)
 
-#else
-#define _SEH3$_CALL_WRAPPER(_Function, _TrylevelFrame, _DataTable) \
-    asm goto ("leal %0, %%eax\n\t" \
-              "leal %1, %%edx\n\t" \
-              "call " #_Function \
-              : \
-              : "m" (*(_TrylevelFrame)), "m" (*(_DataTable)), "p" (_SEH3$_RegisterFrameWithNonVolatiles) \
-              : "eax", "edx", "ecx", "memory" \
-              : _SEH3$_l_BeforeTry, _SEH3$_l_HandlerTarget, _SEH3$_l_OnException, _SEH3$_l_BeforeFilterOrFinally, _SEH3$_l_FilterOrFinally)
-#endif
-
 /* This is an asm wrapper around _SEH3$_RegisterFrame */
 #define _SEH3$_RegisterFrame_(_TrylevelFrame, _DataTable) \
     do { \
@@ -219,6 +207,36 @@ _SEH3$_RegisterTryLevelWithNonVolatiles(
         (_TrylevelFrame)->TryLevel = _SEH3$_TryLevel; \
         _SEH3$_CALL_WRAPPER(__SEH3$_RegisterTryLevel, _TrylevelFrame, _DataTable); \
     } while (0)
+
+#else /* !__cplusplus */
+
+/*
+ * The handler cannot enter the __except block at its label: the only jumps to
+ * it GCC knows of are those from the registration, and GCC is free to put
+ * code on them (a register reloaded from its stack slot, say), which entering
+ * at the label skips. It also expects the label to be reached with ebx, esi
+ * and edi as they were at the registration, while the handler comes from deep
+ * inside the dispatcher. IopCreateFile freed such a register, a dispatcher
+ * value, as its open packet. So register the frame the way setjmp works: a
+ * returns_twice call that the handler returns from a second time, with 2 and
+ * the non-volatiles of the first return (_SEH3$_JumpToTarget).
+ */
+#define _SEH3$_RegisterFrame_(_TrylevelFrame, _DataTable) \
+    do { \
+        (_TrylevelFrame)->Handler = (void*)_SEH3$_except_handler; \
+        (_TrylevelFrame)->TryLevel = 0; \
+        if (__builtin_expect(_SEH3$_RegisterFrameWithNonVolatiles(_TrylevelFrame, _DataTable, __builtin_alloca(0)) != 0, 0)) \
+            goto _SEH3$_l_HandlerTarget; \
+    } while (0)
+
+#define _SEH3$_RegisterTryLevel_(_TrylevelFrame, _DataTable) \
+    do { \
+        (_TrylevelFrame)->TryLevel = _SEH3$_TryLevel; \
+        if (__builtin_expect(_SEH3$_RegisterTryLevelWithNonVolatiles(_TrylevelFrame, _DataTable, __builtin_alloca(0)) != 0, 0)) \
+            goto _SEH3$_l_HandlerTarget; \
+    } while (0)
+
+#endif /* !__cplusplus */
 
 /* This construct scares GCC so much, that it will stop moving code
    around into places that are never executed. */
