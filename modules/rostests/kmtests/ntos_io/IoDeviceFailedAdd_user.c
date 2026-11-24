@@ -124,6 +124,7 @@ TestFailedAdd(
     DEVINST Child;
     CONFIGRET Cr;
     ULONG Status, Problem, i;
+    BOOL Started;
     DWORD Installed = 1;
     DWORD Error;
     HKEY Key;
@@ -166,8 +167,9 @@ TestFailedAdd(
     /* And has the device started: AddDevice anew, then IRP_MN_START_DEVICE */
     Cr = CM_Setup_DevNode(Child, CM_SETUP_DEVNODE_READY);
     ok_eq_ulong(Cr, CR_SUCCESS);
-    ok(WaitDevice(Child, 0, &Status, &Problem),
-       "Child not started: status 0x%lx, problem %lu\n", Status, Problem);
+    /* The call goes first: the message reads what it returns */
+    Started = WaitDevice(Child, 0, &Status, &Problem);
+    ok(Started, "Child not started: status 0x%lx, problem %lu\n", Status, Problem);
     trace("After the installation: status 0x%lx, problem %lu\n", Status, Problem);
     ok(!(Status & DN_HAS_PROBLEM), "Problem %lu left\n", Problem);
     ok_eq_ulong(GetCounter(IOFAILEDADD_VALUE_FAILED_ADDS), 1UL);
@@ -185,6 +187,7 @@ START_TEST(IoDeviceFailedAdd)
     SC_HANDLE Service = NULL;
     DEVINST Root, Bus;
     ULONG Status, Problem;
+    BOOL Started;
     CONFIGRET Cr;
     DWORD Error;
     HKEY Key;
@@ -239,8 +242,9 @@ START_TEST(IoDeviceFailedAdd)
         goto Uninstall;
     Cr = CM_Setup_DevNode(Bus, CM_SETUP_DEVNODE_READY);
     ok_eq_ulong(Cr, CR_SUCCESS);
-    ok(WaitDevice(Bus, 0, &Status, &Problem),
-       "Bus not started: status 0x%lx, problem %lu\n", Status, Problem);
+    /* The call goes first: the message reads what it returns */
+    Started = WaitDevice(Bus, 0, &Status, &Problem);
+    ok(Started, "Bus not started: status 0x%lx, problem %lu\n", Status, Problem);
 
     if (Status & DN_STARTED)
         TestFailedAdd(Bus);
