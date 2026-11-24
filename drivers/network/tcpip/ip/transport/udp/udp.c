@@ -278,9 +278,19 @@ NTSTATUS UDPSendDatagram(
     }
     else
     {
-        if(!(NCE = NBLocateNeighbor( &LocalAddress, NULL ))) {
+        /* Bound to a local address: the packet leaves through the interface
+         * that owns it, towards the next hop to the destination on that
+         * interface (not to a neighbor named after our own address) */
+        PIP_INTERFACE Interface = AddrLocateInterface( &LocalAddress );
+        if (!Interface) {
             UnlockObject(AddrFile);
-            return STATUS_INVALID_PARAMETER;
+            return STATUS_INVALID_ADDRESS;
+        }
+
+        NCE = RouteGetRouteToDestinationOnInterface( &RemoteAddress, Interface );
+        if (!NCE) {
+            UnlockObject(AddrFile);
+            return STATUS_NETWORK_UNREACHABLE;
         }
     }
 
