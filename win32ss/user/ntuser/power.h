@@ -13,7 +13,9 @@
 typedef enum tagPOWER_CALLOUT_TYPE
 {
     POWER_CALLOUT_EVENT = 0,
-    POWER_CALLOUT_STATE
+    POWER_CALLOUT_STATE,
+    /* A power setting changed for a window that registered for it */
+    POWER_CALLOUT_SETTING
 } POWER_CALLOUT_TYPE;
 
 //
@@ -32,6 +34,12 @@ typedef struct tagWIN32POWERCALLOUT
 
     /* The captured Win32 power event parameters (the params are set to none if Type == POWER_STATE) */
     WIN32_POWEREVENT_PARAMETERS Params;
+
+#if (WINVER >= 0x0600)
+    /* POWER_CALLOUT_SETTING: the registered window and the new value (variable size, keep it last) */
+    HWND hwndRecipient;
+    POWERBROADCAST_SETTING Setting;
+#endif
 } WIN32POWERCALLOUT, *PWIN32POWERCALLOUT;
 
 //
@@ -69,6 +77,26 @@ NTSTATUS
 NTAPI
 IntHandlePowerState(
     _In_ PWIN32_POWERSTATE_PARAMETERS pWin32PwrStateParams);
+
+VOID
+NTAPI
+IntUserPowerCalloutWorker(VOID);
+
+ULONG_PTR
+NTAPI
+IntRegisterPowerSettingNotification(
+    _In_ PWND pWnd,
+    _In_ LPCGUID UserGuid);
+
+BOOL
+NTAPI
+IntUnregisterPowerSettingNotification(
+    _In_ ULONG_PTR Notify);
+
+VOID
+NTAPI
+IntCleanupPowerSettingNotifications(
+    _In_ PPROCESSINFO ppi);
 
 //
 // Power Callout locking mechanism

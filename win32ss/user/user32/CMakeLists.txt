@@ -31,6 +31,7 @@ list(APPEND SOURCE
     misc/logon.c
     misc/misc.c
     misc/object.c
+    misc/power.c
     misc/resources.c
     misc/rtlstr.c
     misc/stubs.c

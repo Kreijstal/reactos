@@ -144,6 +144,17 @@ NtUserCallNoParam(DWORD Routine)
             Result = TRUE; // Always return TRUE.
             break;
 
+        case NOPARAM_ROUTINE_USERPWRCALLOUTWORKER:
+            /* The power request thread of CSRSS runs the queued power callouts */
+            if (PsGetCurrentProcess() != gpepCSRSS)
+            {
+                EngSetLastError(ERROR_ACCESS_DENIED);
+                break;
+            }
+            IntUserPowerCalloutWorker();
+            Result = TRUE;
+            break;
+
         default:
             ERR("Calling invalid routine number 0x%x in NtUserCallNoParam\n", Routine);
             EngSetLastError(ERROR_INVALID_PARAMETER);
@@ -437,6 +448,10 @@ NtUserCallOneParam(
             Result = (DWORD_PTR)IntAllowSetForegroundWindow(Param);
             break;
 
+        case ONEPARAM_ROUTINE_UNREGISTERPOWERSETTINGNOTIFY:
+            Result = (DWORD_PTR)IntUnregisterPowerSettingNotification(Param);
+            break;
+
         default:
             ERR("Calling invalid routine number 0x%x in NtUserCallOneParam(), Param=0x%x\n",
                 Routine, Param);
@@ -493,6 +508,13 @@ NtUserCallTwoParam(
             else
                 Ret = (DWORD_PTR)MenuObject->cyMenu;
             IntReleaseMenuObject(MenuObject);
+            break;
+        }
+
+        case TWOPARAM_ROUTINE_REGISTERPOWERSETTINGNOTIFY:
+        {
+            Window = UserGetWindowObject((HWND)Param1);
+            Ret = Window ? IntRegisterPowerSettingNotification(Window, (LPCGUID)Param2) : 0;
             break;
         }
 

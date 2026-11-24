@@ -1629,6 +1629,15 @@ typedef enum tagHANDEDNESS
 #define PBT_APMPOWERSTATUSCHANGE 0x000A
 #define PBT_APMOEMEVENT 0x000B
 #define PBT_APMRESUMEAUTOMATIC 0x0012
+#if (_WIN32_WINNT >= 0x0600)
+#define PBT_POWERSETTINGCHANGE 0x8013
+
+typedef struct {
+  GUID PowerSetting;
+  DWORD DataLength;
+  UCHAR Data[1];
+} POWERBROADCAST_SETTING, *PPOWERBROADCAST_SETTING;
+#endif
 
 
 /* Window messages */

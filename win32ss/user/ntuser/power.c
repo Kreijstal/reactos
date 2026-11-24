@@ -17,6 +17,37 @@ PFAST_MUTEX gpPowerCalloutMutexLock;
 PKEVENT gpPowerRequestCalloutEvent;
 PKTHREAD gpPowerCalloutMutexOwnerThread;
 
+#if (WINVER >= 0x0600)
+/*
+ * A window registered by RegisterPowerSettingNotification. Each one holds a
+ * kernel power setting callback; the kernel calls it once with the current
+ * value right after registration and again on each change, on its power
+ * setting worker thread. The value goes to the window as WM_POWERBROADCAST
+ * with PBT_POWERSETTINGCHANGE through the power callout queue.
+ */
+typedef struct _USER_POWER_SETTING_NOTIFY
+{
+    LIST_ENTRY Link;
+    PPROCESSINFO ppi;
+    HWND hwnd;
+    /* What the window asked for, reported in the POWERBROADCAST_SETTING */
+    GUID Guid;
+    PVOID PoHandle;
+    /* The HPOWERNOTIFY of the registration */
+    ULONG_PTR Notify;
+} USER_POWER_SETTING_NOTIFY, *PUSER_POWER_SETTING_NOTIFY;
+
+static LIST_ENTRY gPowerSettingNotifyList;
+static PFAST_MUTEX gpPowerSettingNotifyLock;
+static ULONG_PTR gLastPowerSettingNotify;
+
+/* A session setting the kernel does not produce: the session display is the console display */
+static const GUID GUID_SESSION_DISPLAY_STATUS_ =
+    { 0x2b84c20e, 0xad23, 0x4ddf, { 0x93, 0xdb, 0x05, 0xff, 0xbd, 0x7e, 0xfc, 0xa5 } };
+static const GUID GUID_CONSOLE_DISPLAY_STATE_ =
+    { 0x6fe69556, 0x704a, 0x47a0, { 0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47 } };
+#endif
+
 /* PRIVATE FUNCTIONS *********************************************************/
 
 /**
@@ -63,6 +94,21 @@ IntHandlePowerEventWorker(
     }
 }
 
+#if (WINVER >= 0x0600)
+/* Tells a registered window the new value of a power setting */
+static
+VOID
+IntHandlePowerSettingWorker(
+    _In_ PWIN32POWERCALLOUT pPowerCallout)
+{
+    /* The receiver gets its own copy of the POWERBROADCAST_SETTING (see MsgMemorySize) */
+    co_IntSendMessageNoWait(pPowerCallout->hwndRecipient,
+                            WM_POWERBROADCAST,
+                            PBT_POWERSETTINGCHANGE,
+                            (LPARAM)&pPowerCallout->Setting);
+}
+#endif
+
 /**
  * @brief
  * Validates the power event parameters that come from
@@ -97,16 +143,9 @@ IntValidateWin32PowerParams(
 
 /**
  * @brief
- * Gets the next pending power callout from the global queue
+ * Gets the oldest pending power callout from the global queue
  * list and returns it to the caller. Note that the returned
  * power callout is delisted from the list.
- *
- * @param[in] pPowerCallout
- * A pointer to a power callout entry that was previously returned
- * by the same function. If this parameter is set to NULL the function
- * will return the first callout entry from the list. Otherwise the
- * function will return the next callout entry of the current power
- * callout.
  *
  * @return
  * Returns a pointer to a power callout to the caller. If the list is
@@ -118,11 +157,9 @@ IntValidateWin32PowerParams(
  */
 static
 PWIN32POWERCALLOUT
-IntGetNextPowerCallout(
-    _In_ PWIN32POWERCALLOUT pPowerCallout)
+IntGetNextPowerCallout(VOID)
 {
     PLIST_ENTRY Entry;
-    PWIN32POWERCALLOUT pPowerCalloutEntry = NULL;
 
     /* Ensure the current calling thread owns the power callout lock */
     ASSERT_POWER_CALLOUT_LOCK_ACQUIRED();
@@ -133,21 +170,9 @@ IntGetNextPowerCallout(
         return NULL;
     }
 
-    /* The caller supplied a NULL argument, give them the first entry */
-    if (!pPowerCallout)
-    {
-        Entry = gPowerCalloutsQueueList.Flink;
-    }
-    else
-    {
-        /* Otherwise give the caller the next power callout entry from the list */
-        Entry = pPowerCallout->Link.Flink;
-    }
-
-    /* Delist the power callout entry from the list and give it to caller */
-    pPowerCalloutEntry = CONTAINING_RECORD(Entry, WIN32POWERCALLOUT, Link);
-    RemoveEntryList(&pPowerCalloutEntry->Link);
-    return pPowerCalloutEntry;
+    /* Delist the oldest power callout and give it to the caller */
+    Entry = RemoveHeadList(&gPowerCalloutsQueueList);
+    return CONTAINING_RECORD(Entry, WIN32POWERCALLOUT, Link);
 }
 
 /**
@@ -161,8 +186,8 @@ IntDeployPowerCallout(VOID)
 {
     PWIN32POWERCALLOUT pWin32PwrCallout;
 
-    /* Lock the entire USER subsystem down as we do particular stuff */
-    UserEnterExclusive();
+    /* The caller locked the entire USER subsystem down as we do particular stuff */
+    ASSERT(UserIsEnteredExclusive());
 
     /*
      * FIXME: While we did indeed lock the USER subsystem, there is a risk
@@ -176,14 +201,18 @@ IntDeployPowerCallout(VOID)
 
     /* Deploy all the pending power callouts to the appropriate callout workers */
     IntAcquirePowerCalloutLock();
-    for (pWin32PwrCallout = IntGetNextPowerCallout(NULL);
-         pWin32PwrCallout != NULL;
-         pWin32PwrCallout = IntGetNextPowerCallout(pWin32PwrCallout))
+    while ((pWin32PwrCallout = IntGetNextPowerCallout()) != NULL)
     {
         if (pWin32PwrCallout->Type == POWER_CALLOUT_EVENT)
         {
             IntHandlePowerEventWorker(&pWin32PwrCallout->Params);
         }
+#if (WINVER >= 0x0600)
+        else if (pWin32PwrCallout->Type == POWER_CALLOUT_SETTING)
+        {
+            IntHandlePowerSettingWorker(pWin32PwrCallout);
+        }
+#endif
         else // POWER_CALLOUT_STATE
         {
             ERR("Power state callout management is currently not implemented!\n");
@@ -195,7 +224,6 @@ IntDeployPowerCallout(VOID)
 
     /* Release what we locked */
     IntReleasePowerCalloutLock();
-    UserLeave();
 }
 
 /**
@@ -243,8 +271,49 @@ IntEnlistPowerCallout(
     }
 
     /* Handle this power callout ourselves */
+    UserEnterExclusive();
     IntDeployPowerCallout();
+    UserLeave();
 }
+
+#if (WINVER >= 0x0600)
+/* Called by the kernel power manager on its power setting worker thread */
+static POWER_SETTING_CALLBACK IntPowerSettingCallback;
+
+static
+NTSTATUS
+NTAPI
+IntPowerSettingCallback(
+    _In_ LPCGUID SettingGuid,
+    _In_reads_bytes_(ValueLength) PVOID Value,
+    _In_ ULONG ValueLength,
+    _Inout_opt_ PVOID Context)
+{
+    PUSER_POWER_SETTING_NOTIFY pNotify = Context;
+    PWIN32POWERCALLOUT pPowerCallout;
+
+    UNREFERENCED_PARAMETER(SettingGuid);
+
+    /* The registration is not freed while its callback runs (PoUnregisterPowerSettingCallback waits) */
+    pPowerCallout = ExAllocatePoolZero(NonPagedPool,
+                                       FIELD_OFFSET(WIN32POWERCALLOUT, Setting.Data) + ValueLength,
+                                       USERTAG_POWER);
+    if (pPowerCallout == NULL)
+    {
+        ERR("No memory to report a power setting change to window %p\n", pNotify->hwnd);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    pPowerCallout->Type = POWER_CALLOUT_SETTING;
+    pPowerCallout->hwndRecipient = pNotify->hwnd;
+    pPowerCallout->Setting.PowerSetting = pNotify->Guid;
+    pPowerCallout->Setting.DataLength = ValueLength;
+    RtlCopyMemory(pPowerCallout->Setting.Data, Value, ValueLength);
+
+    IntEnlistPowerCallout(pPowerCallout);
+    return STATUS_SUCCESS;
+}
+#endif
 
 /* PUBLIC FUNCTIONS **********************************************************/
 
@@ -287,6 +356,20 @@ IntInitWin32PowerManagement(
     ExInitializeFastMutex(gpPowerCalloutMutexLock);
     gpPowerCalloutMutexOwnerThread = NULL;
 
+#if (WINVER >= 0x0600)
+    gpPowerSettingNotifyLock = ExAllocatePoolZero(NonPagedPool,
+                                                  sizeof(FAST_MUTEX),
+                                                  USERTAG_POWER);
+    if (gpPowerSettingNotifyLock == NULL)
+    {
+        ERR("Failed to allocate pool of memory for the power setting notification mutex\n");
+        ExFreePoolWithTag(gpPowerCalloutMutexLock, USERTAG_POWER);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    ExInitializeFastMutex(gpPowerSettingNotifyLock);
+    InitializeListHead(&gPowerSettingNotifyList);
+#endif
+
     /* Initialize the global queue list and the power callout (aka request) event object */
     InitializeListHead(&gPowerCalloutsQueueList);
     Status = ObReferenceObjectByHandle(hPowerRequestEvent,
@@ -298,6 +381,10 @@ IntInitWin32PowerManagement(
     if (!NT_SUCCESS(Status))
     {
         ERR("Failed to reference the power callout event handle (Status 0x%08lx)\n", Status);
+#if (WINVER >= 0x0600)
+        ExFreePoolWithTag(gpPowerSettingNotifyLock, USERTAG_POWER);
+        gpPowerSettingNotifyLock = NULL;
+#endif
         ExFreePoolWithTag(gpPowerCalloutMutexLock, USERTAG_POWER);
         return Status;
     }
@@ -326,9 +413,7 @@ IntWin32PowerManagementCleanup(VOID)
      * apart during Win32k cleanup, so future power callouts would not
      * be allowed anyway, therefore we are safe.
      */
-    for (pWin32PwrCallout = IntGetNextPowerCallout(NULL);
-         pWin32PwrCallout != NULL;
-         pWin32PwrCallout = IntGetNextPowerCallout(pWin32PwrCallout))
+    while ((pWin32PwrCallout = IntGetNextPowerCallout()) != NULL)
     {
         ExFreePoolWithTag(pWin32PwrCallout, USERTAG_POWER);
     }
@@ -423,5 +508,214 @@ IntHandlePowerState(
     ERR("IntHandlePowerState is UNIMPLEMENTED\n");
     return STATUS_NOT_IMPLEMENTED;
 }
+
+/**
+ * @brief
+ * Runs the power callouts that were queued by threads that could
+ * not run them (system threads, attached or non-GUI threads). The
+ * power request thread of CSRSS calls this each time the power
+ * request event is signaled. The caller holds the USER lock.
+ */
+VOID
+NTAPI
+IntUserPowerCalloutWorker(VOID)
+{
+    IntDeployPowerCallout();
+}
+
+#if (WINVER >= 0x0600)
+/**
+ * @brief
+ * Registers a window for the power setting notifications of a
+ * setting (RegisterPowerSettingNotification). The window gets
+ * WM_POWERBROADCAST PBT_POWERSETTINGCHANGE with the current value
+ * right away and again whenever the value changes.
+ *
+ * @return
+ * The notification handle, or 0 with the last error set.
+ */
+ULONG_PTR
+NTAPI
+IntRegisterPowerSettingNotification(
+    _In_ PWND pWnd,
+    _In_ LPCGUID UserGuid)
+{
+    PUSER_POWER_SETTING_NOTIFY pNotify;
+    GUID Guid;
+    LPCGUID KernelGuid;
+    NTSTATUS Status;
+
+    ASSERT(UserIsEnteredExclusive());
+
+    _SEH2_TRY
+    {
+        ProbeForRead(UserGuid, sizeof(GUID), 1);
+        Guid = *UserGuid;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        EngSetLastError(ERROR_NOACCESS);
+        _SEH2_YIELD(return 0);
+    }
+    _SEH2_END;
+
+    /* The display of the (only) session is the console display */
+    KernelGuid = IsEqualGUID(&Guid, &GUID_SESSION_DISPLAY_STATUS_) ? &GUID_CONSOLE_DISPLAY_STATE_ : &Guid;
+
+    pNotify = ExAllocatePoolZero(PagedPool, sizeof(*pNotify), USERTAG_POWER);
+    if (pNotify == NULL)
+    {
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+
+    pNotify->ppi = GetW32ProcessInfo();
+    pNotify->hwnd = UserHMGetHandle(pWnd);
+    pNotify->Guid = Guid;
+
+    KeEnterCriticalRegion();
+    ExAcquireFastMutexUnsafe(gpPowerSettingNotifyLock);
+    do
+    {
+        pNotify->Notify = ++gLastPowerSettingNotify;
+    } while (pNotify->Notify == 0);
+    ExReleaseFastMutexUnsafe(gpPowerSettingNotifyLock);
+    KeLeaveCriticalRegion();
+
+    /* The callback only reads the registration, it may run before this returns */
+    Status = PoRegisterPowerSettingCallback(NULL,
+                                            KernelGuid,
+                                            IntPowerSettingCallback,
+                                            pNotify,
+                                            &pNotify->PoHandle);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("Cannot register window %p for power setting %08lx (0x%08lx)\n",
+            pNotify->hwnd, Guid.Data1, Status);
+        ExFreePoolWithTag(pNotify, USERTAG_POWER);
+        SetLastNtError(Status);
+        return 0;
+    }
+
+    KeEnterCriticalRegion();
+    ExAcquireFastMutexUnsafe(gpPowerSettingNotifyLock);
+    InsertTailList(&gPowerSettingNotifyList, &pNotify->Link);
+    ExReleaseFastMutexUnsafe(gpPowerSettingNotifyLock);
+    KeLeaveCriticalRegion();
+
+    return pNotify->Notify;
+}
+
+static
+VOID
+IntFreePowerSettingNotification(
+    _In_ PUSER_POWER_SETTING_NOTIFY pNotify)
+{
+    NTSTATUS Status;
+
+    /* Waits for a callback that is running; changes reported before stay queued */
+    Status = PoUnregisterPowerSettingCallback(pNotify->PoHandle);
+    ASSERT(NT_SUCCESS(Status));
+    ExFreePoolWithTag(pNotify, USERTAG_POWER);
+}
+
+/* Takes a registration of the process off the list; Notify == 0 takes any */
+static
+PUSER_POWER_SETTING_NOTIFY
+IntRemovePowerSettingNotification(
+    _In_ PPROCESSINFO ppi,
+    _In_ ULONG_PTR Notify)
+{
+    PUSER_POWER_SETTING_NOTIFY pNotify = NULL;
+    PLIST_ENTRY Entry;
+
+    KeEnterCriticalRegion();
+    ExAcquireFastMutexUnsafe(gpPowerSettingNotifyLock);
+    for (Entry = gPowerSettingNotifyList.Flink;
+         Entry != &gPowerSettingNotifyList;
+         Entry = Entry->Flink)
+    {
+        PUSER_POWER_SETTING_NOTIFY pEntry = CONTAINING_RECORD(Entry, USER_POWER_SETTING_NOTIFY, Link);
+        if (pEntry->ppi == ppi && (Notify == 0 || pEntry->Notify == Notify))
+        {
+            RemoveEntryList(&pEntry->Link);
+            pNotify = pEntry;
+            break;
+        }
+    }
+    ExReleaseFastMutexUnsafe(gpPowerSettingNotifyLock);
+    KeLeaveCriticalRegion();
+
+    return pNotify;
+}
+
+/**
+ * @brief
+ * Removes a registration of the calling process
+ * (UnregisterPowerSettingNotification).
+ */
+BOOL
+NTAPI
+IntUnregisterPowerSettingNotification(
+    _In_ ULONG_PTR Notify)
+{
+    PUSER_POWER_SETTING_NOTIFY pNotify;
+
+    pNotify = Notify ? IntRemovePowerSettingNotification(GetW32ProcessInfo(), Notify) : NULL;
+    if (pNotify == NULL)
+    {
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    IntFreePowerSettingNotification(pNotify);
+    return TRUE;
+}
+
+/**
+ * @brief
+ * Removes the registrations of a process that goes away.
+ */
+VOID
+NTAPI
+IntCleanupPowerSettingNotifications(
+    _In_ PPROCESSINFO ppi)
+{
+    PUSER_POWER_SETTING_NOTIFY pNotify;
+
+    /* Power management is not up before CSRSS initialized USER */
+    if (gpPowerSettingNotifyLock == NULL)
+        return;
+
+    while ((pNotify = IntRemovePowerSettingNotification(ppi, 0)) != NULL)
+        IntFreePowerSettingNotification(pNotify);
+}
+#else
+ULONG_PTR
+NTAPI
+IntRegisterPowerSettingNotification(
+    _In_ PWND pWnd,
+    _In_ LPCGUID UserGuid)
+{
+    EngSetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return 0;
+}
+
+BOOL
+NTAPI
+IntUnregisterPowerSettingNotification(
+    _In_ ULONG_PTR Notify)
+{
+    EngSetLastError(ERROR_INVALID_HANDLE);
+    return FALSE;
+}
+
+VOID
+NTAPI
+IntCleanupPowerSettingNotifications(
+    _In_ PPROCESSINFO ppi)
+{
+}
+#endif
 
 /* EOF */

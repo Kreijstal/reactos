@@ -110,6 +110,36 @@ BOOL NTAPI _UserSoundSentry(VOID)
     return TRUE;
 }
 
+/*
+ * Win32k queues a power callout it cannot run on the thread that raised it
+ * (a system thread, an attached or a non-GUI thread) and signals the power
+ * request event; this thread then runs the queued callouts in win32k.
+ */
+static
+ULONG
+NTAPI
+UserpPowerRequestThread(PVOID Parameter)
+{
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(Parameter);
+
+    for (;;)
+    {
+        Status = NtWaitForSingleObject(ghPowerRequestEvent, FALSE, NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Power request wait failed with Status 0x%08lx\n", Status);
+            break;
+        }
+
+        NtUserCallNoParam(NOPARAM_ROUTINE_USERPWRCALLOUTWORKER);
+    }
+
+    RtlExitUserThread(Status);
+    return 0;
+}
+
 ULONG
 NTAPI
 CreateSystemThreads(PVOID pParam)
@@ -294,6 +324,31 @@ CSR_SERVER_DLL_INIT(UserServerDllInitialization)
     {
         DPRINT1("NtUserInitialize failed with Status 0x%08x\n", Status);
         return Status;
+    }
+
+    /* Run the power callouts win32k queues for us */
+    {
+        HANDLE hThread;
+        CLIENT_ID ClientId;
+
+        Status = RtlCreateUserThread(NtCurrentProcess(),
+                                     NULL,
+                                     TRUE,
+                                     0,
+                                     0,
+                                     0,
+                                     UserpPowerRequestThread,
+                                     NULL,
+                                     &hThread,
+                                     &ClientId);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Power request thread creation failed with Status 0x%08x\n", Status);
+            return Status;
+        }
+
+        CsrAddStaticServerThread(hThread, &ClientId, 0);
+        NtResumeThread(hThread, NULL);
     }
 
     /* All done */

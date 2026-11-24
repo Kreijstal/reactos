@@ -162,6 +162,9 @@ static MSGMEMORY g_MsgMemory[] =
     { WM_HELP, sizeof(HELPINFO), MMS_FLAG_READWRITE },
     { WM_NEXTMENU, sizeof(MDINEXTMENU), MMS_FLAG_READWRITE },
     { WM_DEVICECHANGE, MMS_SIZE_SPECIAL, MMS_FLAG_READ },
+#if (WINVER >= 0x0600)
+    { WM_POWERBROADCAST, MMS_SIZE_SPECIAL, MMS_FLAG_READ },
+#endif
 };
 
 static PMSGMEMORY FASTCALL
@@ -252,6 +255,19 @@ MsgMemorySize(PMSGMEMORY MsgMemoryEntry, WPARAM wParam, LPARAM lParam)
                     }
                 }
                 break;
+
+#if (WINVER >= 0x0600)
+            case WM_POWERBROADCAST:
+                {
+                    /* Only a power setting change carries data */
+                    if (lParam && wParam == PBT_POWERSETTINGCHANGE)
+                    {
+                        PPOWERBROADCAST_SETTING Setting = (PPOWERBROADCAST_SETTING)lParam;
+                        Size = FIELD_OFFSET(POWERBROADCAST_SETTING, Data) + Setting->DataLength;
+                    }
+                }
+                break;
+#endif
 
             default:
                 ASSERT(FALSE);
@@ -2109,7 +2125,11 @@ UserSendNotifyMessage( HWND hWnd,
         PWND DesktopWindow;
         ULONG i;
 
+        /* Before the first desktop there is no window to tell */
         DesktopWindow = UserGetDesktopWindow();
+        if (DesktopWindow == NULL)
+            return TRUE;
+
         List = IntWinListChildren(DesktopWindow);
 
         if (List != NULL)

@@ -203,6 +203,9 @@ UserProcessDestroy(PEPROCESS Process)
 
     IntFreeImeHotKeys();
 
+    /* Its windows are no longer told about power setting changes */
+    IntCleanupPowerSettingNotifications(ppiCurrent);
+
     if (gpwlCache)
     {
         ExFreePoolWithTag(gpwlCache, USERTAG_WINDOWLIST);
