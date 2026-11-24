@@ -1960,8 +1960,16 @@ IopSendRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
     }
 
     PiNotifyTargetDeviceChange(&GUID_TARGET_DEVICE_REMOVE_COMPLETE, DeviceObject, NULL);
+    /*
+     * The device tree lets go of the PDO. The bus driver of a device that is
+     * still there (failed AddDevice, disabled, query-removed) keeps its PDO,
+     * and the tree references it again when the device restarts
+     * (PiRestartDevNode). Only the PDO of a device that is gone must have no
+     * references left but those of the handles still open to it.
+     */
     LONG_PTR refCount = ObDereferenceObject(DeviceObject);
-    if (refCount != 0)
+    if (refCount != 0 && (DeviceNode->Flags & DNF_DEVICE_GONE) &&
+        !PiDeviceStackHasOpenHandles(DeviceObject))
     {
         DPRINT1("Leaking device %wZ, refCount = %d\n", &DeviceNode->InstancePath, (INT32)refCount);
     }
