@@ -17,6 +17,14 @@ target_compile_definitions(iocreatefile_drv PRIVATE KMT_STANDALONE_DRIVER)
 add_rostests_file(TARGET iocreatefile_drv)
 
 #
+# IoDeviceFailedAdd
+#
+add_library(iofailedadd_drv MODULE IoDeviceFailedAdd_drv.c)
+set_module_type(iofailedadd_drv kernelmodedriver)
+add_importlibs(iofailedadd_drv ntoskrnl hal)
+add_rostests_file(TARGET iofailedadd_drv)
+
+#
 # IoDeviceObject
 #
 list(APPEND IODEVICEOBJECT_DRV_SOURCE

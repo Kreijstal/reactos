@@ -22,6 +22,7 @@ KMT_TESTFUNC Test_FltMgrLoad;
 KMT_TESTFUNC Test_FltMgrReg;
 KMT_TESTFUNC Test_HidPDescription;
 KMT_TESTFUNC Test_IoCreateFile;
+KMT_TESTFUNC Test_IoDeviceFailedAdd;
 KMT_TESTFUNC Test_IoDeviceObject;
 KMT_TESTFUNC Test_IoDeviceRestart;
 KMT_TESTFUNC Test_IoReadWrite;
@@ -95,6 +96,7 @@ const KMT_TEST TestList[] =
     { "NetioWsk",                     Test_NetioWsk },
     { "HidPDescription",              Test_HidPDescription },
     { "IoCreateFile",                 Test_IoCreateFile },
+    { "IoDeviceFailedAdd",            Test_IoDeviceFailedAdd },
     { "IoDeviceObject",               Test_IoDeviceObject },
     { "IoDeviceRestart",              Test_IoDeviceRestart },
     { "IoReadWrite",                  Test_IoReadWrite },
