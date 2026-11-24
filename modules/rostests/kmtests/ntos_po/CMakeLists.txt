@@ -25,7 +25,7 @@ list(APPEND POBATTERY_DRV_SOURCE
 
 add_library(pobattery_drv MODULE ${POBATTERY_DRV_SOURCE})
 set_module_type(pobattery_drv kernelmodedriver)
-target_link_libraries(pobattery_drv kmtest_printf ${PSEH_LIB})
+target_link_libraries(pobattery_drv kmtest_printf memcmp ${PSEH_LIB})
 add_importlibs(pobattery_drv ntoskrnl hal battc)
 target_compile_definitions(pobattery_drv PRIVATE KMT_STANDALONE_DRIVER)
 add_rostests_file(TARGET pobattery_drv)
