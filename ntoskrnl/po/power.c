@@ -371,6 +371,68 @@ PopSetSystemPowerStateTraverse(PDEVICE_NODE DeviceNode,
 #endif
 }
 
+/**
+ * @brief      Calls Action for each device node of the subtree at RootNode,
+ *             every node after all of its children and RootNode last
+ *
+ * A system that leaves S0 tells the leaves of the device tree first and a bus
+ * only after all the devices on it, as Windows does: a bus that powers down
+ * first strands the I/O of the devices that still run on it. A KMDF bus waits
+ * for that I/O for good when it stops its power-managed queues, which is how
+ * a reboot hung behind the xHCI controller of a USB boot disk that classpnp
+ * was still polling.
+ */
+static
+VOID
+PopTraverseDeviceTreeChildrenFirst(
+    _In_ PDEVICE_NODE RootNode,
+    _In_ DEVICETREE_TRAVERSE_ROUTINE Action,
+    _In_ PVOID Context)
+{
+    PDEVICE_NODE DeviceNode;
+    PDEVICE_NODE NextNode;
+    KIRQL OldIrql;
+
+    PAGED_CODE();
+
+    /* The PDO reference keeps a node whose device goes away meanwhile */
+    KeAcquireSpinLock(&IopDeviceTreeLock, &OldIrql);
+    for (DeviceNode = RootNode; DeviceNode->Child != NULL; DeviceNode = DeviceNode->Child)
+        ASSERT(DeviceNode->Child->Parent == DeviceNode);
+    ObReferenceObject(DeviceNode->PhysicalDeviceObject);
+    KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
+
+    for (;;)
+    {
+        (VOID)Action(DeviceNode, Context);
+
+        if (DeviceNode == RootNode)
+        {
+            ObDereferenceObject(DeviceNode->PhysicalDeviceObject);
+            return;
+        }
+
+        /* Next is the deepest first descendant of the next sibling, else the parent */
+        KeAcquireSpinLock(&IopDeviceTreeLock, &OldIrql);
+        if (DeviceNode->Sibling != NULL)
+        {
+            ASSERT(DeviceNode->Sibling->Parent == DeviceNode->Parent);
+            for (NextNode = DeviceNode->Sibling; NextNode->Child != NULL; NextNode = NextNode->Child)
+                ASSERT(NextNode->Child->Parent == NextNode);
+        }
+        else
+        {
+            NextNode = DeviceNode->Parent;
+            ASSERT(NextNode != NULL);
+        }
+        ObReferenceObject(NextNode->PhysicalDeviceObject);
+        KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
+
+        ObDereferenceObject(DeviceNode->PhysicalDeviceObject);
+        DeviceNode = NextNode;
+    }
+}
+
 NTSTATUS
 NTAPI
 PopSetSystemPowerState(SYSTEM_POWER_STATE PowerState, POWER_ACTION PowerAction)
@@ -378,7 +440,6 @@ PopSetSystemPowerState(SYSTEM_POWER_STATE PowerState, POWER_ACTION PowerAction)
     PDEVICE_OBJECT DeviceObject;
     PDEVICE_OBJECT Fdo;
     NTSTATUS Status;
-    DEVICETREE_TRAVERSE_CONTEXT Context;
     POWER_STATE_TRAVERSE_CONTEXT PowerContext;
 
     Status = IopGetSystemPowerDeviceObject(&DeviceObject);
@@ -402,25 +463,19 @@ PopSetSystemPowerState(SYSTEM_POWER_STATE PowerState, POWER_ACTION PowerAction)
     PowerContext.SystemPowerState = PowerState;
     PowerContext.PowerDevice = Fdo;
 
-    /* Query for system power change */
-    IopInitDeviceTreeTraverseContext(&Context,
-                                     IopRootDeviceNode,
-                                     PopQuerySystemPowerStateTraverse,
-                                     &PowerContext);
+    /* Leaving S0, every device is told before the bus it is on */
+    ASSERT(PowerState > PowerSystemWorking);
 
-    Status = IopTraverseDeviceTree(&Context);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("Query system power state failed; changing state anyway\n");
-    }
+    /* Query for system power change */
+    PopTraverseDeviceTreeChildrenFirst(IopRootDeviceNode,
+                                       PopQuerySystemPowerStateTraverse,
+                                       &PowerContext);
 
     /* Set system power change */
-    IopInitDeviceTreeTraverseContext(&Context,
-                                     IopRootDeviceNode,
-                                     PopSetSystemPowerStateTraverse,
-                                     &PowerContext);
-
-    IopTraverseDeviceTree(&Context);
+    PopTraverseDeviceTreeChildrenFirst(IopRootDeviceNode,
+                                       PopSetSystemPowerStateTraverse,
+                                       &PowerContext);
+    Status = STATUS_SUCCESS;
 
     if (!PopAcpiPresent) return STATUS_NOT_IMPLEMENTED;
 
