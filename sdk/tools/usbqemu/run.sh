@@ -8,7 +8,8 @@
 # $WORK/results.txt one verdict line: DONE (KMTCD-SUMMARY reached), HANG
 # (hard timeout), HANG-STALL (COM1 silent for $STALL s or no KMTCD marker for
 # $KMSTALL s: all vCPU registers, CPU0's stack and the PE image around its RIP
-# are saved first), EXITn, "+CRASH" when COM1 shows a bugcheck or debugger.
+# are saved first), REBOOTED (QEMU exited on a guest reset, -no-reboot),
+# EXITn, "+CRASH" when COM1 shows a bugcheck or debugger.
 # kmtcdrunner powers off through isa-debug-exit, so a finished run exits.
 # COM1 carries the debug log (KDBG builds, _WINKD_ off), COM2 the test output.
 #
@@ -87,6 +88,6 @@ C1=$O/com1.log
 SUM=$(cat "$O/com2.log" "$C1" | command grep -a -m1 KMTCD-SUMMARY | tr -d '\r')
 ENDS=$(command grep -a KMTCD-END "$O/com2.log" | tr -d '\r' | sed 's/^.*KMTCD-END //; s/ exit=/|/' | paste -sd';')
 CRASH=$(command grep -a -m1 -E 'Entered debugger|\*\*\* Fatal System Error|KeBugCheck|STOP: 0x|kdb:>|Unhandled exception|Assertion failed' "$C1" | tr -d '\r' | cut -c1-160)
-if [ -f "$O/stall.txt" ]; then V=HANG-STALL; elif [ -n "$SUM" ]; then V=DONE; elif [ $RC = 124 ] || [ $RC = 137 ]; then V=HANG; else V=EXIT$RC; fi
+if [ -f "$O/stall.txt" ]; then V=HANG-STALL; elif [ -n "$SUM" ]; then V=DONE; elif [ $RC = 124 ] || [ $RC = 137 ]; then V=HANG; elif [ $RC = 0 ]; then V=REBOOTED; else V=EXIT$RC; fi
 [ -n "$CRASH" ] && V="$V+CRASH"
 echo "$TAG verdict=$V t=${EL}s | $SUM | ends=$ENDS | crash=$CRASH" | tee -a "$WORK/results.txt"

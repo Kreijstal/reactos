@@ -1,5 +1,5 @@
 #!/bin/bash
-# [LIST=removal] mkimgs.sh <work-dir> <build-dir>
+# [LIST=removal|reboot] mkimgs.sh <work-dir> <build-dir>
 #
 # Builds the scratch images run.sh boots with, in <work-dir>/img, without
 # mounting anything: three USB disks (usb0 FAT with a 96 MB payload file,
@@ -33,7 +33,15 @@ rm -f payload.bin
 # %D = control disk letter, %K = kmtest.exe (see kmtcdrunner). D: is usb0.
 # LIST=removal: UsbDiskRemoval first, for run.sh HOTPLUG=1
 # HOTPLUG_AFTER=USBDISK-UNPLUG-NOW (it waits for a disk to be unplugged).
-if [ "$LIST" = removal ]; then
+# LIST=reboot: read the USB disks, then reboot through the shutdown path with
+# every USB disk still mounted; run.sh reports REBOOTED once QEMU exits on the
+# reset (-no-reboot), HANG-STALL when the shutdown stops.
+if [ "$LIST" = reboot ]; then
+cat > RUN.LST <<'L'
+%D:\kernel32_apitest.exe UsbDiskVerify
+shutdown -r -f -t 0
+L
+elif [ "$LIST" = removal ]; then
 cat > RUN.LST <<'L'
 %D:\kernel32_apitest.exe UsbDiskRemoval
 %D:\kernel32_apitest.exe UsbDiskVerify
