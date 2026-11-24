@@ -131,10 +131,107 @@ test_IcmpSendEcho(void)
     IcmpCloseHandle(hIcmp);
 }
 
+typedef DWORD (WINAPI *PFN_ICMPSENDECHO2EX)(HANDLE, HANDLE, PVOID, PVOID, IPAddr, IPAddr,
+                                            LPVOID, WORD, PIP_OPTION_INFORMATION,
+                                            LPVOID, DWORD, DWORD);
+
+/* The first adapter with an IPv4 address and a gateway */
+static
+BOOL
+GetLocalAndGateway(IPAddr *Local, IPAddr *Gateway)
+{
+    ULONG Size = 0;
+    PIP_ADAPTER_INFO Info, Adapter;
+    BOOL Found = FALSE;
+
+    if (GetAdaptersInfo(NULL, &Size) != ERROR_BUFFER_OVERFLOW)
+        return FALSE;
+    Info = malloc(Size);
+    if (!Info)
+        return FALSE;
+    if (GetAdaptersInfo(Info, &Size) == ERROR_SUCCESS)
+    {
+        for (Adapter = Info; Adapter && !Found; Adapter = Adapter->Next)
+        {
+            *Local = inet_addr(Adapter->IpAddressList.IpAddress.String);
+            *Gateway = inet_addr(Adapter->GatewayList.IpAddress.String);
+            Found = (*Local != 0 && *Local != INADDR_NONE &&
+                     *Gateway != 0 && *Gateway != INADDR_NONE);
+        }
+    }
+    free(Info);
+    return Found;
+}
+
+static
+void
+test_IcmpSendEcho2Ex(void)
+{
+    PFN_ICMPSENDECHO2EX pIcmpSendEcho2Ex;
+    HANDLE hIcmp;
+    char SendData[32] = "Data Buffer";
+    DWORD ReplySize = sizeof(ICMP_ECHO_REPLY) + sizeof(SendData) + 8 + 2 * sizeof(PVOID); /* + IO_STATUS_BLOCK */
+    PICMP_ECHO_REPLY Reply;
+    IPAddr Loopback = htonl(INADDR_LOOPBACK), Local, Gateway;
+    DWORD nReplies;
+
+    pIcmpSendEcho2Ex = (PFN_ICMPSENDECHO2EX)GetProcAddress(GetModuleHandleW(L"iphlpapi.dll"), "IcmpSendEcho2Ex");
+    ok(pIcmpSendEcho2Ex != NULL, "IcmpSendEcho2Ex is not exported\n");
+    if (!pIcmpSendEcho2Ex)
+        return;
+
+    hIcmp = IcmpCreateFile();
+    if (hIcmp == INVALID_HANDLE_VALUE)
+    {
+        skip("IcmpCreateFile failed unexpectedly: %lu\n", GetLastError());
+        return;
+    }
+    Reply = malloc(ReplySize);
+
+    /* Loopback from the loopback address */
+    SetLastError(0xDEADBEEF);
+    nReplies = pIcmpSendEcho2Ex(hIcmp, NULL, NULL, NULL, Loopback, Loopback,
+                                SendData, sizeof(SendData), NULL, Reply, ReplySize, 5000);
+    ok(nReplies == 1, "loopback: %lu replies, error %lu\n", nReplies, GetLastError());
+    if (nReplies == 1)
+    {
+        ok(Reply->Status == IP_SUCCESS, "loopback: status %lu\n", Reply->Status);
+        ok(Reply->Address == Loopback, "loopback: reply from 0x%lx\n", Reply->Address);
+    }
+
+    /* A source address that is not ours is refused */
+    SetLastError(0xDEADBEEF);
+    nReplies = pIcmpSendEcho2Ex(hIcmp, NULL, NULL, NULL, inet_addr("192.0.2.77"), Loopback,
+                                SendData, sizeof(SendData), NULL, Reply, ReplySize, 2000);
+    ok(nReplies == 0, "foreign source: %lu replies\n", nReplies);
+
+    /* From the adapter's own address to its gateway: the echo leaves through that adapter */
+    if (GetLocalAndGateway(&Local, &Gateway))
+    {
+        SetLastError(0xDEADBEEF);
+        nReplies = pIcmpSendEcho2Ex(hIcmp, NULL, NULL, NULL, Local, Gateway,
+                                    SendData, sizeof(SendData), NULL, Reply, ReplySize, 5000);
+        ok(nReplies == 1, "adapter source: %lu replies, error %lu\n", nReplies, GetLastError());
+        if (nReplies == 1)
+        {
+            ok(Reply->Status == IP_SUCCESS, "adapter source: status %lu\n", Reply->Status);
+            ok(Reply->Address == Gateway, "adapter source: reply from 0x%lx\n", Reply->Address);
+        }
+    }
+    else
+    {
+        skip("No adapter with an IPv4 address and a gateway\n");
+    }
+
+    free(Reply);
+    IcmpCloseHandle(hIcmp);
+}
+
 START_TEST(icmp)
 {
     test_IcmpCreateFile();
     test_Icmp6CreateFile();
     test_IcmpCloseHandle();
     test_IcmpSendEcho();
+    test_IcmpSendEcho2Ex();
 }

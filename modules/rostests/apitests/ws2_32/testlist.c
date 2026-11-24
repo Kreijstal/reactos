@@ -16,6 +16,7 @@ extern void func_nostartup(void);
 extern void func_open_osfhandle(void);
 extern void func_recv(void);
 extern void func_send(void);
+extern void func_sendbound(void);
 extern void func_sendflood(void);
 extern void func_WSAAsync(void);
 extern void func_WSAIoctl(void);
@@ -38,6 +39,7 @@ const struct test winetest_testlist[] =
     { "open_osfhandle", func_open_osfhandle },
     { "recv", func_recv },
     { "send", func_send },
+    { "sendbound", func_sendbound },
     { "sendflood", func_sendflood },
     { "WSAAsync", func_WSAAsync },
     { "WSAIoctl", func_WSAIoctl },
