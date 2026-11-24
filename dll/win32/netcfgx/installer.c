@@ -783,13 +783,23 @@ InstallNetDevice(
         DEVINST dnDevInst = DeviceInfoData->DevInst;
         ULONG ulStatus, ulProblem;
 
-        /* A device that has not started yet reads the linkage when it starts */
         if (CM_Get_DevNode_Status(&ulStatus, &ulProblem, dnDevInst, 0) == CR_SUCCESS &&
             (ulStatus & DN_STARTED))
         {
             CM_Disable_DevNode(dnDevInst, 0);
+            CM_Enable_DevNode(dnDevInst, 0);
         }
-        CM_Enable_DevNode(dnDevInst, 0);
+        else
+        {
+            /*
+             * A device that has not started yet reads the linkage when it
+             * starts. Set it up rather than only enable it: it may not run
+             * because of a problem, as when NDIS failed its AddDevice before
+             * it was installed (a CriticalDeviceDatabase-bound boot adapter
+             * without its Linkage key).
+             */
+            CM_Setup_DevNode(dnDevInst, CM_SETUP_DEVNODE_READY);
+        }
     }
 
     rc = ERROR_SUCCESS;

@@ -6062,9 +6062,19 @@ SetupDiInstallDevice(
        goto cleanup;
     }
 
-    /* Start the device */
+    /*
+     * Start the device. Set it up rather than only enable it: it may not run
+     * because of a problem, as when its driver failed AddDevice before the
+     * device was installed (a CriticalDeviceDatabase-bound boot device).
+     */
     if (!RebootRequired && !(InstallParams.Flags & (DI_NEEDRESTART | DI_NEEDREBOOT | DI_DONOTCALLCONFIGMG)))
-        ret = ResetDevice(DeviceInfoSet, DeviceInfoData);
+    {
+        CONFIGRET cr = CM_Setup_DevNode_Ex(DeviceInfoData->DevInst, CM_SETUP_DEVNODE_READY,
+                                           ((struct DeviceInfoSet *)DeviceInfoSet)->hMachine);
+        ret = (cr == CR_SUCCESS);
+        if (!ret)
+            SetLastError(GetErrorCodeFromCrCode(cr));
+    }
     else
         ret = TRUE;
 
