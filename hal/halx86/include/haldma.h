@@ -356,13 +356,11 @@ typedef struct _ADAPTER_OBJECT {
    BOOLEAN Dma32BitAddresses;
    BOOLEAN Dma64BitAddresses;
    LIST_ENTRY AdapterList;
+   /* Map buffer growth for this adapter's waiting request; GrowWorkItemQueued
+    * is protected by the master adapter lock */
+   WORK_QUEUE_ITEM GrowWorkItem;
+   BOOLEAN GrowWorkItemQueued;
 } ADAPTER_OBJECT;
-
-typedef struct _GROW_WORK_ITEM {
-   WORK_QUEUE_ITEM WorkQueueItem;
-   PADAPTER_OBJECT AdapterObject;
-   ULONG NumberOfMapRegisters;
-} GROW_WORK_ITEM, *PGROW_WORK_ITEM;
 
 #define MAP_BASE_SW_SG 1
 

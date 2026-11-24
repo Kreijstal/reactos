@@ -93,6 +93,13 @@ static BOOLEAN HalpEisaDma;
 #ifndef _MINIHAL_
 static ULONGLONG HalpMaximumPhysicalMemoryAddress = MAXULONGLONG;
 static PADAPTER_OBJECT HalpMasterAdapter;
+#ifndef _MINIHAL_
+static
+VOID
+HalpFreeMapRegisters(IN PADAPTER_OBJECT MasterAdapter,
+                     IN PVOID MapRegisterBase,
+                     IN ULONG NumberOfMapRegisters);
+#endif
 #endif
 
 static const ULONG_PTR HalpEisaPortPage[8] = {
@@ -1591,8 +1598,8 @@ VOID
 NTAPI
 HalpGrowMapBufferWorker(IN PVOID DeferredContext)
 {
-    PGROW_WORK_ITEM WorkItem = (PGROW_WORK_ITEM)DeferredContext;
-    PADAPTER_OBJECT MasterAdapter = WorkItem->AdapterObject->MasterAdapter;
+    PADAPTER_OBJECT AdapterObject = (PADAPTER_OBJECT)DeferredContext;
+    PADAPTER_OBJECT MasterAdapter = AdapterObject->MasterAdapter;
     ULONG NumberOfMapRegisters;
     PADAPTER_OBJECT Head;
     KIRQL OldIrql;
@@ -1625,6 +1632,9 @@ HalpGrowMapBufferWorker(IN PVOID DeferredContext)
         KeAcquireSpinLock(&MasterAdapter->SpinLock, &OldIrql);
         if (IsListEmpty(&MasterAdapter->AdapterQueue))
         {
+            /* This adapter is not queued: its next wait queues the item again */
+            ASSERT(AdapterObject->GrowWorkItemQueued);
+            AdapterObject->GrowWorkItemQueued = FALSE;
             KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
             KeSetEvent(&HalpDmaLock, 0, 0);
             break;
@@ -1674,12 +1684,10 @@ HalpGrowMapBufferWorker(IN PVOID DeferredContext)
          * Walk the queue no matter how the growth went: map registers freed
          * since the check above may satisfy the head by now, and this routine
          * and IoFreeMapRegisters are the only places that ever re-examine the
-         * queue. The easiest way to walk it is to call IoFreeMapRegisters to
-         * not free any registers. Note that we use the magic (PVOID)2 map
-         * register base to bypass the parameter checking.
+         * queue. Walk it by freeing no registers.
          */
         OldIrql = KfRaiseIrql(DISPATCH_LEVEL);
-        IoFreeMapRegisters(WorkItem->AdapterObject, (PVOID)2, 0);
+        HalpFreeMapRegisters(MasterAdapter, NULL, 0);
         KfLowerIrql(OldIrql);
 
         /*
@@ -1687,8 +1695,8 @@ HalpGrowMapBufferWorker(IN PVOID DeferredContext)
          * first, and stopped at the next request the pool cannot serve. Look
          * at the queue again until it is empty: a worker that stopped while
          * requests were still queued (because the head fit, served by a walk
-         * still in progress elsewhere) left the request behind that head to
-         * wait for a free, and its own work item may already have run.
+         * still in progress elsewhere) would leave the request behind that
+         * head to wait for a free.
          */
         if (HeadFits || Grew)
             continue;
@@ -1715,12 +1723,13 @@ HalpGrowMapBufferWorker(IN PVOID DeferredContext)
 
             Delay.QuadPart = -250 * 10000;    /* 250 ms */
             KeDelayExecutionThread(KernelMode, FALSE, &Delay);
-            ExQueueWorkItem(&WorkItem->WorkQueueItem, DelayedWorkQueue);
+            ExQueueWorkItem(&AdapterObject->GrowWorkItem, DelayedWorkQueue);
             return;
         }
     }
 
-    ExFreePool(WorkItem);
+    /* Taken by HalpQueueGrowMapBuffers */
+    ObDereferenceObject(AdapterObject);
 }
 
 /*
@@ -1736,20 +1745,34 @@ VOID
 HalpQueueGrowMapBuffers(IN PADAPTER_OBJECT AdapterObject,
                         IN ULONG NumberOfMapRegisters)
 {
-    PGROW_WORK_ITEM WorkItem;
+    PADAPTER_OBJECT MasterAdapter = AdapterObject->MasterAdapter;
 
-    WorkItem = ExAllocatePoolWithTag(NonPagedPool, sizeof(GROW_WORK_ITEM), TAG_DMA);
-    if (!WorkItem)
+    /* Called with the master adapter lock held, right after queueing */
+    UNREFERENCED_PARAMETER(MasterAdapter);
+    UNREFERENCED_PARAMETER(NumberOfMapRegisters);
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+    ASSERT(!IsListEmpty(&MasterAdapter->AdapterQueue));
+
+    /*
+     * Each adapter has a work item of its own: it is not allocated per
+     * request, since a work item that could not be allocated left the
+     * adapter queued, its driver already told the request was accepted, and
+     * nothing would look at the queue again unless some other adapter
+     * happened to free map registers. It is per adapter, not one for the
+     * master queue, so that a worker thread held up (readied for a busy
+     * processor, say) holds up only the growth of its own adapter's request.
+     * The worker grows for whoever heads the queue and runs until the queue
+     * is empty; while it is queued or running for this adapter, it also
+     * serves this adapter's next wait. The reference keeps the adapter, and
+     * so the work item, alive until the worker is done with it.
+     */
+    if (!AdapterObject->GrowWorkItemQueued)
     {
-        DPRINT1("HalpQueueGrowMapBuffers: no memory for the growth work item\n");
-        return;
+        AdapterObject->GrowWorkItemQueued = TRUE;
+        ObReferenceObject(AdapterObject);
+        ExInitializeWorkItem(&AdapterObject->GrowWorkItem, HalpGrowMapBufferWorker, AdapterObject);
+        ExQueueWorkItem(&AdapterObject->GrowWorkItem, DelayedWorkQueue);
     }
-
-    ExInitializeWorkItem(&WorkItem->WorkQueueItem, HalpGrowMapBufferWorker, WorkItem);
-    WorkItem->AdapterObject = AdapterObject;
-    WorkItem->NumberOfMapRegisters = NumberOfMapRegisters;
-
-    ExQueueWorkItem(&WorkItem->WorkQueueItem, DelayedWorkQueue);
 }
 
 /**
@@ -2115,14 +2138,31 @@ IoFreeMapRegisters(IN PADAPTER_OBJECT AdapterObject,
                    IN ULONG NumberOfMapRegisters)
 {
     PADAPTER_OBJECT MasterAdapter = AdapterObject->MasterAdapter;
+
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+
+    if (!(MasterAdapter) || !(MapRegisterBase)) return;
+
+    HalpFreeMapRegisters(MasterAdapter, MapRegisterBase, NumberOfMapRegisters);
+}
+
+/*
+ * Free map registers (none if NumberOfMapRegisters is 0) and start the
+ * adapters waiting on the master queue that the pool can now serve.
+ */
+static
+VOID
+HalpFreeMapRegisters(IN PADAPTER_OBJECT MasterAdapter,
+                     IN PVOID MapRegisterBase,
+                     IN ULONG NumberOfMapRegisters)
+{
+    PADAPTER_OBJECT AdapterObject;
     PLIST_ENTRY ListEntry;
     KIRQL OldIrql;
     ULONG Index;
     ULONG Result;
 
     ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
-
-    if (!(MasterAdapter) || !(MapRegisterBase)) return;
 
     KeAcquireSpinLock(&MasterAdapter->SpinLock, &OldIrql);
 
