@@ -31,19 +31,28 @@ BOOL
 FLOATOBJ_bConvertToLong(FLOATOBJ *pf, PLONG pl)
 {
     EFLOAT_S *pef = (EFLOAT_S*)pf;
+    LONGLONG Mantissa = pef->lMant;
+    ULONG Shift;
 
     if (pef->lExp > 32)
     {
         return FALSE;
     }
 
+    /* |f| < 1, or 0 */
     if (pef->lExp < 2)
     {
         *pl = 0;
         return TRUE;
     }
 
-    *pl = EngMulDiv(pef->lMant, 1 << (pef->lExp - 2), 0x40000000);
+    /* f = lMant * 2^(lExp - 32). Truncate toward zero, like the cast that
+     * converts a FLOAT on the other architectures. */
+    Shift = 32 - pef->lExp;
+    if (Mantissa < 0)
+        *pl = (LONG)-((-Mantissa) >> Shift);
+    else
+        *pl = (LONG)(Mantissa >> Shift);
     return TRUE;
 }
 
@@ -90,6 +99,7 @@ extern const FLOATOBJ gef2;
 extern const FLOATOBJ gef16;
 
 #define FLOATOBJ_0 {0x00000000, 0x00000000}
+#define FLOATOBJ_1_2 {0x40000000, 0x00000001}
 #define FLOATOBJ_1 {0x40000000, 0x00000002}
 #define FLOATOBJ_16 {0x40000000, 0x00000006}
 #define FLOATOBJ_1_16 {0x40000000, 0xfffffffe}
@@ -106,6 +116,7 @@ extern const FLOATOBJ gef16;
 #define FLOATOBJ_GetFix(pf) ((LONG)(*(pf) * 16.))
 
 #define FLOATOBJ_0 0.
+#define FLOATOBJ_1_2 0.5
 #define FLOATOBJ_1 1.
 #define FLOATOBJ_16 16.
 #define FLOATOBJ_1_16 (1./16.)

@@ -13,14 +13,17 @@ BOOLEAN
 INTERNAL_ROUND_FLOATOBJ_TO_LONG(PFLOATOBJ value, PLONG result)
 {
     FLOATOBJ rounded = *value;
+    /* Not FLOATOBJ_AddFloat(.., 0.5f): on x86 a FLOATL is the IEEE bit
+     * pattern in a DWORD, so the float literal would be converted to 0 */
+    FLOATOBJ half = FLOATOBJ_1_2;
 
     if (FLOATOBJ_GreaterThanLong(&rounded, 0))
     {
-        FLOATOBJ_AddFloat(&rounded, 0.5f);
+        FLOATOBJ_Add(&rounded, &half);
     }
     else if (FLOATOBJ_LessThanLong(&rounded, 0))
     {
-        FLOATOBJ_SubFloat(&rounded, 0.5f);
+        FLOATOBJ_Sub(&rounded, &half);
     }
 
     return FLOATOBJ_bConvertToLong(&rounded, result);
