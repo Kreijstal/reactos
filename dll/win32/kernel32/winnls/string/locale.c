@@ -45,6 +45,7 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
 #define REG_SZ 1
 extern int wine_fold_string(int flags, const WCHAR *src, int srclen, WCHAR *dst, int dstlen);
 extern int wine_get_sortkey(const WCHAR *locale, int flags, const WCHAR *src, int srclen, char *dst, int dstlen);
+extern BOOL wine_load_sort_tables(void);
 extern int wine_compare_string(const WCHAR *locale, int flags, const WCHAR *str1, int len1, const WCHAR *str2, int len2);
 typedef NTSTATUS (WINAPI *PRTL_NORMALIZE_STRING)(ULONG, const WCHAR *, INT, WCHAR *, INT *);
 #ifdef __REACTOS__
@@ -4208,6 +4209,10 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
 
     if (len1 < 0) len1 = strlenW(str1);
     if (len2 < 0) len2 = strlenW(str2);
+
+    /* Last error is set by wine_load_sort_tables */
+    if (!wine_load_sort_tables())
+        return 0;
 
     ret = wine_compare_string(locale, flags, str1, len1, str2, len2);
 

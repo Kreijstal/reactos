@@ -14,7 +14,8 @@
 #include <k32.h>
 #include "wine/unicode.h"
 
-extern unsigned char K32sortdefault[];
+#define NDEBUG
+#include <debug.h>
 
 struct sortguid
 {
@@ -117,9 +118,47 @@ static struct
     const struct jamo_sort        *jamo;
 } sort;
 
-static BOOL sort_initialized;
+/* 0: not loaded, 1: a thread is loading it, 2: loaded */
+static volatile LONG sort_state;
 
-static void load_sortdefault_nls(void)
+/*
+ * The default sort table is a 3.3 MB system file, as on Windows. It is mapped
+ * read-only from System32 the first time a sort key is needed instead of being
+ * linked into kernel32, whose image would then no longer fit below ntdll.
+ */
+static NTSTATUS map_sortdefault_nls(const void **base)
+{
+    UNICODE_STRING file_name = RTL_CONSTANT_STRING(L"\\SystemRoot\\System32\\sortdefault.nls");
+    OBJECT_ATTRIBUTES attr;
+    IO_STATUS_BLOCK io;
+    HANDLE file, section;
+    PVOID view = NULL;
+    SIZE_T view_size = 0;
+    NTSTATUS status;
+
+    InitializeObjectAttributes(&attr, &file_name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    status = NtOpenFile(&file, FILE_READ_DATA | SYNCHRONIZE, &attr, &io, FILE_SHARE_READ,
+                        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+    if (!NT_SUCCESS(status))
+        return status;
+
+    status = NtCreateSection(&section, SECTION_MAP_READ | SECTION_QUERY, NULL, NULL,
+                             PAGE_READONLY, SEC_COMMIT, file);
+    NtClose(file);
+    if (!NT_SUCCESS(status))
+        return status;
+
+    status = NtMapViewOfSection(section, NtCurrentProcess(), &view, 0, 0, NULL, &view_size,
+                                ViewShare, 0, PAGE_READONLY);
+    NtClose(section);
+    if (!NT_SUCCESS(status))
+        return status;
+
+    *base = view;
+    return STATUS_SUCCESS;
+}
+
+static void parse_sortdefault_nls(const void *base)
 {
     const struct
     {
@@ -127,13 +166,10 @@ static void load_sortdefault_nls(void)
         UINT casemaps;
         UINT ctypes;
         UINT sortids;
-    } *header = (const void *)K32sortdefault;
+    } *header = base;
     const UINT *table;
     const struct sort_compression *last_compr;
     UINT i;
-
-    if (sort_initialized)
-        return;
 
     sort.keys = (const UINT *)((const char *)header + header->sortkeys);
 
@@ -157,8 +193,37 @@ static void load_sortdefault_nls(void)
         table += last_compr->len[i] * ((i + 5) / 2);
     table += 1 + table[0] / 2;
     sort.jamo = (const struct jamo_sort *)(table + 1);
+}
 
-    sort_initialized = TRUE;
+/* Returns FALSE, with the last error set, when the sort table cannot be mapped */
+BOOL wine_load_sort_tables(void)
+{
+    const void *base;
+    NTSTATUS status;
+
+    for (;;)
+    {
+        LONG state = InterlockedCompareExchange(&sort_state, 1, 0);
+
+        if (state == 2)
+            return TRUE;
+        if (state == 0)
+            break;
+        NtYieldExecution();
+    }
+
+    status = map_sortdefault_nls(&base);
+    if (!NT_SUCCESS(status))
+    {
+        DPRINT1("Cannot map sortdefault.nls, Status 0x%08lx\n", status);
+        InterlockedExchange(&sort_state, 0);
+        BaseSetLastNTError(status);
+        return FALSE;
+    }
+
+    parse_sortdefault_nls(base);
+    InterlockedExchange(&sort_state, 2);
+    return TRUE;
 }
 
 static BOOL sort_locale_is(const WCHAR *locale, const char *name)
@@ -209,7 +274,8 @@ static const struct sortguid *get_language_sort(const WCHAR *locale)
 {
     int index;
 
-    load_sortdefault_nls();
+    if (!wine_load_sort_tables())
+        return NULL;
     index = get_sort_index_for_locale(locale);
     return ((UINT)index < sort.guid_count) ? &sort.guids[index] : &sort.guids[0];
 }
