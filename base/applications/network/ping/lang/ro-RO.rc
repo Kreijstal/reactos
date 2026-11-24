@@ -12,7 +12,7 @@ STRINGTABLE
 BEGIN
     IDS_USAGE "\n\
 Utilizare: ping [-t] [-a] [-n număr] [-l dimensiune] [-f] [-i TDV] [-v TDS]\n\
-                [-w expirare] [-4] [-6] gazdă-destinație\n\
+                [-w expirare] [-S srcaddr] [-4] [-6] gazdă-destinație\n\
 \n\
 Opțiuni:\n\
     -t            Transmitere continuă până la oprire manuală.\n\
@@ -28,6 +28,7 @@ Opțiuni:\n\
                   nu este de actualitate și nu va avea efect asupra câmpului\n\
                   tipului de serviciu din antetul unui pachet IP).\n\
     -w expirare   Limita temporală pentru răspuns, în milisecunde.\n\
+    -S srcaddr    Source address to use.\n\
     -4            Solicită IPv4.\n\
     -6            Solicită IPv6.\n\
 \n"

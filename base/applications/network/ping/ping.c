@@ -41,6 +41,25 @@
 
 #include <conutils.h>
 
+#if (NTDDI_VERSION < NTDDI_VISTASP1)
+/* ReactOS' iphlpapi exports it on every version */
+DWORD
+WINAPI
+IcmpSendEcho2Ex(
+    _In_ HANDLE IcmpHandle,
+    _In_opt_ HANDLE Event,
+    _In_opt_ PVOID ApcRoutine,
+    _In_opt_ PVOID ApcContext,
+    _In_ IPAddr SourceAddress,
+    _In_ IPAddr DestinationAddress,
+    _In_reads_bytes_(RequestSize) LPVOID RequestData,
+    _In_ WORD RequestSize,
+    _In_opt_ PIP_OPTION_INFORMATION RequestOptions,
+    _Out_writes_bytes_(ReplySize) LPVOID ReplyBuffer,
+    _In_ DWORD ReplySize,
+    _In_ DWORD Timeout);
+#endif
+
 #include "resource.h"
 
 #define NDEBUG
@@ -53,6 +72,7 @@
 
 static BOOL ParseCmdLine(int argc, PWSTR argv[]);
 static BOOL ResolveTarget(PCWSTR target);
+static BOOL ResolveSource(PCWSTR source);
 static void Ping(void);
 static void PrintStats(void);
 static BOOL WINAPI ConsoleCtrlHandler(DWORD ControlType);
@@ -65,6 +85,8 @@ static ULONG PingCount = 4;
 static BOOL PingForever = FALSE;
 static PADDRINFOW Target = NULL;
 static PCWSTR TargetName = NULL;
+static PCWSTR SourceName = NULL;
+static PADDRINFOW Source = NULL;
 static WCHAR Address[46];
 static WCHAR CanonName[NI_MAXHOST];
 static BOOL ResolveAddress = FALSE;
@@ -113,6 +135,14 @@ wmain(int argc, WCHAR *argv[])
         return 1;
     }
 
+    /* The source is resolved in the family the target settled on */
+    if (SourceName != NULL && !ResolveSource(SourceName))
+    {
+        FreeAddrInfoW(Target);
+        WSACleanup();
+        return 1;
+    }
+
     if (WSAAddressToStringW(Target->ai_addr, (DWORD)Target->ai_addrlen, NULL, Address, &StrLen) != 0)
     {
         DPRINT("WSAAddressToStringW failed: %d\n", WSAGetLastError());
@@ -140,6 +170,18 @@ wmain(int argc, WCHAR *argv[])
     else
         ConResPrintf(StdOut, IDS_PINGING_ADDRESS, Address);
 
+    if (Source != NULL)
+    {
+        WCHAR SourceString[46];
+        DWORD SourceStrLen = _countof(SourceString);
+
+        if (WSAAddressToStringW(Source->ai_addr, (DWORD)Source->ai_addrlen, NULL,
+                                SourceString, &SourceStrLen) == 0)
+        {
+            ConResPrintf(StdOut, IDS_SOURCE_ADDRESS, SourceString, L"");
+        }
+    }
+
     ConResPrintf(StdOut, IDS_PING_SIZE, RequestSize);
 
     Ping();
@@ -157,6 +199,8 @@ wmain(int argc, WCHAR *argv[])
     PrintStats();
 
     IcmpCloseHandle(hIcmpFile);
+    if (Source != NULL)
+        FreeAddrInfoW(Source);
     FreeAddrInfoW(Target);
     WSACleanup();
 
@@ -303,6 +347,20 @@ ParseCmdLine(int argc, PWSTR argv[])
                 break;
             }
 
+            case L'S':
+            {
+                if (i + 1 < argc)
+                {
+                    SourceName = argv[++i];
+                }
+                else
+                {
+                    ConResPrintf(StdErr, IDS_MISSING_VALUE, argv[i]);
+                    return FALSE;
+                }
+                break;
+            }
+
             case L'R':
             {
                 if (Family == AF_INET)
@@ -415,6 +473,26 @@ ResolveTarget(PCWSTR target)
 }
 
 static
+BOOL
+ResolveSource(PCWSTR source)
+{
+    ADDRINFOW hints;
+
+    /* Windows takes a numeric source address of the target's family */
+    ZeroMemory(&hints, sizeof(hints));
+    hints.ai_family = Family;
+    hints.ai_flags = AI_NUMERICHOST;
+
+    if (GetAddrInfoW(source, NULL, &hints, &Source) != 0)
+    {
+        ConResPrintf(StdErr, IDS_BAD_PARAMETER, source);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static
 void
 Ping(void)
 {
@@ -468,23 +546,31 @@ Ping(void)
 
     if (Family == AF_INET6)
     {
-        struct sockaddr_in6 Source;
+        struct sockaddr_in6 SourceAddr;
 
-        ZeroMemory(&Source, sizeof(Source));
-        Source.sin6_family = AF_INET6;
+        if (Source != NULL)
+        {
+            CopyMemory(&SourceAddr, Source->ai_addr, sizeof(SourceAddr));
+        }
+        else
+        {
+            ZeroMemory(&SourceAddr, sizeof(SourceAddr));
+            SourceAddr.sin6_family = AF_INET6;
+        }
 
         Status = Icmp6SendEcho2(hIcmpFile, NULL, NULL, NULL,
-                                &Source,
+                                &SourceAddr,
                                 (struct sockaddr_in6 *)Target->ai_addr,
                                 SendBuffer, (USHORT)RequestSize, &IpOptions,
                                 ReplyBuffer, ReplySize, Timeout);
     }
     else
     {
-        Status = IcmpSendEcho2(hIcmpFile, NULL, NULL, NULL,
-                               ((PSOCKADDR_IN)Target->ai_addr)->sin_addr.s_addr,
-                               SendBuffer, (USHORT)RequestSize, &IpOptions,
-                               ReplyBuffer, ReplySize, Timeout);
+        Status = IcmpSendEcho2Ex(hIcmpFile, NULL, NULL, NULL,
+                                 Source ? ((PSOCKADDR_IN)Source->ai_addr)->sin_addr.s_addr : 0,
+                                 ((PSOCKADDR_IN)Target->ai_addr)->sin_addr.s_addr,
+                                 SendBuffer, (USHORT)RequestSize, &IpOptions,
+                                 ReplyBuffer, ReplySize, Timeout);
     }
 
     /* TODO: Compare ReplyBuffer data to SendBuffer. */

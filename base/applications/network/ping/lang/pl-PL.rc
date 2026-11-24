@@ -10,7 +10,7 @@ STRINGTABLE
 BEGIN
     IDS_USAGE "\n\
 Sposób użycia: ping [-t] [-a] [-n ilość] [-l bajtów] [-f] [-i TTL] [-v TOS]\n\
-                    [-w czas] [-4] [-6] host-docelowy\n\
+                    [-w czas] [-S srcaddr] [-4] [-6] host-docelowy\n\
 \n\
 Opcje:\n\
     -t        Odpytuje określonego hosta do czasu zatrzymania.\n\
@@ -25,6 +25,7 @@ Opcje:\n\
               i nie ma wpływu na typ pola usługi w\n\
               nagłówku IP).\n\
     -w czas   Opóźnienie oczekiwanej odpowiedzi, w milisekundach.\n\
+    -S srcaddr Source address to use.\n\
     -4        Wymuś używanie IPv4.\n\
     -6        Wymuś używanie IPv6.\n\
 \n"

@@ -11,7 +11,7 @@ STRINGTABLE
 BEGIN
     IDS_USAGE "\n\
 Uso: ping [-t] [-a] [-n cuenta] [-l tamaño] [-f] [-i TTL] [-v TOS]\n\
-          [-w tiempo_de_espera] [-4] [-6] nombre_de_destino\n\
+          [-w tiempo_de_espera] [-S srcaddr] [-4] [-6] nombre_de_destino\n\
 \n\
 Opciones:\n\
     -t          Hacer ping al host especificado hasta que se detenga.\n\
@@ -26,6 +26,7 @@ Opciones:\n\
                 y no tiene ningún efecto sobre el campo de tipo de servicio\n\
                 del encabezado IP).\n\
     -w t_espera Tiempo de espera en milisegundos para cada respuesta.\n\
+    -S srcaddr  Source address to use.\n\
     -4          Forzar el uso de IPv4.\n\
     -6          Forzar el uso de IPv6.\n\
 \n"

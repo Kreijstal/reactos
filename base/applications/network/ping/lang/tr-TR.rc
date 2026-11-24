@@ -10,7 +10,7 @@ STRINGTABLE
 BEGIN
     IDS_USAGE "\n\
 Kullanım: ping [-t] [-a] [-n sayı] [-l boyut] [-f] [-i TTL] [-v TOS]\n\
-            [-w zaman aşımı] [-4] [-6] varış anabilgisayarı\n\
+            [-w zaman aşımı] [-S srcaddr] [-4] [-6] varış anabilgisayarı\n\
 \n\
 Seçenekler:\n\
     -t             Belirtilen anabilgisayar durana kadar ping atar.\n\
@@ -25,6 +25,7 @@ Seçenekler:\n\
                    kaldırılmıştır ve IP üst bilgisinde hizmet türü alanı\n\
                    üzerinde bir etkisi yoktur.)\n\
     -w zaman aşımı  Tüm yanıtlar için milisaniye cinsinden zaman aşımı.\n\
+    -S srcaddr Source address to use.\n\
     -4             IPv4 kullanmaya zorlar.\n\
     -6             IPv6 kullanmaya zorlar.\n\
 \n"

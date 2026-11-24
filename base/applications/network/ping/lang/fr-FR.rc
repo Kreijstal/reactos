@@ -10,7 +10,7 @@ STRINGTABLE
 BEGIN
     IDS_USAGE "\n\
 Utilisation : ping [-t] [-a] [-n nombre] [-l taille] [-f] [-i TTL] [-v TOS]\n\
-                   [-w délai] [-4] [-6] hôte-destination\n\
+                   [-w délai] [-S srcaddr] [-4] [-6] hôte-destination\n\
 \n\
 Options :\n\
     -t          Ping l'hôte spécifié tant que non interrompu.\n\
@@ -24,6 +24,7 @@ Options :\n\
     -v TOS      Type Of Service (IPv4 uniquement. Ce paramètre est obsolète\n\
                 et n'a pas d'effet sur le champ type de service dans l'en-tête IP).\n\
     -w délai    Délai d'attente en millisecondes pour chaque réponse.\n\
+    -S srcaddr  Source address to use.\n\
     -4          Force l'utilisation d'IPv4.\n\
     -6          Force l'utilisation d'IPv6.\n\
 \n"

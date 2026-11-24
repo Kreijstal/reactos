@@ -12,7 +12,7 @@ STRINGTABLE
 BEGIN
     IDS_USAGE "\n\
 用法:ping [-t] [-a] [-n count] [-l size] [-f] [-i TTL] [-v TOS]\n\
-            [-w timeout] [-4] [-6] target\n\
+            [-w timeout] [-S srcaddr] [-4] [-6] target\n\
 \n\
 选项：\n\
     -t          Ping 指定的主机直到停止为止。\n\
@@ -27,6 +27,7 @@ BEGIN
                 对 IP 标头中的服务类型字段没有任何\n\
                 影响）。\n\
     -w timeout  等待每次回复的超时时间（毫秒）。\n\
+    -S srcaddr  Source address to use.\n\
     -4          强制使用 IPv4。\n\
     -6          强制使用 IPv6。\n\
 \n"

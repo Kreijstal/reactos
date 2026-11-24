@@ -11,7 +11,7 @@ STRINGTABLE
 BEGIN
     IDS_USAGE "\n\
 Použitie: ping [-t] [-a] [-n počet] [-l veľkosť] [-f] [-i TTL] [-v TOS]\n\
-               [-w timeout] [-4] [-6] cieľ\n\
+               [-w timeout] [-S srcaddr] [-4] [-6] cieľ\n\
 \n\
 Voľby:\n\
     -t           Posiela ping na určeného hostiteľa, dokým nie je zastavený.\n\
@@ -25,6 +25,7 @@ Voľby:\n\
     -v TOS       Type Of Service (Len IPv4. Toto nastavenie je zastarané\n\
                  a nemá žiadny vplyv na pole typu služby v IP hlavičke).\n\
     -w timeout   Doba v milisekundách, počas ktorej sa bude čakať na odpoveď.\n\
+    -S srcaddr   Source address to use.\n\
     -4           Vynúti použitie IPv4.\n\
     -6           Vynúti použitie IPv6.\n\
 \n"

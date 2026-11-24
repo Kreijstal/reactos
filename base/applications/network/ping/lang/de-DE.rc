@@ -10,7 +10,7 @@ STRINGTABLE
 BEGIN
     IDS_USAGE "\n\
 Syntax: ping [-t] [-a] [-n Anzahl] [-l Größe] [-f] [-i TTL] [-v TOS]\n\
-             [-w Zeitlimit] [-4] [-6] Zielhost\n\
+             [-w Zeitlimit] [-S Quelladr.] [-4] [-6] Zielhost\n\
 \n\
 Optionen:\n\
     -t            Sendet fortlaufend Ping-Signale zum angegebenen Host.\n\
@@ -24,6 +24,7 @@ Optionen:\n\
     -v TOS        (Type Of Service) Diensttyp, nur IPv4, obsolet und\n\
                   ohne jeglichen Einfluss auf das TOS-Feld im Header.\n\
     -w Zeitlimit  Zeitlimit in Millisekunden für eine Antwort.\n\
+    -S Quelladr.  Zu verwendende Quelladresse.\n\
     -4            erzwingt IPv4.\n\
     -6            erzwingt IPv6.\n\
 \n"
