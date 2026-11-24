@@ -2484,6 +2484,60 @@ PiQueryRemoveDevice(
     return STATUS_SUCCESS;
 }
 
+/**
+ * @brief      Makes a device removed on behalf of user mode ready to be started again
+ *
+ * CM_Disable_DevNode and CM_Query_And_Remove_SubTree remove a device that is
+ * still there: its bus driver keeps the PDO, and the device node stays in the
+ * tree in DeviceNodeRemoved. As on Windows, a later start request for it
+ * (CM_Enable_DevNode, CM_Setup_DevNode) starts the device again on that PDO: the
+ * class installer of network adapters disables and enables a started adapter
+ * this way to have NDIS bind the protocols anew. The device has been
+ * initialized already; what its removal left behind is reset, and it gets its
+ * drivers added, its resources assigned and its IRP_MN_START_DEVICE anew.
+ */
+static
+VOID
+PiRestartDevNode(
+    _In_ PDEVICE_NODE DeviceNode)
+{
+    PDEVICE_OBJECT DeviceObject = DeviceNode->PhysicalDeviceObject;
+    KIRQL OldIrql;
+
+    ASSERT(DeviceNode->State == DeviceNodeRemoved);
+    ASSERT(!(DeviceNode->Flags & DNF_DEVICE_GONE));
+    /* IRP_MN_REMOVE_DEVICE took the device objects above the PDO, and the children */
+    ASSERT(DeviceObject->AttachedDevice == NULL);
+    ASSERT(DeviceNode->Child == NULL);
+    ASSERT(!(IoGetDevObjExtension(DeviceObject)->ExtensionFlags & DOE_DELETE_PENDING));
+
+    DPRINT("Restarting %wZ\n", &DeviceNode->InstancePath);
+
+    /* The device tree references the PDO of a device again, see IopSendRemoveDevice */
+    ObReferenceObject(DeviceObject);
+
+    /* The PDO gets a new stack, which may be opened */
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueIoDatabaseLock);
+    IoGetDevObjExtension(DeviceObject)->ExtensionFlags &= ~(DOE_REMOVE_PENDING | DOE_REMOVE_PROCESSED);
+    KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
+
+    /* The resources of the previous start were released with its removal */
+    if (DeviceNode->ResourceList)
+    {
+        ExFreePool(DeviceNode->ResourceList);
+        DeviceNode->ResourceList = NULL;
+    }
+    if (DeviceNode->ResourceListTranslated)
+    {
+        ExFreePool(DeviceNode->ResourceListTranslated);
+        DeviceNode->ResourceListTranslated = NULL;
+    }
+    DeviceNode->Flags &= ~(DNF_LEGACY_DRIVER | DNF_NO_RESOURCE_REQUIRED | DNF_REENUMERATE |
+                           DNF_RESOURCE_REQUIREMENTS_CHANGED | DNF_NON_STOPPED_REBALANCE);
+
+    PiSetDevNodeState(DeviceNode, DeviceNodeInitialized);
+}
+
 static
 NTSTATUS
 PiEnumerateDevice(
@@ -3014,6 +3068,13 @@ PipDeviceActionWorker(
                 if (deviceNode->State == DeviceNodeInitialized &&
                     !(deviceNode->Flags & DNF_HAS_PROBLEM))
                 {
+                    PiDevNodeStateMachine(deviceNode);
+                }
+                else if (deviceNode->State == DeviceNodeRemoved &&
+                         !(deviceNode->Flags & (DNF_HAS_PROBLEM | DNF_DEVICE_GONE)))
+                {
+                    /* Removed by user mode while its bus still reports it: start it anew */
+                    PiRestartDevNode(deviceNode);
                     PiDevNodeStateMachine(deviceNode);
                 }
                 else if (deviceNode->State == DeviceNodeStarted &&
