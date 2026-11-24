@@ -287,6 +287,7 @@ list(APPEND KMTEST_SOURCE
     ntos_mm/MmPageoutSysView_user.c
     ntos_mm/MmProcessChurnStress_user.c
     ntos_mm/NtCreateSection_user.c
+    ntos_po/PoBattery_user.c
     ntos_po/PoIdle_user.c
     ntos_po/PoIrp_user.c
     tcpip/TcpIp_user.c
