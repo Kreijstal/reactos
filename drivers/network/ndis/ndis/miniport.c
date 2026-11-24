@@ -2921,7 +2921,8 @@ NdisIPnPStopDevice(
   Adapter->NdisMiniportBlock.OldPnPDeviceState = Adapter->NdisMiniportBlock.PnPDeviceState;
   Adapter->NdisMiniportBlock.PnPDeviceState = NdisPnPDeviceStopped;
 
-  (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.HaltHandler)(Adapter);
+  (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.HaltHandler)(
+      Adapter->NdisMiniportBlock.MiniportAdapterContext);
 
   IoSetDeviceInterfaceState(&Adapter->NdisMiniportBlock.SymbolicLinkName, FALSE);
 
@@ -3050,26 +3051,40 @@ NdisIPnPRemoveDevice(
         RtlFreeUnicodeString(&Adapter->NdisMiniportBlock.SymbolicLinkName);
     }
 
-    Irp->IoStatus.Status = STATUS_SUCCESS;
-    IoSkipCurrentIrpStackLocation(Irp);
-    Status = IoCallDriver(Adapter->NdisMiniportBlock.NextDeviceObject, Irp);
-
-    IoDetachDevice(Adapter->NdisMiniportBlock.NextDeviceObject);
-        
-    RtlFreeUnicodeString(&Adapter->NdisMiniportBlock.MiniportName);
-
     if (Adapter->NdisMiniportBlock.PnPDeviceState == NdisPnPDeviceStarted)
     {
+        extern VOID Ndis6UnbindProtocolsFromAdapter(PLOGICAL_ADAPTER);
+
         /* Remove adapter from adapter list for this miniport */
         ExInterlockedRemoveEntryList(&Adapter->MiniportListEntry, &Adapter->NdisMiniportBlock.DriverHandle->Lock);
 
         /* Remove adapter from global adapter list */
         ExInterlockedRemoveEntryList(&Adapter->ListEntry, &AdapterListLock);
 
+        /*
+         * The protocols unbind while the miniport still runs: none of them
+         * may keep a binding to the adapter that is freed below, and a
+         * protocol closes its binding with requests to the miniport.
+         */
+        Ndis6UnbindProtocolsFromAdapter(Adapter);
+
         KeCancelTimer(&Adapter->NdisMiniportBlock.WakeUpDpcTimer.Timer);
 
-        Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.HaltHandler(Adapter);
+        Adapter->NdisMiniportBlock.OldPnPDeviceState = Adapter->NdisMiniportBlock.PnPDeviceState;
+        Adapter->NdisMiniportBlock.PnPDeviceState = NdisPnPDeviceStopped;
+
+        /* Halt the miniport before its bus driver sees the removal */
+        Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.HaltHandler(
+            Adapter->NdisMiniportBlock.MiniportAdapterContext);
     }
+
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    IoSkipCurrentIrpStackLocation(Irp);
+    Status = IoCallDriver(Adapter->NdisMiniportBlock.NextDeviceObject, Irp);
+
+    IoDetachDevice(Adapter->NdisMiniportBlock.NextDeviceObject);
+
+    RtlFreeUnicodeString(&Adapter->NdisMiniportBlock.MiniportName);
 
     if (Adapter->NdisMiniportBlock.EthDB)
     {
