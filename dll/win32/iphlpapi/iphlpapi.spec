@@ -115,6 +115,7 @@
 @ stdcall IcmpCreateFile()
 @ stdcall IcmpParseReplies(ptr long)
 @ stdcall IcmpSendEcho2(ptr ptr ptr ptr long ptr long ptr ptr long long)
+@ stdcall IcmpSendEcho2Ex(ptr ptr ptr ptr long long ptr long ptr ptr long long)
 @ stdcall IcmpSendEcho(ptr long ptr long ptr ptr long long)
 @ stdcall -stub -version=0x600+ if_indextoname(long ptr)
 @ stdcall -stub -version=0x600+ if_nametoindex(str)

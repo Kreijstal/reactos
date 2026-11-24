@@ -417,7 +417,9 @@ DispEchoRequest(
     LocalAddressTa.TAAddressCount = 1;
     LocalAddressTa.Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
     LocalAddressTa.Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
-    LocalAddressTa.Address[0].Address[0].in_addr = 0;
+    /* IcmpSendEcho2Ex: a non-zero source binds the echo to that local address,
+     * so it leaves through the interface that owns it */
+    LocalAddressTa.Address[0].Address[0].in_addr = Request->SourceAddress;
 
     Status = FileOpenAddress(&SendContext->TdiRequest, &LocalAddressTa, IPPROTO_ICMP, FALSE, NULL);
     if (!NT_SUCCESS(Status))

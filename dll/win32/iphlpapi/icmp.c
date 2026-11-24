@@ -282,11 +282,12 @@ IcmpParseReplies(
 
 DWORD
 WINAPI
-IcmpSendEcho2(
+IcmpSendEcho2Ex(
     _In_     HANDLE                 IcmpHandle,
     _In_opt_ HANDLE                 Event,
     _In_opt_ PIO_APC_ROUTINE        ApcRoutine,
     _In_opt_ PVOID                  ApcContext,
+    _In_     IPAddr                 SourceAddress,
     _In_     IPAddr                 DestinationAddress,
     _In_     LPVOID                 RequestData,
     _In_     WORD                   RequestSize,
@@ -328,6 +329,7 @@ IcmpSendEcho2(
 
     Request = (PICMP_ECHO_REQUEST)InputBuffer;
     Request->Address = DestinationAddress;
+    Request->SourceAddress = SourceAddress;
     Request->Timeout = Timeout;
     Request->OptionsOffset = sizeof(ICMP_ECHO_REQUEST);
     Request->DataOffset = sizeof(ICMP_ECHO_REQUEST);
@@ -416,6 +418,27 @@ IcmpSendEcho2(
     ((PICMP_ECHO_REPLY)ReplyBuffer)->Reserved = 0;
 
     return nReplies;
+}
+
+DWORD
+WINAPI
+IcmpSendEcho2(
+    _In_     HANDLE                 IcmpHandle,
+    _In_opt_ HANDLE                 Event,
+    _In_opt_ PIO_APC_ROUTINE        ApcRoutine,
+    _In_opt_ PVOID                  ApcContext,
+    _In_     IPAddr                 DestinationAddress,
+    _In_     LPVOID                 RequestData,
+    _In_     WORD                   RequestSize,
+    _In_opt_ PIP_OPTION_INFORMATION RequestOptions,
+    _Out_    LPVOID                 ReplyBuffer,
+    _In_     DWORD                  ReplySize,
+    _In_     DWORD                  Timeout)
+{
+    /* No source address: the route to the destination picks it */
+    return IcmpSendEcho2Ex(IcmpHandle, Event, ApcRoutine, ApcContext,
+                           0, DestinationAddress, RequestData, RequestSize,
+                           RequestOptions, ReplyBuffer, ReplySize, Timeout);
 }
 
 DWORD
