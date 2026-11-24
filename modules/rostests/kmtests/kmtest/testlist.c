@@ -23,6 +23,7 @@ KMT_TESTFUNC Test_FltMgrReg;
 KMT_TESTFUNC Test_HidPDescription;
 KMT_TESTFUNC Test_IoCreateFile;
 KMT_TESTFUNC Test_IoDeviceObject;
+KMT_TESTFUNC Test_IoDeviceRestart;
 KMT_TESTFUNC Test_IoReadWrite;
 KMT_TESTFUNC Test_Kmdf133;
 KMT_TESTFUNC Test_KmdfIdle;
@@ -95,6 +96,7 @@ const KMT_TEST TestList[] =
     { "HidPDescription",              Test_HidPDescription },
     { "IoCreateFile",                 Test_IoCreateFile },
     { "IoDeviceObject",               Test_IoDeviceObject },
+    { "IoDeviceRestart",              Test_IoDeviceRestart },
     { "IoReadWrite",                  Test_IoReadWrite },
     { "Kmdf133",                      Test_Kmdf133 },
     { "KmdfIdle",                     Test_KmdfIdle },

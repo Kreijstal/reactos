@@ -275,6 +275,7 @@ list(APPEND KMTEST_SOURCE
     ntos_cc/CcSetFileSizes_user.c
     ntos_io/IoCreateFile_user.c
     ntos_io/IoDeviceObject_user.c
+    ntos_io/IoDeviceRestart_user.c
     ntos_io/IoReadWrite_user.c
     ntos_io/NtfsDirIndex_user.c
     ntos_io/NtfsFeatures_user.c
