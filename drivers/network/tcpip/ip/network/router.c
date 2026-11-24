@@ -430,14 +430,24 @@ VOID RouterRemoveRoutesForInterface(PIP_INTERFACE Interface)
     TcpipReleaseSpinLock(&FIBLock, OldIrql);
 }
 
-NTSTATUS RouterRemoveRoute(PIP_ADDRESS Target, PIP_ADDRESS Router)
+NTSTATUS RouterRemoveRoute(
+    PIP_ADDRESS Target,
+    PIP_ADDRESS Netmask,
+    PIP_ADDRESS Router,
+    PIP_INTERFACE Interface)
 /*
  * FUNCTION: Removes a route from the Forward Information Base (FIB)
  * ARGUMENTS:
- *     Target: The machine or network targeted by the route
- *     Router: The router used to pass the packet to the destination
+ *     Target:    The machine or network targeted by the route
+ *     Netmask:   The netmask of the route
+ *     Router:    The router used to pass the packet to the destination
+ *     Interface: The interface the route belongs to
  *
- * Searches the FIB and removes a route matching the indicated parameters.
+ * Searches the FIB and removes the route matching all of the parameters.
+ * Two interfaces on one subnet can each have a route to the same
+ * destination through the same gateway, and routes to the same network
+ * with different masks can share a gateway: deleting one of them must not
+ * remove another.
  */
 {
     KIRQL OldIrql;
@@ -463,7 +473,9 @@ NTSTATUS RouterRemoveRoute(PIP_ADDRESS Target, PIP_ADDRESS Router)
         NCE   = Current->Router;
 
 	if( AddrIsEqual( &Current->NetworkAddress, Target ) &&
-	    AddrIsEqual( &NCE->Address, Router ) ) {
+	    AddrIsEqual( &Current->Netmask, Netmask ) &&
+	    AddrIsEqual( &NCE->Address, Router ) &&
+	    NCE->Interface == Interface ) {
 	    Found = TRUE;
 	    break;
 	}

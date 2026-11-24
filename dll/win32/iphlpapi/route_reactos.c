@@ -125,7 +125,7 @@ DWORD deleteIpForwardEntry( PMIB_IPFORWARDROW pRoute ) {
             // dwForwardPolicy
             // dwForwardNextHopAS
             rte->ire_dest    = pRoute->dwForwardDest;
-            rte->ire_mask    = INADDR_NONE;
+            rte->ire_mask    = pRoute->dwForwardMask;
             rte->ire_gw      = pRoute->dwForwardNextHop;
             rte->ire_index   = pRoute->dwForwardIfIndex;
             rte->ire_type    = IP_FORWARD_DEL;

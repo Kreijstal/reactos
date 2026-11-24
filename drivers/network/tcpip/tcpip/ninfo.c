@@ -404,7 +404,7 @@ TDI_STATUS InfoTdiSetRoute(PIP_INTERFACE IF, PVOID Buffer, UINT BufferSize)
         return TDI_SUCCESS;
      } else if( Route->Type == IP_ROUTE_TYPE_DEL ) {
 	TI_DbgPrint(DEBUG_INFO,("Removing route (%s)\n", A2S(&Address)));
-	if (NT_SUCCESS(RouterRemoveRoute( &Address, &Router )))
+	if (NT_SUCCESS(RouterRemoveRoute( &Address, &Netmask, &Router, IF )))
             return TDI_SUCCESS;
         else
             return TDI_INVALID_PARAMETER;

@@ -28,7 +28,8 @@ PFIB_ENTRY RouterAddRoute(
 
 PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination, PIP_INTERFACE Interface);
 
-NTSTATUS RouterRemoveRoute(PIP_ADDRESS Target, PIP_ADDRESS Router);
+NTSTATUS RouterRemoveRoute(PIP_ADDRESS Target, PIP_ADDRESS Netmask,
+                           PIP_ADDRESS Router, PIP_INTERFACE Interface);
 
 PFIB_ENTRY RouterCreateRoute(
     PIP_ADDRESS NetworkAddress,

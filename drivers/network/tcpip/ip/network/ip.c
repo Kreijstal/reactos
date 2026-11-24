@@ -353,7 +353,7 @@ VOID IPRemoveInterfaceRoute( PIP_INTERFACE IF ) {
 
        AddrWidenAddress(&GeneralRoute,&IF->Unicast,&IF->Netmask);
 
-       RouterRemoveRoute(&GeneralRoute, &IF->Unicast);
+       RouterRemoveRoute(&GeneralRoute, &IF->Netmask, &IF->Unicast, IF);
 
        NBRemoveNeighbor(NCE);
     }
