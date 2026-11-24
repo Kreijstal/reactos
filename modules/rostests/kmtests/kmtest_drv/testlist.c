@@ -11,6 +11,9 @@ KMT_TESTFUNC Test_InbvOwnership;
 KMT_TESTFUNC Test_CmKeyName;
 KMT_TESTFUNC Test_CmNotify;
 KMT_TESTFUNC Test_CmSecurity;
+#if defined(_M_IX86)
+KMT_TESTFUNC Test_EngFloatObj;
+#endif
 KMT_TESTFUNC Test_EtwProvider;
 KMT_TESTFUNC Test_Example;
 KMT_TESTFUNC Test_ExAllocatePool2;
@@ -197,6 +200,9 @@ const KMT_TEST TestList[] =
     { "ExSpinLockRw",                       Test_ExSpinLockRw },
     { "-ExTimer",                           Test_ExTimer },
     { "ExUuid",                             Test_ExUuid },
+#if defined(_M_IX86)
+    { "EngFloatObj",                        Test_EngFloatObj },
+#endif
     { "EtwProvider",                        Test_EtwProvider },
     { "Example",                            Test_Example },
     { "FsRtlDissect",                       Test_FsRtlDissect },

@@ -207,6 +207,16 @@ if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64" OR ARCH STREQUAL "arm64")
     list(APPEND KMTEST_DRV_SOURCE hal/HalScatterGatherReuse.c)
 endif()
 
+if(ARCH STREQUAL "i386")
+    # The win32k x86 FLOATOBJ emulation, linked in to be tested directly
+    add_asm_files(KMTEST_DRV_FLOATOBJ_ASM
+        ${REACTOS_SOURCE_DIR}/win32ss/gdi/eng/i386/floatobj.S
+        win32ss/i386/EngFloatObjCall.S)
+    list(APPEND KMTEST_DRV_SOURCE
+        ${KMTEST_DRV_FLOATOBJ_ASM}
+        win32ss/EngFloatObj.c)
+endif()
+
 add_library(kmtest_drv MODULE ${KMTEST_DRV_SOURCE})
 set_module_type(kmtest_drv kernelmodedriver)
 target_link_libraries(kmtest_drv kmtest_printf chkstk memcmp ntoskrnl_vista ${PSEH_LIB})
@@ -247,6 +257,7 @@ list(APPEND KMTEST_SOURCE
     hidparse/HidP_user.c
     kernel32/FileAttributes_user.c
     kernel32/FindFile_user.c
+    kernel32/SystemDllLayout_user.c
     rtl/RtlCriticalSection_user.c
     kmdf/Kmdf133_user.c
     kmdf/KmdfIdle_user.c

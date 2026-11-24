@@ -69,6 +69,7 @@ KMT_TESTFUNC Test_RtlSplayTree;
 KMT_TESTFUNC Test_RtlStack;
 KMT_TESTFUNC Test_RtlStrSafe;
 KMT_TESTFUNC Test_RtlUnicodeString;
+KMT_TESTFUNC Test_SystemDllLayout;
 KMT_TESTFUNC Test_TcpIpIoctl;
 KMT_TESTFUNC Test_TcpIpTdi;
 KMT_TESTFUNC Test_TcpIpConnect;
@@ -138,6 +139,7 @@ const KMT_TEST TestList[] =
     { "RtlStack",                     Test_RtlStack },
     { "RtlStrSafe",                   Test_RtlStrSafe },
     { "RtlUnicodeString",             Test_RtlUnicodeString },
+    { "SystemDllLayout",              Test_SystemDllLayout },
     { "TcpIpTdi",                     Test_TcpIpTdi },
     { "TcpIpConnect",                 Test_TcpIpConnect },
 #ifdef _M_AMD64
