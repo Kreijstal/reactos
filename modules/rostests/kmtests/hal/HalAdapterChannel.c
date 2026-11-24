@@ -757,6 +757,7 @@ TestNoMapRegisters(VOID)
 START_TEST(HalAdapterChannel)
 {
     PDMA_ADAPTER Shared;
+    NTSTATUS Status;
     LARGE_INTEGER Delay;
     KIRQL OldIrql;
     ULONG i, Wait, Pass, Pending = 0;
@@ -794,9 +795,11 @@ START_TEST(HalAdapterChannel)
     /* First holds the channel, Second and Third queue up behind it */
     ok(Request(&First), "The first request did not get map registers\n");
     Second.Requested = TRUE;
-    ok_eq_hex(Shared->DmaOperations->AllocateAdapterChannel(Shared, Second.DeviceObject, 1,
-                                                            SecondRoutine, &Second),
-              STATUS_SUCCESS);
+    /* Not inside ok_eq_hex, which evaluates its argument twice: a second call
+     * queues the same wait context block on the channel again */
+    Status = Shared->DmaOperations->AllocateAdapterChannel(Shared, Second.DeviceObject, 1,
+                                                           SecondRoutine, &Second);
+    ok_eq_hex(Status, STATUS_SUCCESS);
     ok(!Request(&Third), "The third request was not queued on the busy channel\n");
 
     /* Start Second; it fills the pool and gives the adapter back, which
