@@ -736,9 +736,16 @@ BochsGetVideoChildDescriptor(
         ChildEnumInfo->ChildDescriptorSize >= VBE_EDID_SIZE &&
         !DeviceExtension->IoPorts.RangeInIoSpace)
     {
-        memcpy(pChildDescriptor,
-               DeviceExtension->IoPorts.Mapped,
-               VBE_EDID_SIZE);
+        ULONG i;
+
+        /* The EDID lives in the MMIO BAR: read it with register accesses,
+         * not memcpy, which the compiler may turn into SSE loads that a
+         * hypervisor's MMIO emulator (e.g. QEMU with WHPX) cannot decode. */
+        for (i = 0; i < VBE_EDID_SIZE; i++)
+        {
+            pChildDescriptor[i] =
+                VideoPortReadRegisterUchar((PUCHAR)DeviceExtension->IoPorts.Mapped + i);
+        }
     }
 
     VideoDebugPrint((Info, "Bochs: BochsGetVideoChildDescriptor Exit Uid:%d\n", ChildEnumInfo->ChildIndex));
