@@ -773,6 +773,7 @@ KeInsertQueueApc(IN PKAPC Apc,
                  IN KPRIORITY PriorityBoost)
 {
     PKTHREAD Thread = Apc->Thread;
+    KPROCESSOR_MODE ApcMode = Apc->ApcMode;
     KLOCK_QUEUE_HANDLE ApcLock;
     BOOLEAN State = TRUE;
     ASSERT_APC(Apc);
@@ -798,9 +799,30 @@ KeInsertQueueApc(IN PKAPC Apc,
         KiInsertQueueApc(Apc, PriorityBoost);
     }
 
-    /* Release the APC lock and return success */
+    /* Release the APC lock */
     KiReleaseApcLockFromSynchLevel(&ApcLock);
     KiExitDispatcher(ApcLock.OldIrql);
+
+    /*
+     * A kernel APC queued to the current thread was requested through a
+     * software interrupt, which should fire as soon as the IRQL drops back
+     * below APC_LEVEL. Some hypervisors (e.g. QEMU with WHPX) do not exit
+     * when the guest lowers CR8, so that interrupt is only injected later.
+     * Callers rely on it having run by now: IoCompleteRequest writes the
+     * caller's IOSB from such an APC, and IopSynchronousCall reads it right
+     * after a non-pending IoCallDriver. Deliver it ourselves if we can.
+     * Do not touch Apc here: once delivered, its storage may be gone.
+     */
+    if (State &&
+        (ApcMode == KernelMode) &&
+        (Thread == KeGetCurrentThread()) &&
+        (KeGetCurrentIrql() == PASSIVE_LEVEL) &&
+        !(Thread->SpecialApcDisable) &&
+        (Thread->ApcState.KernelApcPending))
+    {
+        KiCheckForKernelApcDelivery();
+    }
+
     return State;
 }
 
