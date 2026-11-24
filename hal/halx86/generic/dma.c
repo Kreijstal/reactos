@@ -92,7 +92,16 @@ static BOOLEAN HalpEisaDma;
  */
 #ifndef _MINIHAL_
 static ULONGLONG HalpMaximumPhysicalMemoryAddress = MAXULONGLONG;
+/*
+ * The map register pools. A bus master that addresses 32 bits (or more) gets
+ * its map buffers anywhere below 4 GB; everything else (ISA/EISA system DMA,
+ * ISA bus masters) needs them below 16 MB. One pool for both put every map
+ * buffer in the 16 MB window on x86, where a few busy PCI masters used up the
+ * contiguous low memory it is carved from, and requests then waited for
+ * map registers forever.
+ */
 static PADAPTER_OBJECT HalpMasterAdapter;
+static PADAPTER_OBJECT HalpIsaMasterAdapter;
 #ifndef _MINIHAL_
 static
 VOID
@@ -248,7 +257,8 @@ HalpInitDma(VOID)
     /* An auto-reset event: a notification event never resets, so every
      * waiter passed it and growths / adapter creation ran concurrently. */
     KeInitializeEvent(&HalpDmaLock, SynchronizationEvent, TRUE);
-    HalpMasterAdapter = HalpDmaAllocateMasterAdapter();
+    HalpMasterAdapter = HalpDmaAllocateMasterAdapter(TRUE);
+    HalpIsaMasterAdapter = HalpDmaAllocateMasterAdapter(FALSE);
 
     /*
      * Find the highest RAM address: a 32-bit bus master can reach all of
@@ -507,7 +517,7 @@ HalpGrowMapBuffers(IN PADAPTER_OBJECT AdapterObject,
  */
 PADAPTER_OBJECT
 NTAPI
-HalpDmaAllocateMasterAdapter(VOID)
+HalpDmaAllocateMasterAdapter(IN BOOLEAN Dma32BitAddresses)
 {
     PADAPTER_OBJECT MasterAdapter;
     ULONG Size, SizeOfBitmap;
@@ -546,15 +556,10 @@ HalpDmaAllocateMasterAdapter(VOID)
     RtlZeroMemory(MasterAdapter->MapRegisterBase,
                   SizeOfBitmap * sizeof(ROS_MAP_REGISTER_ENTRY));
 
-#ifdef _M_AMD64
-    /*
-     * The global map-buffer pool is used by bus-master devices on amd64.
-     * Do not exhaust the scarce ISA 24-bit window for this pool; individual
-     * legacy adapters still carry their own addressing limits.
-     */
-    MasterAdapter->MasterDevice = TRUE;
-    MasterAdapter->Dma32BitAddresses = TRUE;
-#endif
+    /* The pool's buffers must be reachable by every adapter using it
+     * (HalpGetAdapterMaximumPhysicalAddress) */
+    MasterAdapter->MasterDevice = Dma32BitAddresses;
+    MasterAdapter->Dma32BitAddresses = Dma32BitAddresses;
 
     if (!HalpGrowMapBuffers(MasterAdapter, 0x10000))
     {
@@ -620,7 +625,6 @@ HalpDmaAllocateChildAdapter(IN ULONG NumberOfMapRegisters,
     AdapterObject->MapRegistersPerChannel = 1;
     AdapterObject->Dma32BitAddresses = DeviceDescription->Dma32BitAddresses;
     AdapterObject->ChannelNumber = 0xFF;
-    AdapterObject->MasterAdapter = HalpMasterAdapter;
     KeInitializeDeviceQueue(&AdapterObject->ChannelWaitQueue);
 
     return AdapterObject;
@@ -955,6 +959,23 @@ HalGetAdapter(IN PDEVICE_DESCRIPTION DeviceDescription,
     AdapterObject->ScatterGather = DeviceDescription->ScatterGather;
     AdapterObject->MasterDevice = DeviceDescription->Master;
     *NumberOfMapRegisters = AdapterObject->MapRegistersPerChannel;
+
+    /*
+     * Take map registers from the pool this adapter can reach. A static
+     * (E)ISA adapter described again keeps the pool its registers came from,
+     * so a new description must not change which one that is.
+     */
+    {
+        PADAPTER_OBJECT MasterAdapter;
+
+        MasterAdapter = ((AdapterObject->MasterDevice) &&
+                         ((AdapterObject->Dma32BitAddresses) ||
+                          (AdapterObject->Dma64BitAddresses)))
+                        ? HalpMasterAdapter : HalpIsaMasterAdapter;
+        ASSERT((AdapterObject->MasterAdapter == NULL) ||
+               (AdapterObject->MasterAdapter == MasterAdapter));
+        AdapterObject->MasterAdapter = MasterAdapter;
+    }
 
     /*
      * For non-(E)ISA adapters we have already done all the work. On the

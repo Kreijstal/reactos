@@ -365,7 +365,7 @@ typedef struct _ADAPTER_OBJECT {
 #define MAP_BASE_SW_SG 1
 
 PADAPTER_OBJECT NTAPI
-HalpDmaAllocateMasterAdapter(VOID);
+HalpDmaAllocateMasterAdapter(IN BOOLEAN Dma32BitAddresses);
 
 PDMA_ADAPTER NTAPI
 HalpGetDmaAdapter(
