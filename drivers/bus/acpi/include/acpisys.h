@@ -49,6 +49,8 @@ typedef struct _PDO_DEVICE_DATA
     // The array itself also null terminated
     PWCHAR      HardwareIDs;
     BOOLEAN     DockDevice;
+    /* The composite battery (compbatt.sys); it has no ACPI namespace object */
+    BOOLEAN     CompositeBattery;
     // Link point to hold all the PDOs for a single bus together
     LIST_ENTRY  Link;
     ULONG       InterfaceRefCount;

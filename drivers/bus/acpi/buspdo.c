@@ -61,8 +61,13 @@ Bus_PDO_PnP (
         DeviceData->InterfaceName.Length = 0;
         status = STATUS_SUCCESS;
 
-        if (!device)
+        if (DeviceData->CompositeBattery)
         {
+            /* compbatt has the battery interfaces */
+        }
+        else if (!device)
+        {
+            /* A fixed feature button */
             status = IoRegisterDeviceInterface(DeviceData->Common.Self,
                                                &GUID_DEVICE_SYS_BUTTON,
                                                NULL,
@@ -423,14 +428,15 @@ Bus_PDO_QueryDeviceCaps(
         deviceCapabilities->DockDevice = TRUE;
     DPRINT("DockDevice: %u\n", deviceCapabilities->DockDevice);
 
-    if (!device ||
-        (device->flags.hardware_id &&
+    if ((!device && !DeviceData->CompositeBattery) ||
+        (device && device->flags.hardware_id &&
          (strstr(device->pnp.hardware_id, ACPI_BUTTON_HID_LID) ||
           strstr(device->pnp.hardware_id, ACPI_THERMAL_HID) ||
           strstr(device->pnp.hardware_id, ACPI_PROCESSOR_HID))))
     {
         /* Allow ACPI to control the device if it is a lid button,
-         * a thermal zone, a processor, or a fixed feature button */
+         * a thermal zone, a processor, or a fixed feature button.
+         * The composite battery needs compbatt. */
         deviceCapabilities->RawDeviceOK = TRUE;
     }
 
@@ -456,6 +462,40 @@ Bus_PDO_QueryDeviceId(
     PAGED_CODE ();
 
     stack = IoGetCurrentIrpStackLocation (Irp);
+
+    if (DeviceData->CompositeBattery)
+    {
+        switch (stack->Parameters.QueryId.IdType)
+        {
+            case BusQueryDeviceID:
+                src = L"ACPI\\COMPOSITE_BATTERY";
+                length = (ULONG)wcslen(src) + 1;
+                break;
+
+            case BusQueryInstanceID:
+                src = L"0";
+                length = (ULONG)wcslen(src) + 1;
+                break;
+
+            case BusQueryHardwareIDs:
+                /* REG_MULTI_SZ, as made by Bus_PlugInCompositeBattery */
+                src = DeviceData->HardwareIDs;
+                length = (ULONG)wcslen(src) + 1;
+                length += (ULONG)wcslen(&src[length]) + 1;
+                length++;
+                break;
+
+            default:
+                return Irp->IoStatus.Status;
+        }
+
+        buffer = ExAllocatePoolWithTag(PagedPool, length * sizeof(WCHAR), 'IpcA');
+        if (!buffer)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        RtlCopyMemory(buffer, src, length * sizeof(WCHAR));
+        Irp->IoStatus.Information = (ULONG_PTR)buffer;
+        return STATUS_SUCCESS;
+    }
 
     switch (stack->Parameters.QueryId.IdType) {
 
@@ -770,6 +810,8 @@ Bus_PDO_QueryDeviceText(
                 Temp = L"Smart Battery";
             else if (wcsstr(DeviceData->HardwareIDs, L"ACPI0003") != 0)
                 Temp = L"AC Adapter";
+            else if (DeviceData->CompositeBattery)
+                Temp = L"Composite Battery";
             /* Simply checking if AcpiHandle is NULL eliminates the need to check
              * for the 4 different names that ACPI knows the fixed feature button as internally
              */
