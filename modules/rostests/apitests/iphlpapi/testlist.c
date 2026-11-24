@@ -11,6 +11,7 @@ extern void func_GetOwnerModuleFromTcpEntry(void);
 extern void func_GetOwnerModuleFromUdpEntry(void);
 extern void func_icmp(void);
 extern void func_IcmpFlood(void);
+extern void func_IpForwardEntry(void);
 extern void func_IpHelperV2(void);
 extern void func_SendARP(void);
 
@@ -25,6 +26,7 @@ const struct test winetest_testlist[] =
     { "GetOwnerModuleFromUdpEntry", func_GetOwnerModuleFromUdpEntry },
     { "icmp",                       func_icmp },
     { "IcmpFlood",                  func_IcmpFlood },
+    { "IpForwardEntry",             func_IpForwardEntry },
     { "IpHelperV2",                 func_IpHelperV2 },
     { "SendARP",                    func_SendARP },
 

@@ -9,6 +9,7 @@ list(APPEND SOURCE
     GetOwnerModuleFromUdpEntry.c
     icmp.c
     IcmpFlood.c
+    IpForwardEntry.c
     IpHelperV2.c
     SendARP.c
     testlist.c)
