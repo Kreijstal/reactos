@@ -644,12 +644,12 @@ PUBLIC _FLOATOBJ_MulFloat@8
 
 	sub esp, 8					/* Make room for a FLOATOBJ on the stack */
 	mov eax, [ebp + PARAM2]		/* Load f into eax */
-	lea ecx, [ebp -4]			/* Load pointer to local FLOATOBJ into ecx */
+	lea ecx, [ebp -8]			/* Load pointer to local FLOATOBJ into ecx */
 	push eax					/* Push f on the stack */
 	push ecx					/* Push pointer to local FLOATOBJ on the stack */
 	call _FLOATOBJ_SetFloat@8	/* Set the FLOATOBJ */
 
-	lea ecx, [ebp -4]			/* Push pointer to local FLOATOBJ on the stack */
+	lea ecx, [ebp -8]			/* Push pointer to local FLOATOBJ on the stack */
 	push ecx
 	push [ebp + PARAM1]			/* Push the FLOATOBJ param on the stack */
 	call _FLOATOBJ_Mul@8		/* Multiply */
@@ -771,12 +771,12 @@ PUBLIC _FLOATOBJ_DivFloat@8
 	sub esp, 8					/* Make room for a FLOATOBJ on the stack */
 
 	mov eax, [ebp + PARAM2]		/* Load f into eax */
-	lea ecx, [ebp -4]			/* Load pointer to local FLOATOBJ into ecx */
+	lea ecx, [ebp -8]			/* Load pointer to local FLOATOBJ into ecx */
 	push eax					/* Push f on the stack */
 	push ecx					/* Push pointer to local FLOATOBJ on the stack */
 	call _FLOATOBJ_SetFloat@8	/* Set the FLOATOBJ */
 
-	lea ecx, [ebp -4]			/* Push pointer to local FLOATOBJ on the stack */
+	lea ecx, [ebp -8]			/* Push pointer to local FLOATOBJ on the stack */
 	push ecx
 	push [ebp + PARAM1]			/* Push the FLOATOBJ param on the stack */
 	call _FLOATOBJ_Div@8		/* Divide */
@@ -925,12 +925,12 @@ PUBLIC _FLOATOBJ_AddFloat@8
 	sub esp, 8					/* Make room for a FLOATOBJ on the stack */
 
 	mov eax, [ebp + PARAM2]		/* Load f into eax */
-	lea ecx, [ebp -4]			/* Load pointer to local FLOATOBJ into ecx */
+	lea ecx, [ebp -8]			/* Load pointer to local FLOATOBJ into ecx */
 	push eax					/* Push f on the stack */
 	push ecx					/* Push pointer to local FLOATOBJ on the stack */
 	call _FLOATOBJ_SetFloat@8	/* Set the FLOATOBJ */
 
-	lea ecx, [ebp -4]			/* Push pointer to local FLOATOBJ on the stack */
+	lea ecx, [ebp -8]			/* Push pointer to local FLOATOBJ on the stack */
 	push ecx
 	push [ebp + PARAM1]			/* Push the FLOATOBJ param on the stack */
 	call _FLOATOBJ_Add@8		/* Add */
@@ -1078,12 +1078,12 @@ PUBLIC _FLOATOBJ_SubFloat@8
 	sub esp, 8					/* Make room for a FLOATOBJ on the stack */
 
 	mov eax, [ebp + PARAM2]		/* Load f into eax */
-	lea ecx, [ebp -4]			/* Load pointer to local FLOATOBJ into ecx */
+	lea ecx, [ebp -8]			/* Load pointer to local FLOATOBJ into ecx */
 	push eax					/* Push f on the stack */
 	push ecx					/* Push pointer to local FLOATOBJ on the stack */
 	call _FLOATOBJ_SetFloat@8	/* Set the FLOATOBJ */
 
-	lea ecx, [ebp -4]			/* Push pointer to local FLOATOBJ on the stack */
+	lea ecx, [ebp -8]			/* Push pointer to local FLOATOBJ on the stack */
 	push ecx
 	push [ebp + PARAM1]			/* Push the FLOATOBJ param on the stack */
 	call _FLOATOBJ_Sub@8		/* Substract */
