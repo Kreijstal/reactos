@@ -359,8 +359,37 @@ Test_InterfaceChangeIsAsynchronous(VOID)
     ObDereferenceObject(Pdo);
 }
 
+/* A class that never had an interface has an empty list, as one whose interfaces are all gone */
+static
+VOID
+Test_IoGetDeviceInterfacesNoClass(VOID)
+{
+    static const GUID NeverRegistered =
+        { 0x9a3c5e1b, 0x27d4, 0x4f60, { 0x8b, 0x1e, 0x6c, 0x0d, 0x52, 0xa9, 0x3f, 0x77 } };
+    PWSTR SymbolicLinkList = NULL;
+    NTSTATUS Status;
+
+    Status = IoGetDeviceInterfaces(&NeverRegistered, NULL, 0, &SymbolicLinkList);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!skip(NT_SUCCESS(Status) && SymbolicLinkList != NULL, "No list\n"))
+    {
+        ok(SymbolicLinkList[0] == UNICODE_NULL, "List is not empty: '%ls'\n", SymbolicLinkList);
+        ExFreePool(SymbolicLinkList);
+    }
+
+    SymbolicLinkList = NULL;
+    Status = IoGetDeviceInterfaces(&NeverRegistered, NULL, DEVICE_INTERFACE_INCLUDE_NONACTIVE, &SymbolicLinkList);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!skip(NT_SUCCESS(Status) && SymbolicLinkList != NULL, "No list\n"))
+    {
+        ok(SymbolicLinkList[0] == UNICODE_NULL, "List is not empty: '%ls'\n", SymbolicLinkList);
+        ExFreePool(SymbolicLinkList);
+    }
+}
+
 START_TEST(IoDeviceInterface)
 {
+    Test_IoGetDeviceInterfacesNoClass();
     size_t n;
     for (n = 0; n < RTL_NUMBER_OF(Types); ++n)
     {
