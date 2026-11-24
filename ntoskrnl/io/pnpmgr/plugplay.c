@@ -1035,7 +1035,8 @@ IopDeviceStatus(PPLUGPLAY_CONTROL_STATUS_DATA StatusData)
     _SEH2_TRY
     {
         Operation = StatusData->Operation;
-        if (Operation == PNP_SET_DEVICE_STATUS)
+        if (Operation == PNP_SET_DEVICE_STATUS ||
+            Operation == PNP_CLEAR_DEVICE_STATUS)
         {
             DeviceStatus = StatusData->DeviceStatus;
             DeviceProblem = StatusData->DeviceProblem;
@@ -1077,7 +1078,21 @@ IopDeviceStatus(PPLUGPLAY_CONTROL_STATUS_DATA StatusData)
             break;
 
         case PNP_CLEAR_DEVICE_STATUS:
-            DPRINT1("FIXME: Clear status data!\n");
+            DPRINT("Clear status data\n");
+            /*
+             * CM_Setup_DevNode(CM_SETUP_DEVNODE_READY) clears the problem a
+             * device does not run because of, then asks for its start. Clear
+             * only the problem the caller saw: it may have changed since.
+             */
+            if (DeviceStatus & DN_HAS_PROBLEM)
+            {
+                if (!(DeviceNode->Flags & DNF_HAS_PROBLEM))
+                    Status = STATUS_SUCCESS;
+                else if (DeviceNode->Problem != DeviceProblem)
+                    Status = STATUS_INVALID_PARAMETER;
+                else
+                    Status = PiPerformSyncDeviceAction(DeviceObject, PiActionClearProblem);
+            }
             break;
     }
 

@@ -2538,6 +2538,48 @@ PiRestartDevNode(
     PiSetDevNodeState(DeviceNode, DeviceNodeInitialized);
 }
 
+/**
+ * @brief      Clears the problem of a device on behalf of user mode
+ *
+ * CM_Setup_DevNode(CM_SETUP_DEVNODE_READY) restarts a device that does not
+ * run because of a problem: the PnP manager leaves such a device alone, and
+ * a start request for it then finds it as it was before the failed attempt.
+ * A device whose driver failed AddDevice before the device was installed
+ * (bound through the CriticalDeviceDatabase, NDIS without the adapter's
+ * Linkage key) is in DeviceNodeRemoved with CM_PROB_FAILED_ADD, and starts
+ * again once the installation is done. A device that is started, or whose
+ * removal is under way, has no problem to clear yet.
+ */
+static
+NTSTATUS
+PiClearDevNodeProblemOnRequest(
+    _In_ PDEVICE_NODE DeviceNode)
+{
+    if (!(DeviceNode->Flags & DNF_HAS_PROBLEM))
+        return STATUS_SUCCESS;
+
+    /* Its bus no longer reports it */
+    if (DeviceNode->Flags & DNF_DEVICE_GONE)
+        return STATUS_NO_SUCH_DEVICE;
+
+    switch (DeviceNode->State)
+    {
+        case DeviceNodeUninitialized:
+        case DeviceNodeInitialized:
+        case DeviceNodeDriversAdded:
+        case DeviceNodeResourcesAssigned:
+        case DeviceNodeRemoved:
+            DPRINT("Clearing problem %u of %wZ\n", DeviceNode->Problem, &DeviceNode->InstancePath);
+            PiClearDevNodeProblem(DeviceNode);
+            return STATUS_SUCCESS;
+
+        default:
+            DPRINT1("Not clearing problem %u of %wZ in state %u\n",
+                    DeviceNode->Problem, &DeviceNode->InstancePath, DeviceNode->State);
+            return STATUS_INVALID_DEVICE_STATE;
+    }
+}
+
 static
 NTSTATUS
 PiEnumerateDevice(
@@ -2991,6 +3033,8 @@ ActionToStr(
             return "PiActionQueryRemoveDevice";
         case PiActionRemovePendingCloses:
             return "PiActionRemovePendingCloses";
+        case PiActionClearProblem:
+            return "PiActionClearProblem";
         default:
             return "(request unknown)";
     }
@@ -3126,6 +3170,10 @@ PipDeviceActionWorker(
                     PiDevNodeStateMachine(deviceNode);
                 }
                 status = STATUS_SUCCESS;
+                break;
+
+            case PiActionClearProblem:
+                status = PiClearDevNodeProblemOnRequest(deviceNode);
                 break;
 
             default:
