@@ -529,6 +529,7 @@ PoInitSystem(IN ULONG BootPhase)
 
     KeInitializeGuardedMutex(&PopBatteryQueryLock);
     PopBatteryQueryValid = FALSE;
+    PopInitializeBatteryWait();
 
     /* Power settings drivers can register for from now on */
     PopInitializePowerSettings();
@@ -1002,7 +1003,29 @@ PopRefreshPowerSource(VOID)
     PopBatteryQueryValid = FALSE;
     KeReleaseGuardedMutex(&PopBatteryQueryLock);
 
-    PopQueryBatteryStateCached(&BatteryState);
+    if (PopCapabilities.SystemBatteriesPresent)
+        PopQueryBatteryStateCached(&BatteryState);
+    else
+        PopSetPowerSource(PoAc);
+
+    /* From now on the composite battery tells us when the source changes */
+    PopStartBatteryWait();
+}
+
+/* The composite battery changed its power state (power setting worker) */
+VOID
+NTAPI
+PopBatteryStateChanged(
+    _In_ BOOLEAN AcOnLine)
+{
+    PAGED_CODE();
+
+    /* The next battery state query gets the new state */
+    KeAcquireGuardedMutex(&PopBatteryQueryLock);
+    PopBatteryQueryValid = FALSE;
+    KeReleaseGuardedMutex(&PopBatteryQueryLock);
+
+    PopSetPowerSource(AcOnLine ? PoAc : PoDc);
 }
 
 

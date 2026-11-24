@@ -677,7 +677,8 @@ PopPowerSettingWorker(
 {
     HANDLE PowerKey = NULL, EventHandle = NULL;
     PKEVENT StoreEvent;
-    PVOID Objects[2];
+    PVOID Objects[3];
+    ULONG ObjectCount, StoreIndex;
     PLIST_ENTRY Entry;
     BOOLEAN Refresh;
     NTSTATUS Status;
@@ -693,7 +694,14 @@ PopPowerSettingWorker(
     }
 
     Objects[0] = &PopSettingWorkEvent;
-    Objects[1] = StoreEvent;
+    Objects[1] = &PopBatteryWaitEvent;
+    ObjectCount = 2;
+    StoreIndex = MAXULONG;
+    if (StoreEvent)
+    {
+        StoreIndex = ObjectCount;
+        Objects[ObjectCount++] = StoreEvent;
+    }
 
     /* The power source before the first values go out */
     PopRefreshPowerSource();
@@ -710,7 +718,7 @@ PopPowerSettingWorker(
         PopReadSchemeSettings();
         PopDispatchPowerSettings();
 
-        Status = KeWaitForMultipleObjects(StoreEvent ? 2 : 1,
+        Status = KeWaitForMultipleObjects(ObjectCount,
                                           Objects,
                                           WaitAny,
                                           Executive,
@@ -719,6 +727,11 @@ PopPowerSettingWorker(
                                           NULL,
                                           NULL);
         if (Status == STATUS_WAIT_1)
+        {
+            /* The composite battery request completed */
+            PopBatteryWaitCompleted();
+        }
+        else if (Status == STATUS_WAIT_0 + StoreIndex)
         {
             /* Re-arm first so a write during the re-read is not missed */
             if (!NT_SUCCESS(PopArmSchemeStoreWatch(PowerKey, EventHandle)))

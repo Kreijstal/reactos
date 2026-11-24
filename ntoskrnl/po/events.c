@@ -176,10 +176,16 @@ PopAddRemoveSysCapsCallback(IN PVOID NotificationStructure,
     else
         return STATUS_INVALID_PARAMETER;
 
-    if (Arrival && DeviceType == PolicyDeviceBattery)
+    if (DeviceType == PolicyDeviceBattery)
     {
-        PopCapabilities.SystemBatteriesPresent = TRUE;
-        /* The battery may say the system runs on DC */
+        static LONG BatteryCount;
+        LONG Count;
+
+        Count = Arrival ? InterlockedIncrement(&BatteryCount) : InterlockedDecrement(&BatteryCount);
+        ASSERT(Count >= 0);
+        PopCapabilities.SystemBatteriesPresent = (Count > 0);
+
+        /* The battery may say the system runs on DC; without one it runs on AC */
         PopRequestPowerSourceRefresh();
         return STATUS_SUCCESS;
     }

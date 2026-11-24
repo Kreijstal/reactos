@@ -359,6 +359,36 @@ PopRefreshPowerSource(
     VOID
 );
 
+VOID
+NTAPI
+PopBatteryStateChanged(
+    _In_ BOOLEAN AcOnLine
+);
+
+//
+// Following the composite battery
+//
+extern KEVENT PopBatteryWaitEvent;
+
+CODE_SEG("INIT")
+VOID
+NTAPI
+PopInitializeBatteryWait(
+    VOID
+);
+
+VOID
+NTAPI
+PopStartBatteryWait(
+    VOID
+);
+
+VOID
+NTAPI
+PopBatteryWaitCompleted(
+    VOID
+);
+
 //
 // I/O Routines
 //
