@@ -12,9 +12,10 @@
 
 #include <msafd.h>
 
+static
 int
-WSPAPI
-WSPEventSelect(
+MsafdEventSelect(
+    _In_opt_ PSOCKET_INFORMATION Socket,
     IN SOCKET Handle,
     IN WSAEVENT hEventObject,
     IN long lNetworkEvents,
@@ -22,15 +23,12 @@ WSPEventSelect(
 {
     IO_STATUS_BLOCK        IOSB;
     AFD_EVENT_SELECT_INFO  EventSelectInfo;
-    PSOCKET_INFORMATION    Socket = NULL;
     NTSTATUS               Status;
     BOOLEAN                BlockMode;
     HANDLE                 SockEvent;
 
     TRACE("WSPEventSelect (%lx) %lx %lx\n", Handle, hEventObject, lNetworkEvents);
 
-    /* Get the Socket Structure associate to this Socket*/
-    Socket = GetSocketStructure(Handle);
     if (!Socket)
     {
         if (lpErrno) *lpErrno = WSAENOTSOCK;
@@ -127,10 +125,32 @@ WSPEventSelect(
     return 0;
 }
 
-
-INT
+int
 WSPAPI
-WSPEnumNetworkEvents(
+WSPEventSelect(
+    IN SOCKET Handle,
+    IN WSAEVENT hEventObject,
+    IN long lNetworkEvents,
+    OUT LPINT lpErrno)
+{
+    PSOCKET_INFORMATION Socket;
+    int Ret;
+
+    /* The body may use the socket until it returns, even if another
+     * thread closes it meanwhile */
+    Socket = GetSocketStructure(Handle);
+    Ret = MsafdEventSelect(Socket, Handle, hEventObject, lNetworkEvents, lpErrno);
+    if (Socket)
+        DereferenceSocket(Socket);
+    return Ret;
+}
+
+
+
+static
+INT
+MsafdEnumNetworkEvents(
+    _In_opt_ PSOCKET_INFORMATION Socket,
     IN  SOCKET Handle,
     IN  WSAEVENT hEventObject,
     OUT LPWSANETWORKEVENTS lpNetworkEvents,
@@ -138,14 +158,11 @@ WSPEnumNetworkEvents(
 {
     AFD_ENUM_NETWORK_EVENTS_INFO EnumReq;
     IO_STATUS_BLOCK              IOSB;
-    PSOCKET_INFORMATION          Socket = NULL;
     NTSTATUS                     Status;
     HANDLE                       SockEvent;
 
     TRACE("Called (lpNetworkEvents %x)\n", lpNetworkEvents);
 
-    /* Get the Socket Structure associate to this Socket*/
-    Socket = GetSocketStructure(Handle);
     if (!Socket)
     {
        if (lpErrno) *lpErrno = WSAENOTSOCK;
@@ -252,5 +269,26 @@ WSPEnumNetworkEvents(
 
     return MsafdReturnWithErrno(STATUS_SUCCESS, lpErrno, 0, NULL);
 }
+
+INT
+WSPAPI
+WSPEnumNetworkEvents(
+    IN  SOCKET Handle,
+    IN  WSAEVENT hEventObject,
+    OUT LPWSANETWORKEVENTS lpNetworkEvents,
+    OUT LPINT lpErrno)
+{
+    PSOCKET_INFORMATION Socket;
+    INT Ret;
+
+    /* The body may use the socket until it returns, even if another
+     * thread closes it meanwhile */
+    Socket = GetSocketStructure(Handle);
+    Ret = MsafdEnumNetworkEvents(Socket, Handle, hEventObject, lpNetworkEvents, lpErrno);
+    if (Socket)
+        DereferenceSocket(Socket);
+    return Ret;
+}
+
 
 /* EOF */

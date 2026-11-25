@@ -61,6 +61,10 @@ typedef struct _SOCKET_INFORMATION {
 	BOOL TrySAN;
 	WSAPROTOCOL_INFOW ProtocolInfo;
 	struct _SOCKET_INFORMATION *NextSocket;
+	/* See GetSocketStructure() */
+	LONG RefCount;
+	/* Set by the one WSPCloseSocket() closing it; under SocketListLock */
+	BOOLEAN Closing;
 } SOCKET_INFORMATION, *PSOCKET_INFORMATION;
 
 
@@ -438,14 +442,22 @@ WSPGetAcceptExSockaddrs(
     OUT struct sockaddr **RemoteSockaddr,
     OUT LPINT RemoteSockaddrLength);
 
+/* Returns the socket referenced; the caller drops it with DereferenceSocket() */
 PSOCKET_INFORMATION GetSocketStructure(
 	SOCKET Handle
 );
+
+VOID ReferenceSocket(PSOCKET_INFORMATION Socket);
+
+VOID DereferenceSocket(PSOCKET_INFORMATION Socket);
+
+VOID SockAbandonClose(PSOCKET_INFORMATION Socket);
 
 INT TranslateNtStatusError( NTSTATUS Status );
 
 VOID DeleteSocketStructure( SOCKET Handle );
 
+/* Get/SetSocketInformation return a Winsock error code, NO_ERROR on success */
 int GetSocketInformation(
 	PSOCKET_INFORMATION Socket,
 	ULONG				AfdInformationClass,

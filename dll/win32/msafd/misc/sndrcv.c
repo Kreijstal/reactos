@@ -12,20 +12,19 @@
 
 #include <msafd.h>
 
+static
 INT
-WSPAPI
-WSPAsyncSelect(IN  SOCKET Handle,
+MsafdAsyncSelect(
+    _In_opt_ PSOCKET_INFORMATION Socket,
+    IN  SOCKET Handle,
                IN  HWND hWnd,
                IN  UINT wMsg,
                IN  LONG lEvent,
                OUT LPINT lpErrno)
 {
-    PSOCKET_INFORMATION Socket = NULL;
     PASYNC_DATA                 AsyncData;
     BOOLEAN                     BlockMode;
 
-    /* Get the Socket Structure associated to this Socket */
-    Socket = GetSocketStructure(Handle);
     if (!Socket)
     {
        *lpErrno = WSAENOTSOCK;
@@ -76,6 +75,7 @@ WSPAsyncSelect(IN  SOCKET Handle,
     }
 
     /* Set up the Async Data */
+    ReferenceSocket(Socket);
     AsyncData->ParentSocket = Socket;
     AsyncData->SequenceNumber = Socket->SharedData->SequenceNumber;
 
@@ -90,10 +90,32 @@ WSPAsyncSelect(IN  SOCKET Handle,
     return ERROR_SUCCESS;
 }
 
-
-BOOL
+INT
 WSPAPI
-WSPGetOverlappedResult(
+WSPAsyncSelect(IN  SOCKET Handle,
+               IN  HWND hWnd,
+               IN  UINT wMsg,
+               IN  LONG lEvent,
+               OUT LPINT lpErrno)
+{
+    PSOCKET_INFORMATION Socket;
+    INT Ret;
+
+    /* The body may use the socket until it returns, even if another
+     * thread closes it meanwhile */
+    Socket = GetSocketStructure(Handle);
+    Ret = MsafdAsyncSelect(Socket, Handle, hWnd, wMsg, lEvent, lpErrno);
+    if (Socket)
+        DereferenceSocket(Socket);
+    return Ret;
+}
+
+
+
+static
+BOOL
+MsafdGetOverlappedResult(
+    _In_opt_ PSOCKET_INFORMATION Socket,
     IN  SOCKET Handle,
     IN  LPWSAOVERLAPPED lpOverlapped,
     OUT LPDWORD lpdwBytes,
@@ -101,7 +123,6 @@ WSPGetOverlappedResult(
     OUT LPDWORD lpdwFlags,
     OUT LPINT lpErrno)
 {
-    PSOCKET_INFORMATION     Socket;
     PIO_STATUS_BLOCK        IoStatusBlock;
     BOOL                    Ret;
     HANDLE                  WaitHandle;
@@ -109,8 +130,6 @@ WSPGetOverlappedResult(
 
     TRACE("Called (%x)\n", Handle);
 
-    /* Get the Socket Structure associate to this Socket*/
-    Socket = GetSocketStructure(Handle);
     if (!Socket)
     {
         if(lpErrno)
@@ -174,6 +193,29 @@ WSPGetOverlappedResult(
     return Ret;
 }
 
+BOOL
+WSPAPI
+WSPGetOverlappedResult(
+    IN  SOCKET Handle,
+    IN  LPWSAOVERLAPPED lpOverlapped,
+    OUT LPDWORD lpdwBytes,
+    IN  BOOL fWait,
+    OUT LPDWORD lpdwFlags,
+    OUT LPINT lpErrno)
+{
+    PSOCKET_INFORMATION Socket;
+    BOOL Ret;
+
+    /* The body may use the socket until it returns, even if another
+     * thread closes it meanwhile */
+    Socket = GetSocketStructure(Handle);
+    Ret = MsafdGetOverlappedResult(Socket, Handle, lpOverlapped, lpdwBytes, fWait, lpdwFlags, lpErrno);
+    if (Socket)
+        DereferenceSocket(Socket);
+    return Ret;
+}
+
+
 static
 VOID
 NTAPI
@@ -197,6 +239,8 @@ MsafdRecvAPC(
         SockReenableAsyncSelectEvent(Context->lpSocket, FD_READ);
     }
 
+    DereferenceSocket(Context->lpSocket);
+
     if (Context->lpCompletionRoutine)
         Context->lpCompletionRoutine(IoStatusBlock->Status, IoStatusBlock->Information, (LPWSAOVERLAPPED)IoStatusBlock, 0);
 
@@ -217,6 +261,7 @@ MsafdSendAPC(
 
     /* Re-enable Async Event */
     SockReenableAsyncSelectEvent(Context->lpSocket, FD_WRITE);
+    DereferenceSocket(Context->lpSocket);
 
     if (Context->lpCompletionRoutine)
         Context->lpCompletionRoutine(IoStatusBlock->Status, IoStatusBlock->Information, (LPWSAOVERLAPPED)IoStatusBlock, 0);
@@ -225,9 +270,11 @@ MsafdSendAPC(
     HeapFree(GlobalHeap, 0, ApcContext);
 }
 
+static
 int
-WSPAPI
-WSPRecv(SOCKET Handle,
+MsafdRecv(
+    _In_opt_ PSOCKET_INFORMATION Socket,
+    SOCKET Handle,
         LPWSABUF lpBuffers,
         DWORD dwBufferCount,
         LPDWORD lpNumberOfBytesRead,
@@ -245,13 +292,10 @@ WSPRecv(SOCKET Handle,
     PIO_APC_ROUTINE         APCFunction = NULL;
     HANDLE                  Event = NULL;
     HANDLE                  SockEvent;
-    PSOCKET_INFORMATION     Socket;
     DWORD                   NumberOfBytesRead;
 
     TRACE("WSPRecv(%x)\n", Handle);
 
-    /* Get the Socket Structure associate to this Socket*/
-    Socket = GetSocketStructure(Handle);
     if (!Socket)
     {
         if (lpErrno)
@@ -343,6 +387,7 @@ WSPRecv(SOCKET Handle,
             }
             APCContext->lpCompletionRoutine = lpCompletionRoutine;
             APCContext->lpOverlapped = lpOverlapped;
+            ReferenceSocket(Socket);
             APCContext->lpSocket = Socket;
             Event = NULL;
         }
@@ -434,7 +479,34 @@ WSPRecv(SOCKET Handle,
 
 int
 WSPAPI
-WSPRecvFrom(SOCKET Handle,
+WSPRecv(SOCKET Handle,
+        LPWSABUF lpBuffers,
+        DWORD dwBufferCount,
+        LPDWORD lpNumberOfBytesRead,
+        LPDWORD ReceiveFlags,
+        LPWSAOVERLAPPED lpOverlapped,
+        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+        LPWSATHREADID lpThreadId,
+        LPINT lpErrno)
+{
+    PSOCKET_INFORMATION Socket;
+    int Ret;
+
+    /* The body may use the socket until it returns, even if another
+     * thread closes it meanwhile */
+    Socket = GetSocketStructure(Handle);
+    Ret = MsafdRecv(Socket, Handle, lpBuffers, dwBufferCount, lpNumberOfBytesRead, ReceiveFlags, lpOverlapped, lpCompletionRoutine, lpThreadId, lpErrno);
+    if (Socket)
+        DereferenceSocket(Socket);
+    return Ret;
+}
+
+
+static
+int
+MsafdRecvFrom(
+    _In_opt_ PSOCKET_INFORMATION Socket,
+    SOCKET Handle,
             LPWSABUF lpBuffers,
             DWORD dwBufferCount,
             LPDWORD lpNumberOfBytesRead,
@@ -444,7 +516,7 @@ WSPRecvFrom(SOCKET Handle,
             LPWSAOVERLAPPED lpOverlapped,
             LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
             LPWSATHREADID lpThreadId,
-            LPINT lpErrno )
+            LPINT lpErrno)
 {
     PIO_STATUS_BLOCK            IOSB;
     IO_STATUS_BLOCK             DummyIOSB;
@@ -454,13 +526,10 @@ WSPRecvFrom(SOCKET Handle,
     PIO_APC_ROUTINE             APCFunction = NULL;
     HANDLE                      Event = NULL;
     HANDLE                      SockEvent;
-    PSOCKET_INFORMATION         Socket;
     DWORD                       NumberOfBytesRead;
 
     TRACE("WSPRecvFrom(%x)\n", Handle);
 
-    /* Get the Socket Structure associate to this Socket*/
-    Socket = GetSocketStructure(Handle);
     if (!Socket)
     {
         if (lpErrno)
@@ -578,6 +647,7 @@ WSPRecvFrom(SOCKET Handle,
             }
             APCContext->lpCompletionRoutine = lpCompletionRoutine;
             APCContext->lpOverlapped = lpOverlapped;
+            ReferenceSocket(Socket);
             APCContext->lpSocket = Socket;
             Event = NULL;
         }
@@ -668,10 +738,39 @@ WSPRecvFrom(SOCKET Handle,
     return MsafdReturnWithErrno(Status, lpErrno, NumberOfBytesRead, lpNumberOfBytesRead);
 }
 
-
 int
 WSPAPI
-WSPSend(SOCKET Handle,
+WSPRecvFrom(SOCKET Handle,
+            LPWSABUF lpBuffers,
+            DWORD dwBufferCount,
+            LPDWORD lpNumberOfBytesRead,
+            LPDWORD ReceiveFlags,
+            struct sockaddr *SocketAddress,
+            int *SocketAddressLength,
+            LPWSAOVERLAPPED lpOverlapped,
+            LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+            LPWSATHREADID lpThreadId,
+            LPINT lpErrno )
+{
+    PSOCKET_INFORMATION Socket;
+    int Ret;
+
+    /* The body may use the socket until it returns, even if another
+     * thread closes it meanwhile */
+    Socket = GetSocketStructure(Handle);
+    Ret = MsafdRecvFrom(Socket, Handle, lpBuffers, dwBufferCount, lpNumberOfBytesRead, ReceiveFlags, SocketAddress, SocketAddressLength, lpOverlapped, lpCompletionRoutine, lpThreadId, lpErrno);
+    if (Socket)
+        DereferenceSocket(Socket);
+    return Ret;
+}
+
+
+
+static
+int
+MsafdSend(
+    _In_opt_ PSOCKET_INFORMATION Socket,
+    SOCKET Handle,
         LPWSABUF lpBuffers,
         DWORD dwBufferCount,
         LPDWORD lpNumberOfBytesSent,
@@ -689,13 +788,10 @@ WSPSend(SOCKET Handle,
     PIO_APC_ROUTINE         APCFunction = NULL;
     HANDLE                  Event = NULL;
     HANDLE                  SockEvent;
-    PSOCKET_INFORMATION     Socket;
     DWORD                   NumberOfBytesSent;
     
     TRACE("WSPSend(%x)\n", Handle);
 
-    /* Get the Socket Structure associate to this Socket*/
-    Socket = GetSocketStructure(Handle);
     if (!Socket)
     {
         if (lpErrno)
@@ -771,6 +867,7 @@ WSPSend(SOCKET Handle,
             }
             APCContext->lpCompletionRoutine = lpCompletionRoutine;
             APCContext->lpOverlapped = lpOverlapped;
+            ReferenceSocket(Socket);
             APCContext->lpSocket = Socket;
             APCContext->lpRemoteAddress = NULL;
             Event = NULL;
@@ -790,15 +887,6 @@ WSPSend(SOCKET Handle,
             {
                 APCContext = (PMSAFD_SEND_APC_CONTEXT)lpOverlapped;
             }
-        }
-        
-        Event = lpOverlapped->hEvent;
-        // APCContext is unsupported when using event
-        if (Event)
-        {
-            if (lpCompletionRoutine)
-                HeapFree(GetProcessHeap(), 0, APCContext);
-            APCContext = NULL;
         }
 
         SendInfo.AfdFlags |= AFD_OVERLAPPED;
@@ -845,7 +933,34 @@ WSPSend(SOCKET Handle,
 
 int
 WSPAPI
-WSPSendTo(SOCKET Handle,
+WSPSend(SOCKET Handle,
+        LPWSABUF lpBuffers,
+        DWORD dwBufferCount,
+        LPDWORD lpNumberOfBytesSent,
+        DWORD iFlags,
+        LPWSAOVERLAPPED lpOverlapped,
+        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+        LPWSATHREADID lpThreadId,
+        LPINT lpErrno)
+{
+    PSOCKET_INFORMATION Socket;
+    int Ret;
+
+    /* The body may use the socket until it returns, even if another
+     * thread closes it meanwhile */
+    Socket = GetSocketStructure(Handle);
+    Ret = MsafdSend(Socket, Handle, lpBuffers, dwBufferCount, lpNumberOfBytesSent, iFlags, lpOverlapped, lpCompletionRoutine, lpThreadId, lpErrno);
+    if (Socket)
+        DereferenceSocket(Socket);
+    return Ret;
+}
+
+
+static
+int
+MsafdSendTo(
+    _In_opt_ PSOCKET_INFORMATION Socket,
+    SOCKET Handle,
           LPWSABUF lpBuffers,
           DWORD dwBufferCount,
           LPDWORD lpNumberOfBytesSent,
@@ -866,14 +981,11 @@ WSPSendTo(SOCKET Handle,
     HANDLE                  Event = NULL;
     PTRANSPORT_ADDRESS      RemoteAddress;
     HANDLE                  SockEvent;
-    PSOCKET_INFORMATION     Socket;
     DWORD                   NumberOfBytesSent;
     UCHAR                   Buffer[128];
 
     TRACE("WSPSendTo(%x)\n", Handle);
 
-    /* Get the Socket Structure associate to this Socket */
-    Socket = GetSocketStructure(Handle);
     if (!Socket)
     {
         if (lpErrno)
@@ -988,6 +1100,7 @@ WSPSendTo(SOCKET Handle,
             }
             APCContext->lpCompletionRoutine = lpCompletionRoutine;
             APCContext->lpOverlapped = lpOverlapped;
+            ReferenceSocket(Socket);
             APCContext->lpSocket = Socket;
             APCContext->lpRemoteAddress = RemoteAddress;
             Event = NULL;
@@ -1050,6 +1163,33 @@ WSPSendTo(SOCKET Handle,
     TRACE("Leaving (%lx %ld)\n", Status, NumberOfBytesSent);
     return MsafdReturnWithErrno(Status, lpErrno, NumberOfBytesSent, lpNumberOfBytesSent);
 }
+
+int
+WSPAPI
+WSPSendTo(SOCKET Handle,
+          LPWSABUF lpBuffers,
+          DWORD dwBufferCount,
+          LPDWORD lpNumberOfBytesSent,
+          DWORD iFlags,
+          const struct sockaddr *SocketAddress,
+          int SocketAddressLength,
+          LPWSAOVERLAPPED lpOverlapped,
+          LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+          LPWSATHREADID lpThreadId,
+          LPINT lpErrno)
+{
+    PSOCKET_INFORMATION Socket;
+    int Ret;
+
+    /* The body may use the socket until it returns, even if another
+     * thread closes it meanwhile */
+    Socket = GetSocketStructure(Handle);
+    Ret = MsafdSendTo(Socket, Handle, lpBuffers, dwBufferCount, lpNumberOfBytesSent, iFlags, SocketAddress, SocketAddressLength, lpOverlapped, lpCompletionRoutine, lpThreadId, lpErrno);
+    if (Socket)
+        DereferenceSocket(Socket);
+    return Ret;
+}
+
 
 INT
 WSPAPI
