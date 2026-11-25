@@ -14,6 +14,7 @@ list(APPEND SOURCE
     nostartup.c
     open_osfhandle.c
     recv.c
+    recvtimeout.c
     send.c
     sendbound.c
     sendflood.c
