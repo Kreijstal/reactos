@@ -195,6 +195,7 @@ PADDRESS_FILE AddrFindShared(
     PLIST_ENTRY CurrentEntry;
     KIRQL OldIrql;
     PADDRESS_FILE Current = NULL;
+    LONG Sharers;
 
     TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
 
@@ -206,10 +207,22 @@ PADDRESS_FILE AddrFindShared(
         if ((Current->Port == Port) &&
             (Current->Protocol == Protocol))
         {
-            /* Increase the sharer count */
-            ASSERT(Current->Sharers != 0);
-            InterlockedIncrement(&Current->Sharers);
-            break;
+            /* Increase the sharer count -- unless the last sharer has closed
+             * it already (FileCloseAddress()).  Such an address file stays on
+             * the list until its last reference goes, which a connection
+             * accepted on it may hold for long; it is being torn down and is
+             * nobody's to share any more. */
+            Sharers = Current->Sharers;
+            while (Sharers != 0)
+            {
+                LONG Seen = InterlockedCompareExchange(&Current->Sharers, Sharers + 1, Sharers);
+                if (Seen == Sharers)
+                    break;
+                Sharers = Seen;
+            }
+
+            if (Sharers != 0)
+                break;
         }
 
         CurrentEntry = CurrentEntry->Flink;
