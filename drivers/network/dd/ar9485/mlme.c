@@ -44,9 +44,8 @@
 #define AR9485_POLL_IDLE_MS         20
 #define AR9485_POLL_ACTIVE_MS       2
 
-/* Beacons are ~100 ms apart; three seconds without one from our own BSS is a
- * link that is gone whether or not the AP said so. */
-#define AR9485_BEACON_TIMEOUT_MS    3000
+/* Liveness while associated (keep-alive, beacon loss, TX hang) is the
+ * connection monitor's, in linkmon.h. */
 
 /* RSN suite selectors (IEEE 802.11, table 9-131/9-133). */
 #define RSN_SUITE_OUI_0             0x00
@@ -1107,7 +1106,15 @@ AR9485TearDownLink(
      * read. */
     AR9485SetCipherKey(Adapter, AR9485_KEY_PAIRWISE, DOT11_CIPHER_ALGO_NONE,
                        NULL, 0, NULL);
-    AR9485SetCipherKey(Adapter, 0, DOT11_CIPHER_ALGO_NONE, NULL, 0, NULL);
+    /* Every default slot: a GTK lives at its key ID (1 or 2 on a rekeying
+     * AP), not at slot 0. */
+    {
+        ULONG KeyId;
+
+        for (KeyId = 0; KeyId < DOT11_MAX_NUM_DEFAULT_KEY; ++KeyId)
+            AR9485SetCipherKey(Adapter, KeyId, DOT11_CIPHER_ALGO_NONE,
+                               NULL, 0, NULL);
+    }
 
     AR9485FlushTransmitQueue(Adapter);
     AR9485WriteAssociationId(Adapter);
@@ -1250,7 +1257,7 @@ AR9485DoConnect(_In_ PAR9485_ADAPTER Adapter)
     /* The AID goes into AR_BSS_ID1 so the MAC can recognise its own bit in
      * the traffic-indication map. */
     AR9485WriteAssociationId(Adapter);
-    Adapter->LastBeaconTime = KeQueryInterruptTime();
+    AR9485LinkMonReset(&Adapter->LinkMon, KeQueryInterruptTime());
     Adapter->MlmeState = AR9485MlmeAssociated;
 
     DPRINT1("AR9485: associated with %02x:%02x:%02x:%02x:%02x:%02x, AID %u\n",
@@ -1291,6 +1298,72 @@ AR9485DoDisconnect(_In_ PAR9485_ADAPTER Adapter)
     {
         Adapter->CurrentChannelMHz = AR9485_DEFAULT_CHANNEL_MHZ;
         AR9485ProgramMacState(Adapter);
+    }
+}
+
+/* ================================================================== *
+ *  Connection monitor
+ * ================================================================== */
+
+static const char *
+AR9485LinkLostReasonName(_In_ ULONG Reason)
+{
+    switch (Reason)
+    {
+        case AR9485_LINKMON_LOST_PROBE:     return "AP stopped acknowledging";
+        case AR9485_LINKMON_LOST_BEACON:    return "no beacon";
+        case AR9485_LINKMON_LOST_TX_STALL:  return "transmit hang";
+        default:                            return "?";
+    }
+}
+
+/*
+ * One connection-monitor pass (linkmon.h has the policy and why).  Runs on
+ * the chip worker after the RX/TX harvest, while associated.  Every line it
+ * logs is rare -- a probe outside the 30 s idle rhythm, or the end of a link
+ * -- so the 16 KB log ring keeps hours of history.
+ */
+static VOID
+AR9485MonitorLink(_In_ PAR9485_ADAPTER Adapter)
+{
+    PAR9485_LINKMON Mon = &Adapter->LinkMon;
+    ULONG64 Now = KeQueryInterruptTime();
+
+    switch (AR9485LinkMonTick(Mon, Now, Adapter->TxPending))
+    {
+        case AR9485LinkMonSendProbe:
+            if (Mon->LastProbeReason != AR9485_LINKMON_PROBE_IDLE ||
+                (Mon->IdleProbes % 20) == 1)
+            {
+                DPRINT1("AR9485: linkmon probe #%u (%s): beacon %I64u ms ago, "
+                        "ack %I64u ms ago, fails %u, acked %u/%u\n",
+                        Mon->ProbesSent,
+                        (Mon->LastProbeReason == AR9485_LINKMON_PROBE_IDLE) ? "idle" :
+                        (Mon->LastProbeReason == AR9485_LINKMON_PROBE_BEACON) ? "beacon loss"
+                                                                             : "retry",
+                        (Now - Mon->LastBeacon) / 10000ULL,
+                        (Now - Mon->LastAck) / 10000ULL,
+                        Mon->ProbeFailures, Mon->ProbesAcked, Mon->ProbesSent - 1);
+            }
+            if (AR9485TransmitNullData(Adapter) != NDIS_STATUS_SUCCESS)
+                AR9485LinkMonOnProbeDone(Mon, Now, FALSE);
+            break;
+
+        case AR9485LinkMonLinkLost:
+            DPRINT1("AR9485: link lost after %I64u s: %s (beacon %I64u ms ago, "
+                    "ack %I64u ms ago, TxPending %lu, probes %u acked %u failed %u "
+                    "timed out %u)\n",
+                    (Now - Mon->LinkStart) / 10000000ULL,
+                    AR9485LinkLostReasonName(Mon->LastLostReason),
+                    (Now - Mon->LastBeacon) / 10000ULL,
+                    (Now - Mon->LastAck) / 10000ULL,
+                    Adapter->TxPending, Mon->ProbesSent, Mon->ProbesAcked,
+                    Mon->ProbesFailed, Mon->ProbesTimedOut);
+            AR9485TearDownLink(Adapter, FALSE, DOT11_ASSOC_STATUS_UNREACHABLE);
+            break;
+
+        default:
+            break;
     }
 }
 
@@ -1364,16 +1437,26 @@ AR9485ChipWorker(_In_ PVOID Context)
                                (Adapter->DeauthReason &
                                 DOT11_ASSOC_STATUS_REASON_CODE_MASK);
 
+                if (Adapter->MlmeState == AR9485MlmeAssociated)
+                {
+                    ULONG64 Now = KeQueryInterruptTime();
+                    PAR9485_LINKMON Mon = &Adapter->LinkMon;
+
+                    /* Reason 2/4 here with a recent ack would mean the AP's
+                     * idle timer is not what the keep-alive feeds. */
+                    DPRINT1("AR9485: AP ended the link after %I64u s, reason %u "
+                            "(ack %I64u ms ago, probes %u acked %u)\n",
+                            (Now - Mon->LinkStart) / 10000000ULL,
+                            Adapter->DeauthReason,
+                            (Now - Mon->LastAck) / 10000ULL,
+                            Mon->ProbesSent, Mon->ProbesAcked);
+                }
+
                 AR9485TearDownLink(Adapter, FALSE, Reason);
             }
-            else if (Adapter->MlmeState == AR9485MlmeAssociated &&
-                     KeQueryInterruptTime() - Adapter->LastBeaconTime >
-                         (ULONG64)AR9485_BEACON_TIMEOUT_MS * 10000ULL)
+            else if (Adapter->MlmeState == AR9485MlmeAssociated)
             {
-                DPRINT1("AR9485: no beacon from the BSS for %u ms; link lost\n",
-                        AR9485_BEACON_TIMEOUT_MS);
-                AR9485TearDownLink(Adapter, FALSE,
-                                   DOT11_ASSOC_STATUS_UNREACHABLE);
+                AR9485MonitorLink(Adapter);
             }
         }
 

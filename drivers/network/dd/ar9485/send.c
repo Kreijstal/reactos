@@ -329,15 +329,16 @@ AR9485SubmitDescriptor(
     AR9485_WRITE_REG(Adapter, AR_Q_TXE, 1 << AR9485_TX_QCU);
 }
 
-NDIS_STATUS
-AR9485TransmitFrame(
+static NDIS_STATUS
+AR9485TransmitFrameInternal(
     _In_ PAR9485_ADAPTER Adapter,
     _In_reads_bytes_(Length) PUCHAR Frame,
     _In_ ULONG Length,
     _In_ ULONG KeyIndex,
     _In_ ULONG RateCode,
     _In_ BOOLEAN NoAck,
-    _In_opt_ PNET_BUFFER_LIST Nbl)
+    _In_opt_ PNET_BUFFER_LIST Nbl,
+    _In_ BOOLEAN Probe)
 {
     PAR9485_TX_SLOT Slot;
     ULONG BufferLength, FrameLength, EncryptType = AR_ENCR_TYPE_CLEAR;
@@ -397,6 +398,7 @@ AR9485TransmitFrame(
 
     Slot->Nbl = Nbl;
     Slot->InUse = TRUE;
+    Slot->Probe = Probe;
 
     AR9485SubmitDescriptor(Adapter, Slot, BufferLength, FrameLength,
                            KeyIndex, EncryptType, RateCode, NoAck);
@@ -406,6 +408,39 @@ AR9485TransmitFrame(
 
     NdisReleaseSpinLock(&Adapter->TxLock);
     return NDIS_STATUS_SUCCESS;
+}
+
+NDIS_STATUS
+AR9485TransmitFrame(
+    _In_ PAR9485_ADAPTER Adapter,
+    _In_reads_bytes_(Length) PUCHAR Frame,
+    _In_ ULONG Length,
+    _In_ ULONG KeyIndex,
+    _In_ ULONG RateCode,
+    _In_ BOOLEAN NoAck,
+    _In_opt_ PNET_BUFFER_LIST Nbl)
+{
+    return AR9485TransmitFrameInternal(Adapter, Frame, Length, KeyIndex,
+                                       RateCode, NoAck, Nbl, FALSE);
+}
+
+/*
+ * The connection monitor's probe (linkmon.h): a null-data frame to the AP.
+ * It goes out at the 1 Mbit floor, like the management frames, because its
+ * only job is to be heard and acknowledged; the status the reaper sees for
+ * it is what tells the monitor whether the AP is still there.
+ */
+NDIS_STATUS
+AR9485TransmitNullData(_In_ PAR9485_ADAPTER Adapter)
+{
+    UCHAR Frame[AR9485_NULLDATA_LEN];
+    ULONG Length;
+
+    Length = AR9485BuildNullData(Frame, Adapter->Bssid,
+                                 Adapter->CurrentMacAddress);
+    return AR9485TransmitFrameInternal(Adapter, Frame, Length,
+                                       AR9485_KEY_NONE, AR9485_RATE_1M,
+                                       FALSE, NULL, TRUE);
 }
 
 /*
@@ -477,6 +512,21 @@ AR9485ReapTransmitStatus(_In_ PAR9485_ADAPTER Adapter)
             DPRINT("AR9485: TX failed status3 0x%08lx\n", Status3);
         }
 
+        /* Everything this station sends is addressed to the AP, so an
+         * acknowledged frame of any kind proves the AP heard us.  The reaper
+         * runs only on the chip worker, as does every linkmon user. */
+        {
+            ULONG64 Now = KeQueryInterruptTime();
+            BOOLEAN Acked = (Status3 & AR_FrmXmitOK) != 0;
+
+            AR9485LinkMonOnTxDone(&Adapter->LinkMon, Now, Acked);
+            if (Slot->Probe)
+            {
+                Slot->Probe = FALSE;
+                AR9485LinkMonOnProbeDone(&Adapter->LinkMon, Now, Acked);
+            }
+        }
+
         if (Slot->Nbl != NULL)
         {
             NET_BUFFER_LIST_STATUS(Slot->Nbl) =
@@ -509,6 +559,7 @@ AR9485FlushTransmitQueue(_In_ PAR9485_ADAPTER Adapter)
         PAR9485_TX_SLOT Slot = &Adapter->TxSlots[i];
 
         Slot->InUse = FALSE;
+        Slot->Probe = FALSE;
         if (Slot->Nbl != NULL)
         {
             NET_BUFFER_LIST_STATUS(Slot->Nbl) = NDIS_STATUS_FAILURE;

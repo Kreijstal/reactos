@@ -36,6 +36,7 @@
 
 /* 802.11 frame layout shared by the transmit path and the MLME. */
 #include "dot11frame.h"
+#include "linkmon.h"
 
 /* Register offsets and bit math now live under ath9k/reg.h (slice 1) and
  * are consumed via ath9k/hw_min.h's verbatim AR_SREV_* constants
@@ -122,6 +123,8 @@ typedef struct _AR9485_TX_SLOT
      * NULL for a frame the driver itself originated (auth, assoc, deauth). */
     PNET_BUFFER_LIST        Nbl;
     BOOLEAN                 InUse;
+    /* A connection-monitor null-data probe: its status feeds linkmon. */
+    BOOLEAN                 Probe;
 } AR9485_TX_SLOT, *PAR9485_TX_SLOT;
 
 typedef enum _AR9485_MLME_STATE
@@ -307,10 +310,15 @@ typedef struct _AR9485_ADAPTER
     volatile LONG           DeauthSeen;
     USHORT                  DeauthReason;
 
-    /* Interrupt time of the last beacon from the BSS we hold.  An AP that
-     * goes away, or a station carried out of range, never sends a
-     * deauthentication; missing beacons is the only evidence there is. */
-    ULONG64                 LastBeaconTime;
+    /*
+     * Liveness of the link we hold (linkmon.h): the last beacon and the last
+     * acknowledged transmit, the null-data probe in flight, and cumulative
+     * counters a post-mortem reads (IOCTL_AR9485LAB_LINK_STATUS, or KD).  An
+     * AP that goes away never sends a deauthentication, and an AP that has
+     * not heard from us for minutes sends one we cannot avoid; this is what
+     * covers both.  Only the chip worker touches it.
+     */
+    AR9485_LINKMON          LinkMon;
 
     /* Shadow of the hardware key cache. */
     BOOLEAN                 PairwiseKeyValid;
@@ -386,6 +394,8 @@ NDIS_STATUS AR9485TransmitFrame(_In_ PAR9485_ADAPTER Adapter,
                                 _In_ ULONG RateCode,
                                 _In_ BOOLEAN NoAck,
                                 _In_opt_ PNET_BUFFER_LIST Nbl);
+/* Queue the connection monitor's null-data probe to the AP we hold. */
+NDIS_STATUS AR9485TransmitNullData(_In_ PAR9485_ADAPTER Adapter);
 
 /* mlme.c - join, authenticate, associate, and the chip worker itself. */
 NDIS_STATUS AR9485StartChipWorker(_In_ PAR9485_ADAPTER Adapter);

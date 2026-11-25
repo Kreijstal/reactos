@@ -284,11 +284,12 @@ static VOID DispatchFrame(PAR9485_ADAPTER Adapter, PUCHAR Frame, ULONG Length,
         {
             RememberBss(Adapter, Frame, Length, Frequency, Rssi);
 
-            /* Feed the beacon watchdog while the beacon is our own BSS's. */
+            /* Feed the connection monitor while the beacon is our own
+             * BSS's. */
             if (Adapter->MlmeState == AR9485MlmeAssociated &&
                 RtlCompareMemory(Frame + 16, Adapter->Bssid, DOT11_ADDR_LEN) ==
                     DOT11_ADDR_LEN)
-                Adapter->LastBeaconTime = KeQueryInterruptTime();
+                AR9485LinkMonOnBeacon(&Adapter->LinkMon, KeQueryInterruptTime());
         }
 
         AR9485MlmeReceiveManagement(Adapter, Frame, Length);

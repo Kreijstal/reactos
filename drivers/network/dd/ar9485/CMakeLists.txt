@@ -99,6 +99,7 @@ list(APPEND SOURCE
     ath9k/hw_txpower.c
     ar9485.h
     dot11frame.h
+    linkmon.h
     linux-compat.h
     ath9k/ath_reg.h
     ath9k/reg.h
