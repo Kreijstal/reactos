@@ -904,19 +904,28 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
     /* Perform the TLS handshake */
     ret = schan_imp_handshake(ctx->session);
 
+    /* The output token holds exactly what this step produced. When there is
+     * nothing to send (the rest of the peer's flight has not arrived, or the
+     * input was rejected) it is empty, not the size of the caller's buffer. */
+    out_buffers = &transport.out;
+    if (out_buffers->current_buffer_idx != -1)
+    {
+        SecBuffer *buffer = &out_buffers->desc->pBuffers[out_buffers->current_buffer_idx];
+        buffer->cbBuffer = out_buffers->offset;
+    }
+    else if (pOutput)
+    {
+        int idx = schan_find_sec_buffer_idx(pOutput, 0, SECBUFFER_TOKEN);
+        if (idx != -1)
+            pOutput->pBuffers[idx].cbBuffer = 0;
+    }
+
     if(transport.in.offset && transport.in.offset != pInput->pBuffers[0].cbBuffer) {
         if(pInput->cBuffers<2 || pInput->pBuffers[1].BufferType!=SECBUFFER_EMPTY)
             return SEC_E_INVALID_TOKEN;
 
         pInput->pBuffers[1].BufferType = SECBUFFER_EXTRA;
         pInput->pBuffers[1].cbBuffer = pInput->pBuffers[0].cbBuffer-transport.in.offset;
-    }
-
-    out_buffers = &transport.out;
-    if (out_buffers->current_buffer_idx != -1)
-    {
-        SecBuffer *buffer = &out_buffers->desc->pBuffers[out_buffers->current_buffer_idx];
-        buffer->cbBuffer = out_buffers->offset;
     }
 
     *pfContextAttr = ISC_RET_REPLAY_DETECT | ISC_RET_SEQUENCE_DETECT | ISC_RET_CONFIDENTIALITY | ISC_RET_STREAM;
