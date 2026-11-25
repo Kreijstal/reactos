@@ -77,6 +77,84 @@ TestBootDriverModuleNames(VOID)
     RtlFreeHeap(RtlGetProcessHeap(), 0, Modules);
 }
 
+/*
+ * The kernel creates the first thread of the session manager itself
+ * (RtlCreateUserProcess at NT 5.2, NtCreateUserProcess at NT 6+). Like every
+ * thread of a user process, it must start at a user-mode address.
+ */
+static
+VOID
+TestSmssThreadStartAddresses(VOID)
+{
+    SYSTEM_BASIC_INFORMATION BasicInfo;
+    PSYSTEM_PROCESS_INFORMATION Process;
+    PSYSTEM_THREAD_INFORMATION Thread;
+    PVOID Buffer;
+    ULONG Length = 0, i;
+    BOOLEAN Found = FALSE;
+    NTSTATUS Status;
+
+    Status = NtQuerySystemInformation(SystemBasicInformation, &BasicInfo, sizeof(BasicInfo), NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    Status = NtQuerySystemInformation(SystemProcessInformation, NULL, 0, &Length);
+    ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+    if (Length == 0)
+    {
+        skip("No process information length\n");
+        return;
+    }
+
+    /* Leave room for processes and threads created in the meantime */
+    Length += 0x10000;
+    Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+    if (!Buffer)
+    {
+        skip("Out of memory\n");
+        return;
+    }
+
+    Status = NtQuerySystemInformation(SystemProcessInformation, Buffer, Length, &Length);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+        return;
+    }
+
+    Process = Buffer;
+    for (;;)
+    {
+        if (Process->ImageName.Buffer &&
+            _wcsnicmp(Process->ImageName.Buffer, L"smss.exe",
+                      Process->ImageName.Length / sizeof(WCHAR)) == 0 &&
+            Process->ImageName.Length == sizeof(L"smss.exe") - sizeof(WCHAR))
+        {
+            Found = TRUE;
+            ok(Process->NumberOfThreads != 0, "smss.exe has no threads\n");
+            Thread = (PSYSTEM_THREAD_INFORMATION)(Process + 1);
+            for (i = 0; i < Process->NumberOfThreads; i++)
+            {
+                ok((ULONG_PTR)Thread[i].StartAddress <= BasicInfo.MaximumUserModeAddress,
+                   "smss.exe thread %p started at %p, above the user address space (%p)\n",
+                   Thread[i].ClientId.UniqueThread, Thread[i].StartAddress,
+                   (PVOID)BasicInfo.MaximumUserModeAddress);
+            }
+        }
+
+        if (Process->NextEntryOffset == 0)
+            break;
+        Process = (PSYSTEM_PROCESS_INFORMATION)((PUCHAR)Process + Process->NextEntryOffset);
+    }
+
+    if (!Found)
+        skip("smss.exe is not running\n");
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+}
+
 START_TEST(NtQuerySystemInformation)
 {
     NTSTATUS Status;
@@ -88,4 +166,5 @@ START_TEST(NtQuerySystemInformation)
     ok_hex(Status, STATUS_INVALID_INFO_CLASS);
 
     TestBootDriverModuleNames();
+    TestSmssThreadStartAddresses();
 }
