@@ -10,7 +10,153 @@
 
 #include "afd.h"
 
+/*
+ * How a stream send moves through FCB->Send.Window
+ *
+ * A send IRP stays on PendingIrpList[FUNCTION_SEND] until the transport has
+ * taken every byte of it.  Two numbers in the IRP track it there:
+ *
+ *  - IoStatus.Information: how much of the caller's payload has been copied
+ *    into the window so far.  It is also what the caller is told was sent.
+ *  - Tail.Overlay.DriverContext[3]: how many of the bytes in the window this
+ *    IRP answers for that the transport has not reported yet (its own, plus
+ *    any taken over from a cancelled send, see AfdReleaseSendWindowOwnership).
+ *
+ * A send whose caller may wait for it -- a blocking or an overlapped one -- is
+ * not limited by the size of the window: it is copied in as room appears, in
+ * as many pieces as it takes, and completes with its full length once the last
+ * piece has been sent.  Only a send that must not wait (non-blocking, not
+ * overlapped) completes with whatever fit.  The queue is always in the order
+ * the window holds the bytes in: fully buffered sends first, then at most one
+ * that is partly buffered, then the ones still waiting for their first byte.
+ */
+
+/* The length of the payload a send request describes */
+static
+UINT
+AfdSendRequestLength(PAFD_SEND_INFO SendReq)
+{
+    UINT i, Length = 0;
+
+    for (i = 0; i < SendReq->BufferCount; i++)
+        Length += SendReq->BufferArray[i].len;
+
+    return Length;
+}
+
+/* Whether the caller of this send can wait for it to go out in full.  A
+ * non-blocking socket's flag was already folded into AfdFlags when the request
+ * was queued, so this does not change while it waits. */
+static
+BOOLEAN
+AfdSendMayWait(PAFD_SEND_INFO SendReq)
+{
+    return (SendReq->AfdFlags & AFD_OVERLAPPED) ||
+           !(SendReq->AfdFlags & AFD_IMMEDIATE);
+}
+
+/* Whether part of a queued stream send has still to be copied into the window */
+static
+BOOLEAN
+AfdSendIsBuffering(PIRP Irp)
+{
+    PAFD_SEND_INFO SendReq = GetLockedData(Irp, IoGetCurrentIrpStackLocation(Irp));
+
+    return AfdSendMayWait(SendReq) &&
+           Irp->IoStatus.Information < AfdSendRequestLength(SendReq);
+}
+
+/*
+ * Appends as much of the not yet buffered part of a stream send as fits to the
+ * window and returns how many bytes that was.  LockBuffers() has already
+ * pointed every buffer at a kernel copy of the caller's data, so this works in
+ * any thread context.
+ */
+static
+UINT
+AfdBufferSendData(PAFD_FCB FCB, PIRP Irp, PAFD_SEND_INFO SendReq)
+{
+    ULONG_PTR Skip = Irp->IoStatus.Information;
+    UINT SpaceAvail = FCB->Send.Size - FCB->Send.BytesUsed;
+    UINT Copied = 0, BytesCopied, Length, i;
+
+    for (i = 0; i < SendReq->BufferCount && SpaceAvail > 0; i++)
+    {
+        Length = SendReq->BufferArray[i].len;
+        if (Skip >= Length)
+        {
+            Skip -= Length;
+            continue;
+        }
+
+        BytesCopied = MIN(Length - (UINT)Skip, SpaceAvail);
+
+        RtlCopyMemory(FCB->Send.Window + FCB->Send.BytesUsed,
+                      SendReq->BufferArray[i].buf + Skip,
+                      BytesCopied);
+
+        Skip = 0;
+        Copied += BytesCopied;
+        SpaceAvail -= BytesCopied;
+        FCB->Send.BytesUsed += BytesCopied;
+    }
+
+    if (Copied != 0)
+    {
+        Irp->IoStatus.Information += Copied;
+
+        /* What we just appended sits behind any bytes orphaned by a cancelled
+         * send, so those stop being the tail of the window and this IRP takes
+         * them over.  Only the accounting moves -- the caller is still told
+         * just its own byte count. */
+        Irp->Tail.Overlay.DriverContext[3] = (PVOID)
+            ((ULONG_PTR)Irp->Tail.Overlay.DriverContext[3] + Copied + FCB->SendOrphanedBytes);
+        FCB->SendOrphanedBytes = 0;
+    }
+
+    return Copied;
+}
+
 static IO_COMPLETION_ROUTINE SendComplete;
+
+/*
+ * Hands the send window to the transport.  The transport often completes the
+ * send before TdiSend() returns, which runs SendComplete() on this same stack,
+ * and SendComplete() then sends what is left.  A send larger than the window
+ * goes out one window at a time, so letting each completion issue the next
+ * send itself would nest one SendComplete() per window -- 8192 deep for a
+ * 64 MB send -- and overflow the kernel stack.  Only the outermost caller
+ * issues sends; a nested one just asks it to send again.  Must be called with
+ * the socket lock held.
+ */
+static
+VOID
+AfdIssueSend(PAFD_FCB FCB)
+{
+    if (FCB->SendIssuing)
+    {
+        FCB->SendReissue = TRUE;
+        return;
+    }
+
+    FCB->SendIssuing = TRUE;
+    do
+    {
+        FCB->SendReissue = FALSE;
+
+        if (!FCB->Send.BytesUsed || FCB->SendIrp.InFlightRequest)
+            break;
+
+        TdiSend(&FCB->SendIrp.InFlightRequest,
+                FCB->Connection.Object,
+                0,
+                FCB->Send.Window,
+                FCB->Send.BytesUsed,
+                SendComplete,
+                FCB);
+    } while (FCB->SendReissue);
+    FCB->SendIssuing = FALSE;
+}
 static NTSTATUS NTAPI SendComplete
 ( PDEVICE_OBJECT DeviceObject,
   PIRP Irp,
@@ -21,10 +167,9 @@ static NTSTATUS NTAPI SendComplete
     PIRP NextIrp = NULL;
     PIO_STACK_LOCATION NextIrpSp;
     PAFD_SEND_INFO SendReq = NULL;
-    PAFD_MAPBUF Map;
-    SIZE_T TotalBytesCopied = 0, TotalBytesProcessed = 0, SpaceAvail, i;
-    UINT SendLength, BytesCopied;
-    BOOLEAN HaltSendQueue;
+    SIZE_T TotalBytesProcessed = 0;
+    ULONG_PTR Owned;
+    UINT SendLength;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -48,7 +193,10 @@ static NTSTATUS NTAPI SendComplete
     FCB->SendIrp.InFlightRequest = NULL;
     /* Request is not in flight any longer */
 
-    if( FCB->SharedData.State == SOCKET_STATE_CLOSED ) {
+    /* A socket whose handle closed while it still had data to send keeps
+     * going until that data is out; see AfdCloseSocket().  Only one that is
+     * being torn down for good stops here. */
+    if( FCB->SharedData.State == SOCKET_STATE_CLOSED && !FCB->CloseLingering ) {
         /* Cleanup our IRP queue because the FCB is being destroyed */
         while( !IsListEmpty( &FCB->PendingIrpList[FUNCTION_SEND] ) ) {
             NextIrpEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]);
@@ -117,58 +265,50 @@ static NTSTATUS NTAPI SendComplete
 
     TotalBytesProcessed = 0;
     SendLength = Irp->IoStatus.Information;
-    HaltSendQueue = FALSE;
     while (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]) && SendLength > 0) {
-        NextIrpEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]);
+        NextIrpEntry = FCB->PendingIrpList[FUNCTION_SEND].Flink;
         NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
         NextIrpSp = IoGetCurrentIrpStackLocation( NextIrp );
-        SendReq = GetLockedData(NextIrp, NextIrpSp);
-        Map = (PAFD_MAPBUF)(SendReq->BufferArray + SendReq->BufferCount);
 
-        TotalBytesCopied = (ULONG_PTR)NextIrp->Tail.Overlay.DriverContext[3];
+        Owned = (ULONG_PTR)NextIrp->Tail.Overlay.DriverContext[3];
 
         /* This send is still only waiting for window space -- it owns none of
          * the bytes the transport just reported, and neither does anything
          * behind it.  Whatever is left is a cancelled send's, and is retired
-         * against FCB->SendOrphanedBytes once the loop ends.  Put the IRP back
-         * and stop; the block below is what finally buffers it.  (The old
-         * ASSERT(TotalBytesCopied != 0) here assumed every queued send owns
-         * window bytes, which was never true of one parked by
-         * LeaveIrpUntilLater().  ASSERT(SendLength == 0) below is the guard
-         * that actually catches a miscount.) */
-        if (TotalBytesCopied == 0)
-        {
-            InsertHeadList(&FCB->PendingIrpList[FUNCTION_SEND],
-                           &NextIrp->Tail.Overlay.ListEntry);
+         * against FCB->SendOrphanedBytes once the loop ends.  Leave it at the
+         * head; the block below is what buffers it.  (ASSERT(SendLength == 0)
+         * below is the guard that catches a miscount.) */
+        if (Owned == 0)
             break;
-        }
 
         /* If we didn't get enough, keep waiting */
-        if (TotalBytesCopied > SendLength)
+        if (Owned > SendLength)
         {
-            /* Update the bytes left to copy */
-            TotalBytesCopied -= SendLength;
-            NextIrp->Tail.Overlay.DriverContext[3] = (PVOID)TotalBytesCopied;
+            NextIrp->Tail.Overlay.DriverContext[3] = (PVOID)(Owned - SendLength);
 
-            /* Update the state variables */
             FCB->Send.BytesUsed -= SendLength;
             TotalBytesProcessed += SendLength;
             SendLength = 0;
-
-            /* Pend the IRP */
-            InsertHeadList(&FCB->PendingIrpList[FUNCTION_SEND],
-                           &NextIrp->Tail.Overlay.ListEntry);
-            HaltSendQueue = TRUE;
             break;
         }
+
+        NextIrp->Tail.Overlay.DriverContext[3] = NULL;
+        FCB->Send.BytesUsed -= Owned;
+        TotalBytesProcessed += Owned;
+        SendLength -= Owned;
+
+        /* Everything it had in the window is out, but part of its payload has
+         * not been buffered yet.  It stays at the head and is topped up below;
+         * nothing behind it holds window bytes. */
+        if (AfdSendIsBuffering(NextIrp))
+            break;
+
+        RemoveEntryList(NextIrpEntry);
+        SendReq = GetLockedData(NextIrp, NextIrpSp);
 
         ASSERT(NextIrp->IoStatus.Information != 0);
 
         NextIrp->IoStatus.Status = Irp->IoStatus.Status;
-
-        FCB->Send.BytesUsed -= TotalBytesCopied;
-        TotalBytesProcessed += TotalBytesCopied;
-        SendLength -= TotalBytesCopied;
 
         (void)IoSetCancelRoutine(NextIrp, NULL);
 
@@ -209,104 +349,37 @@ static NTSTATUS NTAPI SendComplete
     {
         AFD_DbgPrint(MIN_TRACE,("send window drift: SendLength=%u left, "
                      "Information=%u, orphaned=%u, BytesUsed=%u, processed=%u, "
-                     "halted=%u, pendingEmpty=%u\n",
+                     "pendingEmpty=%u\n",
                      SendLength, (UINT)Irp->IoStatus.Information,
                      FCB->SendOrphanedBytes, FCB->Send.BytesUsed,
-                     (UINT)TotalBytesProcessed, (UINT)HaltSendQueue,
+                     (UINT)TotalBytesProcessed,
                      (UINT)IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND])));
     }
 
     ASSERT(SendLength == 0);
 
-   if ( !HaltSendQueue && !IsListEmpty( &FCB->PendingIrpList[FUNCTION_SEND] ) ) {
-        NextIrpEntry = FCB->PendingIrpList[FUNCTION_SEND].Flink;
+    /* Give the room the transport just freed to the sends still waiting for
+     * it, oldest first.  The sends ahead of the first one that is still
+     * buffering are fully in the window already, and buffering them again
+     * would put a second copy of their bytes on the wire. */
+    for (NextIrpEntry = FCB->PendingIrpList[FUNCTION_SEND].Flink;
+         NextIrpEntry != &FCB->PendingIrpList[FUNCTION_SEND] &&
+         FCB->Send.BytesUsed < FCB->Send.Size;
+         NextIrpEntry = NextIrpEntry->Flink)
+    {
         NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
-        NextIrpSp = IoGetCurrentIrpStackLocation( NextIrp );
-        SendReq = GetLockedData(NextIrp, NextIrpSp);
-        Map = (PAFD_MAPBUF)(SendReq->BufferArray + SendReq->BufferCount);
 
+        if (!AfdSendIsBuffering(NextIrp))
+            continue;
+
+        SendReq = GetLockedData(NextIrp, IoGetCurrentIrpStackLocation(NextIrp));
         AFD_DbgPrint(MID_TRACE,("SendReq @ %p\n", SendReq));
 
-        /* Only a send that never got window space belongs here -- the one
-         * LeaveIrpUntilLater() parked.  The head of the queue is NOT always
-         * such a send: the drain loop above stops as soon as SendLength runs
-         * out, so a send whose payload is already in the window stays at the
-         * head whenever the transport reported exactly the bytes owned by the
-         * sends ahead of it.  That is the ordinary case once two sends are
-         * outstanding, because the second one is buffered while the first
-         * TdiSend is still in flight and so is not covered by it.
-         *
-         * Buffering it again would append a second copy of bytes the window
-         * already holds -- the peer receives the payload twice -- and
-         * DriverContext[3] is overwritten rather than added to, so the window
-         * would carry more bytes than the queue claims and the next completion
-         * would trip ASSERT(SendLength == 0) above.  A send that is already
-         * buffered needs nothing here: FCB->Send.BytesUsed is still non-zero,
-         * so the TdiSend at the end of this function transmits it. */
-        if (NextIrp->Tail.Overlay.DriverContext[3] != NULL)
-            NextIrp = NULL;
+        AfdBufferSendData(FCB, NextIrp, SendReq);
 
-        SpaceAvail = FCB->Send.Size - FCB->Send.BytesUsed;
-        TotalBytesCopied = 0;
-
-        /* Count the total transfer size */
-        SendLength = 0;
-        for (i = 0; i < SendReq->BufferCount; i++)
-        {
-            SendLength += SendReq->BufferArray[i].len;
-        }
-
-        /* Make sure we've got the space */
-        if (NextIrp != NULL && SendLength > SpaceAvail)
-        {
-           /* Blocking sockets have to wait here */
-           if (SendLength <= FCB->Send.Size && !((SendReq->AfdFlags & AFD_IMMEDIATE) || (FCB->NonBlocking)))
-           {
-               FCB->PollState &= ~AFD_EVENT_SEND;
-
-               NextIrp = NULL;
-           }
-
-           /* Check if we can send anything */
-           if (SpaceAvail == 0)
-           {
-               FCB->PollState &= ~AFD_EVENT_SEND;
-
-               /* We should never be non-overlapped and get to this point */
-               ASSERT(SendReq->AfdFlags & AFD_OVERLAPPED);
-
-               NextIrp = NULL;
-           }
-        }
-
-        if (NextIrp != NULL)
-        {
-            for( i = 0; i < SendReq->BufferCount; i++ ) {
-                BytesCopied = MIN(SendReq->BufferArray[i].len, SpaceAvail);
-
-                Map[i].BufferAddress =
-                   MmMapLockedPages( Map[i].Mdl, KernelMode );
-
-                RtlCopyMemory( FCB->Send.Window + FCB->Send.BytesUsed,
-                               Map[i].BufferAddress,
-                               BytesCopied );
-
-                MmUnmapLockedPages( Map[i].BufferAddress, Map[i].Mdl );
-
-                TotalBytesCopied += BytesCopied;
-                SpaceAvail -= BytesCopied;
-                FCB->Send.BytesUsed += BytesCopied;
-            }
-
-            NextIrp->IoStatus.Information = TotalBytesCopied;
-            /* What we just appended sits behind any bytes orphaned by a
-             * cancelled send, so those stop being the tail of the window and
-             * this IRP takes them over.  Only the accounting moves -- the
-             * caller is still told just its own byte count. */
-            NextIrp->Tail.Overlay.DriverContext[3] = (PVOID)
-                ((ULONG_PTR)NextIrp->IoStatus.Information + FCB->SendOrphanedBytes);
-            FCB->SendOrphanedBytes = 0;
-        }
+        /* Still not all in: the window is full again */
+        if (AfdSendIsBuffering(NextIrp))
+            break;
     }
 
     if (FCB->Send.Size - FCB->Send.BytesUsed != 0 && !FCB->SendClosed &&
@@ -325,13 +398,7 @@ static NTSTATUS NTAPI SendComplete
     /* Some data is still waiting */
     if( FCB->Send.BytesUsed )
     {
-        Status = TdiSend( &FCB->SendIrp.InFlightRequest,
-                          FCB->Connection.Object,
-                          0,
-                          FCB->Send.Window,
-                          FCB->Send.BytesUsed,
-                          SendComplete,
-                          FCB );
+        AfdIssueSend(FCB);
     }
     else
     {
@@ -628,7 +695,8 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 #ifdef _WIN64
     PAFD_SEND_INFO32 SendReq32 = NULL;
 #endif
-    UINT TotalBytesCopied = 0, i, SpaceAvail = 0, BytesCopied, SendLength;
+    UINT TotalBytesCopied = 0, SendLength;
+    BOOLEAN Behind = FALSE;
     KPROCESSOR_MODE LockMode;
 
     UNREFERENCED_PARAMETER(DeviceObject);
@@ -646,6 +714,8 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
      * window at all -- which is how AfdReleaseSendWindowOwnership() tells a
      * buffered send from one that owns no window bytes. */
     Irp->Tail.Overlay.DriverContext[3] = NULL;
+    /* Nor has any of it been copied */
+    Irp->IoStatus.Information = 0;
 
     if(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)
     {
@@ -738,7 +808,13 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     AFD_DbgPrint(MID_TRACE,("FCB->Send.BytesUsed = %u\n",
                             FCB->Send.BytesUsed));
 
-    SpaceAvail = FCB->Send.Size - FCB->Send.BytesUsed;
+    /* Whether this request may wait is settled now, in the request itself, so
+     * that a later change of the socket's blocking mode does not change it
+     * while it is queued */
+    if (FCB->NonBlocking)
+        SendReq->AfdFlags |= AFD_IMMEDIATE;
+
+    SendLength = AfdSendRequestLength(SendReq);
 
     /* Sends have to reach the connection in the order they were issued.  If an
      * earlier send is still waiting for window space, letting this one take
@@ -747,86 +823,47 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
      * order the send window no longer matches, which SendComplete()'s drain
      * loop reads as an IRP owning no bytes.  Treat the window as full instead,
      * so the checks below apply the caller's own blocking/overlapped policy
-     * exactly as they do for a genuinely full window.  A send that never got
-     * space leaves DriverContext[3] NULL and can only be at the tail, so the
-     * last entry is the one to look at. */
+     * exactly as they do for a genuinely full window.  A send that is still
+     * buffering can only be followed by others that are, so the last entry is
+     * the one to look at. */
     if (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]))
     {
         PIRP LastIrp = CONTAINING_RECORD(FCB->PendingIrpList[FUNCTION_SEND].Blink,
                                          IRP, Tail.Overlay.ListEntry);
 
-        if (LastIrp->Tail.Overlay.DriverContext[3] == NULL)
-            SpaceAvail = 0;
+        Behind = AfdSendIsBuffering(LastIrp);
     }
 
     AFD_DbgPrint(MID_TRACE,("We can accept %u bytes\n",
-                            SpaceAvail));
+                            Behind ? 0 : FCB->Send.Size - FCB->Send.BytesUsed));
 
-    /* Count the total transfer size */
-    SendLength = 0;
-    for (i = 0; i < SendReq->BufferCount; i++)
+    /* A send whose caller cannot wait takes whatever fits now and completes
+     * with that; if nothing fits it fails rather than blocks */
+    if (SendLength != 0 && !AfdSendMayWait(SendReq) &&
+        (Behind || FCB->Send.BytesUsed == FCB->Send.Size))
     {
-        SendLength += SendReq->BufferArray[i].len;
+        FCB->PollState &= ~AFD_EVENT_SEND;
+        UnlockBuffers( SendReq->BufferArray, SendReq->BufferCount, FALSE );
+        return UnlockAndMaybeComplete( FCB, STATUS_CANT_WAIT, Irp, 0 );
     }
 
-    /* Make sure we've got the space */
-    if (SendLength > SpaceAvail)
+    if (!Behind)
+        TotalBytesCopied = AfdBufferSendData(FCB, Irp, SendReq);
+
+    if (SendLength == 0)
     {
-        /* Blocking sockets have to wait here */
-        if (SendLength <= FCB->Send.Size && !((SendReq->AfdFlags & AFD_IMMEDIATE) || (FCB->NonBlocking)))
-        {
-            FCB->PollState &= ~AFD_EVENT_SEND;
-            return LeaveIrpUntilLater(FCB, Irp, FUNCTION_SEND);
-        }
-
-        /* Check if we can send anything */
-        if (SpaceAvail == 0)
-        {
-            FCB->PollState &= ~AFD_EVENT_SEND;
-
-            /* Non-overlapped sockets will fail if we can send nothing */
-            if (!(SendReq->AfdFlags & AFD_OVERLAPPED))
-            {
-                UnlockBuffers( SendReq->BufferArray, SendReq->BufferCount, FALSE );
-                return UnlockAndMaybeComplete( FCB, STATUS_CANT_WAIT, Irp, 0 );
-            }
-            else
-            {
-                /* Overlapped sockets just pend */
-                return LeaveIrpUntilLater(FCB, Irp, FUNCTION_SEND);
-            }
-        }
-    }
-
-    for ( i = 0; SpaceAvail > 0 && i < SendReq->BufferCount; i++ )
-    {
-        BytesCopied = MIN(SendReq->BufferArray[i].len, SpaceAvail);
-
-        AFD_DbgPrint(MID_TRACE,("Copying Buffer %u, %p:%u to %p\n",
-                                i,
-                                SendReq->BufferArray[i].buf,
-                                BytesCopied,
-                                FCB->Send.Window + FCB->Send.BytesUsed));
-
-        RtlCopyMemory(FCB->Send.Window + FCB->Send.BytesUsed,
-                      SendReq->BufferArray[i].buf,
-                      BytesCopied);
-
-        TotalBytesCopied += BytesCopied;
-        SpaceAvail -= BytesCopied;
-        FCB->Send.BytesUsed += BytesCopied;
-    }
-
-    Irp->IoStatus.Information = TotalBytesCopied;
-
-    if( TotalBytesCopied == 0 ) {
         AFD_DbgPrint(MID_TRACE,("Empty send\n"));
         UnlockBuffers( SendReq->BufferArray, SendReq->BufferCount, FALSE );
         return UnlockAndMaybeComplete
-        ( FCB, STATUS_SUCCESS, Irp, TotalBytesCopied );
+        ( FCB, STATUS_SUCCESS, Irp, 0 );
     }
 
-    if (SpaceAvail)
+    /* Whatever does not fit now -- all of it, if nothing does -- is buffered
+     * by SendComplete() as the transport frees window space; the request
+     * completes once all of it has been sent.  The window is full or another
+     * send is waiting ahead of this one, so a transmission is in flight that
+     * will get there. */
+    if (FCB->Send.Size - FCB->Send.BytesUsed != 0 && !AfdSendIsBuffering(Irp))
     {
         FCB->PollState |= AFD_EVENT_SEND;
         FCB->PollStatus[FD_WRITE_BIT] = STATUS_SUCCESS;
@@ -837,30 +874,20 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         FCB->PollState &= ~AFD_EVENT_SEND;
     }
 
-    /* We use the IRP tail for some temporary storage here.  Bytes orphaned by
-     * a cancelled send sit in front of what we just appended, so they are no
-     * longer the tail of the window and this IRP takes them over; see
-     * AfdReleaseSendWindowOwnership().  Only the accounting moves -- the
-     * caller is still told just its own byte count. */
-    Irp->Tail.Overlay.DriverContext[3] = (PVOID)
-        ((ULONG_PTR)Irp->IoStatus.Information + FCB->SendOrphanedBytes);
-    FCB->SendOrphanedBytes = 0;
+    AFD_DbgPrint(MID_TRACE,("Buffered %u of %u bytes\n", TotalBytesCopied, SendLength));
 
     Status = QueueUserModeIrp(FCB, Irp, FUNCTION_SEND);
-    if (Status == STATUS_PENDING && !FCB->SendIrp.InFlightRequest)
+
+    /* Even a request cancelled before it was queued has left its bytes in the
+     * window (they are orphaned now), and they still have to go out */
+    if (FCB->Send.BytesUsed && !FCB->SendIrp.InFlightRequest)
     {
-        TdiSend(&FCB->SendIrp.InFlightRequest,
-                FCB->Connection.Object,
-                0,
-                FCB->Send.Window,
-                FCB->Send.BytesUsed,
-                SendComplete,
-                FCB);
+        AfdIssueSend(FCB);
     }
 
     SocketStateUnlock(FCB);
 
-    return STATUS_PENDING;
+    return Status;
 }
 
 NTSTATUS NTAPI

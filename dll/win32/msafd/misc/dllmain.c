@@ -827,7 +827,9 @@ WSPCloseSocket(IN SOCKET Handle,
             {
                 WARN("Would block!\n");
                 NtClose(SockEvent);
+                /* The socket stays open: undo the close so far */
                 Socket->SharedData->State = OldState;
+                InterlockedIncrement(&Socket->SharedData->RefCount);
                 if (lpErrno) *lpErrno = WSAEWOULDBLOCK;
                 return SOCKET_ERROR;
             }
@@ -844,15 +846,23 @@ WSPCloseSocket(IN SOCKET Handle,
         }
     }
 
+    /*
+     * SO_LINGER with a zero timeout, or one that ran out before the sends
+     * finished: reset the connection.  Otherwise the close is graceful and
+     * closesocket() does not wait for it -- AFD sends whatever is still queued,
+     * then the FIN, after the handle is gone (MSDN, closesocket: with l_onoff
+     * zero "the close operation completes ... in the background").  Waiting
+     * for a graceful disconnect here would block for as long as the peer does
+     * not read.
+     */
     if (OldState == SocketConnected)
     {
-        if (LingerWait <= 0)
+        if (LingerWait == 0)
         {
             DisconnectInfo.Timeout.QuadPart = 0LL;
-            DisconnectInfo.DisconnectType = LingerWait < 0 ? AFD_DISCONNECT_SEND : AFD_DISCONNECT_ABORT;
+            DisconnectInfo.DisconnectType = AFD_DISCONNECT_ABORT;
 
-            if (((DisconnectInfo.DisconnectType & AFD_DISCONNECT_SEND) && (!Socket->SharedData->SendShutdown)) ||
-                ((DisconnectInfo.DisconnectType & AFD_DISCONNECT_ABORT) && (!Socket->SharedData->ReceiveShutdown)))
+            if (!Socket->SharedData->ReceiveShutdown)
             {
                 /* Send IOCTL */
                 Status = NtDeviceIoControlFile((HANDLE)Handle,

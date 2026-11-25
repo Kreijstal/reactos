@@ -524,19 +524,21 @@ MsafdReturnWithErrno(
     _In_ DWORD Received,
     _Out_opt_ LPDWORD ReturnedBytes)
 {
+    /* The byte count is only reported for a call that succeeded; a failed one
+     * leaves the caller's variable alone */
     if (Errno)
     {
         *Errno = TranslateNtStatusError(Status);
 
-        if (ReturnedBytes)
-            *ReturnedBytes = (*Errno == 0) ? Received : 0;
+        if (ReturnedBytes && *Errno == 0)
+            *ReturnedBytes = Received;
 
         return (*Errno == 0) ? 0 : SOCKET_ERROR;
     }
     else
     {
-        if (ReturnedBytes)
-            *ReturnedBytes = (Status == STATUS_SUCCESS) ? Received : 0;
+        if (ReturnedBytes && Status == STATUS_SUCCESS)
+            *ReturnedBytes = Received;
 
         return (Status == STATUS_SUCCESS) ? 0 : SOCKET_ERROR;
     }

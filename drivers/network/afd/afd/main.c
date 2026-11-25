@@ -457,64 +457,14 @@ AfdCleanupSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, 0);
 }
 
-static NTSTATUS NTAPI
-AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
-               PIO_STACK_LOCATION IrpSp)
+/*
+ * Frees everything a socket owns, the FCB last.  Nothing may still reference
+ * the FCB: no IRP of ours in flight, no caller holding its lock.
+ */
+static
+VOID
+AfdDestroyFcb(PAFD_FCB FCB)
 {
-    PFILE_OBJECT FileObject = IrpSp->FileObject;
-    PAFD_FCB FCB = FileObject->FsContext;
-    UINT i;
-    PAFD_IN_FLIGHT_REQUEST InFlightRequest[IN_FLIGHT_REQUESTS];
-    PAFD_TDI_OBJECT_QELT Qelt;
-    PLIST_ENTRY QeltEntry;
-
-
-    AFD_DbgPrint(MID_TRACE,("AfdClose(DeviceObject %p Irp %p)\n",
-                            DeviceObject, Irp));
-
-    if( !SocketAcquireStateLock( FCB ) ) return STATUS_FILE_CLOSED;
-
-    FCB->SharedData.State = SOCKET_STATE_CLOSED;
-
-    InFlightRequest[0] = &FCB->ListenIrp;
-    InFlightRequest[1] = &FCB->ReceiveIrp;
-    InFlightRequest[2] = &FCB->SendIrp;
-    InFlightRequest[3] = &FCB->ConnectIrp;
-    InFlightRequest[4] = &FCB->DisconnectIrp;
-
-    /* Cancel our pending requests */
-    for( i = 0; i < IN_FLIGHT_REQUESTS; i++ ) {
-        if( InFlightRequest[i]->InFlightRequest ) {
-            AFD_DbgPrint(MID_TRACE,("Cancelling in flight irp %u (%p)\n",
-                                    i, InFlightRequest[i]->InFlightRequest));
-            IoCancelIrp(InFlightRequest[i]->InFlightRequest);
-        }
-    }
-
-    KillSelectsForFCB( FCB->DeviceExt, FileObject, FALSE );
-
-    ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECT]));
-    ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECTEX]));
-    ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]));
-    ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_RECV]));
-    ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_PREACCEPT]));
-    ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_DISCONNECT]));
-
-    while (!IsListEmpty(&FCB->PendingConnections))
-    {
-        QeltEntry = RemoveHeadList(&FCB->PendingConnections);
-        Qelt = CONTAINING_RECORD(QeltEntry, AFD_TDI_OBJECT_QELT, ListEntry);
-
-        /* We have to close all pending connections or the listen won't get closed */
-        TdiDisassociateAddressFile(Qelt->Object.Object);
-        ObDereferenceObject(Qelt->Object.Object);
-        ZwClose(Qelt->Object.Handle);
-
-        ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
-    }
-
-    SocketStateUnlock( FCB );
-
     if( FCB->EventSelect )
         ObDereferenceObject( FCB->EventSelect );
 
@@ -588,6 +538,204 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     }
 
     ExFreePoolWithTag(FCB, TAG_AFD_FCB);
+}
+
+static WORKER_THREAD_ROUTINE AfdLingeringCloseWorker;
+static
+VOID
+NTAPI
+AfdLingeringCloseWorker(PVOID Context)
+{
+    PAFD_FCB FCB = Context;
+    PAFD_IN_FLIGHT_REQUEST InFlightRequest[IN_FLIGHT_REQUESTS];
+    UINT i;
+
+    /* Whoever queued us still held the socket lock; wait for them to drop it.
+     * The send side is finished by now, so nothing else can be in flight --
+     * the receive side was cancelled when the handle closed -- but make sure,
+     * as AfdCloseSocket() does. */
+    if (SocketAcquireStateLock(FCB))
+    {
+        ASSERT(!FCB->SendIrp.InFlightRequest);
+        ASSERT(!FCB->DisconnectIrp.InFlightRequest);
+
+        FCB->CloseLingering = FALSE;
+
+        InFlightRequest[0] = &FCB->ListenIrp;
+        InFlightRequest[1] = &FCB->ReceiveIrp;
+        InFlightRequest[2] = &FCB->SendIrp;
+        InFlightRequest[3] = &FCB->ConnectIrp;
+        InFlightRequest[4] = &FCB->DisconnectIrp;
+
+        for (i = 0; i < IN_FLIGHT_REQUESTS; i++)
+        {
+            if (InFlightRequest[i]->InFlightRequest)
+                IoCancelIrp(InFlightRequest[i]->InFlightRequest);
+        }
+
+        SocketStateUnlock(FCB);
+    }
+
+    AFD_DbgPrint(MID_TRACE,("Lingering close of %p finished\n", FCB));
+
+    AfdDestroyFcb(FCB);
+}
+
+/*
+ * The graceful close of a socket whose handle is already gone has finished, or
+ * cannot go on.  Must be called with the socket lock held; the FCB is freed
+ * once the caller drops it.
+ */
+static
+VOID
+AfdFinishLingeringClose(PAFD_FCB FCB)
+{
+    ASSERT(FCB->CloseLingering);
+
+    ExInitializeWorkItem(&FCB->CloseWorkItem, AfdLingeringCloseWorker, FCB);
+    ExQueueWorkItem(&FCB->CloseWorkItem, DelayedWorkQueue);
+}
+
+/*
+ * Whether a connected stream socket whose last handle is closing still owes
+ * its peer a graceful close.  Such a socket is not torn down yet: with
+ * SO_LINGER off, closesocket() returns at once and the graceful close -- the
+ * data still queued, then the FIN -- carries on in the background (MSDN,
+ * closesocket).  With SO_LINGER on, msafd has already waited for the sends or
+ * aborted the connection before it closes the handle; if the sends finished,
+ * only the FIN is left, and it goes the same way.  Not for a socket whose
+ * connection was aborted, nor for one whose send side is already shut down.
+ */
+static
+BOOLEAN
+AfdShouldLingerOnClose(PAFD_FCB FCB)
+{
+    if ((FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) ||
+        FCB->SharedData.State != SOCKET_STATE_CONNECTED ||
+        FCB->Connection.Object == NULL ||
+        FCB->ConnectCallInfo == NULL ||
+        FCB->DisconnectIrp.InFlightRequest != NULL ||
+        (FCB->PollState & AFD_EVENT_ABORT))
+    {
+        return FALSE;
+    }
+
+    /* shutdown(SD_SEND) or a disconnect that already went out */
+    if (FCB->SendClosed && !FCB->DisconnectPending)
+        return FALSE;
+
+    /* An abortive disconnect does not wait for anything */
+    if (FCB->DisconnectPending && (FCB->DisconnectFlags & TDI_DISCONNECT_ABORT))
+        return FALSE;
+
+    return TRUE;
+}
+
+static NTSTATUS NTAPI
+AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+               PIO_STACK_LOCATION IrpSp)
+{
+    PFILE_OBJECT FileObject = IrpSp->FileObject;
+    PAFD_FCB FCB = FileObject->FsContext;
+    UINT i;
+    PAFD_IN_FLIGHT_REQUEST InFlightRequest[IN_FLIGHT_REQUESTS];
+    PAFD_TDI_OBJECT_QELT Qelt;
+    PLIST_ENTRY QeltEntry;
+
+
+    AFD_DbgPrint(MID_TRACE,("AfdClose(DeviceObject %p Irp %p)\n",
+                            DeviceObject, Irp));
+
+    if( !SocketAcquireStateLock( FCB ) ) return STATUS_FILE_CLOSED;
+
+    if (AfdShouldLingerOnClose(FCB))
+    {
+        /* Keep the connection and the send window; the disconnect that ends
+         * the graceful close frees the FCB (see DisconnectComplete()).  The
+         * file object goes away when we return, so nothing may signal it from
+         * now on. */
+        AFD_DbgPrint(MID_TRACE,("Closing %p with %u bytes unsent\n",
+                                FCB, FCB->Send.BytesUsed));
+
+        FCB->SharedData.State = SOCKET_STATE_CLOSED;
+        FCB->CloseLingering = TRUE;
+
+        if (FCB->ReceiveIrp.InFlightRequest)
+            IoCancelIrp(FCB->ReceiveIrp.InFlightRequest);
+
+        KillSelectsForFCB( FCB->DeviceExt, FileObject, FALSE );
+        FCB->FileObject = NULL;
+        FileObject->FsContext = NULL;
+
+        ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]));
+        ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_RECV]));
+        ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_DISCONNECT]));
+
+        if (!FCB->DisconnectPending)
+        {
+            FCB->DisconnectFlags = TDI_DISCONNECT_RELEASE;
+            FCB->DisconnectTimeout.QuadPart = 0;
+            FCB->DisconnectPending = TRUE;
+        }
+        FCB->SendClosed = TRUE;
+        FCB->PollState &= ~AFD_EVENT_SEND;
+
+        /* With nothing left to send this sends the FIN right away; otherwise
+         * SendComplete() does once the window has drained.  Either way the FCB
+         * is freed once the disconnect completes and we have dropped the lock. */
+        RetryDisconnectCompletion(FCB);
+
+        SocketStateUnlock( FCB );
+
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+
+        return STATUS_SUCCESS;
+    }
+
+    FCB->SharedData.State = SOCKET_STATE_CLOSED;
+
+    InFlightRequest[0] = &FCB->ListenIrp;
+    InFlightRequest[1] = &FCB->ReceiveIrp;
+    InFlightRequest[2] = &FCB->SendIrp;
+    InFlightRequest[3] = &FCB->ConnectIrp;
+    InFlightRequest[4] = &FCB->DisconnectIrp;
+
+    /* Cancel our pending requests */
+    for( i = 0; i < IN_FLIGHT_REQUESTS; i++ ) {
+        if( InFlightRequest[i]->InFlightRequest ) {
+            AFD_DbgPrint(MID_TRACE,("Cancelling in flight irp %u (%p)\n",
+                                    i, InFlightRequest[i]->InFlightRequest));
+            IoCancelIrp(InFlightRequest[i]->InFlightRequest);
+        }
+    }
+
+    KillSelectsForFCB( FCB->DeviceExt, FileObject, FALSE );
+
+    ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECT]));
+    ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECTEX]));
+    ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]));
+    ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_RECV]));
+    ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_PREACCEPT]));
+    ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_DISCONNECT]));
+
+    while (!IsListEmpty(&FCB->PendingConnections))
+    {
+        QeltEntry = RemoveHeadList(&FCB->PendingConnections);
+        Qelt = CONTAINING_RECORD(QeltEntry, AFD_TDI_OBJECT_QELT, ListEntry);
+
+        /* We have to close all pending connections or the listen won't get closed */
+        TdiDisassociateAddressFile(Qelt->Object.Object);
+        ObDereferenceObject(Qelt->Object.Object);
+        ZwClose(Qelt->Object.Handle);
+
+        ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
+    }
+
+    SocketStateUnlock( FCB );
+
+    AfdDestroyFcb(FCB);
 
     Irp->IoStatus.Status = STATUS_SUCCESS;
     Irp->IoStatus.Information = 0;
@@ -663,6 +811,10 @@ DisconnectComplete(PDEVICE_OBJECT DeviceObject,
         PollReeval(FCB->DeviceExt, FCB->FileObject);
     }
 
+    /* The FIN that ends a background close is out: nothing is left to do */
+    if (FCB->CloseLingering)
+        AfdFinishLingeringClose(FCB);
+
     SocketStateUnlock(FCB);
 
     return Irp->IoStatus.Status;
@@ -711,8 +863,11 @@ RetryDisconnectCompletion(PAFD_FCB FCB)
 
     if (IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]) && !FCB->SendIrp.InFlightRequest && FCB->DisconnectPending)
     {
-        /* Sends are done; fire off a TDI_DISCONNECT request */
-        DoDisconnect(FCB);
+        /* Sends are done; fire off a TDI_DISCONNECT request.  If it could not
+         * even be issued, DisconnectComplete() will never run, so a background
+         * close ends here. */
+        if (DoDisconnect(FCB) != STATUS_PENDING && FCB->CloseLingering)
+            AfdFinishLingeringClose(FCB);
     }
 }
 
@@ -735,15 +890,13 @@ AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY,
                                        Irp, 0 );
 
-    /* Send direction only */
-    if ((DisReq->DisconnectType & AFD_DISCONNECT_SEND) &&
-        !(DisReq->DisconnectType & AFD_DISCONNECT_RECV))
-    {
-        /* Perform a controlled disconnect */
-        Flags = TDI_DISCONNECT_RELEASE;
-    }
-    /* Receive direction or both */
-    else
+    /* Only AFD_DISCONNECT_ABORT resets the connection.  shutdown(SD_BOTH)
+     * (AFD_DISCONNECT_SEND | AFD_DISCONNECT_RECV) closes the send direction
+     * gracefully, with a FIN after whatever is still queued, exactly as
+     * shutdown(SD_SEND) does; treating it as an abort made the peer lose data
+     * it had been sent (a server that answers, shuts down both directions and
+     * closes the socket). */
+    if (DisReq->DisconnectType & (AFD_DISCONNECT_RECV | AFD_DISCONNECT_ABORT))
     {
         /* Mark that we can't issue another receive request */
         FCB->TdiReceiveClosed = TRUE;
@@ -761,19 +914,22 @@ AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
         /* Clear the receive event */
         FCB->PollState &= ~AFD_EVENT_RECEIVE;
+    }
 
-        /* Receive direction only */
-        if ((DisReq->DisconnectType & AFD_DISCONNECT_RECV) &&
-            !(DisReq->DisconnectType & AFD_DISCONNECT_SEND))
-        {
-            /* No need to tell the transport driver for receive direction only */
-            return UnlockAndMaybeComplete( FCB, STATUS_SUCCESS, Irp, 0 );
-        }
-        else
-        {
-            /* Perform an abortive disconnect */
-            Flags = TDI_DISCONNECT_ABORT;
-        }
+    if (DisReq->DisconnectType & AFD_DISCONNECT_ABORT)
+    {
+        /* Perform an abortive disconnect */
+        Flags = TDI_DISCONNECT_ABORT;
+    }
+    else if (DisReq->DisconnectType & AFD_DISCONNECT_SEND)
+    {
+        /* Perform a controlled disconnect */
+        Flags = TDI_DISCONNECT_RELEASE;
+    }
+    else
+    {
+        /* No need to tell the transport driver for receive direction only */
+        return UnlockAndMaybeComplete( FCB, STATUS_SUCCESS, Irp, 0 );
     }
 
     if (!(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))

@@ -533,6 +533,11 @@ VOID PollReeval( PAFD_DEVICE_EXTENSION DeviceExt, PFILE_OBJECT FileObject ) {
     AFD_DbgPrint(MID_TRACE,("Called: DeviceExt %p FileObject %p\n",
                             DeviceExt, FileObject));
 
+    /* A socket finishing its close in the background (FCB->CloseLingering)
+     * has no file object left, and nobody to tell */
+    if (!FileObject)
+        return;
+
     KeAcquireSpinLock( &DeviceExt->Lock, &OldIrql );
 
     /* Take care of any event select signalling */
