@@ -287,6 +287,11 @@ WSPSocket(int AddressFamily,
                    TransportName.Buffer,
                    TransportName.Length + sizeof(WCHAR));
     AfdPacket->GroupID = g;
+#if (_WIN32_WINNT >= 0x0600)
+    AfdPacket->AddressFamily = AddressFamily;
+    AfdPacket->SocketType = SocketType;
+    AfdPacket->Protocol = Protocol;
+#endif
 
     /* Set up Endpoint Flags */
     if ((Socket->SharedData->ServiceFlags1 & XP1_CONNECTIONLESS) != 0)

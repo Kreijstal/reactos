@@ -56,6 +56,12 @@ typedef struct STRUCT(_AFD_CREATE_PACKET)
 {
     DWORD EndpointFlags;
     DWORD GroupID;
+#if (_WIN32_WINNT >= 0x0600)
+    /* NT6 msafd passes the socket triple to AFD on creation */
+    DWORD AddressFamily;
+    DWORD SocketType;
+    DWORD Protocol;
+#endif
     DWORD SizeOfTransportName;
     WCHAR TransportName[1];
 } STRUCT(AFD_CREATE_PACKET), *STRUCT(PAFD_CREATE_PACKET);

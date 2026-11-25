@@ -329,6 +329,17 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         ConnectInfo = (PAFD_CREATE_PACKET)(EaInfo->EaName + EaInfo->EaNameLength + 1);
         EaInfoValue = (PWCHAR)(((PCHAR)ConnectInfo) + sizeof(AFD_CREATE_PACKET));
 
+        /* The packet and the transport name it carries come from user mode */
+        if (EaInfo->EaValueLength < FIELD_OFFSET(AFD_CREATE_PACKET, TransportName) ||
+            EaInfo->EaValueLength - FIELD_OFFSET(AFD_CREATE_PACKET, TransportName) <
+                ConnectInfo->SizeOfTransportName)
+        {
+            Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+
         //EaLength = sizeof(FILE_FULL_EA_INFORMATION) + EaInfo->EaNameLength + EaInfo->EaValueLength;
 
         AFD_DbgPrint(MID_TRACE,("EaInfo: %p, EaInfoValue: %p\n",
