@@ -468,9 +468,51 @@ VOID UnlockBuffers( PAFD_WSABUF Buf, UINT Count, BOOL Address ) {
 
 /* Produce a kernel-land handle array with handles replaced by object
  * pointers.  This will allow the system to do proper alerting */
+/*
+ * References a socket handle the caller passed in a request.  It must be a
+ * file object of ours: a stale socket handle the process has since reused
+ * for an event, a thread or another file is not a socket, and its "FCB" is
+ * whatever the object happens to hold.  The handle belongs to the requestor,
+ * so it is checked in the requestor's mode.
+ */
+NTSTATUS
+AfdReferenceSocketHandle(
+    _In_ HANDLE Handle,
+    _In_ PIRP Irp,
+    _Out_ PFILE_OBJECT *FileObject)
+{
+    PFILE_OBJECT Object;
+    NTSTATUS Status;
+
+    *FileObject = NULL;
+
+    Status = ObReferenceObjectByHandle(Handle,
+                                       0,
+                                       *IoFileObjectType,
+                                       Irp->RequestorMode,
+                                       (PVOID *)&Object,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (Object->DeviceObject->DriverObject !=
+        IoGetCurrentIrpStackLocation(Irp)->DeviceObject->DriverObject)
+    {
+        ObDereferenceObject(Object);
+        return STATUS_INVALID_HANDLE;
+    }
+
+    /* An open socket always has its FCB; only its close clears it */
+    ASSERT(Object->FsContext != NULL);
+
+    *FileObject = Object;
+    return STATUS_SUCCESS;
+}
+
 PAFD_HANDLE LockHandles(PAFD_HANDLE HandleArray, 
                         UINT HandleCount, 
-                        BOOLEAN Wow64Is32Bit) 
+                        BOOLEAN Wow64Is32Bit,
+                        PIRP Irp) 
 {
     UINT i;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -505,12 +547,9 @@ PAFD_HANDLE LockHandles(PAFD_HANDLE HandleArray,
         
         if(NT_SUCCESS(Status)) 
         {
-            Status = ObReferenceObjectByHandle((PVOID)handle,
-                                               FILE_ALL_ACCESS,
-                                               NULL,
-                                               KernelMode,
-                                               (PVOID*)&FileObjects[i].Handle,
-                                               NULL);
+            Status = AfdReferenceSocketHandle((HANDLE)handle,
+                                              Irp,
+                                              (PFILE_OBJECT *)&FileObjects[i].Handle);
         }
 
         if(!NT_SUCCESS(Status))

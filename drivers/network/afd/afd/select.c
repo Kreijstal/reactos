@@ -346,7 +346,7 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                  PollReq32->HandleCount,
                                  (INT)(PollReq32->Timeout.QuadPart)));
 
-        AfdHandles = LockHandles((PVOID)PollReq32->Handles, PollReq->HandleCount, TRUE);
+        AfdHandles = LockHandles((PVOID)PollReq32->Handles, PollReq->HandleCount, TRUE, Irp);
     }
     else
 #endif
@@ -358,7 +358,7 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                  PollReq->HandleCount,
                                  (INT)(PollReq->Timeout.QuadPart)));
 
-        AfdHandles = LockHandles(PollReq->Handles, PollReq->HandleCount, FALSE);
+        AfdHandles = LockHandles(PollReq->Handles, PollReq->HandleCount, FALSE, Irp);
     }
     
     if(!AfdHandles) 

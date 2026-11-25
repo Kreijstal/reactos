@@ -550,13 +550,9 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
             RemoveEntryList( PendingConn );
 
-            Status = ObReferenceObjectByHandle
-                ( AcceptData->ListenHandle,
-                  FILE_ALL_ACCESS,
-                  NULL,
-                  KernelMode,
-                  (PVOID *)&NewFileObject,
-                  NULL );
+            Status = AfdReferenceSocketHandle(AcceptData->ListenHandle,
+                                              Irp,
+                                              &NewFileObject);
 
             if( !NT_SUCCESS(Status) ) return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
 
@@ -623,8 +619,7 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     _SEH2_END;
 
     /* Validate that accepting socket is valid, and has not been bound or connected */
-    Status = ObReferenceObjectByHandle(
-        AcceptRequest->AcceptHandle, FILE_ALL_ACCESS, NULL, KernelMode, (PVOID *)&NewFileObject, NULL);
+    Status = AfdReferenceSocketHandle(AcceptRequest->AcceptHandle, Irp, &NewFileObject);
     if (!NT_SUCCESS(Status))
     {
         IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]);

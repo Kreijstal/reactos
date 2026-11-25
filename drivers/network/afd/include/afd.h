@@ -352,7 +352,8 @@ NTSTATUS NTAPI UnlockAndMaybeComplete
   UINT Information );
 VOID SocketStateUnlock( PAFD_FCB FCB );
 NTSTATUS LostSocket( PIRP Irp );
-PAFD_HANDLE LockHandles(PAFD_HANDLE HandleArray, UINT HandleCount, BOOLEAN Wow64Is32Bit);
+NTSTATUS AfdReferenceSocketHandle(HANDLE Handle, PIRP Irp, PFILE_OBJECT *FileObject);
+PAFD_HANDLE LockHandles(PAFD_HANDLE HandleArray, UINT HandleCount, BOOLEAN Wow64Is32Bit, PIRP Irp);
 VOID UnlockHandles( PAFD_HANDLE HandleArray, UINT HandleCount );
 PVOID LockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp, BOOLEAN Output, KPROCESSOR_MODE *LockMode );
 VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp );
