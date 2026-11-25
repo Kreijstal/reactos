@@ -515,6 +515,14 @@ PspInitPhase0(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     PspCidTable = ExCreateHandleTable(NULL);
     if (!PspCidTable) return FALSE;
 
+    /*
+     * Like Windows, hand out process and thread IDs in FIFO order, so that the
+     * ID of an object that just went away is not given to the very next one.
+     * Software that keys state by PID (e.g. the MSYS2/Cygwin console code) gets
+     * confused when a new process immediately receives its predecessor's PID.
+     */
+    PspCidTable->StrictFIFO = TRUE;
+
     /* FIXME: Initialize LDT/VDM support */
 
     /* Setup the reaper */
