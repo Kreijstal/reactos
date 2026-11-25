@@ -457,6 +457,17 @@ NwifiSupplicantInstallKeysWorker(
      * supplicant between queueing and running this item. */
     NdisAcquireSpinLock(&Msm->Lock);
     Sup = Msm->Supplicant;
+    /*
+     * The item is running, so the next completed exchange may queue it
+     * again.  This used to be cleared only by NwifiSupplicantStart, so the
+     * install after the 4-way handshake was the last one of the association:
+     * every group-key rekey was answered on the air (the AP moved to the new
+     * GTK) and never reached the hardware, and broadcast receive died at the
+     * first rekey.  Cleared before the generation is read below, so a rekey
+     * that lands while this runs queues a fresh pass instead of being lost.
+     */
+    if (Sup != NULL)
+        InterlockedExchange(&Sup->InstallQueued, 0);
     if (Sup == NULL || !Sup->Initialised)
     {
         NdisReleaseSpinLock(&Msm->Lock);
