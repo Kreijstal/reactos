@@ -241,6 +241,69 @@ typedef struct _AR9485LAB_INFO
     USHORT DeviceId;
 } AR9485LAB_INFO, *PAR9485LAB_INFO;
 
+/* ===========================================================================
+ *  IOCTL_AR9485LAB_LINK_STATUS / IOCTL_AR9485LAB_READ_LOG
+ *
+ *  Read-only views of the running miniport that need NO claim.  A claim
+ *  stands the chip worker down and its release resets the chip, which ends
+ *  the association being studied; these two only copy driver memory, so
+ *  they can be polled from luagent while the link is up.
+ * ===========================================================================
+ */
+#define IOCTL_AR9485LAB_LINK_STATUS \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x904, METHOD_BUFFERED, FILE_ANY_ACCESS)
+/* Output: the driver log ring, oldest byte first (up to 16 KB). */
+#define IOCTL_AR9485LAB_READ_LOG \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x905, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+#define AR9485LAB_LINK_STATUS_VERSION   1
+
+typedef struct _AR9485LAB_LINK_STATUS
+{
+    ULONG Version;              /* AR9485LAB_LINK_STATUS_VERSION */
+    ULONG Size;
+    ULONGLONG Now;              /* KeQueryInterruptTime, 100 ns */
+    ULONG MlmeState;            /* 4 = associated */
+    ULONG ChannelMHz;
+    UCHAR Bssid[6];
+    USHORT AssociationId;
+    ULONG TxPending;
+    ULONG DeauthReason;         /* last reason the AP gave */
+    ULONGLONG TxFrameCount;     /* acknowledged */
+    ULONGLONG TxFailureCount;
+    ULONGLONG RxFrameCount;
+    ULONGLONG RxUnicastCount;
+    ULONGLONG RxMulticastCount;
+    ULONGLONG RxBroadcastCount;
+    ULONGLONG RxErrorCount;
+    ULONGLONG RxCryptoErrorCount;
+    ULONG RxDropMichael;
+    ULONG RxGroupMicOkCount;
+    /* Group keys: installs since load, the slots now holding one (bit n =
+     * key ID n), and group frames that arrived under a key ID no slot
+     * holds -- what a rekey that never reached the hardware looks like. */
+    ULONG GroupKeyInstalls;
+    ULONG GroupKeyMask;
+    ULONG LastGroupKeyId;
+    ULONG RxGroupUnknownKeyId;
+    /* Connection monitor (linkmon.h), times as KeQueryInterruptTime. */
+    ULONGLONG LinkStart;
+    ULONGLONG LastBeacon;
+    ULONGLONG LastAck;
+    ULONGLONG LastProbe;
+    ULONGLONG LastLostTime;
+    ULONG Links;
+    ULONG ProbesSent;
+    ULONG ProbesAcked;
+    ULONG ProbesFailed;
+    ULONG ProbesTimedOut;
+    ULONG IdleProbes;
+    ULONG BeaconLossEvents;
+    ULONG LinksLost;
+    ULONG LastLostReason;       /* AR9485_LINKMON_LOST_* */
+    ULONG PeerDisconnects;      /* deauth/disassoc from the AP */
+} AR9485LAB_LINK_STATUS, *PAR9485LAB_LINK_STATUS;
+
 #define AR9485LAB_INFO_CLAIMED          0x00000001
 #define AR9485LAB_INFO_CLAIMED_BY_ME    0x00000002
 #define AR9485LAB_INFO_PHY_UP           0x00000004

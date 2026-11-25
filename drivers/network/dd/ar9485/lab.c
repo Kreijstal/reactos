@@ -587,6 +587,62 @@ LabFillInfo(_Out_ PAR9485LAB_INFO Info, _In_opt_ PFILE_OBJECT FileObject)
         Info->Flags |= AR9485LAB_INFO_PHY_UP;
 }
 
+/*
+ * A snapshot of the link for IOCTL_AR9485LAB_LINK_STATUS.  Reads only: the
+ * chip worker owns every field and keeps running, so a value may be one
+ * worker pass stale, which is fine for counters.
+ */
+static VOID
+LabFillLinkStatus(_Out_ PAR9485LAB_LINK_STATUS S)
+{
+    PAR9485_ADAPTER A = gLab.Adapter;
+    const AR9485_LINKMON *M;
+
+    RtlZeroMemory(S, sizeof(*S));
+    S->Version = AR9485LAB_LINK_STATUS_VERSION;
+    S->Size = sizeof(*S);
+    S->Now = KeQueryInterruptTime();
+    if (A == NULL)
+        return;
+    M = &A->LinkMon;
+
+    S->MlmeState = A->MlmeState;
+    S->ChannelMHz = A->CurrentChannelMHz;
+    RtlCopyMemory(S->Bssid, A->Bssid, sizeof(S->Bssid));
+    S->AssociationId = A->AssociationId;
+    S->TxPending = A->TxPending;
+    S->DeauthReason = A->DeauthReason;
+    S->TxFrameCount = A->TxFrameCount;
+    S->TxFailureCount = A->TxFailureCount;
+    S->RxFrameCount = A->RxFrameCount;
+    S->RxUnicastCount = A->RxUnicastCount;
+    S->RxMulticastCount = A->RxMulticastCount;
+    S->RxBroadcastCount = A->RxBroadcastCount;
+    S->RxErrorCount = A->RxErrorCount;
+    S->RxCryptoErrorCount = A->RxCryptoErrorCount;
+    S->RxDropMichael = A->RxDropMichael;
+    S->RxGroupMicOkCount = A->RxGroupMicOkCount;
+    S->GroupKeyInstalls = A->GroupKeyInstalls;
+    S->GroupKeyMask = A->GroupKeyMask;
+    S->LastGroupKeyId = A->LastGroupKeyId;
+    S->RxGroupUnknownKeyId = A->RxGroupUnknownKeyId;
+    S->LinkStart = M->LinkStart;
+    S->LastBeacon = M->LastBeacon;
+    S->LastAck = M->LastAck;
+    S->LastProbe = M->LastProbe;
+    S->LastLostTime = M->LastLostTime;
+    S->Links = M->Links;
+    S->ProbesSent = M->ProbesSent;
+    S->ProbesAcked = M->ProbesAcked;
+    S->ProbesFailed = M->ProbesFailed;
+    S->ProbesTimedOut = M->ProbesTimedOut;
+    S->IdleProbes = M->IdleProbes;
+    S->BeaconLossEvents = M->BeaconLossEvents;
+    S->LinksLost = M->LinksLost;
+    S->LastLostReason = M->LastLostReason;
+    S->PeerDisconnects = A->PeerDisconnects;
+}
+
 static NTSTATUS
 LabClaim(_In_ PFILE_OBJECT FileObject)
 {
@@ -721,6 +777,27 @@ LabDispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             }
             LabFillInfo((PAR9485LAB_INFO)Buffer, IrpSp->FileObject);
             Written = sizeof(AR9485LAB_INFO);
+            Status = STATUS_SUCCESS;
+            break;
+        }
+
+        /* The two read-only views take no claim: see ar9485_lab.h. */
+        case IOCTL_AR9485LAB_LINK_STATUS:
+        {
+            if (OutLength < sizeof(AR9485LAB_LINK_STATUS))
+            {
+                Status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+            LabFillLinkStatus((PAR9485LAB_LINK_STATUS)Buffer);
+            Written = sizeof(AR9485LAB_LINK_STATUS);
+            Status = STATUS_SUCCESS;
+            break;
+        }
+
+        case IOCTL_AR9485LAB_READ_LOG:
+        {
+            Written = AR9485LogCopy((PUCHAR)Buffer, OutLength);
             Status = STATUS_SUCCESS;
             break;
         }

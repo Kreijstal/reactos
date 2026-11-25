@@ -286,6 +286,8 @@ AR9485SetCipherKey(
         {
             Adapter->GroupKeyValid = FALSE;
             Adapter->GroupRxMicValid = FALSE;
+            if (Index < DOT11_MAX_NUM_DEFAULT_KEY)
+                Adapter->GroupKeyMask &= ~(1UL << Index);
         }
         return NDIS_STATUS_SUCCESS;
     }
@@ -396,10 +398,19 @@ AR9485SetCipherKey(
         Adapter->PairwiseKeyValid = TRUE;
     }
     else
+    {
         Adapter->GroupKeyValid = TRUE;
+        if (Index < DOT11_MAX_NUM_DEFAULT_KEY)
+        {
+            Adapter->GroupKeyMask |= 1UL << Index;
+            Adapter->LastGroupKeyId = Index;
+            Adapter->GroupKeyInstalls++;
+        }
+    }
 
-    DPRINT1("AR9485: key cache %lu programmed, cipher 0x%08lx, %lu bytes\n",
-            Index, CipherAlgorithm, KeyLength);
+    DPRINT1("AR9485: key cache %lu programmed, cipher 0x%08lx, %lu bytes "
+            "(group installs %lu)\n",
+            Index, CipherAlgorithm, KeyLength, Adapter->GroupKeyInstalls);
     return NDIS_STATUS_SUCCESS;
 }
 
@@ -1442,6 +1453,7 @@ AR9485ChipWorker(_In_ PVOID Context)
                     ULONG64 Now = KeQueryInterruptTime();
                     PAR9485_LINKMON Mon = &Adapter->LinkMon;
 
+                    Adapter->PeerDisconnects++;
                     /* Reason 2/4 here with a recent ack would mean the AP's
                      * idle timer is not what the keep-alive feeds. */
                     DPRINT1("AR9485: AP ended the link after %I64u s, reason %u "

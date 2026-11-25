@@ -398,6 +398,16 @@ static VOID DispatchFrame(PAR9485_ADAPTER Adapter, PUCHAR Frame, ULONG Length,
         ULONG HeaderLen = DOT11_CCMP_HEADER_LEN;
         ULONG TrailerLen = DOT11_CCMP_MIC_LEN;
 
+        /* A group frame under a key ID no slot holds: the AP rekeyed and the
+         * new GTK never reached us.  Counted, not dropped here -- the crypto
+         * checks below reject it either way. */
+        if (KeyId != 0 && !(Adapter->GroupKeyMask & (1UL << KeyId)) &&
+            (++Adapter->RxGroupUnknownKeyId % 1000) == 1)
+            DPRINT1("AR9485: group frame under key ID %lu, slots held 0x%lx "
+                    "(last installed %lu) #%lu\n",
+                    KeyId, Adapter->GroupKeyMask, Adapter->LastGroupKeyId,
+                    Adapter->RxGroupUnknownKeyId);
+
         if (Cipher == DOT11_CIPHER_ALGO_TKIP)
         {
             /*

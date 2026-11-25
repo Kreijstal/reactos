@@ -334,6 +334,15 @@ typedef struct _AR9485_ADAPTER
      * does, the way mac80211 does. */
     UCHAR                   GroupRxMicKey[8];
     BOOLEAN                 GroupRxMicValid;
+    /* Group-key bookkeeping for post-mortems: installs since load, which
+     * default slots hold a key (bit n = key ID n), and group frames that
+     * named a key ID no slot holds -- a rekey that never reached us. */
+    ULONG                   GroupKeyInstalls;
+    ULONG                   GroupKeyMask;
+    ULONG                   LastGroupKeyId;
+    ULONG                   RxGroupUnknownKeyId;
+    /* Deauthentications/disassociations the AP sent while we held a link. */
+    ULONG                   PeerDisconnects;
 
     LONG                    Flags;
 } AR9485_ADAPTER, *PAR9485_ADAPTER;

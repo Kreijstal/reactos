@@ -187,6 +187,109 @@ PrintInfo(const AR9485LAB_INFO *Info)
 }
 
 /* ===========================================================================
+ *  -s / -l: read-only views of the running driver, no claim
+ *
+ *  A claim stands the chip worker down and the release resets the chip, so a
+ *  script run ends the very association a post-mortem wants to look at.
+ *  These two only copy driver memory and can be polled while the link is up.
+ * ===========================================================================
+ */
+
+static HANDLE
+OpenLab(void)
+{
+    HANDLE Device = CreateFileW(AR9485LAB_WIN32_NAME,
+                                GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                                OPEN_EXISTING, 0, NULL);
+    if (Device == INVALID_HANDLE_VALUE)
+        fprintf(stderr, "ar9485lab: cannot open %ls (error %lu)\n",
+                AR9485LAB_WIN32_NAME, GetLastError());
+    return Device;
+}
+
+/* Milliseconds from an interrupt-time stamp to Now; -1 for "never". */
+static long long
+AgoMs(ULONGLONG Now, ULONGLONG Then)
+{
+    if (Then == 0)
+        return -1;
+    return (long long)((Now - Then) / 10000ULL);
+}
+
+static int
+PrintLinkStatus(void)
+{
+    static const char *const LostName[] = { "none", "probe", "beacon", "tx-stall" };
+    AR9485LAB_LINK_STATUS S;
+    DWORD Returned = 0;
+    HANDLE Device = OpenLab();
+
+    if (Device == INVALID_HANDLE_VALUE)
+        return 1;
+    memset(&S, 0, sizeof(S));
+    if (!DeviceIoControl(Device, IOCTL_AR9485LAB_LINK_STATUS, NULL, 0,
+                         &S, sizeof(S), &Returned, NULL) ||
+        Returned < sizeof(S) || S.Version != AR9485LAB_LINK_STATUS_VERSION)
+    {
+        fprintf(stderr, "ar9485lab: LINK_STATUS failed (error %lu, %lu bytes, "
+                "version %lu)\n", GetLastError(), Returned, S.Version);
+        CloseHandle(Device);
+        return 1;
+    }
+    CloseHandle(Device);
+
+    Emit("LINK now=%I64u mlme=%lu ch=%lu bssid=%02x:%02x:%02x:%02x:%02x:%02x "
+         "aid=%u up_s=%I64d\n",
+         S.Now, S.MlmeState, S.ChannelMHz,
+         S.Bssid[0], S.Bssid[1], S.Bssid[2], S.Bssid[3], S.Bssid[4], S.Bssid[5],
+         S.AssociationId,
+         (S.MlmeState == 4) ? AgoMs(S.Now, S.LinkStart) / 1000 : -1LL);
+    Emit("LINKMON links=%lu lost=%lu last_lost=%s lost_ago_ms=%I64d peer_disc=%lu "
+         "deauth_reason=%lu\n",
+         S.Links, S.LinksLost,
+         (S.LastLostReason < 4) ? LostName[S.LastLostReason] : "?",
+         AgoMs(S.Now, S.LastLostTime), S.PeerDisconnects, S.DeauthReason);
+    Emit("LINKMON probes=%lu acked=%lu failed=%lu timedout=%lu idle=%lu "
+         "beacon_loss=%lu beacon_ago_ms=%I64d ack_ago_ms=%I64d probe_ago_ms=%I64d\n",
+         S.ProbesSent, S.ProbesAcked, S.ProbesFailed, S.ProbesTimedOut,
+         S.IdleProbes, S.BeaconLossEvents, AgoMs(S.Now, S.LastBeacon),
+         AgoMs(S.Now, S.LastAck), AgoMs(S.Now, S.LastProbe));
+    Emit("TX ok=%I64u fail=%I64u pending=%lu\n",
+         S.TxFrameCount, S.TxFailureCount, S.TxPending);
+    Emit("RX frames=%I64u uc=%I64u mc=%I64u bc=%I64u err=%I64u crypto=%I64u "
+         "michael_drop=%lu grp_mic_ok=%lu\n",
+         S.RxFrameCount, S.RxUnicastCount, S.RxMulticastCount,
+         S.RxBroadcastCount, S.RxErrorCount, S.RxCryptoErrorCount,
+         S.RxDropMichael, S.RxGroupMicOkCount);
+    Emit("GTK installs=%lu slots=0x%lx last_id=%lu rx_unknown_id=%lu\n",
+         S.GroupKeyInstalls, S.GroupKeyMask, S.LastGroupKeyId,
+         S.RxGroupUnknownKeyId);
+    return 0;
+}
+
+static int
+PrintLog(void)
+{
+    static char Ring[16384 + 1];
+    DWORD Returned = 0;
+    HANDLE Device = OpenLab();
+
+    if (Device == INVALID_HANDLE_VALUE)
+        return 1;
+    if (!DeviceIoControl(Device, IOCTL_AR9485LAB_READ_LOG, NULL, 0,
+                         Ring, sizeof(Ring) - 1, &Returned, NULL))
+    {
+        fprintf(stderr, "ar9485lab: READ_LOG failed (error %lu)\n",
+                GetLastError());
+        CloseHandle(Device);
+        return 1;
+    }
+    CloseHandle(Device);
+    fwrite(Ring, 1, Returned, g_Out);
+    return 0;
+}
+
+/* ===========================================================================
  *  main
  * ===========================================================================
  */
@@ -194,8 +297,11 @@ PrintInfo(const AR9485LAB_INFO *Info)
 static void
 Usage(void)
 {
-    printf("usage: ar9485lab [-i] [script ...]\n"
+    printf("usage: ar9485lab [-o file] [-i | -s | -l | script ...]\n"
            "  -i          print device info and exit\n"
+           "  -s          print link/keep-alive/key counters (no claim)\n"
+           "  -l          dump the driver log ring (no claim)\n"
+           "  -o file     write results to a file instead of stdout\n"
            "  script      script file, or - for stdin\n"
            "\n"
            "script statements:\n"
@@ -337,6 +443,7 @@ main(int argc, char **argv)
     unsigned char *Out = NULL;
     ULONG InLength, OutLength;
     int InfoOnly = 0;
+    int QueryMode = 0;
     int Parsed = 0;
     int i;
     int Result = 1;
@@ -364,6 +471,11 @@ main(int argc, char **argv)
         if (strcmp(argv[i], "-i") == 0)
         {
             InfoOnly = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "-l") == 0)
+        {
+            QueryMode = argv[i][1];
             continue;
         }
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)
@@ -394,6 +506,21 @@ main(int argc, char **argv)
             fclose(Script);
         }
         Parsed = 1;
+    }
+
+    if (QueryMode != 0)
+    {
+        int QueryResult;
+
+        if (OutPath != NULL && (g_Out = fopen(OutPath, "w")) == NULL)
+        {
+            fprintf(stderr, "ar9485lab: cannot write %s\n", OutPath);
+            return 1;
+        }
+        QueryResult = (QueryMode == 's') ? PrintLinkStatus() : PrintLog();
+        if (g_Out != stdout)
+            fclose(g_Out);
+        return QueryResult;
     }
 
     if (!InfoOnly && !Parsed)
