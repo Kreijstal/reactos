@@ -299,17 +299,33 @@ RtlCreateUserThread(IN HANDLE ProcessHandle,
 
     /* Next, we'll set up the Initial Context */
 #ifdef _M_AMD64
-    /* The thread starts in RtlUserThreadStart, which expects the user
-       entry point in Rcx and its argument in Rdx, so the real StartAddress
-       travels through the ThreadStartParam slot (-> Rcx) and the wrapper
-       through the ThreadStartAddress slot (-> Rip). The casts express that
-       deliberate indirection. */
-    RtlInitializeContext(ProcessHandle,
-                         &Context,
-                         (PVOID)StartAddress,
-                         (PTHREAD_START_ROUTINE)RtlUserThreadStart,
-                         InitialTeb.StackBase);
-    Context.Rdx = (ULONG_PTR)Parameter;
+    if (RtlpGetMode() == UserMode)
+    {
+        /* The thread starts in RtlUserThreadStart, which expects the user
+           entry point in Rcx and its argument in Rdx, so the real StartAddress
+           travels through the ThreadStartParam slot (-> Rcx) and the wrapper
+           through the ThreadStartAddress slot (-> Rip). The casts express that
+           deliberate indirection. */
+        RtlInitializeContext(ProcessHandle,
+                             &Context,
+                             (PVOID)StartAddress,
+                             (PTHREAD_START_ROUTINE)RtlUserThreadStart,
+                             InitialTeb.StackBase);
+        Context.Rdx = (ULONG_PTR)Parameter;
+    }
+    else
+    {
+        /* The kernel's own copy of RtlUserThreadStart is a kernel address
+           the new user thread cannot execute. A kernel-mode caller (the
+           initial process, created through RtlCreateUserProcess at NT 5.2)
+           starts the thread at its entry point directly, as NT 5.2 does and
+           as NtCreateUserProcess starts the first thread of a process. */
+        RtlInitializeContext(ProcessHandle,
+                             &Context,
+                             Parameter,
+                             StartAddress,
+                             InitialTeb.StackBase);
+    }
 #else
     RtlInitializeContext(ProcessHandle,
                          &Context,

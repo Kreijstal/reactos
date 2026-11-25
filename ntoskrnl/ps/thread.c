@@ -379,6 +379,12 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
         }
         _SEH2_END;
 
+        /* A kernel-mode caller built the context itself: it must start the
+           user thread at a user-mode address */
+        ASSERT(!NT_SUCCESS(Status) ||
+               (PreviousMode != KernelMode) ||
+               ((ULONG_PTR)Thread->StartAddress <= (ULONG_PTR)MmHighestUserAddress));
+
         /* Let the kernel intialize the Thread */
         if (NT_SUCCESS(Status))
         {
