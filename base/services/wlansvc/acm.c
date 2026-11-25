@@ -16,6 +16,7 @@
  */
 
 #include "precomp.h"
+#include <winreg.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -30,6 +31,76 @@
 static HANDLE        WlanSvcAcmThread = NULL;
 static HANDLE        WlanSvcAcmEvent = NULL;
 static volatile LONG WlanSvcAcmRun = 0;
+
+/*
+ * Why the ACM did or did not reconnect, for a box whose debug output never
+ * reaches anyone at runtime (the ASUS: DPRINT is lost after boot).  The
+ * counters are published to a volatile registry key after every pass, so
+ * `reg query HKLM\SYSTEM\CurrentControlSet\Services\WlanSvc\AcmStatus`
+ * answers "did it see the drop, did it try, what stopped it".
+ */
+#define WLANSVC_ACM_STATUS_KEY \
+    L"SYSTEM\\CurrentControlSet\\Services\\WlanSvc\\AcmStatus"
+
+/* Values of LastDecline: the first test that kept the ACM away from an
+ * interface the service believed disconnected. */
+#define ACM_DECLINE_NONE            0
+#define ACM_DECLINE_AUTOCONFIG_OFF  1
+#define ACM_DECLINE_USER            2   /* WlanDisconnect: waits for WlanConnect */
+#define ACM_DECLINE_NOT_DOWN        3   /* cached state not disconnected */
+#define ACM_DECLINE_GRACE           4   /* within 30 s of a connect request */
+#define ACM_DECLINE_NO_AUTO_PROFILE 5
+#define ACM_DECLINE_QUERY_FAILED    6   /* IOCTL_NWIFI_QUERY_STATE failed */
+#define ACM_DECLINE_NWIFI_NOT_DOWN  7   /* nwifi says the link is not down */
+#define ACM_DECLINE_NO_PROFILE_SEEN 8   /* the scan listed no auto SSID */
+
+/* Every field a DWORD, published in this order under these names. */
+static struct
+{
+    DWORD Kicks;
+    DWORD Passes;
+    DWORD Wanted;           /* interfaces found needing a reconnect */
+    DWORD LastDecline;
+    DWORD LastDeclineState; /* Iface->State at that decline */
+    DWORD LastNwifiStatus;  /* NWIFI_LINK_STATUS at that decline */
+    DWORD Scans;
+    DWORD LastScanResult;
+    DWORD Connects;
+    DWORD LastConnectResult;
+    DWORD LastPassTick;
+    DWORD LastConnectTick;
+} WlanSvcAcmStats;
+
+static const PCWSTR WlanSvcAcmStatNames[] =
+{
+    L"Kicks", L"Passes", L"Wanted", L"LastDecline", L"LastDeclineState",
+    L"LastNwifiStatus", L"Scans", L"LastScanResult", L"Connects",
+    L"LastConnectResult", L"LastPassTick", L"LastConnectTick"
+};
+
+static VOID
+WlanSvcAcmPublish(VOID)
+{
+    const DWORD *Value = (const DWORD *)&WlanSvcAcmStats;
+    HKEY hKey;
+    ULONG i;
+
+    C_ASSERT(sizeof(WlanSvcAcmStats) ==
+             sizeof(WlanSvcAcmStatNames) / sizeof(WlanSvcAcmStatNames[0]) *
+             sizeof(DWORD));
+
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, WLANSVC_ACM_STATUS_KEY, 0, NULL,
+                        REG_OPTION_VOLATILE, KEY_SET_VALUE, NULL, &hKey,
+                        NULL) != ERROR_SUCCESS)
+        return;
+
+    for (i = 0; i < ARRAYSIZE(WlanSvcAcmStatNames); i++)
+    {
+        RegSetValueExW(hKey, WlanSvcAcmStatNames[i], 0, REG_DWORD,
+                       (const BYTE *)&Value[i], sizeof(DWORD));
+    }
+    RegCloseKey(hKey);
+}
 
 static BOOL
 WlanSvcAcmHasAutoProfile(PWLANSVC_INTERFACE Iface)
@@ -46,25 +117,51 @@ WlanSvcAcmHasAutoProfile(PWLANSVC_INTERFACE Iface)
     return FALSE;
 }
 
-static BOOL
-WlanSvcAcmWantsConnect(PWLANSVC_INTERFACE Iface)
+/* ACM_DECLINE_NONE if the interface should be reconnected now. */
+static DWORD
+WlanSvcAcmDecline(PWLANSVC_INTERFACE Iface, PDWORD NwifiStatus)
 {
     NWIFI_LINK_STATE ls;
 
-    if (!Iface->AutoConfigEnabled ||
-        Iface->UserDisconnected ||
-        Iface->State != wlan_interface_state_disconnected ||
-        GetTickCount() - Iface->LastConnectTick < WLANSVC_ACM_CONNECT_GRACE_MS ||
-        !WlanSvcAcmHasAutoProfile(Iface))
-    {
-        return FALSE;
-    }
+    *NwifiStatus = MAXDWORD;
+    if (!Iface->AutoConfigEnabled)
+        return ACM_DECLINE_AUTOCONFIG_OFF;
+    if (Iface->UserDisconnected)
+        return ACM_DECLINE_USER;
+    if (Iface->State != wlan_interface_state_disconnected)
+        return ACM_DECLINE_NOT_DOWN;
+    if (GetTickCount() - Iface->LastConnectTick < WLANSVC_ACM_CONNECT_GRACE_MS)
+        return ACM_DECLINE_GRACE;
+    if (!WlanSvcAcmHasAutoProfile(Iface))
+        return ACM_DECLINE_NO_AUTO_PROFILE;
 
     /* The cached state follows notifications, which can be stale; nwifi's
      * own state decides whether the link is really down. */
-    return NwifiQueryState(Iface->NwifiIndex, Iface->UpperLuid,
-                           &Iface->MacAddress, &ls) == ERROR_SUCCESS &&
-           ls.Status == NwifiLinkDisconnected;
+    if (NwifiQueryState(Iface->NwifiIndex, Iface->UpperLuid,
+                        &Iface->MacAddress, &ls) != ERROR_SUCCESS)
+        return ACM_DECLINE_QUERY_FAILED;
+    *NwifiStatus = ls.Status;
+    if (ls.Status != NwifiLinkDisconnected)
+        return ACM_DECLINE_NWIFI_NOT_DOWN;
+    return ACM_DECLINE_NONE;
+}
+
+static BOOL
+WlanSvcAcmWantsConnect(PWLANSVC_INTERFACE Iface)
+{
+    DWORD NwifiStatus;
+    DWORD Decline = WlanSvcAcmDecline(Iface, &NwifiStatus);
+
+    /* A connected interface declining is the normal case; record only why
+     * an interface the service thinks is DOWN is being left alone. */
+    if (Decline != ACM_DECLINE_NONE &&
+        Iface->State == wlan_interface_state_disconnected)
+    {
+        WlanSvcAcmStats.LastDecline = Decline;
+        WlanSvcAcmStats.LastDeclineState = Iface->State;
+        WlanSvcAcmStats.LastNwifiStatus = NwifiStatus;
+    }
+    return Decline == ACM_DECLINE_NONE;
 }
 
 /* The first auto-connect profile whose SSID is in the BSS cache. */
@@ -115,7 +212,10 @@ WlanSvcAcmServiceInterface(ULONG NwifiIndex)
     if (iface == NULL || !WlanSvcAcmWantsConnect(iface))
         return;
 
-    if (WlanSvcDoScan(iface, NULL) == ERROR_DEVICE_NOT_CONNECTED)
+    WlanSvcAcmStats.Scans++;
+    dwResult = WlanSvcDoScan(iface, NULL);
+    WlanSvcAcmStats.LastScanResult = dwResult;
+    if (dwResult == ERROR_DEVICE_NOT_CONNECTED)
         return;
 
     iface = WlanSvcFindInterfaceByIndex(NwifiIndex);
@@ -124,7 +224,10 @@ WlanSvcAcmServiceInterface(ULONG NwifiIndex)
 
     prof = WlanSvcAcmPickProfile(iface);
     if (prof == NULL)
+    {
+        WlanSvcAcmStats.LastDecline = ACM_DECLINE_NO_PROFILE_SEEN;
         return;
+    }
 
     wcsncpy(name, prof->Name, WLAN_MAX_NAME_LENGTH - 1);
     name[WLAN_MAX_NAME_LENGTH - 1] = L'\0';
@@ -135,6 +238,9 @@ WlanSvcAcmServiceInterface(ULONG NwifiIndex)
     params.dot11BssType = prof->BssType;
 
     dwResult = WlanSvcConnect(iface, &params);
+    WlanSvcAcmStats.Connects++;
+    WlanSvcAcmStats.LastConnectResult = dwResult;
+    WlanSvcAcmStats.LastConnectTick = GetTickCount();
     DPRINT1("WLANSVC: auto-connect ifidx %lu to '%S': %lu\n",
             NwifiIndex, name, dwResult);
 }
@@ -165,8 +271,12 @@ WlanSvcAcmWorker(LPVOID lpParameter)
             if (WlanSvcAcmWantsConnect(iface))
                 indices[count++] = iface->NwifiIndex;
         }
+        WlanSvcAcmStats.Passes++;
+        WlanSvcAcmStats.Wanted += count;
+        WlanSvcAcmStats.LastPassTick = GetTickCount();
         for (i = 0; i < count; i++)
             WlanSvcAcmServiceInterface(indices[i]);
+        WlanSvcAcmPublish();
         LeaveCriticalSection(&WlanSvcLock);
     }
 
@@ -178,7 +288,10 @@ VOID
 WlanSvcAcmKick(VOID)
 {
     if (WlanSvcAcmEvent != NULL)
+    {
+        InterlockedIncrement((volatile LONG *)&WlanSvcAcmStats.Kicks);
         SetEvent(WlanSvcAcmEvent);
+    }
 }
 
 VOID
