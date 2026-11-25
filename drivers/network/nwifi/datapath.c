@@ -389,7 +389,8 @@ NwifiSendCompleteFromLower(
  *  Raw L2 TX inject (used by the supplicant to send EAPOL-Key frames)
  *
  *  Build an 802.11 ToDS data frame around a raw (dst, EtherType, payload)
- *  triple and send it down, optionally marked "send unencrypted".
+ *  triple and send it down, optionally exempt from encryption while no
+ *  pairwise key is installed.
  * ===========================================================================
  */
 NDIS_STATUS
@@ -399,7 +400,7 @@ NwifiInjectL2Frame(
     _In_ USHORT EtherType,
     _In_reads_bytes_(PayloadLength) PUCHAR Payload,
     _In_ ULONG PayloadLength,
-    _In_ BOOLEAN SendUnencrypted)
+    _In_ BOOLEAN ExemptWithoutPairwiseKey)
 {
     ULONG FrameLength;
     PUCHAR Frame;
@@ -466,9 +467,18 @@ NwifiInjectL2Frame(
     SendCtx->Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
     SendCtx->Header.Revision = DOT11_EXTSTA_SEND_CONTEXT_REVISION_1;
     SendCtx->Header.Size = sizeof(DOT11_EXTSTA_SEND_CONTEXT);
-    /* EAPOL must always be sent in the clear during the handshake. */
+    /*
+     * EAPOL leaves in the clear only while there is no pairwise key: the
+     * initial 4-way handshake.  Once the PTK is installed every EAPOL-Key
+     * frame -- group-key message 2, a PTK rekey -- is protected with it
+     * (wpa_supplicant's wpa_ether_send() asks the control port for
+     * encryption as soon as wpa_sm_has_ptk_installed()).  That is what
+     * DOT11_EXEMPT_ON_KEY_MAPPING_KEY_UNAVAILABLE says; DOT11_EXEMPT_ALWAYS
+     * sent group message 2 unprotected, which an AP is free to drop.
+     */
     SendCtx->usExemptionActionType =
-        SendUnencrypted ? DOT11_EXEMPT_ALWAYS : DOT11_EXEMPT_NO_EXEMPTION;
+        ExemptWithoutPairwiseKey ? DOT11_EXEMPT_ON_KEY_MAPPING_KEY_UNAVAILABLE
+                                 : DOT11_EXEMPT_NO_EXEMPTION;
     SendCtx->uPhyId = 0;
     SendCtx->uDelayedSleepValue = 0;
     SendCtx->pvMediaSpecificInfo = NULL;

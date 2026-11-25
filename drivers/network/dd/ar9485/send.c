@@ -624,14 +624,22 @@ AR9485LinearizeNetBuffer(
 /*
  * Does this outbound data frame have to leave in the clear?
  *
- * nwifi marks the supplicant's own EAPOL sends with DOT11_EXEMPT_ALWAYS, but
- * its ordinary 802.3 translation path hardcodes DOT11_EXEMPT_NO_EXEMPTION, so
- * the send context alone is not enough to recognise every EAPOL frame.  The
- * SNAP EtherType is, and getting this wrong encrypts message 2 of the 4-way
+ * The send context's exemption action decides, with the WDK meanings:
+ * DOT11_EXEMPT_ALWAYS is always clear, DOT11_EXEMPT_ON_KEY_MAPPING_KEY_-
+ * UNAVAILABLE is clear only while no pairwise key is installed -- what EAPOL
+ * wants: the initial 4-way handshake travels unprotected, and every EAPOL-Key
+ * frame after the PTK is installed (group-key message 2, a PTK rekey) is
+ * protected with it.  Sending those in the clear, as this did for anything
+ * exempt, leaves the AP free to drop our group-key reply.
+ *
+ * nwifi's ordinary 802.3 translation path hardcodes DOT11_EXEMPT_NO_EXEMPTION,
+ * so an EAPOL frame from it is recognised by the SNAP EtherType and given the
+ * EAPOL treatment; getting that wrong would encrypt message 2 of the 4-way
  * handshake with a key the AP does not have yet.
  */
 static BOOLEAN
 AR9485FrameIsExempt(
+    _In_ PAR9485_ADAPTER Adapter,
     _In_ PNET_BUFFER_LIST Nbl,
     _In_reads_bytes_(Length) PUCHAR Frame,
     _In_ ULONG Length)
@@ -641,9 +649,18 @@ AR9485FrameIsExempt(
                                                          MediaSpecificInformation);
     PDOT11_SNAP_HEADER Snap;
 
-    if (SendContext != NULL &&
-        SendContext->usExemptionActionType != DOT11_EXEMPT_NO_EXEMPTION)
-        return TRUE;
+    if (SendContext != NULL)
+    {
+        switch (SendContext->usExemptionActionType)
+        {
+            case DOT11_EXEMPT_ALWAYS:
+                return TRUE;
+            case DOT11_EXEMPT_ON_KEY_MAPPING_KEY_UNAVAILABLE:
+                return !Adapter->PairwiseKeyValid;
+            default:
+                break;
+        }
+    }
 
     if (Length < DOT11_MAC_HEADER_LEN + sizeof(DOT11_SNAP_HEADER))
         return FALSE;
@@ -652,7 +669,9 @@ AR9485FrameIsExempt(
     if (Snap->Dsap != 0xAA || Snap->Ssap != 0xAA || Snap->Control != 0x03)
         return FALSE;
 
-    return RtlUshortByteSwap(Snap->EtherType) == DOT11_ETHERTYPE_EAPOL;
+    if (RtlUshortByteSwap(Snap->EtherType) != DOT11_ETHERTYPE_EAPOL)
+        return FALSE;
+    return !Adapter->PairwiseKeyValid;
 }
 
 VOID NTAPI
@@ -705,7 +724,7 @@ AR9485SendNetBufferLists(
             goto Reject;
 
         if (Adapter->PairwiseKeyValid &&
-            !AR9485FrameIsExempt(Current, Frame, Length))
+            !AR9485FrameIsExempt(Adapter, Current, Frame, Length))
         {
             /* Open the CCMP header gap between the MAC header and the
              * payload and fill it in software.  ath9k hardware never

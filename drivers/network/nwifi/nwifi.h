@@ -346,7 +346,7 @@ NDIS_STATUS NwifiInjectL2Frame(
     _In_ USHORT EtherType,
     _In_reads_bytes_(PayloadLength) PUCHAR Payload,
     _In_ ULONG PayloadLength,
-    _In_ BOOLEAN SendUnencrypted);
+    _In_ BOOLEAN ExemptWithoutPairwiseKey);
 
 #include "msm.h"
 

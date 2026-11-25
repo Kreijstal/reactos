@@ -591,8 +591,11 @@ NwifiSupplicantRxEapol(
     NewState = RsnaRxEapol(&Sup->Ctx, Eapol, Length, OutFrame, &OutLen);
     DPRINT1("NWIFI: sup eapol in %lu out %lu state %d err %d\n", Length, (ULONG)OutLen, NewState, RsnaLastError(&Sup->Ctx));
 
-    /* Transmit any reply (msg2 after msg1, msg4 after msg3) back to the AP as
-     * an EAPOL frame, sent in the clear (the link is not yet encrypted). */
+    /* Transmit any reply (msg2 after msg1, msg4 after msg3, group msg2) back
+     * to the AP as an EAPOL frame: in the clear during the initial 4-way
+     * handshake, under the PTK once one is installed.  Message 4 still goes
+     * out in the clear because the key install is deferred to the work item
+     * queued below, after this send has reached the miniport. */
     if (OutLen != 0)
     {
         NwifiInjectL2Frame(Msm->Adapter, SrcMac, EAPOL_ETHERTYPE,
