@@ -546,4 +546,11 @@ VOID
 MsafdWaitForAlert(
     _In_ HANDLE hObject);
 
+NTSTATUS
+MsafdWaitForBlockingIo(
+    _In_ HANDLE Handle,
+    _In_ HANDLE hEvent,
+    _In_ PIO_STATUS_BLOCK IoStatusBlock,
+    _In_ DWORD TimeoutMs);
+
 #endif /* __MSAFD_H */

@@ -220,8 +220,8 @@ WSPSocket(int AddressFamily,
         Socket->SharedData->ProviderFlags = lpProtocolInfo->dwProviderFlags;
         Socket->SharedData->UseSAN = FALSE;
         Socket->SharedData->NonBlocking = FALSE; /* Sockets start blocking */
-        Socket->SharedData->RecvTimeout = INFINITE;
-        Socket->SharedData->SendTimeout = INFINITE;
+        Socket->SharedData->RecvTimeout = 0;
+        Socket->SharedData->SendTimeout = 0;
         Socket->SharedData->OobInline = FALSE;
 
         /* Ask alex about this */
@@ -570,6 +570,7 @@ TranslateNtStatusError(NTSTATUS Status)
           return WSAEWOULDBLOCK;
 
        case STATUS_TIMEOUT:
+       case STATUS_IO_TIMEOUT:
           return WSAETIMEDOUT;
 
        case STATUS_SUCCESS:
@@ -650,6 +651,55 @@ MsafdWaitForAlert(
         if (Result != WAIT_IO_COMPLETION)
             break;
     }
+}
+
+/*
+ * Waits for a blocking (non-overlapped) send or receive whose IOCTL returned
+ * STATUS_PENDING, honouring SO_SNDTIMEO/SO_RCVTIMEO. A timeout of 0 (or
+ * INFINITE) means wait forever. When the timeout expires the request is
+ * cancelled and we still wait for it to complete, so no IRP outlives the
+ * caller's buffers or IoStatusBlock. A request that was cancelled because of
+ * the timeout completes with STATUS_IO_TIMEOUT (WSAETIMEDOUT); one that
+ * finished before the cancel took effect keeps its own status.
+ */
+NTSTATUS
+MsafdWaitForBlockingIo(
+    _In_ HANDLE Handle,
+    _In_ HANDLE hEvent,
+    _In_ PIO_STATUS_BLOCK IoStatusBlock,
+    _In_ DWORD TimeoutMs)
+{
+    IO_STATUS_BLOCK CancelIosb;
+    DWORD Start, Elapsed, Result;
+
+    if (TimeoutMs == 0 || TimeoutMs == INFINITE)
+    {
+        MsafdWaitForAlert(hEvent);
+        return IoStatusBlock->Status;
+    }
+
+    Start = GetTickCount();
+    for (;;)
+    {
+        Elapsed = GetTickCount() - Start;
+        Result = WaitForSingleObjectEx(hEvent,
+                                       (Elapsed < TimeoutMs) ? TimeoutMs - Elapsed : 0,
+                                       TRUE);
+        if (Result == WAIT_IO_COMPLETION)
+            continue;
+        if (Result != WAIT_TIMEOUT)
+            return IoStatusBlock->Status;
+        break;
+    }
+
+    /* Timed out: cancel this thread's request and wait for it to finish */
+    NtCancelIoFile(Handle, &CancelIosb);
+    MsafdWaitForAlert(hEvent);
+
+    if (IoStatusBlock->Status == STATUS_CANCELLED)
+        return STATUS_IO_TIMEOUT;
+
+    return IoStatusBlock->Status;
 }
 
 /*

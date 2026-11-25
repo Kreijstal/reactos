@@ -384,10 +384,8 @@ WSPRecv(SOCKET Handle,
     /* Wait for completion if not overlapped */
     if (!lpOverlapped && Status == STATUS_PENDING)
     {
-        /* It's up to the protocol to time out recv. We must wait
-         * until the protocol decides it's had enough. */
-        MsafdWaitForAlert(SockEvent);
-        Status = IOSB->Status;
+        Status = MsafdWaitForBlockingIo((HANDLE)Handle, SockEvent, IOSB,
+                                        Socket->SharedData->RecvTimeout);
     }
 
     NtClose(SockEvent);
@@ -621,9 +619,8 @@ WSPRecvFrom(SOCKET Handle,
     /* Wait for completion if not overlapped */
     if (!lpOverlapped && Status == STATUS_PENDING)
     {
-        /* FIXME: Shouldn't wait infinitely for receive... */
-        MsafdWaitForAlert(SockEvent);
-        Status = IOSB->Status;
+        Status = MsafdWaitForBlockingIo((HANDLE)Handle, SockEvent, IOSB,
+                                        Socket->SharedData->RecvTimeout);
     }
 
     /* Return the Flags */
@@ -825,9 +822,8 @@ WSPSend(SOCKET Handle,
     /* Wait for completion if not overlapped */
     if (!lpOverlapped && Status == STATUS_PENDING)
     {
-        /* FIXME: Shouldn't wait infinitely for send... */
-        MsafdWaitForAlert(SockEvent);
-        Status = IOSB->Status;
+        Status = MsafdWaitForBlockingIo((HANDLE)Handle, SockEvent, IOSB,
+                                        Socket->SharedData->SendTimeout);
     }
 
     NtClose(SockEvent);
@@ -1034,9 +1030,8 @@ WSPSendTo(SOCKET Handle,
     /* Wait for completion if not overlapped */
     if (!lpOverlapped && Status == STATUS_PENDING)
     {
-        /* FIXME: Shouldn't wait infinitely for send... */
-        MsafdWaitForAlert(SockEvent);
-        Status = IOSB->Status;
+        Status = MsafdWaitForBlockingIo((HANDLE)Handle, SockEvent, IOSB,
+                                        Socket->SharedData->SendTimeout);
     }
 
     NtClose(SockEvent);
