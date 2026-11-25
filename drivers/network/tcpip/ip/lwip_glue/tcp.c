@@ -912,6 +912,38 @@ LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len
 
 static
 void
+LibTCPKickSendCallback(void *arg)
+{
+    PCONNECTION_ENDPOINT Connection = arg;
+    PTCP_PCB pcb = Connection->SocketContext;
+
+    /* Runs on the tcpip thread, so after any sent callback that was already
+     * under way: if that one found no queued send to retry, the space it
+     * reported is still there and we retry now */
+    if (pcb && tcp_sndbuf(pcb) > 0)
+        TCPSendEventHandler(Connection, tcp_sndbuf(pcb));
+
+    DereferenceObject(Connection);
+}
+
+/*
+ * A send that found no room in lwIP is queued on Connection->SendRequest after
+ * LibTCPSend() has returned, outside the tcpip thread.  If the peer acknowledged
+ * everything in between, the sent callback that would have retried it has
+ * already run and found the queue empty, and with nothing left in flight no
+ * further one comes: the send waits forever.  The caller queues the request
+ * first and then calls this to have the tcpip thread look once more.
+ */
+VOID
+LibTCPKickSend(PCONNECTION_ENDPOINT Connection)
+{
+    ReferenceObject(Connection);
+    if (tcpip_callback_with_block(LibTCPKickSendCallback, Connection, 1) != ERR_OK)
+        DereferenceObject(Connection);
+}
+
+static
+void
 LibTCPConnectCallback(void *arg)
 {
     struct lwip_callback_msg *msg = arg;
@@ -997,11 +1029,29 @@ LibTCPShutdownCallback(void *arg)
             msg->Output.Shutdown.Error = tcp_shutdown(pcb, FALSE, TRUE);
         }
     }
+    else if (msg->Input.Shutdown.shut_rx && pcb->state != LISTEN) {
+        /* Both directions at once is TDI_DISCONNECT_ABORT, an abortive close
+         * (closesocket() with SO_LINGER {1,0}, or a linger timeout): the peer
+         * has to see a reset, and whatever is still queued is discarded.
+         * tcp_close() would send a FIN instead unless received data happens
+         * to be unread.  tcp_abort() frees the PCB, so detach from it first;
+         * its error callback then finds no connection and does nothing. */
+        PCONNECTION_ENDPOINT Connection = msg->Input.Shutdown.Connection;
+
+        Connection->SocketContext = NULL;
+        tcp_arg(pcb, NULL);
+        tcp_abort(pcb);
+
+        Connection->ReceiveShutdown = TRUE;
+        Connection->ReceiveShutdownStatus = STATUS_FILE_CLOSED;
+        Connection->SendShutdown = TRUE;
+        msg->Output.Shutdown.Error = ERR_OK;
+
+        TCPFinEventHandler(Connection, ERR_CLSD);
+        goto done;
+    }
     else if (msg->Input.Shutdown.shut_rx) {
-        /* We received both RX and TX requests, which seems to mean closing connection from TDI.
-         * So call tcp_close, otherwise we risk to be put in TCP_WAIT_* states, which makes further
-         * attempts to close the socket to fail in this state.
-         */
+        /* A listener has no connection to reset */
         msg->Output.Shutdown.Error = tcp_close(pcb);
     }
     else {

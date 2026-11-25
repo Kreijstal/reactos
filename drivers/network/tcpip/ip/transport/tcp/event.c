@@ -189,6 +189,10 @@ TCPFinEventHandler(void *arg, const err_t err)
 
    LockObject(Connection);
 
+   /* A reset while connecting means nobody is listening there */
+   if (err == ERR_RST)
+       FlushConnectQueue(Connection, STATUS_CONNECTION_REFUSED);
+
    /* Complete all outstanding requests now */
    FlushAllQueues(Connection, Status);
 
