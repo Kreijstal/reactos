@@ -224,8 +224,8 @@ typedef struct _AFD_FCB {
      * them against what it is told was sent. */
     UINT SendOrphanedBytes;
     /* The handle is closed, but the data still in the send window is being
-     * sent before the connection is released; the FCB has no file object any
-     * more and is freed once that finishes.  See AfdCloseSocket(). */
+     * sent before the connection is released; the FCB is freed once that
+     * finishes and the file object is gone.  See AfdCleanupSocket(). */
     BOOLEAN CloseLingering;
     WORK_QUEUE_ITEM CloseWorkItem;
     /* See AfdIssueSend() */
@@ -326,6 +326,8 @@ AfdGetPeerName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 PIO_STACK_LOCATION IrpSp );
 
 /* listen.c */
+VOID AfdReleasePreAcceptIrp(PIRP Irp);
+
 NTSTATUS AfdWaitForListen( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			   PIO_STACK_LOCATION IrpSp );
 

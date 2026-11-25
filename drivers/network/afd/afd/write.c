@@ -194,7 +194,7 @@ static NTSTATUS NTAPI SendComplete
     /* Request is not in flight any longer */
 
     /* A socket whose handle closed while it still had data to send keeps
-     * going until that data is out; see AfdCloseSocket().  Only one that is
+     * going until that data is out; see AfdCleanupSocket().  Only one that is
      * being torn down for good stops here. */
     if( FCB->SharedData.State == SOCKET_STATE_CLOSED && !FCB->CloseLingering ) {
         /* Cleanup our IRP queue because the FCB is being destroyed */

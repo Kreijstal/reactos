@@ -390,6 +390,24 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
         FileObject = (PFILE_OBJECT)AfdHandles[i].Handle;
         FCB = FileObject->FsContext;
 
+        /* Its handle was closed after LockHandles() got hold of the socket.
+         * KillSelectsForFCB() has been and gone, so this poll would never
+         * learn of the close and would keep the socket until it timed out:
+         * report the close now, as KillSelectsForFCB() would have.  The
+         * cleanup sets the flag before it takes the device lock to kill the
+         * polls, so a poll queued before that is killed with the others. */
+        if (FileObject->Flags & FO_CLEANUP_COMPLETE)
+        {
+#ifdef _WIN64
+            if (IoIs32bitProcess(Irp))
+                PollReq32->Handles[i].Status = PollReq32->Handles[i].Events & AFD_EVENT_CLOSE;
+            else
+#endif
+                PollReq->Handles[i].Status = PollReq->Handles[i].Events & AFD_EVENT_CLOSE;
+            Signalled++;
+            continue;
+        }
+
 #ifdef _WIN64
         if (IoIs32bitProcess(Irp))
         {
@@ -661,7 +679,7 @@ VOID PollReeval( PAFD_DEVICE_EXTENSION DeviceExt, PFILE_OBJECT FileObject ) {
                             DeviceExt, FileObject));
 
     /* A socket finishing its close in the background (FCB->CloseLingering)
-     * has no file object left, and nobody to tell */
+     * may have no file object left, and has nobody to tell */
     if (!FileObject)
         return;
 

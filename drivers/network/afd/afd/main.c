@@ -433,44 +433,109 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     return Status;
 }
 
-static NTSTATUS NTAPI
-AfdCleanupSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
-                 PIO_STACK_LOCATION IrpSp)
+/*
+ * A socket's transport objects: its address and its connection.  They are
+ * taken off the FCB under the socket lock and closed once it is dropped:
+ * closing them ends our requests still in the transport, whose completion
+ * routines take the lock.
+ */
+typedef struct _AFD_TRANSPORT
 {
-    PFILE_OBJECT FileObject = IrpSp->FileObject;
-    PAFD_FCB FCB = FileObject->FsContext;
-    PLIST_ENTRY CurrentEntry, NextEntry;
-    UINT Function;
-    PIRP CurrentIrp;
+    AFD_TDI_OBJECT AddressFile;
+    AFD_TDI_OBJECT Connection;
+} AFD_TRANSPORT, *PAFD_TRANSPORT;
 
-    UNREFERENCED_PARAMETER(DeviceObject);
+static
+VOID
+AfdDetachTransport(PAFD_FCB FCB, PAFD_TRANSPORT Transport)
+{
+    Transport->AddressFile = FCB->AddressFile;
+    Transport->Connection = FCB->Connection;
 
-    if( !SocketAcquireStateLock( FCB ) ) return LostSocket(Irp);
+    FCB->AddressFile.Object = NULL;
+    FCB->AddressFile.Handle = INVALID_HANDLE_VALUE;
+    FCB->Connection.Object = NULL;
+    FCB->Connection.Handle = INVALID_HANDLE_VALUE;
+}
 
-    /* The handle is gone.  A request already on its way in -- a call on
-     * another thread racing the close -- must not be queued behind this
-     * cleanup, where nothing would ever complete it; QueueUserModeIrp()
-     * cancels it like those cancelled here. */
-    FileObject->Flags |= FO_CLEANUP_COMPLETE;
-
-    for (Function = 0; Function < MAX_FUNCTIONS; Function++)
+static
+VOID
+AfdCloseTransport(PAFD_TRANSPORT Transport)
+{
+    if( Transport->Connection.Object )
     {
-        CurrentEntry = FCB->PendingIrpList[Function].Flink;
-        while (CurrentEntry != &FCB->PendingIrpList[Function])
+        TdiDisassociateAddressFile(Transport->Connection.Object);
+        ObDereferenceObject(Transport->Connection.Object);
+    }
+
+    if( Transport->AddressFile.Object )
+        ObDereferenceObject(Transport->AddressFile.Object);
+
+    if( Transport->AddressFile.Handle != INVALID_HANDLE_VALUE )
+    {
+        if (ZwClose(Transport->AddressFile.Handle) == STATUS_INVALID_HANDLE)
         {
-           NextEntry = CurrentEntry->Flink;
-           CurrentIrp = CONTAINING_RECORD(CurrentEntry, IRP, Tail.Overlay.ListEntry);
-
-           /* The cancel routine will remove the IRP from the list */
-           IoCancelIrp(CurrentIrp);
-
-           CurrentEntry = NextEntry;
+            DbgPrint("INVALID ADDRESS FILE HANDLE VALUE: %p %p\n",
+                     Transport->AddressFile.Handle, Transport->AddressFile.Object);
         }
     }
 
-    KillSelectsForFCB( FCB->DeviceExt, FileObject, FALSE );
+    if( Transport->Connection.Handle != INVALID_HANDLE_VALUE )
+    {
+        if (ZwClose(Transport->Connection.Handle) == STATUS_INVALID_HANDLE)
+        {
+            DbgPrint("INVALID CONNECTION HANDLE VALUE: %p %p\n",
+                     Transport->Connection.Handle, Transport->Connection.Object);
+        }
+    }
+}
 
-    return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, 0);
+/*
+ * Ends everything a socket has going in the transport and takes its transport
+ * objects off it, for the caller to close once it has dropped the socket lock.
+ * From here on the socket is SOCKET_STATE_CLOSED: the completion routines of
+ * the requests cancelled here see that and stop.
+ */
+static
+VOID
+AfdShutdownTransport(PAFD_FCB FCB, PAFD_TRANSPORT Transport)
+{
+    PAFD_IN_FLIGHT_REQUEST InFlightRequest[IN_FLIGHT_REQUESTS];
+    PAFD_TDI_OBJECT_QELT Qelt;
+    PLIST_ENTRY QeltEntry;
+    UINT i;
+
+    FCB->SharedData.State = SOCKET_STATE_CLOSED;
+
+    InFlightRequest[0] = &FCB->ListenIrp;
+    InFlightRequest[1] = &FCB->ReceiveIrp;
+    InFlightRequest[2] = &FCB->SendIrp;
+    InFlightRequest[3] = &FCB->ConnectIrp;
+    InFlightRequest[4] = &FCB->DisconnectIrp;
+
+    /* Cancel our pending requests */
+    for( i = 0; i < IN_FLIGHT_REQUESTS; i++ ) {
+        if( InFlightRequest[i]->InFlightRequest ) {
+            AFD_DbgPrint(MID_TRACE,("Cancelling in flight irp %u (%p)\n",
+                                    i, InFlightRequest[i]->InFlightRequest));
+            IoCancelIrp(InFlightRequest[i]->InFlightRequest);
+        }
+    }
+
+    while (!IsListEmpty(&FCB->PendingConnections))
+    {
+        QeltEntry = RemoveHeadList(&FCB->PendingConnections);
+        Qelt = CONTAINING_RECORD(QeltEntry, AFD_TDI_OBJECT_QELT, ListEntry);
+
+        /* We have to close all pending connections or the listen won't get closed */
+        TdiDisassociateAddressFile(Qelt->Object.Object);
+        ObDereferenceObject(Qelt->Object.Object);
+        ZwClose(Qelt->Object.Handle);
+
+        ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
+    }
+
+    AfdDetachTransport(FCB, Transport);
 }
 
 /*
@@ -481,6 +546,8 @@ static
 VOID
 AfdDestroyFcb(PAFD_FCB FCB)
 {
+    AFD_TRANSPORT Transport;
+
     if( FCB->EventSelect )
         ObDereferenceObject( FCB->EventSelect );
 
@@ -523,30 +590,11 @@ AfdDestroyFcb(PAFD_FCB FCB)
     if (FCB->OnConnectSendBuffer)
         ExFreePoolWithTag(FCB->OnConnectSendBuffer, TAG_AFD_SUPER_CONNECT_BUFFER);
 
-    if( FCB->Connection.Object )
-    {
-        TdiDisassociateAddressFile(FCB->Connection.Object);
-        ObDereferenceObject(FCB->Connection.Object);
-    }
-
-    if( FCB->AddressFile.Object )
-        ObDereferenceObject(FCB->AddressFile.Object);
-
-    if( FCB->AddressFile.Handle != INVALID_HANDLE_VALUE )
-    {
-        if (ZwClose(FCB->AddressFile.Handle) == STATUS_INVALID_HANDLE)
-        {
-            DbgPrint("INVALID ADDRESS FILE HANDLE VALUE: %p %p\n", FCB->AddressFile.Handle, FCB->AddressFile.Object);
-        }
-    }
-
-    if( FCB->Connection.Handle != INVALID_HANDLE_VALUE )
-    {
-        if (ZwClose(FCB->Connection.Handle) == STATUS_INVALID_HANDLE)
-        {
-            DbgPrint("INVALID CONNECTION HANDLE VALUE: %p %p\n", FCB->Connection.Handle, FCB->Connection.Object);
-        }
-    }
+    /* Normally gone with the handle already (AfdCleanupSocket()), but an
+     * accept may have handed a connection to a socket whose handle was being
+     * closed meanwhile */
+    AfdDetachTransport(FCB, &Transport);
+    AfdCloseTransport(&Transport);
 
     if (FCB->TdiDeviceName.Buffer)
     {
@@ -563,44 +611,45 @@ NTAPI
 AfdLingeringCloseWorker(PVOID Context)
 {
     PAFD_FCB FCB = Context;
-    PAFD_IN_FLIGHT_REQUEST InFlightRequest[IN_FLIGHT_REQUESTS];
-    UINT i;
+    AFD_TRANSPORT Transport;
+    BOOLEAN FileClosed;
 
     /* Whoever queued us still held the socket lock; wait for them to drop it.
      * The send side is finished by now, so nothing else can be in flight --
      * the receive side was cancelled when the handle closed -- but make sure,
-     * as AfdCloseSocket() does. */
-    if (SocketAcquireStateLock(FCB))
+     * as AfdCleanupSocket() does. */
+    if (!SocketAcquireStateLock(FCB))
     {
-        ASSERT(!FCB->SendIrp.InFlightRequest);
-        ASSERT(!FCB->DisconnectIrp.InFlightRequest);
-
-        FCB->CloseLingering = FALSE;
-
-        InFlightRequest[0] = &FCB->ListenIrp;
-        InFlightRequest[1] = &FCB->ReceiveIrp;
-        InFlightRequest[2] = &FCB->SendIrp;
-        InFlightRequest[3] = &FCB->ConnectIrp;
-        InFlightRequest[4] = &FCB->DisconnectIrp;
-
-        for (i = 0; i < IN_FLIGHT_REQUESTS; i++)
-        {
-            if (InFlightRequest[i]->InFlightRequest)
-                IoCancelIrp(InFlightRequest[i]->InFlightRequest);
-        }
-
-        SocketStateUnlock(FCB);
+        ASSERT(FALSE);
+        return;
     }
+
+    ASSERT(FCB->CloseLingering);
+    ASSERT(!FCB->SendIrp.InFlightRequest);
+    ASSERT(!FCB->DisconnectIrp.InFlightRequest);
+
+    FCB->CloseLingering = FALSE;
+
+    AfdShutdownTransport(FCB, &Transport);
+
+    /* The file object may outlive the handle -- a request still completing
+     * holds it -- and then IRP_MJ_CLOSE frees the FCB */
+    FileClosed = (FCB->FileObject == NULL);
+
+    SocketStateUnlock(FCB);
+
+    AfdCloseTransport(&Transport);
 
     AFD_DbgPrint(MID_TRACE,("Lingering close of %p finished\n", FCB));
 
-    AfdDestroyFcb(FCB);
+    if (FileClosed)
+        AfdDestroyFcb(FCB);
 }
 
 /*
  * The graceful close of a socket whose handle is already gone has finished, or
- * cannot go on.  Must be called with the socket lock held; the FCB is freed
- * once the caller drops it.
+ * cannot go on.  Must be called with the socket lock held; the socket lets go
+ * of its connection and address once the caller drops it.
  */
 static
 VOID
@@ -614,7 +663,7 @@ AfdFinishLingeringClose(PAFD_FCB FCB)
 
 /*
  * Whether a connected stream socket whose last handle is closing still owes
- * its peer a graceful close.  Such a socket is not torn down yet: with
+ * its peer a graceful close.  Such a socket keeps its connection for now: with
  * SO_LINGER off, closesocket() returns at once and the graceful close -- the
  * data still queued, then the FIN -- carries on in the background (MSDN,
  * closesocket).  With SO_LINGER on, msafd has already waited for the sends or
@@ -647,29 +696,70 @@ AfdShouldLingerOnClose(PAFD_FCB FCB)
     return TRUE;
 }
 
+/*
+ * IRP_MJ_CLEANUP: the last handle to the socket is closed, which is
+ * closesocket().  Windows releases the socket there, not when the file object
+ * goes: its address is free for a new bind once closesocket() returns, even if
+ * another thread's select, accept or receive still holds the file object while
+ * it completes.  So the socket ends everything here -- its pending requests
+ * and its transport objects -- except the graceful close of a connected stream
+ * socket, which keeps its connection (and so its address) until the data
+ * still queued and the FIN are out.  The FCB stays until IRP_MJ_CLOSE, and
+ * every request that reaches it from now on fails (see AfdDispatch()).
+ */
 static NTSTATUS NTAPI
-AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
-               PIO_STACK_LOCATION IrpSp)
+AfdCleanupSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+                 PIO_STACK_LOCATION IrpSp)
 {
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
-    UINT i;
-    PAFD_IN_FLIGHT_REQUEST InFlightRequest[IN_FLIGHT_REQUESTS];
-    PAFD_TDI_OBJECT_QELT Qelt;
-    PLIST_ENTRY QeltEntry;
+    PLIST_ENTRY CurrentEntry, NextEntry;
+    UINT Function;
+    PIRP CurrentIrp;
+    AFD_TRANSPORT Transport;
 
+    UNREFERENCED_PARAMETER(DeviceObject);
 
-    AFD_DbgPrint(MID_TRACE,("AfdClose(DeviceObject %p Irp %p)\n",
-                            DeviceObject, Irp));
+    if( !SocketAcquireStateLock( FCB ) ) return LostSocket(Irp);
 
-    if( !SocketAcquireStateLock( FCB ) ) return STATUS_FILE_CLOSED;
+    /* The handle is gone.  A request already on its way in -- a call on
+     * another thread racing the close -- fails once it gets the socket lock;
+     * see AfdDispatch(). */
+    FileObject->Flags |= FO_CLEANUP_COMPLETE;
+
+    for (Function = 0; Function < MAX_FUNCTIONS; Function++)
+    {
+        CurrentEntry = FCB->PendingIrpList[Function].Flink;
+        while (CurrentEntry != &FCB->PendingIrpList[Function])
+        {
+           NextEntry = CurrentEntry->Flink;
+           CurrentIrp = CONTAINING_RECORD(CurrentEntry, IRP, Tail.Overlay.ListEntry);
+
+           /* The cancel routine will remove the IRP from the list.  It may
+            * not do so yet: if another thread is already cancelling the IRP,
+            * its cancel routine is waiting for the socket lock we hold, and
+            * completes the IRP once we drop it.  So the lists need not be
+            * empty until IRP_MJ_CLOSE. */
+           IoCancelIrp(CurrentIrp);
+
+           CurrentEntry = NextEntry;
+        }
+    }
+
+    KillSelectsForFCB( FCB->DeviceExt, FileObject, FALSE );
+
+    /* Nothing is reported to the application any more */
+    if (FCB->EventSelect)
+    {
+        ObDereferenceObject(FCB->EventSelect);
+        FCB->EventSelect = NULL;
+    }
 
     if (AfdShouldLingerOnClose(FCB))
     {
-        /* Keep the connection and the send window; the disconnect that ends
-         * the graceful close frees the FCB (see DisconnectComplete()).  The
-         * file object goes away when we return, so nothing may signal it from
-         * now on. */
+        /* Keep the connection and the send window; once the disconnect that
+         * ends the graceful close is done, AfdLingeringCloseWorker() releases
+         * them (see DisconnectComplete()). */
         AFD_DbgPrint(MID_TRACE,("Closing %p with %u bytes unsent\n",
                                 FCB, FCB->Send.BytesUsed));
 
@@ -678,14 +768,6 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
         if (FCB->ReceiveIrp.InFlightRequest)
             IoCancelIrp(FCB->ReceiveIrp.InFlightRequest);
-
-        KillSelectsForFCB( FCB->DeviceExt, FileObject, FALSE );
-        FCB->FileObject = NULL;
-        FileObject->FsContext = NULL;
-
-        ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]));
-        ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_RECV]));
-        ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_DISCONNECT]));
 
         if (!FCB->DisconnectPending)
         {
@@ -697,38 +779,49 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         FCB->PollState &= ~AFD_EVENT_SEND;
 
         /* With nothing left to send this sends the FIN right away; otherwise
-         * SendComplete() does once the window has drained.  Either way the FCB
-         * is freed once the disconnect completes and we have dropped the lock. */
+         * SendComplete() does once the window has drained, or the cancel
+         * routine of a send still on its way out does. */
         RetryDisconnectCompletion(FCB);
 
-        SocketStateUnlock( FCB );
-
-        Irp->IoStatus.Status = STATUS_SUCCESS;
-        Irp->IoStatus.Information = 0;
-        IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
-
-        return STATUS_SUCCESS;
+        return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, 0);
     }
 
-    FCB->SharedData.State = SOCKET_STATE_CLOSED;
+    AfdShutdownTransport(FCB, &Transport);
 
-    InFlightRequest[0] = &FCB->ListenIrp;
-    InFlightRequest[1] = &FCB->ReceiveIrp;
-    InFlightRequest[2] = &FCB->SendIrp;
-    InFlightRequest[3] = &FCB->ConnectIrp;
-    InFlightRequest[4] = &FCB->DisconnectIrp;
+    SocketStateUnlock( FCB );
 
-    /* Cancel our pending requests */
-    for( i = 0; i < IN_FLIGHT_REQUESTS; i++ ) {
-        if( InFlightRequest[i]->InFlightRequest ) {
-            AFD_DbgPrint(MID_TRACE,("Cancelling in flight irp %u (%p)\n",
-                                    i, InFlightRequest[i]->InFlightRequest));
-            IoCancelIrp(InFlightRequest[i]->InFlightRequest);
-        }
-    }
+    /* The address is free once closesocket() returns */
+    AfdCloseTransport(&Transport);
 
-    KillSelectsForFCB( FCB->DeviceExt, FileObject, FALSE );
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
 
+    return STATUS_SUCCESS;
+}
+
+/*
+ * IRP_MJ_CLOSE: the last reference to the file object is gone; the socket was
+ * shut down at IRP_MJ_CLEANUP.  A graceful close still going on keeps the FCB
+ * and frees it when it is done.
+ */
+static NTSTATUS NTAPI
+AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+               PIO_STACK_LOCATION IrpSp)
+{
+    PFILE_OBJECT FileObject = IrpSp->FileObject;
+    PAFD_FCB FCB = FileObject->FsContext;
+    BOOLEAN Lingering;
+
+    AFD_DbgPrint(MID_TRACE,("AfdClose(DeviceObject %p Irp %p)\n",
+                            DeviceObject, Irp));
+
+    if( !SocketAcquireStateLock( FCB ) ) return STATUS_FILE_CLOSED;
+
+    ASSERT(FileObject->Flags & FO_CLEANUP_COMPLETE);
+    ASSERT(FCB->SharedData.State == SOCKET_STATE_CLOSED);
+
+    /* Every request from user mode holds the file object; they are all gone */
     ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECT]));
     ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECTEX]));
     ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]));
@@ -736,22 +829,16 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_PREACCEPT]));
     ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_DISCONNECT]));
 
-    while (!IsListEmpty(&FCB->PendingConnections))
-    {
-        QeltEntry = RemoveHeadList(&FCB->PendingConnections);
-        Qelt = CONTAINING_RECORD(QeltEntry, AFD_TDI_OBJECT_QELT, ListEntry);
-
-        /* We have to close all pending connections or the listen won't get closed */
-        TdiDisassociateAddressFile(Qelt->Object.Object);
-        ObDereferenceObject(Qelt->Object.Object);
-        ZwClose(Qelt->Object.Handle);
-
-        ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
-    }
+    /* The file object goes away when we return, so nothing may signal it
+     * from now on */
+    FCB->FileObject = NULL;
+    FileObject->FsContext = NULL;
+    Lingering = FCB->CloseLingering;
 
     SocketStateUnlock( FCB );
 
-    AfdDestroyFcb(FCB);
+    if (!Lingering)
+        AfdDestroyFcb(FCB);
 
     Irp->IoStatus.Status = STATUS_SUCCESS;
     Irp->IoStatus.Information = 0;
@@ -1076,40 +1163,13 @@ AfdQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCAT
 }
 
 static DRIVER_DISPATCH AfdDispatch;
-static NTSTATUS NTAPI
-AfdDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+static NTSTATUS
+AfdDispatchRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
-    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
     NTSTATUS Status = STATUS_NOT_IMPLEMENTED;
-#if DBG
-    PFILE_OBJECT FileObject = IrpSp->FileObject;
-#endif
-
-    AFD_DbgPrint(MID_TRACE,("AfdDispatch: %u\n", IrpSp->MajorFunction));
-    if( IrpSp->MajorFunction != IRP_MJ_CREATE) {
-        AFD_DbgPrint(MID_TRACE,("FO %p, IrpSp->FO %p\n",
-                                FileObject, IrpSp->FileObject));
-        ASSERT(FileObject == IrpSp->FileObject);
-    }
-
-    Irp->IoStatus.Information = 0;
-    RtlZeroMemory(Irp->Tail.Overlay.DriverContext,
-                  sizeof(Irp->Tail.Overlay.DriverContext));
 
     switch(IrpSp->MajorFunction)
     {
-        /* opening and closing handles to the device */
-    case IRP_MJ_CREATE:
-        /* Mostly borrowed from the named pipe file system */
-        return AfdCreateSocket(DeviceObject, Irp, IrpSp);
-
-    case IRP_MJ_CLOSE:
-        /* Ditto the borrowing */
-        return AfdCloseSocket(DeviceObject, Irp, IrpSp);
-
-    case IRP_MJ_CLEANUP:
-        return AfdCleanupSocket(DeviceObject, Irp, IrpSp);
-
     /* write data */
     case IRP_MJ_WRITE:
         return AfdConnectedSocketWriteData( DeviceObject, Irp, IrpSp, TRUE );
@@ -1267,6 +1327,56 @@ AfdDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     AFD_DbgPrint(MID_TRACE, ("Returning %x\n", Status));
     Irp->IoStatus.Status = Status;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+    return Status;
+}
+
+static NTSTATUS NTAPI
+AfdDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
+    PFILE_OBJECT FileObject = IrpSp->FileObject;
+    PAFD_FCB FCB;
+    NTSTATUS Status;
+
+    AFD_DbgPrint(MID_TRACE,("AfdDispatch: %u\n", IrpSp->MajorFunction));
+
+    Irp->IoStatus.Information = 0;
+    RtlZeroMemory(Irp->Tail.Overlay.DriverContext,
+                  sizeof(Irp->Tail.Overlay.DriverContext));
+
+    switch(IrpSp->MajorFunction)
+    {
+        /* opening and closing handles to the device */
+    case IRP_MJ_CREATE:
+        /* Mostly borrowed from the named pipe file system */
+        return AfdCreateSocket(DeviceObject, Irp, IrpSp);
+
+    case IRP_MJ_CLOSE:
+        /* Ditto the borrowing */
+        return AfdCloseSocket(DeviceObject, Irp, IrpSp);
+
+    case IRP_MJ_CLEANUP:
+        return AfdCleanupSocket(DeviceObject, Irp, IrpSp);
+    }
+
+    /* Any other request needs a socket whose handle is still open.  One may
+     * still reach us after closesocket() -- a call on another thread racing
+     * it holds the file object -- but AfdCleanupSocket() has taken the
+     * socket's transport and requests apart by then; it fails as a call on a
+     * closed socket does.  The socket lock is held across the request, so the
+     * cleanup cannot run in the middle of it: the lock is recursive, and the
+     * handler takes it again. */
+    FCB = FileObject->FsContext;
+    if (!SocketAcquireStateLock(FCB))
+        return LostSocket(Irp);
+
+    if (FileObject->Flags & FO_CLEANUP_COMPLETE)
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_HANDLE, Irp, 0);
+
+    Status = AfdDispatchRequest(DeviceObject, Irp, IrpSp);
+
+    SocketStateUnlock(FCB);
 
     return Status;
 }
@@ -1486,26 +1596,19 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
 
             RemoveEntryList(CurrentEntry);
             CleanupPendingIrp(FCB, Irp, IrpSp);
+            /* Unlock the acceptor socket so that it can be reused */
             if (Function == FUNCTION_PREACCEPT)
-            {
-                /* Unlock the acceptor socket so that it can be reused */
-                PFILE_OBJECT NewFileObject = (PFILE_OBJECT)Irp->Tail.Overlay.DriverContext[2];
-                if (NewFileObject)
-                {
-                    PAFD_FCB FCB2 = NewFileObject->FsContext;
-                    FCB2->SharedData.State = SOCKET_STATE_CREATED;
-                    
-                    ObfDereferenceObject(NewFileObject);
-                    Irp->Tail.Overlay.DriverContext[2] = NULL;
-                }
+                AfdReleasePreAcceptIrp(Irp);
 
-                if (Irp->Tail.Overlay.DriverContext[3])
-                {
-                    MmUnlockPages((PMDL)Irp->Tail.Overlay.DriverContext[3]);
-                    IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]);
-                    Irp->Tail.Overlay.DriverContext[3] = NULL;
-                }
+            /* A disconnect -- shutdown(SD_SEND), or the graceful close of a
+             * socket whose handle is gone -- may have been waiting behind
+             * this send */
+            if (Function == FUNCTION_SEND && FCB->DisconnectPending &&
+                !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
+            {
+                RetryDisconnectCompletion(FCB);
             }
+
             UnlockAndMaybeComplete(FCB, STATUS_CANCELLED, Irp, 0);
             ObDereferenceObject(FileObject);
             return;

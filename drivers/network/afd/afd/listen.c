@@ -11,6 +11,44 @@
 #include "afd.h"
 #include "ntdef.h"
 
+/*
+ * A wait for a connection (IOCTL_AFD_WAIT_FOR_LISTEN, or an AcceptEx --
+ * IOCTL_AFD_SUPER_ACCEPT) leaves the listener's queue without a connection:
+ * it was cancelled, or the listener closed.  An AcceptEx still holds the
+ * accept socket it reserved and the output buffer it locked; give both back.
+ * Called with the listener's lock held, once the IRP is off the queue.
+ */
+VOID
+AfdReleasePreAcceptIrp(PIRP Irp)
+{
+    PFILE_OBJECT NewFileObject = (PFILE_OBJECT)Irp->Tail.Overlay.DriverContext[2];
+    PAFD_FCB FCB2;
+
+    if (NewFileObject)
+    {
+        FCB2 = NewFileObject->FsContext;
+
+        /* Under its lock (the listener's first, as AfdSuperAccept() takes
+         * them); a socket whose handle is closed meanwhile stays closed */
+        if (SocketAcquireStateLock(FCB2))
+        {
+            if (FCB2->SharedData.State == SOCKET_STATE_CONNECTING)
+                FCB2->SharedData.State = SOCKET_STATE_CREATED;
+            SocketStateUnlock(FCB2);
+        }
+
+        ObDereferenceObject(NewFileObject);
+        Irp->Tail.Overlay.DriverContext[2] = NULL;
+    }
+
+    if (Irp->Tail.Overlay.DriverContext[3])
+    {
+        MmUnlockPages((PMDL)Irp->Tail.Overlay.DriverContext[3]);
+        IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]);
+        Irp->Tail.Overlay.DriverContext[3] = NULL;
+    }
+}
+
 static NTSTATUS SatisfyAccept(PAFD_DEVICE_EXTENSION DeviceExt,
                               PIRP Irp,
                               PFILE_OBJECT NewFileObject,
@@ -25,10 +63,26 @@ static NTSTATUS SatisfyAccept(PAFD_DEVICE_EXTENSION DeviceExt,
     if (!SocketAcquireStateLock(FCB))
         return LostSocket( Irp );
 
+    /* The accept socket's handle was closed meanwhile (AfdCleanupSocket()):
+     * it takes no connection any more.  The connection stays the caller's,
+     * for the next accept. */
+    if (FCB->SharedData.State == SOCKET_STATE_CLOSED)
+    {
+        if (SuperAccept)
+        {
+            SocketStateUnlock(FCB);
+            return STATUS_INVALID_HANDLE;
+        }
+
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_HANDLE, Irp, 0);
+    }
+
     /* Transfer the connection to the new socket, launch the opening read */
     AFD_DbgPrint(MID_TRACE,("Completing a real accept (FCB %p)\n", FCB));
 
     FCB->Connection = Qelt->Object;
+    Qelt->Object.Object = NULL;
+    Qelt->Object.Handle = INVALID_HANDLE_VALUE;
 
     if (FCB->RemoteAddress)
     {
@@ -100,10 +154,30 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     PFILE_OBJECT NewFileObject = (PFILE_OBJECT)Irp->Tail.Overlay.DriverContext[2];
     PAFD_SUPER_ACCEPT_INFO AcceptInfo = (PAFD_SUPER_ACCEPT_INFO)Irp->Tail.Overlay.DriverContext[0]; /* LockRequest stores the request in index 0 */
     PAFD_FCB FCB2 = NewFileObject->FsContext;
-    NTSTATUS Status = SatisfyAccept(NULL, Irp, NewFileObject, Qelt, TRUE);
-    
-    ObDereferenceObject(NewFileObject);
+    NTSTATUS Status;
+
     Irp->Tail.Overlay.DriverContext[2] = NULL;
+
+    /* Everything below changes the accept socket, which its handle being
+     * closed on another thread changes too: hold its lock (the listener's
+     * first, as AfdSuperAccept() takes them), and the reference
+     * AfdSuperAccept() took on it, until done. */
+    if (!SocketAcquireStateLock(FCB2))
+    {
+        ASSERT(FALSE);
+        return STATUS_FILE_CLOSED;
+    }
+
+    Status = SatisfyAccept(NULL, Irp, NewFileObject, Qelt, TRUE);
+
+    if (Qelt->Object.Object)
+    {
+        /* The accept socket is closed and refused it: the connection waits
+         * for the next accept */
+        ASSERT(FCB2->SharedData.State == SOCKET_STATE_CLOSED);
+        InsertHeadList(&FCB->PendingConnections, &Qelt->ListEntry);
+        goto end;
+    }
 
     BYTE *BufferPtr = MmGetSystemAddressForMdlSafe((PMDL)Irp->Tail.Overlay.DriverContext[3], NormalPagePriority);
     if (!BufferPtr)
@@ -141,7 +215,7 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     _SEH2_END;
 
     Status = TdiQueryInformation(
-        Qelt->Object.Object, TDI_QUERY_ADDRESS_INFO, Mdl);
+        FCB2->Connection.Object, TDI_QUERY_ADDRESS_INFO, Mdl);
     if (!NT_SUCCESS(Status))
         goto end;
 
@@ -173,6 +247,9 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
 
         if (Status == STATUS_PENDING)
             Status = STATUS_SUCCESS;
+
+        SocketStateUnlock(FCB2);
+        ObDereferenceObject(NewFileObject);
         return Status;
     }
     else
@@ -192,16 +269,23 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     }
 
 end:
-    /* Complete the IRP, there is no data to receive */
-    if (NT_SUCCESS(Status))
+    /* Complete the IRP, there is no data to receive.  A socket whose handle
+     * is closed stays closed. */
+    if (FCB2->SharedData.State != SOCKET_STATE_CLOSED)
     {
-        FCB2->SharedData.State = SOCKET_STATE_CONNECTED;
+        if (NT_SUCCESS(Status))
+        {
+            FCB2->SharedData.State = SOCKET_STATE_CONNECTED;
+        }
+        else
+        {
+            FCB2->SharedData.State = SOCKET_STATE_CREATED;
+        }
     }
-    else
-    {
-        FCB2->SharedData.State = SOCKET_STATE_CREATED;
-    }
-    
+
+    SocketStateUnlock(FCB2);
+    ObDereferenceObject(NewFileObject);
+
     MmUnlockPages((PMDL)Irp->Tail.Overlay.DriverContext[3]);
     IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]); 
     Irp->IoStatus.Information = 0;
@@ -238,10 +322,14 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
     FCB->ListenIrp.InFlightRequest = NULL;
 
     if( FCB->SharedData.State == SOCKET_STATE_CLOSED ) {
-        /* Cleanup our IRP queue because the FCB is being destroyed */
+        /* Cleanup our IRP queue because the FCB is being destroyed.  The
+         * cleanup cancelled these already; those still here are being
+         * cancelled by another thread, whose cancel routine waits for our
+         * lock and will not find them: they are ours to complete. */
         while( !IsListEmpty( &FCB->PendingIrpList[FUNCTION_PREACCEPT] ) ) {
            NextIrpEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_PREACCEPT]);
            NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
+           AfdReleasePreAcceptIrp(NextIrp);
            NextIrp->IoStatus.Status = STATUS_FILE_CLOSED;
            NextIrp->IoStatus.Information = 0;
            if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
@@ -554,7 +642,12 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                               Irp,
                                               &NewFileObject);
 
-            if( !NT_SUCCESS(Status) ) return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
+            if( !NT_SUCCESS(Status) )
+            {
+                /* The connection is still there for another accept */
+                InsertHeadList( &FCB->PendingConnections, PendingConn );
+                return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
+            }
 
             ASSERT(NewFileObject != FileObject);
             ASSERT(NewFileObject->FsContext != FCB);
@@ -566,7 +659,12 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
             AFD_DbgPrint(MID_TRACE,("Completed a wait for accept\n"));
 
-            ExFreePoolWithTag(PendingConnObj, TAG_AFD_ACCEPT_QUEUE);
+            /* The accept socket refused the connection: its handle was closed
+             * meanwhile.  It is still there for another accept. */
+            if (PendingConnObj->Object.Object)
+                InsertHeadList( &FCB->PendingConnections, PendingConn );
+            else
+                ExFreePoolWithTag(PendingConnObj, TAG_AFD_ACCEPT_QUEUE);
 
             if( !IsListEmpty( &FCB->PendingConnections ) )
             {
