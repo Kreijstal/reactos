@@ -26,6 +26,7 @@ KMT_TESTFUNC Test_IoDeviceFailedAdd;
 KMT_TESTFUNC Test_IoDeviceObject;
 KMT_TESTFUNC Test_IoDeviceRestart;
 KMT_TESTFUNC Test_IoReadWrite;
+KMT_TESTFUNC Test_IoRemovedChild;
 KMT_TESTFUNC Test_Kmdf133;
 KMT_TESTFUNC Test_KmdfIdle;
 KMT_TESTFUNC Test_KmdfNetCx;
@@ -101,6 +102,7 @@ const KMT_TEST TestList[] =
     { "IoDeviceObject",               Test_IoDeviceObject },
     { "IoDeviceRestart",              Test_IoDeviceRestart },
     { "IoReadWrite",                  Test_IoReadWrite },
+    { "IoRemovedChild",               Test_IoRemovedChild },
     { "Kmdf133",                      Test_Kmdf133 },
     { "KmdfIdle",                     Test_KmdfIdle },
     { "KmdfNetCx",                    Test_KmdfNetCx },

@@ -279,6 +279,7 @@ list(APPEND KMTEST_SOURCE
     ntos_io/IoDeviceObject_user.c
     ntos_io/IoDeviceRestart_user.c
     ntos_io/IoReadWrite_user.c
+    ntos_io/IoRemovedChild_user.c
     ntos_io/NtfsDirIndex_user.c
     ntos_io/NtfsFeatures_user.c
     ntos_io/NtfsFormat_user.c

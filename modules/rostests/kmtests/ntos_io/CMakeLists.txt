@@ -25,6 +25,14 @@ add_importlibs(iofailedadd_drv ntoskrnl hal)
 add_rostests_file(TARGET iofailedadd_drv)
 
 #
+# IoRemovedChild
+#
+add_library(ioremovedchild_drv MODULE IoRemovedChild_drv.c)
+set_module_type(ioremovedchild_drv kernelmodedriver)
+add_importlibs(ioremovedchild_drv ntoskrnl hal)
+add_rostests_file(TARGET ioremovedchild_drv)
+
+#
 # IoDeviceObject
 #
 list(APPEND IODEVICEOBJECT_DRV_SOURCE
