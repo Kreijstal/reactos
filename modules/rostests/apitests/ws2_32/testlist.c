@@ -16,6 +16,7 @@ extern void func_nostartup(void);
 extern void func_open_osfhandle(void);
 extern void func_recv(void);
 extern void func_recvtimeout(void);
+extern void func_selectclose(void);
 extern void func_send(void);
 extern void func_sendbound(void);
 extern void func_sendflood(void);
@@ -41,6 +42,7 @@ const struct test winetest_testlist[] =
     { "open_osfhandle", func_open_osfhandle },
     { "recv", func_recv },
     { "recvtimeout", func_recvtimeout },
+    { "selectclose", func_selectclose },
     { "send", func_send },
     { "sendbound", func_sendbound },
     { "sendflood", func_sendflood },
