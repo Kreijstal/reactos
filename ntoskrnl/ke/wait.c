@@ -350,6 +350,16 @@ KeDelayExecutionThread(IN KPROCESSOR_MODE WaitMode,
         {
             /* Unlock the dispatcher */
             KiReleaseDispatcherLock(Thread->WaitIrql);
+
+            /*
+             * The pending kernel APC is normally delivered by the APC software
+             * interrupt as soon as the IRQL drops. That interrupt may already have
+             * been taken in another thread's context, or arrive late under some
+             * hypervisors (e.g. QEMU with WHPX does not exit when CR8 is lowered),
+             * and then this loop would spin forever without ever delivering it.
+             * Deliver it ourselves.
+             */
+            if (Thread->WaitIrql == PASSIVE_LEVEL) KiCheckForKernelApcDelivery();
         }
         else
         {
@@ -473,6 +483,16 @@ KeWaitForSingleObject(IN PVOID Object,
         {
             /* Unlock the dispatcher */
             KiReleaseDispatcherLock(Thread->WaitIrql);
+
+            /*
+             * The pending kernel APC is normally delivered by the APC software
+             * interrupt as soon as the IRQL drops. That interrupt may already have
+             * been taken in another thread's context, or arrive late under some
+             * hypervisors (e.g. QEMU with WHPX does not exit when CR8 is lowered),
+             * and then this loop would spin forever without ever delivering it.
+             * Deliver it ourselves.
+             */
+            if (Thread->WaitIrql == PASSIVE_LEVEL) KiCheckForKernelApcDelivery();
         }
         else
         {
@@ -680,6 +700,16 @@ KeWaitForMultipleObjects(IN ULONG Count,
         {
             /* Unlock the dispatcher */
             KiReleaseDispatcherLock(Thread->WaitIrql);
+
+            /*
+             * The pending kernel APC is normally delivered by the APC software
+             * interrupt as soon as the IRQL drops. That interrupt may already have
+             * been taken in another thread's context, or arrive late under some
+             * hypervisors (e.g. QEMU with WHPX does not exit when CR8 is lowered),
+             * and then this loop would spin forever without ever delivering it.
+             * Deliver it ourselves.
+             */
+            if (Thread->WaitIrql == PASSIVE_LEVEL) KiCheckForKernelApcDelivery();
         }
         else
         {
