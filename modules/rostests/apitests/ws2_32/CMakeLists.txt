@@ -4,6 +4,7 @@ list(APPEND SOURCE
     broadcast.c
     cancelrace.c
     close.c
+    closeaddr.c
     closerace.c
     getaddrinfo.c
     gethostname.c
