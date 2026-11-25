@@ -637,7 +637,21 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     } else if( Status == STATUS_PENDING ) {
         AFD_DbgPrint(MID_TRACE,("Leaving read irp\n"));
         IoMarkIrpPending( Irp );
-        (void)IoSetCancelRoutine(Irp, AfdCancelHandler);
+
+        /* Arm the cancel routine, unless the IRP was cancelled while it sat on
+         * the list unarmed: then IoCancelIrp found nothing to call, and it is
+         * up to us -- as it is when the handle was closed meanwhile (see
+         * QueueUserModeIrp()) */
+        IoAcquireCancelSpinLock(&Irp->CancelIrql);
+        if (!Irp->Cancel && !(FileObject->Flags & FO_CLEANUP_COMPLETE))
+        {
+            (void)IoSetCancelRoutine(Irp, AfdCancelHandler);
+            IoReleaseCancelSpinLock(Irp->CancelIrql);
+        }
+        else
+        {
+            AfdCancelHandler(IoGetCurrentIrpStackLocation(Irp)->DeviceObject, Irp);
+        }
     } else {
         AFD_DbgPrint(MID_TRACE,("Completed with status %x\n", Status));
     }

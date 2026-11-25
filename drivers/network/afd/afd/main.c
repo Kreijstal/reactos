@@ -339,7 +339,6 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             return STATUS_INVALID_PARAMETER;
         }
 
-
         //EaLength = sizeof(FILE_FULL_EA_INFORMATION) + EaInfo->EaNameLength + EaInfo->EaValueLength;
 
         AFD_DbgPrint(MID_TRACE,("EaInfo: %p, EaInfoValue: %p\n",
@@ -447,6 +446,12 @@ AfdCleanupSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     UNREFERENCED_PARAMETER(DeviceObject);
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket(Irp);
+
+    /* The handle is gone.  A request already on its way in -- a call on
+     * another thread racing the close -- must not be queued behind this
+     * cleanup, where nothing would ever complete it; QueueUserModeIrp()
+     * cancels it like those cancelled here. */
+    FileObject->Flags |= FO_CLEANUP_COMPLETE;
 
     for (Function = 0; Function < MAX_FUNCTIONS; Function++)
     {
@@ -1366,7 +1371,14 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
      * manager may then free it -- before SocketAcquireStateLock() below
      * returns. Reading IrpSp after that point is a use-after-free, and the
      * recycled memory reads back as an unrecognised IoControlCode, which
-     * lands in the default case of the switch below. */
+     * lands in the default case of the switch below.
+     *
+     * The same goes for the socket: the IRP's reference on the file object
+     * is all that keeps the FCB from being freed, and that reference goes
+     * once the IRP completes.  If that was the last one -- the handle is
+     * already closed -- AfdCloseSocket() frees the FCB under us.  So the
+     * cancel routine takes a reference of its own while the IRP still holds
+     * one, and keeps it until it is done with the FCB. */
     switch (IrpSp->MajorFunction)
     {
         case IRP_MJ_DEVICE_CONTROL:
@@ -1387,18 +1399,23 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
             return;
     }
 
-    IoReleaseCancelSpinLock(Irp->CancelIrql);
-
     /* A select waits on the device, not on the socket it was sent to; the
      * socket lock does not protect it */
     if (IoctlCode == IOCTL_AFD_SELECT)
     {
+        IoReleaseCancelSpinLock(Irp->CancelIrql);
         AfdCancelSelect(DeviceExt, Irp);
         return;
     }
 
+    ObReferenceObject(FileObject);
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+
     if (!SocketAcquireStateLock(FCB))
+    {
+        ObDereferenceObject(FileObject);
         return;
+    }
 
     switch (IoctlCode)
     {
@@ -1442,6 +1459,7 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
              * not-found path below does. */
             ASSERT(FALSE);
             SocketStateUnlock(FCB);
+            ObDereferenceObject(FileObject);
             DbgPrint("WARNING!!! IRP cancellation race could lead to a process hang! (IoctlCode: 0x%x)\n",
                      IoctlCode);
             return;
@@ -1489,6 +1507,7 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
                 }
             }
             UnlockAndMaybeComplete(FCB, STATUS_CANCELLED, Irp, 0);
+            ObDereferenceObject(FileObject);
             return;
         }
         else
@@ -1498,6 +1517,7 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
     }
 
     SocketStateUnlock(FCB);
+    ObDereferenceObject(FileObject);
 
     DbgPrint("WARNING!!! IRP cancellation race could lead to a process hang! (Function: %u)\n", Function);
 }

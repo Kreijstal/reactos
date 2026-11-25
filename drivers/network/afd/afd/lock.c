@@ -588,9 +588,11 @@ NTSTATUS QueueUserModeIrp(PAFD_FCB FCB, PIRP Irp, UINT Function)
     InsertTailList( &FCB->PendingIrpList[Function],
                    &Irp->Tail.Overlay.ListEntry );
 
-    /* Acquire the cancel spin lock and check the cancel bit */
+    /* Acquire the cancel spin lock and check the cancel bit, and whether the
+     * socket's handle was closed (see AfdCleanupSocket()) */
     IoAcquireCancelSpinLock(&Irp->CancelIrql);
-    if (!Irp->Cancel)
+    if (!Irp->Cancel &&
+        !(IoGetCurrentIrpStackLocation(Irp)->FileObject->Flags & FO_CLEANUP_COMPLETE))
     {
         /* We are not cancelled; we're good to go so
          * set the cancel routine, release the cancel spin lock,
