@@ -62,6 +62,7 @@ KMT_TESTFUNC Test_IoEvent;
 KMT_TESTFUNC Test_IoFilesystem;
 KMT_TESTFUNC Test_IoFilesystemStress;
 KMT_TESTFUNC Test_IoInterrupt;
+KMT_TESTFUNC Test_IoScsiTaggedInquiry;
 KMT_TESTFUNC Test_IoIrp;
 KMT_TESTFUNC Test_IoMdl;
 KMT_TESTFUNC Test_IoUsbDiskStress;
@@ -233,6 +234,7 @@ const KMT_TEST TestList[] =
     { "IoFilesystem",                       Test_IoFilesystem },
     { "IoFilesystemStress",                 Test_IoFilesystemStress },
     { "IoInterrupt",                        Test_IoInterrupt },
+    { "IoScsiTaggedInquiry",                Test_IoScsiTaggedInquiry },
     { "IoIrp",                              Test_IoIrp },
     { "IoMdl",                              Test_IoMdl },
     { "IoUsbDiskStress",                    Test_IoUsbDiskStress },
