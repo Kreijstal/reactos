@@ -18,6 +18,7 @@ list(APPEND SOURCE
     send.c
     sendbound.c
     sendflood.c
+    streamclose.c
     WSAAsync.c
     WSAIoctl.c
     WSARecv.c

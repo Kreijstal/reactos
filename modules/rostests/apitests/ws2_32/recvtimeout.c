@@ -26,7 +26,6 @@ typedef struct _BLOCKING_CALL
     int Length;
     int Result;
     int Error;
-    int Iterations;
     DWORD Elapsed;
 } BLOCKING_CALL, *PBLOCKING_CALL;
 
@@ -51,15 +50,9 @@ BlockingThread(PVOID Parameter)
                                     (struct sockaddr *)&From, &FromLen);
             break;
         case OpSend:
-            /* Keep sending until the peer's window and our buffers are full
-             * and a send has to block; that is the call which must time out */
-            for (Call->Iterations = 0; Call->Iterations < 1024; Call->Iterations++)
-            {
-                Start = GetTickCount();
-                Call->Result = send(Call->Socket, Call->Buffer, Call->Length, 0);
-                if (Call->Result == SOCKET_ERROR)
-                    break;
-            }
+            /* The buffer is larger than the peer's window and our buffers
+             * together, so this blocks until it times out */
+            Call->Result = send(Call->Socket, Call->Buffer, Call->Length, 0);
             break;
     }
     Call->Error = WSAGetLastError();
@@ -299,16 +292,10 @@ Test_Tcp(void)
             ok(0, "TCP send did not time out\n");
             return;
         }
-        ok(Call->Result == SOCKET_ERROR, "TCP send returned %d after %d sends\n",
-           Call->Result, Call->Iterations);
+        ok(Call->Result == SOCKET_ERROR, "TCP send returned %d\n", Call->Result);
         ok(Call->Error == WSAETIMEDOUT, "TCP send error %d, expected WSAETIMEDOUT\n", Call->Error);
         ok(Call->Elapsed >= TIMEOUT_MS - 100 && Call->Elapsed <= 2000,
            "TCP send took %lu ms\n", Call->Elapsed);
-
-        /* Drain what the client queued, so that its graceful close can finish */
-        SetTimeouts(Server, TIMEOUT_MS, 0);
-        while (recv(Server, Big, BigSize, 0) > 0)
-            ;
         HeapFree(GetProcessHeap(), 0, Big);
     }
 

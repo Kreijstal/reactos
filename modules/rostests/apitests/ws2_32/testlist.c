@@ -19,6 +19,7 @@ extern void func_recvtimeout(void);
 extern void func_send(void);
 extern void func_sendbound(void);
 extern void func_sendflood(void);
+extern void func_streamclose(void);
 extern void func_WSAAsync(void);
 extern void func_WSAIoctl(void);
 extern void func_WSARecv(void);
@@ -43,6 +44,7 @@ const struct test winetest_testlist[] =
     { "send", func_send },
     { "sendbound", func_sendbound },
     { "sendflood", func_sendflood },
+    { "streamclose", func_streamclose },
     { "WSAAsync", func_WSAAsync },
     { "WSAIoctl", func_WSAIoctl },
     { "WSARecv", func_WSARecv },
