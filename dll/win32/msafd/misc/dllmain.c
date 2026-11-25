@@ -1439,17 +1439,21 @@ WSPSelect(IN int nfds,
     {
         Events = PollInfo->Handles[i].Events;
         Handle = PollInfo->Handles[i].Handle;
+        if (!Events)
+            continue;
+        Socket = GetSocketStructure(Handle);
+        if (!Socket)
+        {
+            /* Another thread closed it while we waited.  AFD completes the
+             * select for that, reporting the local close, and like on Windows
+             * the closed socket selects as readable. */
+            TRACE("Socket %x closed during select\n", Handle);
+            if (readfds && (Events & AFD_EVENT_CLOSE))
+                FD_SET(Handle, readfds);
+            continue;
+        }
         for(x = 1; x; x<<=1)
         {
-            Socket = GetSocketStructure(Handle);
-            if (!Socket)
-            {
-                TRACE("Invalid socket handle found %d\n", Handle);
-                if (lpErrno) *lpErrno = WSAENOTSOCK;
-                HeapFree(GlobalHeap, 0, PollBuffer);
-                NtClose(SockEvent);
-                return SOCKET_ERROR;
-            }
             switch (Events & x)
             {
                 case AFD_EVENT_RECEIVE:

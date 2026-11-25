@@ -133,6 +133,18 @@ typedef struct _AFD_DEVICE_EXTENSION {
     KSPIN_LOCK Lock;
 } AFD_DEVICE_EXTENSION, *PAFD_DEVICE_EXTENSION;
 
+/*
+ * A select IRP waiting in DeviceExt->Polls; DeviceExt->Lock protects all of it.
+ *
+ * The IRP is completed by whoever owns its completion: the cancel routine, or a
+ * path that took the cancel routine back with IoSetCancelRoutine(Irp, NULL).  A
+ * path that finds the cancel routine already gone leaves the poll alone; it is
+ * the cancel routine's.  Completing takes the poll off the list and clears Irp.
+ *
+ * The poll memory holds the timer and its DPC, so it may only be freed once the
+ * DPC can no longer run: when completing cancels the timer, or the DPC has
+ * already run (TimerExpired).  Otherwise the DPC is queued and frees the poll.
+ */
 typedef struct _AFD_ACTIVE_POLL {
     LIST_ENTRY ListEntry;
     PIRP Irp;
@@ -141,6 +153,7 @@ typedef struct _AFD_ACTIVE_POLL {
     KTIMER Timer;
     PKEVENT EventObject;
     BOOLEAN Exclusive;
+    BOOLEAN TimerExpired;
     PAFD_HANDLE AfdHandles;
 } AFD_ACTIVE_POLL, *PAFD_ACTIVE_POLL;
 
@@ -385,9 +398,7 @@ VOID KillSelectsForFCB( PAFD_DEVICE_EXTENSION DeviceExt,
                         PFILE_OBJECT FileObject, BOOLEAN ExclusiveOnly );
 VOID ZeroEvents(PAFD_POLL_INFO PollReq,
                 BOOLEAN Wow64Is32Bit);
-VOID SignalSocket(
-   PAFD_ACTIVE_POLL Poll OPTIONAL, PIRP _Irp OPTIONAL, PAFD_HANDLE AfdHandles,
-   PAFD_POLL_INFO PollReq, NTSTATUS Status);
+VOID AfdCancelSelect(PAFD_DEVICE_EXTENSION DeviceExt, PIRP Irp);
 
 /* write.c */
 

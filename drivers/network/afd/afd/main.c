@@ -1304,11 +1304,10 @@ BOOLEAN CheckUnlockExtraBuffers(PAFD_FCB FCB, PIO_STACK_LOCATION IrpSp)
 }
 
 VOID
-CleanupPendingIrp(PAFD_FCB FCB, PIRP Irp, PIO_STACK_LOCATION IrpSp, PAFD_ACTIVE_POLL Poll)
+CleanupPendingIrp(PAFD_FCB FCB, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
     PAFD_RECV_INFO RecvReq;
     PAFD_SEND_INFO SendReq;
-    PAFD_POLL_INFO PollReq;
 
     if (IrpSp->MajorFunction == IRP_MJ_READ)
     {
@@ -1334,14 +1333,6 @@ CleanupPendingIrp(PAFD_FCB FCB, PIRP Irp, PIO_STACK_LOCATION IrpSp, PAFD_ACTIVE_
             SendReq = GetLockedData(Irp, IrpSp);
             UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, CheckUnlockExtraBuffers(FCB, IrpSp));
         }
-        else if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AFD_SELECT)
-        {
-            ASSERT(Poll);
-
-            PollReq = Irp->AssociatedIrp.SystemBuffer;
-            ZeroEvents(PollReq, IoIs32bitProcess(Irp));
-            SignalSocket(Poll, NULL, Poll->AfdHandles, PollReq, STATUS_CANCELLED);
-        }
     }
 }
 
@@ -1357,8 +1348,6 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
     PIRP CurrentIrp;
     PLIST_ENTRY CurrentEntry;
     PAFD_DEVICE_EXTENSION DeviceExt = DeviceObject->DeviceExtension;
-    KIRQL OldIrql;
-    PAFD_ACTIVE_POLL Poll;
 
     /* Work out what we are cancelling while the cancel spin lock still
      * protects the IRP. Once it is dropped we have no claim on the IRP at
@@ -1388,6 +1377,14 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
     }
 
     IoReleaseCancelSpinLock(Irp->CancelIrql);
+
+    /* A select waits on the device, not on the socket it was sent to; the
+     * socket lock does not protect it */
+    if (IoctlCode == IOCTL_AFD_SELECT)
+    {
+        AfdCancelSelect(DeviceExt, Irp);
+        return;
+    }
 
     if (!SocketAcquireStateLock(FCB))
         return;
@@ -1420,34 +1417,6 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
             Function = FUNCTION_PREACCEPT;
             break;
 
-        case IOCTL_AFD_SELECT:
-            KeAcquireSpinLock(&DeviceExt->Lock, &OldIrql);
-
-            CurrentEntry = DeviceExt->Polls.Flink;
-            while (CurrentEntry != &DeviceExt->Polls)
-            {
-                Poll = CONTAINING_RECORD(CurrentEntry, AFD_ACTIVE_POLL, ListEntry);
-
-                if (Irp == Poll->Irp)
-                {
-                    CleanupPendingIrp(FCB, Irp, IrpSp, Poll);
-                    KeReleaseSpinLock(&DeviceExt->Lock, OldIrql);
-                    SocketStateUnlock(FCB);
-                    return;
-                }
-                else
-                {
-                    CurrentEntry = CurrentEntry->Flink;
-                }
-            }
-
-            KeReleaseSpinLock(&DeviceExt->Lock, OldIrql);
-
-            SocketStateUnlock(FCB);
-
-            DbgPrint("WARNING!!! IRP cancellation race could lead to a process hang! (IOCTL_AFD_SELECT)\n");
-            return;
-
         case IOCTL_AFD_DISCONNECT:
             Function = FUNCTION_DISCONNECT;
             break;
@@ -1459,7 +1428,7 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
              * owner of the socket lock already completed it while we waited
              * for that lock, this is a second completion and bugchecks with
              * MULTIPLE_IRP_COMPLETE_REQUESTS. Leave it alone and warn, as the
-             * not-found paths below and in the IOCTL_AFD_SELECT case do. */
+             * not-found path below does. */
             ASSERT(FALSE);
             SocketStateUnlock(FCB);
             DbgPrint("WARNING!!! IRP cancellation race could lead to a process hang! (IoctlCode: 0x%x)\n",
@@ -1487,7 +1456,7 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
             }
 
             RemoveEntryList(CurrentEntry);
-            CleanupPendingIrp(FCB, Irp, IrpSp, NULL);
+            CleanupPendingIrp(FCB, Irp, IrpSp);
             if (Function == FUNCTION_PREACCEPT)
             {
                 /* Unlock the acceptor socket so that it can be reused */
