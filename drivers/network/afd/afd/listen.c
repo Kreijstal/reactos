@@ -834,8 +834,36 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     Irp->Tail.Overlay.DriverContext[2] = NewFileObject;
     Irp->Tail.Overlay.DriverContext[3] = Mdl;
 
-    /* Proceed later in SatisfyAcceptEx */
     SocketStateUnlock(Fcb2);
 
+    /* A connection that arrived before us waits in the backlog: take it now,
+     * as accept() would (AfdWaitForListen()).  SatisfySuperAccept() completes
+     * the IRP, or leaves it pending on the accept socket until the first
+     * data arrives. */
+    if (!IsListEmpty(&Fcb->PendingConnections))
+    {
+        PAFD_TDI_OBJECT_QELT Qelt =
+            CONTAINING_RECORD(RemoveHeadList(&Fcb->PendingConnections),
+                              AFD_TDI_OBJECT_QELT, ListEntry);
+
+        IoMarkIrpPending(Irp);
+        SatisfySuperAccept(Fcb, Irp, Qelt);
+
+        if (!IsListEmpty(&Fcb->PendingConnections))
+        {
+            Fcb->PollState |= AFD_EVENT_ACCEPT;
+            Fcb->PollStatus[FD_ACCEPT_BIT] = STATUS_SUCCESS;
+            PollReeval(Fcb->DeviceExt, Fcb->FileObject);
+        }
+        else
+        {
+            Fcb->PollState &= ~AFD_EVENT_ACCEPT;
+        }
+
+        SocketStateUnlock(Fcb);
+        return STATUS_PENDING;
+    }
+
+    /* Proceed later in SatisfySuperAccept(), when a connection arrives */
     return LeaveIrpUntilLater(Fcb, Irp, FUNCTION_PREACCEPT);
 }
