@@ -2251,20 +2251,26 @@ WSPGetAcceptExSockaddrs(
     OUT struct sockaddr **RemoteSockaddr,
     OUT LPINT RemoteSockaddrLength)
 {
-    /* AFD_SUPER_ACCEPT outputs receive data + local address + local address length + remote address + remote address length */
-    /* Length is located 2 bytes before address length */
+    /* AFD_SUPER_ACCEPT outputs the receive data, then the local and the
+     * remote address areas.  An area holds its sockaddr at its start and the
+     * sockaddr's length as a USHORT in its last two bytes; AFD leaves an
+     * area of length 0 alone. */
     BYTE* LocalAddress = (BYTE *)lpOutputBuffer + dwReceiveDataLength;
-    if (dwLocalAddressLength)
+    BYTE* RemoteAddress = LocalAddress + dwLocalAddressLength;
+    USHORT Length;
+
+    if (dwLocalAddressLength >= sizeof(Length))
     {
+        RtlCopyMemory(&Length, LocalAddress + dwLocalAddressLength - sizeof(Length), sizeof(Length));
         *LocalSockaddr = (struct sockaddr *)LocalAddress;
-        *LocalSockaddrLength = *(UINT*)(LocalAddress + dwLocalAddressLength - sizeof(WORD));
+        *LocalSockaddrLength = Length;
     }
 
-    if (dwRemoteAddressLength)
+    if (dwRemoteAddressLength >= sizeof(Length))
     {
-        BYTE* RemoteAddress = LocalAddress + dwLocalAddressLength;
+        RtlCopyMemory(&Length, RemoteAddress + dwRemoteAddressLength - sizeof(Length), sizeof(Length));
         *RemoteSockaddr = (struct sockaddr *)RemoteAddress;
-        *RemoteSockaddrLength = *(UINT*)(RemoteAddress + dwRemoteAddressLength - sizeof(WORD));
+        *RemoteSockaddrLength = Length;
     }
 }
 
