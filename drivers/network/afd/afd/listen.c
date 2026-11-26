@@ -49,6 +49,18 @@ AfdReleasePreAcceptIrp(PIRP Irp)
     }
 }
 
+/*
+ * Frees a connection ListenComplete() queued, once it is accepted (its
+ * connection object handed to the accept socket) or the listener is
+ * destroyed (the object closed).
+ */
+VOID
+AfdFreeQueuedConnection(PAFD_TDI_OBJECT_QELT Qelt)
+{
+    ExFreePoolWithTag(Qelt->ConnInfo, TAG_AFD_TDI_CONNECTION_INFORMATION);
+    ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
+}
+
 static NTSTATUS SatisfyAccept(PAFD_DEVICE_EXTENSION DeviceExt,
                               PIRP Irp,
                               PFILE_OBJECT NewFileObject,
@@ -522,6 +534,10 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
         {
             RemoveEntryList(PendingConn);
             SatisfySuperAccept(FCB, PendingIrpPtr, ConnectionData);
+
+            /* Unless the accept socket refused it (back on the queue) */
+            if (!ConnectionData->Object.Object)
+                AfdFreeQueuedConnection(ConnectionData);
         }
         else
         {
@@ -739,7 +755,7 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
             if (PendingConnObj->Object.Object)
                 InsertHeadList( &FCB->PendingConnections, PendingConn );
             else
-                ExFreePoolWithTag(PendingConnObj, TAG_AFD_ACCEPT_QUEUE);
+                AfdFreeQueuedConnection(PendingConnObj);
 
             if( !IsListEmpty( &FCB->PendingConnections ) )
             {
@@ -848,6 +864,10 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
         IoMarkIrpPending(Irp);
         SatisfySuperAccept(Fcb, Irp, Qelt);
+
+        /* Unless the accept socket refused it (back on the queue) */
+        if (!Qelt->Object.Object)
+            AfdFreeQueuedConnection(Qelt);
 
         if (!IsListEmpty(&Fcb->PendingConnections))
         {

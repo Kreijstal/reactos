@@ -532,7 +532,7 @@ AfdShutdownTransport(PAFD_FCB FCB, PAFD_TRANSPORT Transport)
         ObDereferenceObject(Qelt->Object.Object);
         ZwClose(Qelt->Object.Handle);
 
-        ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
+        AfdFreeQueuedConnection(Qelt);
     }
 
     AfdDetachTransport(FCB, Transport);

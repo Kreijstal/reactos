@@ -327,6 +327,7 @@ AfdGetPeerName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 /* listen.c */
 VOID AfdReleasePreAcceptIrp(PIRP Irp);
+VOID AfdFreeQueuedConnection(PAFD_TDI_OBJECT_QELT Qelt);
 
 NTSTATUS AfdWaitForListen( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			   PIO_STACK_LOCATION IrpSp );
