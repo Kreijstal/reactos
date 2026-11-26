@@ -2392,6 +2392,48 @@ DxgkCbUnmapPhysicalMemory(
 }
 
 /*
+ * DxgkpChildStatusWorker
+ *
+ * PASSIVE_LEVEL half of DxgkCbIndicateChildStatus: lets PnP re-enumerate
+ * the children and, as Windows does on monitor arrival and departure,
+ * updates the VidPN topology and sets the mode again when its primary
+ * output changed.
+ */
+static IO_WORKITEM_ROUTINE DxgkpChildStatusWorker;
+
+static VOID
+NTAPI
+DxgkpChildStatusWorker(
+    _In_     PDEVICE_OBJECT DeviceObject,
+    _In_opt_ PVOID          Context)
+{
+    PDXGKRNL_ADAPTER Adapter = (PDXGKRNL_ADAPTER)Context;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+    PAGED_CODE();
+    ASSERT(Adapter != NULL);
+
+    for (;;)
+    {
+        while (InterlockedExchange(&Adapter->ChildStatusPending, 0) != 0)
+        {
+            IoInvalidateDeviceRelations(Adapter->PhysicalDeviceObject, BusRelations);
+            if (Adapter->State == DxgkAdapterStateStarted)
+                DxgkDisplayUpdateTopology(Adapter);
+        }
+
+        InterlockedExchange(&Adapter->ChildStatusWorkQueued, 0);
+
+        /* A report that raced with the clear above. */
+        if (Adapter->ChildStatusPending == 0 ||
+            InterlockedCompareExchange(&Adapter->ChildStatusWorkQueued, 1, 0) != 0)
+        {
+            break;
+        }
+    }
+}
+
+/*
  * DxgkCbIndicateChildStatus
  *
  * Records the status the miniport reports for one of its children: a
@@ -2455,19 +2497,14 @@ DxgkCbIndicateChildStatus(
                      ChildStatus->ChildUid);
     }
 
-    KeSetEvent(&Adapter->ChildStatusEvent, IO_NO_INCREMENT, FALSE);
-
-    if (Adapter->VidPnCommitted)
+    /* The topology update and the mode set run at PASSIVE_LEVEL. */
+    InterlockedExchange(&Adapter->ChildStatusPending, 1);
+    if (Adapter->ChildStatusWorkItem != NULL &&
+        InterlockedCompareExchange(&Adapter->ChildStatusWorkQueued, 1, 0) == 0)
     {
-        /* TODO: rebuild the topology and set a mode with the changed
-         * output, as Windows does on monitor arrival/departure. */
-        DXGKRNL_WARN("DxgkCbIndicateChildStatus: ChildUid %lu now %s after "
-                     "the mode set; the topology is not updated\n",
-                     ChildStatus->ChildUid,
-                     ChildStatus->HotPlug.Connected ? "connected" : "disconnected");
+        IoQueueWorkItem(Adapter->ChildStatusWorkItem, DxgkpChildStatusWorker,
+                        DelayedWorkQueue, Adapter);
     }
-
-    IoInvalidateDeviceRelations(Adapter->PhysicalDeviceObject, BusRelations);
 
     return STATUS_SUCCESS;
 }
@@ -3693,6 +3730,17 @@ DxgkAdapterStart(
             DXGKRNL_ERR("DxgkAdapterStart: DxgkDdiLinkDevice failed 0x%08lX\n", Status);
     }
 
+    /* The miniport may report child status as soon as it is started. */
+    if (Adapter->ChildStatusWorkItem == NULL)
+    {
+        Adapter->ChildStatusWorkItem = IoAllocateWorkItem(Adapter->FunctionalDeviceObject);
+        if (Adapter->ChildStatusWorkItem == NULL)
+        {
+            DXGKRNL_WARN("DxgkAdapterStart: no child status work item; "
+                         "hot-plug reports will not update the topology\n");
+        }
+    }
+
     /* Call miniport start. */
     DXGKRNL_TRACE("DxgkAdapterStart: calling DxgkDdiStartDevice MiniportCtx=%p\n",
                   Adapter->MiniportDeviceContext);
@@ -4171,6 +4219,19 @@ DxgkAdapterRemove(
         RtlInitEmptyUnicodeString(&Adapter->DeviceRegistryPath, NULL, 0);
     }
 
+    if (Adapter->ChildStatusWorkItem != NULL)
+    {
+        LARGE_INTEGER Interval;
+
+        /* Let a queued or running topology update finish first. */
+        Interval.QuadPart = -10 * 1000 * 10; /* 10 ms */
+        while (Adapter->ChildStatusWorkQueued != 0)
+            KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+
+        IoFreeWorkItem(Adapter->ChildStatusWorkItem);
+        Adapter->ChildStatusWorkItem = NULL;
+    }
+
     /* The DeviceExtension (Adapter) is freed by IoDeleteDevice below. */
     IoDeleteDevice(Adapter->FunctionalDeviceObject);
 
@@ -4636,7 +4697,7 @@ DxgkpAddDevice(
     KeInitializeSpinLock(&Adapter->InterruptLock);
     KeInitializeSpinLock(&Adapter->ChildListLock);
     KeInitializeSpinLock(&Adapter->ChildStatusLock);
-    KeInitializeEvent(&Adapter->ChildStatusEvent, SynchronizationEvent, FALSE);
+    ExInitializeFastMutex(&Adapter->ModeSetMutex);
     KeInitializeSpinLock(&Adapter->SubmitDmaLock);
     KeInitializeEvent(&Adapter->SyncEvent, SynchronizationEvent, FALSE);
     ExInitializeFastMutex(&Adapter->AdapterMutex);

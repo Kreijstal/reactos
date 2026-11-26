@@ -316,8 +316,8 @@ DxgkpGetTargetModeDimensions(
  *
  * IRQL: PASSIVE_LEVEL
  * ====================================================================== */
-NTSTATUS
-DxgkDisplayCommitVidPn(
+static NTSTATUS
+DxgkpCommitVidPnLocked(
     _In_ PDXGKRNL_ADAPTER Adapter)
 {
     NTSTATUS Status;
@@ -344,16 +344,6 @@ DxgkDisplayCommitVidPn(
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Never set the first mode on a topology without a single path: the
-     * miniport may not have finished detecting its outputs when the VidPN
-     * was built at start (#490: AMD's eDP panel stayed black). */
-    if (!Adapter->VidPnCommitted && VidPn->NumPaths == 0)
-    {
-        DXGKRNL_WARN("DxgkpCommitVidPnToMiniport: no output connected yet; "
-                     "waiting for the miniport to detect one\n");
-        DxgkVidPnWaitForConnectedTarget(Adapter);
-        VidPn = (PDXGKP_VIDPN)Adapter->VidPn;
-    }
 
     DXGKRNL_TRACE("DxgkpCommitVidPnToMiniport: starting mode-set sequence\n");
     DXGKRNL_TRACE("DxgkpCommitVidPnToMiniport: callbacks IsSupportedVidPn=%p "
@@ -776,6 +766,18 @@ DxgkDisplayCommitVidPn(
             }
         }
 
+        /* GDI already draws a desktop of a fixed size (a mode set after
+         * IOCTL_VIDEO_MAP_VIDEO_MEMORY, e.g. on a late monitor arrival):
+         * keep that source size and let the path scale it. */
+        if (!ForceDodPresentOnlyPath &&
+            !Adapter->MiniportContext->IsDisplayOnlyDriver &&
+            Adapter->DesktopWidth != 0 && Adapter->DesktopHeight != 0)
+        {
+            DesiredWidth = Adapter->DesktopWidth;
+            DesiredHeight = Adapter->DesktopHeight;
+            PreferClosestPostSourceMode = FALSE;
+        }
+
         /* Pin a source mode matching the desired display resolution. */
         if (VidPn->SourceModeSets[0] != NULL)
         {
@@ -869,6 +871,20 @@ DxgkDisplayCommitVidPn(
             }
         }
 
+        /* The present path copies the desktop: never commit a source of
+         * another size under it. */
+        if (!ForceDodPresentOnlyPath &&
+            !Adapter->MiniportContext->IsDisplayOnlyDriver &&
+            Adapter->DesktopWidth != 0 && VidPn->NumPaths != 0 &&
+            (SourceWidth != Adapter->DesktopWidth || SourceHeight != Adapter->DesktopHeight))
+        {
+            DXGKRNL_WARN("DxgkpCommitVidPnToMiniport: no %lux%lu source mode for the "
+                         "desktop (best %ux%u); not committing\n",
+                         Adapter->DesktopWidth, Adapter->DesktopHeight,
+                         SourceWidth, SourceHeight);
+            return STATUS_NOT_SUPPORTED;
+        }
+
         /* Store the committed resolution for MAP_VIDEO_MEMORY and present. */
         Adapter->CommittedWidth  = SourceWidth;
         Adapter->CommittedHeight = SourceHeight;
@@ -958,6 +974,7 @@ DxgkDisplayCommitVidPn(
         }
     }
 
+    Adapter->CommittedPathCount = VidPn->NumPaths;
     Adapter->VidPnCommitted = TRUE;
     /* CommittedWidth/Height were set during mode pinning above. */
 
@@ -969,6 +986,155 @@ DxgkDisplayCommitVidPn(
     DXGKRNL_TRACE("DxgkpCommitVidPnToMiniport: mode-set complete (%ux%u)\n",
                   Adapter->CommittedWidth, Adapter->CommittedHeight);
     return STATUS_SUCCESS;
+}
+
+static VOID
+DxgkpRecordDirtyRect(
+    _In_ PDXGKRNL_ADAPTER Adapter,
+    _In_ const RECTL *DirtyRect);
+
+/* Mode sets run in a critical region, as the VidPN DDIs need PASSIVE_LEVEL. */
+static VOID
+DxgkpLockModeSet(
+    _In_ PDXGKRNL_ADAPTER Adapter)
+{
+    KeEnterCriticalRegion();
+    ExAcquireFastMutexUnsafe(&Adapter->ModeSetMutex);
+}
+
+static VOID
+DxgkpUnlockModeSet(
+    _In_ PDXGKRNL_ADAPTER Adapter)
+{
+    ExReleaseFastMutexUnsafe(&Adapter->ModeSetMutex);
+    KeLeaveCriticalRegion();
+}
+
+/*
+ * DxgkDisplayCommitVidPn
+ *
+ * Sets the mode of Adapter->VidPn.  Until a mode set drove an output, the
+ * topology is taken from the connection states the miniport reports at
+ * that time, not from the ones it reported right after DxgkDdiStartDevice.
+ *
+ * IRQL: PASSIVE_LEVEL
+ */
+NTSTATUS
+DxgkDisplayCommitVidPn(
+    _In_ PDXGKRNL_ADAPTER Adapter)
+{
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (Adapter == NULL || Adapter->VidPn == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    DxgkpLockModeSet(Adapter);
+    if (!Adapter->VidPnCommitted || Adapter->CommittedPathCount == 0)
+        DxgkVidPnRefreshTopology(Adapter);
+    Status = DxgkpCommitVidPnLocked(Adapter);
+    DxgkpUnlockModeSet(Adapter);
+
+    return Status;
+}
+
+/*
+ * DxgkDisplayUpdateTopology
+ *
+ * Runs after the miniport reported a child connection change
+ * (DxgkCbIndicateChildStatus).  As Windows does on monitor arrival, a mode
+ * that was set without any output (none was connected yet: AMD's eDP panel
+ * detected only after the first mode set) is set again with the output
+ * connected now, at the size of the desktop GDI already draws.
+ *
+ * IRQL: PASSIVE_LEVEL
+ */
+NTSTATUS
+DxgkDisplayUpdateTopology(
+    _In_ PDXGKRNL_ADAPTER Adapter)
+{
+    LARGE_INTEGER Interval;
+    NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN Changed;
+    RECTL Full;
+
+    PAGED_CODE();
+
+    if (Adapter == NULL || Adapter->VidPn == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    /*
+     * Keep the present worker out while the mode may change under it.  It
+     * holds the present token while it can reach DxgkDisplayCommitVidPn
+     * (DxgkpEnsureSharedPrimary), so take the token before ModeSetMutex.
+     */
+    Interval.QuadPart = -10 * 1000; /* 1 ms */
+    while (InterlockedCompareExchange(&g_PresentDispatchBusy, 1, 0) != 0)
+        KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+
+    DxgkpLockModeSet(Adapter);
+
+    Changed = DxgkVidPnRefreshTopology(Adapter);
+
+    if (Changed && Adapter->VidPnCommitted &&
+        Adapter->CommittedPathCount == 0 &&
+        ((PDXGKP_VIDPN)Adapter->VidPn)->NumPaths != 0)
+    {
+        Status = DxgkpCommitVidPnLocked(Adapter);
+        DXGKRNL_WARN("DxgkDisplayUpdateTopology: output connected after the mode "
+                     "set; mode set again (%lux%lu): 0x%08lX\n",
+                     Adapter->CommittedWidth, Adapter->CommittedHeight, Status);
+
+        /* Nothing of the desktop has reached the output yet. */
+        if (NT_SUCCESS(Status) && Adapter->CommittedWidth != 0 && Adapter->ShadowFb != NULL)
+        {
+            Full.left = 0;
+            Full.top = 0;
+            Full.right = (LONG)Adapter->CommittedWidth;
+            Full.bottom = (LONG)Adapter->CommittedHeight;
+            DxgkpRecordDirtyRect(Adapter, &Full);
+        }
+    }
+    else if (Changed && Adapter->VidPnCommitted)
+    {
+        /* TODO: drive outputs beyond the first path (multi-monitor) and
+         * switch a departed one off, as Windows does. */
+        DXGKRNL_WARN("DxgkDisplayUpdateTopology: topology changed after the mode "
+                     "set (%Iu committed path(s)); mode kept\n",
+                     Adapter->CommittedPathCount);
+    }
+
+    DxgkpUnlockModeSet(Adapter);
+    InterlockedExchange(&g_PresentDispatchBusy, 0);
+    return Status;
+}
+
+/*
+ * The mode the display IOCTLs report and the desktop GDI draws: the
+ * committed source mode, else the firmware (POST) mode, else 1024x768.
+ */
+static VOID
+DxgkpGetDisplayModeSize(
+    _In_opt_ PDXGKRNL_ADAPTER Adapter,
+    _Out_ PULONG Width,
+    _Out_ PULONG Height)
+{
+    if (Adapter != NULL && Adapter->CommittedWidth != 0 && Adapter->CommittedHeight != 0)
+    {
+        *Width = Adapter->CommittedWidth;
+        *Height = Adapter->CommittedHeight;
+    }
+    else if (Adapter != NULL && Adapter->PostDisplayWidth != 0 && Adapter->PostDisplayHeight != 0)
+    {
+        *Width = Adapter->PostDisplayWidth;
+        *Height = Adapter->PostDisplayHeight;
+    }
+    else
+    {
+        *Width = 1024;
+        *Height = 768;
+    }
 }
 
 NTSTATUS
@@ -1910,14 +2076,9 @@ DxgkpDisplayDispatch(
 
                 ModeInfo->Length = sizeof(VIDEO_MODE_INFORMATION);
                 ModeInfo->ModeIndex = 0;
-                ModeInfo->VisScreenWidth = (g_DisplayAdapter && g_DisplayAdapter->CommittedWidth) ?
-                                           g_DisplayAdapter->CommittedWidth :
-                                           (g_DisplayAdapter && g_DisplayAdapter->PostDisplayWidth) ?
-                                           g_DisplayAdapter->PostDisplayWidth : 1024;
-                ModeInfo->VisScreenHeight = (g_DisplayAdapter && g_DisplayAdapter->CommittedHeight) ?
-                                            g_DisplayAdapter->CommittedHeight :
-                                            (g_DisplayAdapter && g_DisplayAdapter->PostDisplayHeight) ?
-                                            g_DisplayAdapter->PostDisplayHeight : 768;
+                DxgkpGetDisplayModeSize(g_DisplayAdapter,
+                                        &ModeInfo->VisScreenWidth,
+                                        &ModeInfo->VisScreenHeight);
                 ModeInfo->ScreenStride = ModeInfo->VisScreenWidth * 4;
                 ModeInfo->NumberOfPlanes = 1;
                 ModeInfo->BitsPerPlane = 32;
@@ -1996,10 +2157,7 @@ DxgkpDisplayDispatch(
                 Stack->Parameters.DeviceIoControl.InputBufferLength >= sizeof(VIDEO_MEMORY) &&
                 Stack->Parameters.DeviceIoControl.OutputBufferLength >= sizeof(VIDEO_MEMORY_INFORMATION))
             {
-                ULONG Width = (g_DisplayAdapter && g_DisplayAdapter->CommittedWidth) ?
-                              g_DisplayAdapter->CommittedWidth : 1024;
-                ULONG Height = (g_DisplayAdapter && g_DisplayAdapter->CommittedHeight) ?
-                               g_DisplayAdapter->CommittedHeight : 768;
+                ULONG Width, Height;
                 ULONG FbSize;
                 PVOID FbVa;
 
@@ -2008,6 +2166,9 @@ DxgkpDisplayDispatch(
                     Status = STATUS_DEVICE_NOT_READY;
                     break;
                 }
+
+                /* The size QUERY_CURRENT_MODE reported to the display driver. */
+                DxgkpGetDisplayModeSize(g_DisplayAdapter, &Width, &Height);
 
                 if (Width == 0 ||
                     Height == 0 ||
@@ -2072,6 +2233,8 @@ DxgkpDisplayDispatch(
                         g_DisplayAdapter->ShadowFb = FbVa;
                         g_DisplayAdapter->ShadowFbPitch = Width * 4;
                         g_DisplayAdapter->ShadowFbSize = FbSize;
+                        g_DisplayAdapter->DesktopWidth = Width;
+                        g_DisplayAdapter->DesktopHeight = Height;
 
                         /* Start the periodic present timer if CommitVidPn succeeded. */
                         if (g_DisplayAdapter->VidPnCommitted)

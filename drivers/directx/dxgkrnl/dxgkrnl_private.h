@@ -545,18 +545,34 @@ struct _DXGKRNL_ADAPTER
      * Connection status the miniport last reported for each child through
      * DxgkCbIndicateChildStatus(StatusConnection).  The miniport reports it
      * from its DPC (IRQL <= DISPATCH_LEVEL), so ChildStatusLock is a spin
-     * lock.  ChildStatusEvent is set on every report; the first mode set
-     * waits on it while no output is connected yet (see
-     * DxgkVidPnWaitForConnectedTarget).
+     * lock.  Each report queues ChildStatusWorkItem, which updates the
+     * VidPN topology at PASSIVE_LEVEL (DxgkDisplayUpdateTopology).
      */
     KSPIN_LOCK                  ChildStatusLock;
-    KEVENT                      ChildStatusEvent;
     ULONG                       ChildStatusCount;
     struct
     {
         ULONG                   ChildUid;
         BOOLEAN                 Connected;
     }                           ChildStatus[DXGKRNL_MAX_REPORTED_CHILDREN];
+    PIO_WORKITEM                ChildStatusWorkItem;
+    volatile LONG               ChildStatusWorkQueued;  /* queued or running */
+    volatile LONG               ChildStatusPending;     /* report not handled yet */
+
+    /*
+     * Serialises mode sets (DxgkDisplayCommitVidPn) and topology updates.
+     * Held in a critical region (ExAcquireFastMutexUnsafe), as the
+     * VidPN DDIs run at PASSIVE_LEVEL.
+     */
+    FAST_MUTEX                  ModeSetMutex;
+
+    /*
+     * Size of the desktop GDI draws (the mode the display IOCTLs reported
+     * and the shadow framebuffer was allocated at).  0 until
+     * IOCTL_VIDEO_MAP_VIDEO_MEMORY.  A mode set after that keeps it.
+     */
+    ULONG                       DesktopWidth;
+    ULONG                       DesktopHeight;
 
     /*
      * List of DXGKRNL_DEVICE instances created against this adapter.
@@ -613,6 +629,8 @@ struct _DXGKRNL_ADAPTER
     ULONG                       CommittedHeight;
     BOOLEAN                     VidPnCommitted;
     BOOLEAN                     SystemDisplayEnabled;
+    /* Paths of the topology last committed; 0 = no output is driven. */
+    SIZE_T                      CommittedPathCount;
     D3DDDIFORMAT                SystemDisplayColorFormat;
 
     /* POST display info from DxgkCbAcquirePostDisplayOwnership. */
@@ -1613,8 +1631,12 @@ NTSTATUS
 DxgkVidPnRebuildForHotPlug(
     _In_ PDXGKRNL_ADAPTER Adapter);
 
+BOOLEAN
+DxgkVidPnRefreshTopology(
+    _In_ PDXGKRNL_ADAPTER Adapter);
+
 NTSTATUS
-DxgkVidPnWaitForConnectedTarget(
+DxgkDisplayUpdateTopology(
     _In_ PDXGKRNL_ADAPTER Adapter);
 
 BOOLEAN

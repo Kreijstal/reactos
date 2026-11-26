@@ -1018,81 +1018,81 @@ DxgkVidPnDestroy(
  * Hot-plug detection support
  * ====================================================================== */
 
-/* How long the first mode set waits for the miniport to detect an output. */
-#define DXGKP_CONNECT_WAIT_MS       3000
-#define DXGKP_CONNECT_POLL_MS       50
-
 /*
- * DxgkVidPnWaitForConnectedTarget
+ * DxgkVidPnRefreshTopology
  *
- * The start-time VidPN is built from the connection states the miniport
- * reports right after DxgkDdiStartDevice.  A miniport may still be
- * detecting its outputs then (AMD's atikmdag reports the internal eDP
- * panel, an HpdAwarenessInterruptible child, disconnected on some boots),
- * which leaves a VidPN without a single path: committing it lights nothing,
- * so the panel stays black for the whole session.  Windows' first mode set
- * runs after monitor arrival, so it never commits such a topology.
+ * Rebuilds the topology of Adapter->VidPn from the connection states the
+ * miniport reports now (DxgkDdiQueryChildStatus, and what it reported
+ * through DxgkCbIndicateChildStatus): paths to the connected outputs, in
+ * that order, with default mode sets.  The start-time VidPN may predate
+ * the miniport's own detection (AMD's atikmdag reports its internal eDP
+ * panel disconnected right after DxgkDdiStartDevice on some boots).
  *
- * Before the first commit, while no output is connected, rebuild the VidPN
- * from fresh DxgkDdiQueryChildStatus results and DxgkCbIndicateChildStatus
- * reports until one is connected or DXGKP_CONNECT_WAIT_MS passed.
+ * The VidPN object is updated in place, so pointers to it and to its mode
+ * sets stay valid.  Returns TRUE if the paths changed.
  *
- * Returns STATUS_SUCCESS once Adapter->VidPn has a path, STATUS_TIMEOUT
- * if no output got connected (Adapter->VidPn is then still valid).
- *
- * IRQL: PASSIVE_LEVEL
+ * IRQL: PASSIVE_LEVEL, Adapter->ModeSetMutex held
  */
-NTSTATUS
-DxgkVidPnWaitForConnectedTarget(
+BOOLEAN
+DxgkVidPnRefreshTopology(
     _In_ PDXGKRNL_ADAPTER Adapter)
 {
-    ULONGLONG Deadline;
-    LARGE_INTEGER Timeout;
-    ULONG Attempts = 0;
+    PDXGKP_VIDPN Cur, New;
+    D3DKMDT_HVIDPN hNew = NULL;
+    BOOLEAN Changed;
+    ULONG i;
 
     PAGED_CODE();
 
-    ASSERT(Adapter != NULL);
-    ASSERT(Adapter->VidPn != NULL);
-    ASSERT(!Adapter->VidPnCommitted);
+    Cur = (PDXGKP_VIDPN)Adapter->VidPn;
+    if (Cur == NULL || Cur->Signature != DXGKP_VIDPN_SIGNATURE)
+        return FALSE;
 
-    if (((PDXGKP_VIDPN)Adapter->VidPn)->NumPaths != 0)
-        return STATUS_SUCCESS;
+    if (!NT_SUCCESS(DxgkVidPnCreateForAdapter(Adapter, &hNew)))
+        return FALSE;
+    New = (PDXGKP_VIDPN)hNew;
 
-    Deadline = KeQueryInterruptTime() + (ULONGLONG)DXGKP_CONNECT_WAIT_MS * 10000ULL;
-    Timeout.QuadPart = -(LONGLONG)DXGKP_CONNECT_POLL_MS * 10000LL;
-
-    for (;;)
+    /* Both are built from the same child descriptors. */
+    if (New->NumSources != Cur->NumSources || New->NumTargets != Cur->NumTargets)
     {
-        D3DKMDT_HVIDPN hVidPn = NULL;
-        NTSTATUS Status;
-
-        Attempts++;
-        Status = DxgkVidPnCreateForAdapter(Adapter, &hVidPn);
-        if (NT_SUCCESS(Status))
-        {
-            if (((PDXGKP_VIDPN)hVidPn)->NumPaths != 0)
-            {
-                DXGKRNL_WARN("DxgkVidPnWaitForConnectedTarget: an output got "
-                             "connected after %lu queries; VidPN rebuilt\n",
-                             Attempts);
-                DxgkVidPnDestroy((D3DKMDT_HVIDPN)Adapter->VidPn);
-                Adapter->VidPn = (PVOID)hVidPn;
-                return STATUS_SUCCESS;
-            }
-            DxgkVidPnDestroy(hVidPn);
-        }
-
-        if (KeQueryInterruptTime() >= Deadline)
-            break;
-
-        KeWaitForSingleObject(&Adapter->ChildStatusEvent, Executive,
-                              KernelMode, FALSE, &Timeout);
+        DXGKRNL_WARN("DxgkVidPnRefreshTopology: %lu/%lu sources/targets, was %lu/%lu\n",
+                     New->NumSources, New->NumTargets, Cur->NumSources, Cur->NumTargets);
+        DxgkVidPnDestroy(hNew);
+        return FALSE;
     }
 
-    DXGKRNL_WARN("DxgkVidPnWaitForConnectedTarget: no output connected after "
-                 "%u ms (%lu queries)\n", DXGKP_CONNECT_WAIT_MS, Attempts);
-    return STATUS_TIMEOUT;
+    Changed = (New->NumPaths != Cur->NumPaths);
+    for (i = 0; !Changed && i < New->NumPaths; i++)
+    {
+        Changed = (New->Paths[i].VidPnSourceId != Cur->Paths[i].VidPnSourceId ||
+                   New->Paths[i].VidPnTargetId != Cur->Paths[i].VidPnTargetId);
+    }
+
+    if (Changed)
+    {
+        DXGKRNL_WARN("DxgkVidPnRefreshTopology: %Iu path(s), was %Iu; first target %ld\n",
+                     New->NumPaths, Cur->NumPaths,
+                     New->NumPaths ? (LONG)New->Paths[0].VidPnTargetId : -1);
+
+        RtlCopyMemory(Cur->TargetIds, New->TargetIds, sizeof(Cur->TargetIds));
+        RtlCopyMemory(Cur->Paths, New->Paths, sizeof(Cur->Paths));
+        Cur->NumPaths = New->NumPaths;
+
+        for (i = 0; i < Cur->NumSources; i++)
+        {
+            *Cur->SourceModeSets[i] = *New->SourceModeSets[i];
+            Cur->SourceModeSets[i]->Owner = Cur;
+        }
+        for (i = 0; i < Cur->NumTargets; i++)
+        {
+            *Cur->TargetModeSets[i] = *New->TargetModeSets[i];
+            Cur->TargetModeSets[i]->Owner = Cur;
+            *Cur->MonitorModeSets[i] = *New->MonitorModeSets[i];
+        }
+    }
+
+    DxgkVidPnDestroy(hNew);
+    return Changed;
 }
 
 NTSTATUS
