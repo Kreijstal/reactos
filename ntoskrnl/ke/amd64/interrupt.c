@@ -83,6 +83,7 @@ KeConnectInterrupt(IN PKINTERRUPT Interrupt)
     PVOID CurrentHandler;
     PKINTERRUPT ConnectedInterrupt;
     KIRQL OldIrql;
+    KAFFINITY OldAffinity;
 
     /* Validate the vector */
     if ((Interrupt->Vector < PRIMARY_VECTOR_BASE) ||
@@ -100,8 +101,9 @@ KeConnectInterrupt(IN PKINTERRUPT Interrupt)
     /* Check if its already connected */
     if (Interrupt->Connected) return TRUE;
 
-    /* Set the system affinity and acquire the dispatcher lock */
-    KeSetSystemAffinityThread(1ULL << Interrupt->Number);
+    /* Run on the interrupt's processor and acquire the dispatcher lock. The
+     * caller may have a system affinity of its own, which is restored below */
+    OldAffinity = KiSetSystemAffinityThreadSave(1ULL << Interrupt->Number);
     OldIrql = KiAcquireDispatcherLock();
 
     /* Query the current handler */
@@ -156,7 +158,7 @@ KeConnectInterrupt(IN PKINTERRUPT Interrupt)
 Cleanup:
     /* Release the dispatcher lock and restore the thread affinity */
     KiReleaseDispatcherLock(OldIrql);
-    KeRevertToUserAffinityThread();
+    KiRestoreSystemAffinityThread(OldAffinity);
     return Interrupt->Connected;
 }
 
@@ -168,9 +170,11 @@ KeDisconnectInterrupt(IN PKINTERRUPT Interrupt)
     PVOID VectorHandler, UnexpectedHandler;
     PKINTERRUPT VectorFirstInterrupt, NextInterrupt;
     PLIST_ENTRY HandlerHead;
+    KAFFINITY OldAffinity;
 
-    /* Set the system affinity and acquire the dispatcher lock */
-    KeSetSystemAffinityThread(1ULL << Interrupt->Number);
+    /* Run on the interrupt's processor and acquire the dispatcher lock. The
+     * caller may have a system affinity of its own, which is restored below */
+    OldAffinity = KiSetSystemAffinityThreadSave(1ULL << Interrupt->Number);
     OldIrql = KiAcquireDispatcherLock();
 
     /* Check if the interrupt was connected - otherwise there's nothing to do */
@@ -227,7 +231,7 @@ KeDisconnectInterrupt(IN PKINTERRUPT Interrupt)
 
     /* Release the dispatcher lock and restore the thread affinity */
     KiReleaseDispatcherLock(OldIrql);
-    KeRevertToUserAffinityThread();
+    KiRestoreSystemAffinityThread(OldAffinity);
 
     return TRUE;
 }

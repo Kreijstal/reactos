@@ -398,6 +398,7 @@ KeConnectInterrupt(IN PKINTERRUPT Interrupt)
     UCHAR Number;
     ULONG Vector;
     DISPATCH_INFO Dispatch;
+    KAFFINITY OldAffinity;
 
     /* Get data from interrupt */
     Number = Interrupt->Number;
@@ -417,8 +418,9 @@ KeConnectInterrupt(IN PKINTERRUPT Interrupt)
     Connected = FALSE;
     Error = FALSE;
 
-    /* Set the system affinity and acquire the dispatcher lock */
-    KeSetSystemAffinityThread(1 << Number);
+    /* Run on the interrupt's processor and acquire the dispatcher lock. The
+     * caller may have a system affinity of its own, which is restored below */
+    OldAffinity = KiSetSystemAffinityThreadSave(AFFINITY_MASK(Number));
     OldIrql = KiAcquireDispatcherLock();
 
     /* Check if it's already been connected */
@@ -473,7 +475,7 @@ KeConnectInterrupt(IN PKINTERRUPT Interrupt)
 
     /* Unlock the dispatcher and revert affinity */
     KiReleaseDispatcherLock(OldIrql);
-    KeRevertToUserAffinityThread();
+    KiRestoreSystemAffinityThread(OldAffinity);
 
     /* Check if we failed while trying to connect */
     if ((Connected) && (Error))
@@ -499,9 +501,11 @@ KeDisconnectInterrupt(IN PKINTERRUPT Interrupt)
     DISPATCH_INFO Dispatch;
     PKINTERRUPT NextInterrupt;
     BOOLEAN State;
+    KAFFINITY OldAffinity;
 
-    /* Set the affinity */
-    KeSetSystemAffinityThread(1 << Interrupt->Number);
+    /* Run on the interrupt's processor; the caller's system affinity, if
+     * any, is restored below */
+    OldAffinity = KiSetSystemAffinityThreadSave(AFFINITY_MASK(Interrupt->Number));
 
     /* Lock the dispatcher */
     OldIrql = KiAcquireDispatcherLock();
@@ -567,7 +571,7 @@ KeDisconnectInterrupt(IN PKINTERRUPT Interrupt)
 
     /* Unlock the dispatcher and revert affinity */
     KiReleaseDispatcherLock(OldIrql);
-    KeRevertToUserAffinityThread();
+    KiRestoreSystemAffinityThread(OldAffinity);
 
     /* Return to caller */
     return State;

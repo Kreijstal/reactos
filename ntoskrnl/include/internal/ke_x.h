@@ -1841,6 +1841,45 @@ KiWriteThreadCycleTime(
 #endif
 }
 
+//
+// Runs the current thread on the given processors for a moment, then gives it
+// back the system affinity it had before (KeSetSystemAffinityThreadEx and
+// KeRevertToUserAffinityThreadEx semantics). A plain KeRevertToUserAffinityThread
+// would drop a system affinity the caller set, e.g. the shutdown thread's pin to
+// the boot processor.
+//
+FORCEINLINE
+KAFFINITY
+KiSetSystemAffinityThreadSave(
+    _In_ KAFFINITY Affinity)
+{
+    PKTHREAD Thread = KeGetCurrentThread();
+    KAFFINITY Previous = 0;
+
+    if (Thread->SystemAffinityActive)
+    {
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+        Previous = Thread->Affinity.Mask;
+#else
+        Previous = Thread->Affinity;
+#endif
+    }
+
+    KeSetSystemAffinityThread(Affinity);
+    return Previous;
+}
+
+FORCEINLINE
+VOID
+KiRestoreSystemAffinityThread(
+    _In_ KAFFINITY Previous)
+{
+    if (Previous != 0)
+        KeSetSystemAffinityThread(Previous);
+    else
+        KeRevertToUserAffinityThread();
+}
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
