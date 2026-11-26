@@ -63,6 +63,7 @@ list(APPEND SOURCE
     SwitchToThisWindow.c
     SystemMenu.c
     SystemParametersInfo.c
+    ThreadCleanup.c
     TrackMouseEvent.c
     TrackPopupMenuEx.c
     UserHandleGrantAccess.c
