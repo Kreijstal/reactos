@@ -57,6 +57,7 @@ extern void func_SetParent(void);
 extern void func_SetProp(void);
 extern void func_SetScrollInfo(void);
 extern void func_SetScrollRange(void);
+extern void func_SetTimer(void);
 extern void func_SetWindowPlacement(void);
 extern void func_ShowWindow(void);
 extern void func_SwitchToThisWindow(void);
@@ -126,6 +127,7 @@ const struct test winetest_testlist[] =
     { "SetProp", func_SetProp },
     { "SetScrollInfo", func_SetScrollInfo },
     { "SetScrollRange", func_SetScrollRange },
+    { "SetTimer", func_SetTimer },
     { "SetWindowPlacement", func_SetWindowPlacement },
     { "ShowWindow", func_ShowWindow },
     { "SwitchToThisWindow", func_SwitchToThisWindow },

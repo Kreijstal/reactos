@@ -57,6 +57,7 @@ list(APPEND SOURCE
     SetProp.c
     SetScrollInfo.c
     SetScrollRange.c
+    SetTimer.c
     SetWindowPlacement.c
     ShowWindow.c
     SwitchToThisWindow.c
