@@ -302,7 +302,7 @@ TDI_STATUS InfoTdiQueryGetConnectionTcpTable(PADDRESS_FILE AddrFile,
         ASSERT(EndPoint.TAAddressCount >= 1);
         ASSERT(EndPoint.Address[0].AddressLength == TDI_ADDRESS_LENGTH_IP);
         TcpRow.dwLocalAddr = EndPoint.Address[0].Address[0].in_addr;
-        TcpRow.dwLocalPort = ntohs(EndPoint.Address[0].Address[0].sin_port);
+        TcpRow.dwLocalPort = EndPoint.Address[0].Address[0].sin_port;
 
         QueryStatus = TCPGetSockAddress(Connection, (PTRANSPORT_ADDRESS)&EndPoint, TRUE);
         if (!NT_SUCCESS(QueryStatus))
@@ -310,7 +310,7 @@ TDI_STATUS InfoTdiQueryGetConnectionTcpTable(PADDRESS_FILE AddrFile,
         ASSERT(EndPoint.TAAddressCount >= 1);
         ASSERT(EndPoint.Address[0].AddressLength == TDI_ADDRESS_LENGTH_IP);
         TcpRow.dwRemoteAddr = EndPoint.Address[0].Address[0].in_addr;
-        TcpRow.dwRemotePort = ntohs(EndPoint.Address[0].Address[0].sin_port);
+        TcpRow.dwRemotePort = EndPoint.Address[0].Address[0].sin_port;
 
         RtlCopyMemory(Rows + RowCount * Size, &TcpRow, Size);
         RowCount++;

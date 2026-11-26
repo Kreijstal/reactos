@@ -698,6 +698,7 @@ NTSTATUS TCPGetSockAddress
 {
     PTA_IP_ADDRESS AddressIP = (PTA_IP_ADDRESS)Address;
     ip_addr_t ipaddr;
+    u16_t port;
     NTSTATUS Status;
 
     AddressIP->TAAddressCount = 1;
@@ -710,17 +711,19 @@ NTSTATUS TCPGetSockAddress
     {
         Status = TCPTranslateError(LibTCPGetPeerName(Connection->SocketContext,
                                     &ipaddr,
-                                    &AddressIP->Address[0].Address[0].sin_port));
+                                    &port));
     }
     else
     {
         Status = TCPTranslateError(LibTCPGetHostName(Connection->SocketContext,
                                     &ipaddr,
-                                    &AddressIP->Address[0].Address[0].sin_port));
+                                    &port));
     }
 
     UnlockObject(Connection);
 
+    /* lwIP keeps the port in host order, a TDI address in network order */
+    AddressIP->Address[0].Address[0].sin_port = lwip_htons(port);
     AddressIP->Address[0].Address[0].in_addr = ipaddr.addr;
 
     RtlZeroMemory(&AddressIP->Address[0].Address[0].sin_zero,
