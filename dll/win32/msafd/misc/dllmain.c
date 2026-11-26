@@ -189,6 +189,7 @@ WSPSocket(int AddressFamily,
         goto error;
     }
     RtlZeroMemory(Socket, sizeof(*Socket));
+    InitializeCriticalSection(&Socket->Lock);
     /* The reference of the process socket list */
     Socket->RefCount = 1;
     if (SharedData)
@@ -208,6 +209,7 @@ WSPSocket(int AddressFamily,
             goto error;
         }
         RtlZeroMemory(Socket->SharedData, sizeof(*Socket->SharedData));
+        Socket->HeapSharedData = Socket->SharedData;
         Socket->SharedData->State = SocketOpen;
         Socket->SharedData->RefCount = 1L;
         Socket->SharedData->Listening = FALSE;
@@ -467,7 +469,10 @@ error:
     }
 
     if( Socket )
+    {
+        DeleteCriticalSection(&Socket->Lock);
         HeapFree(GlobalHeap, 0, Socket);
+    }
 
     if( EABuffer )
         HeapFree(GlobalHeap, 0, EABuffer);
@@ -488,8 +493,8 @@ MsafdDuplicateSocket(
     OUT LPWSAPROTOCOL_INFOW lpProtocolInfo,
     OUT LPINT lpErrno)
 {
-    HANDLE hProcess, hDuplicatedSharedData, hDuplicatedHandle;
-    PSOCK_SHARED_INFO pSharedData, pOldSharedData;
+    HANDLE hProcess, hSharedData, hDuplicatedSharedData, hDuplicatedHandle;
+    PSOCK_SHARED_INFO pSharedData;
     BOOL bDuplicated;
 
     if (Handle == INVALID_SOCKET)
@@ -503,31 +508,52 @@ MsafdDuplicateSocket(
     if ( !(hProcess = OpenProcess(PROCESS_DUP_HANDLE, FALSE, dwProcessId)) )
         return MsafdReturnWithErrno(STATUS_INVALID_PARAMETER, lpErrno, 0, NULL);
 
-    /* It is a not yet duplicated socket, so map the memory, copy the SharedData and free heap */
+    /* The first duplicate moves SharedData into a section, for the processes
+     * the socket goes to to share.  Once per socket, however many threads
+     * duplicate it at once; and calls on other threads may be using the heap
+     * block meanwhile, which stays until the socket is freed. */
+    EnterCriticalSection(&Socket->Lock);
     if( Socket->SharedDataHandle == INVALID_HANDLE_VALUE )
     {
-        Socket->SharedDataHandle = CreateFileMapping(INVALID_HANDLE_VALUE,
-                                                     NULL,
-                                                     PAGE_READWRITE | SEC_COMMIT,
-                                                     0,
-                                                     (sizeof(SOCK_SHARED_INFO) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1),
-                                                     NULL);
-        if( Socket->SharedDataHandle == INVALID_HANDLE_VALUE )
+        ASSERT(Socket->SharedData == Socket->HeapSharedData);
+
+        hSharedData = CreateFileMappingW(INVALID_HANDLE_VALUE,
+                                         NULL,
+                                         PAGE_READWRITE | SEC_COMMIT,
+                                         0,
+                                         (sizeof(SOCK_SHARED_INFO) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1),
+                                         NULL);
+        if (!hSharedData)
+        {
+            LeaveCriticalSection(&Socket->Lock);
+            NtClose(hProcess);
             return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL);
-        pSharedData = MapViewOfFile(Socket->SharedDataHandle,
+        }
+        pSharedData = MapViewOfFile(hSharedData,
                                     FILE_MAP_ALL_ACCESS,
                                     0,
                                     0,
                                     sizeof(SOCK_SHARED_INFO));
+        if (!pSharedData)
+        {
+            NtClose(hSharedData);
+            LeaveCriticalSection(&Socket->Lock);
+            NtClose(hProcess);
+            return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL);
+        }
 
         RtlCopyMemory(pSharedData, Socket->SharedData, sizeof(SOCK_SHARED_INFO));
-        pOldSharedData = Socket->SharedData;
-        Socket->SharedData = pSharedData;
-        HeapFree(GlobalHeap, 0, pOldSharedData);
+        Socket->LocalAddress = &pSharedData->WSLocalAddress;
+        Socket->RemoteAddress = &pSharedData->WSRemoteAddress;
+        InterlockedExchangePointer((PVOID *)&Socket->SharedData, pSharedData);
+        Socket->SharedDataHandle = hSharedData;
     }
+    hSharedData = Socket->SharedDataHandle;
+    LeaveCriticalSection(&Socket->Lock);
+
     /* Duplicate the handles for the new process */
     bDuplicated = DuplicateHandle(GetCurrentProcess(),
-                                  Socket->SharedDataHandle,
+                                  hSharedData,
                                   hProcess,
                                   (LPHANDLE)&hDuplicatedSharedData,
                                   0,
@@ -4531,10 +4557,9 @@ DereferenceSocket(PSOCKET_INFORMATION Socket)
         UnmapViewOfFile(Socket->SharedData);
         NtClose(Socket->SharedDataHandle);
     }
-    else
-    {
-        HeapFree(GlobalHeap, 0, Socket->SharedData);
-    }
+    if (Socket->HeapSharedData)
+        HeapFree(GlobalHeap, 0, Socket->HeapSharedData);
+    DeleteCriticalSection(&Socket->Lock);
     HeapFree(GlobalHeap, 0, Socket);
 }
 

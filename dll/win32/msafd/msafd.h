@@ -45,7 +45,13 @@ extern BOOLEAN SockAsyncSelectCalled;
 typedef struct _SOCKET_INFORMATION {
 	SOCKET Handle;
 	PSOCK_SHARED_INFO SharedData;
+	/* The section SharedData is in once the socket has been duplicated */
 	HANDLE SharedDataHandle;
+	/* The heap block a socket created here starts with SharedData in.  The
+	 * first WSPDuplicateSocket() moves SharedData into a section while calls
+	 * on other threads may still be using this block, so it stays until the
+	 * socket is freed. */
+	PSOCK_SHARED_INFO HeapSharedData;
 	DWORD HelperEvents;
 	PHELPER_DATA HelperData;
 	PVOID HelperContext;
@@ -56,6 +62,7 @@ typedef struct _SOCKET_INFORMATION {
 	PVOID AsyncData;
 	HANDLE EventObject;
 	LONG NetworkEvents;
+	/* Serializes moving SharedData into a section (WSPDuplicateSocket()) */
 	CRITICAL_SECTION Lock;
 	PVOID SanData;
 	BOOL TrySAN;
