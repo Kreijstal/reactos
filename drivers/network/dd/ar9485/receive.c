@@ -142,6 +142,7 @@ static VOID RememberBss(PAR9485_ADAPTER Adapter, PUCHAR Frame, ULONG Length,
         RtlCopyMemory(Bss->Bssid, Frame + 16, 6);
     }
     Bss->Rssi = Rssi;
+    Bss->HostTimestamp = KeQueryInterruptTime();
     Bss->BeaconPeriod = Frame[32] | ((USHORT)Frame[33] << 8);
     Bss->CapabilityInformation = Frame[34] | ((USHORT)Frame[35] << 8);
     IeLength = min(Length - 36, (ULONG)AR9485_MAX_BSS_IE_SIZE);
@@ -822,7 +823,9 @@ NDIS_STATUS AR9485BuildBssList(PAR9485_ADAPTER Adapter,
                               (ULONG)(2 * (Source->Rssi + 100));
         Entry->bInRegDomain = TRUE;
         Entry->usBeaconPeriod = Source->BeaconPeriod;
-        Entry->ullHostTimestamp = KeQueryInterruptTime();
+        /* When it was last heard, not when it is being listed: an entry
+         * from a scan minutes ago must not look fresh. */
+        Entry->ullHostTimestamp = Source->HostTimestamp;
         Entry->usCapabilityInformation = Source->CapabilityInformation;
         Entry->uBufferLength = Source->IeLength;
         RtlCopyMemory(Entry->ucBuffer, Source->Ies, Source->IeLength);

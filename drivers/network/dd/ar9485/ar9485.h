@@ -106,6 +106,10 @@ typedef struct _AR9485_BSS
     LONG Rssi;
     USHORT BeaconPeriod;
     USHORT CapabilityInformation;
+    /* KeQueryInterruptTime() of the last beacon or probe response heard,
+     * reported as DOT11_BSS_ENTRY.ullHostTimestamp so nwifi can age out an
+     * AP that went away. */
+    ULONG64 HostTimestamp;
     ULONG IeLength;
     UCHAR Ies[AR9485_MAX_BSS_IE_SIZE];
 } AR9485_BSS, *PAR9485_BSS;

@@ -334,6 +334,50 @@ NwifiMsmStartScan(
     return Status;
 }
 
+/*
+ * Forget BSSes nobody has heard for NWIFI_BSS_EXPIRY.  The cache used to
+ * keep every BSS it ever saw, so a lab AP that had been switched off stayed
+ * "available" for the rest of the boot: the ACM picked it from wlansvc's
+ * list over and over and every connect failed with "requested BSS not
+ * found" (ASUS boot 185).  cfg80211 ages its scan results the same way
+ * (IEEE80211_SCAN_RESULT_EXPIRE); wpa_supplicant has bss_expiration_age.
+ * The BSS we are associated with is kept: a scan while associated is
+ * refused by the miniport, so its entry is not refreshed by scans.
+ * Msm->Lock held.
+ */
+#define NWIFI_BSS_EXPIRY (90ULL * 10000000ULL)     /* 100 ns units */
+
+static
+VOID
+NwifiMsmExpireBssCache(
+    _In_ PNWIFI_MSM Msm,
+    _In_ ULONG64 Now)
+{
+    ULONG i = 0;
+    BOOLEAN Linked = (Msm->State != NwifiMsmIdle &&
+                      Msm->State != NwifiMsmScanning);
+
+    while (i < Msm->BssCount)
+    {
+        PNWIFI_BSS_CACHE_ENTRY Bss = &Msm->BssCache[i];
+        BOOLEAN Current = Linked &&
+            RtlCompareMemory(Bss->Bssid, Msm->CurrentBssid,
+                             IEEE80211_ADDR_LEN) == IEEE80211_ADDR_LEN;
+
+        if (Bss->Valid && (Current || Now - Bss->HostTimestamp <= NWIFI_BSS_EXPIRY))
+        {
+            i++;
+            continue;
+        }
+
+        /* Compact: the last entry takes this slot. */
+        Msm->BssCount--;
+        if (i != Msm->BssCount)
+            *Bss = Msm->BssCache[Msm->BssCount];
+        Msm->BssCache[Msm->BssCount].Valid = FALSE;
+    }
+}
+
 /* Pull the lower miniport's BSS list (OID_DOT11_ENUM_BSS_LIST: a
  * DOT11_BYTE_ARRAY of packed DOT11_BSS_ENTRY records) and merge it into the
  * cache, de-duplicating by BSSID. */
@@ -458,7 +502,11 @@ NwifiAggregateBssList(
         Slot->ChCenterFrequency = Entry->PhySpecificInfo.uChCenterFrequency;
         Slot->BeaconPeriod = Entry->usBeaconPeriod;
         Slot->CapabilityInformation = Entry->usCapabilityInformation;
-        Slot->HostTimestamp = Now;
+        /* When the miniport last HEARD it.  The miniport hands back its
+         * whole list, including BSSes of an older scan. */
+        Slot->HostTimestamp = (Entry->ullHostTimestamp != 0 &&
+                               Entry->ullHostTimestamp <= Now)
+                                  ? Entry->ullHostTimestamp : Now;
         IeCopy = Entry->uBufferLength;
         if (IeCopy > NWIFI_MAX_BSS_IE)
             IeCopy = NWIFI_MAX_BSS_IE;
@@ -483,6 +531,8 @@ NwifiAggregateBssList(
 
         Cursor += EntrySize;
     }
+
+    NwifiMsmExpireBssCache(Msm, Now);
 
     NdisReleaseSpinLock(&Msm->Lock);
     NwifiFree(ByteArray);
