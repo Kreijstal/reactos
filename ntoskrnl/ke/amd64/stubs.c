@@ -309,8 +309,8 @@ KiIdleLoop(VOID)
             KiRetireDpcList(Prcb);
         }
 
-        /* Check if a new thread is scheduled for execution */
-        if (Prcb->NextThread)
+        /* Check if a new thread is scheduled for execution, or one is ready */
+        if ((Prcb->NextThread) || (Prcb->ReadySummary))
         {
             /* Enable interrupts */
             _enable();
@@ -326,18 +326,10 @@ KiIdleLoop(VOID)
              * KiSetPriorityThread, KiDeferredReadyThread), and a thread taken
              * here without it runs on two processors */
             KiAcquirePrcbLock(Prcb);
-            NewThread = Prcb->NextThread;
+            OldThread = Prcb->CurrentThread;
+            NewThread = KiIdleTakeNextThread(Prcb);
             if (NewThread)
             {
-                /* Capture current thread data */
-                OldThread = Prcb->CurrentThread;
-
-                /* Set new thread data */
-                Prcb->NextThread = NULL;
-                Prcb->CurrentThread = NewThread;
-
-                /* The thread is now running */
-                NewThread->State = Running;
                 KiReleasePrcbLock(Prcb);
 
                 /* Switch away from the idle thread */

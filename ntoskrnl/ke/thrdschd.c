@@ -337,7 +337,43 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
      * run again (see the self-swap in KiSwapContext). Leave it alone then: it
      * is on standby and the switch in progress consumes it. */
     NextThread = Prcb->NextThread;
-    if (NextThread)
+    if (NextThread == Prcb->IdleThread)
+    {
+        /*
+         * KiSelectNextThread found nothing ready to replace a thread that
+         * leaves this processor or its standby slot, and made the idle thread
+         * the next one. That stands for "nothing to run": the idle thread is
+         * never put on a ready list, and this thread takes its place whatever
+         * its priority and whichever processor readies it. The processor can
+         * be idle already, its next thread then being its current one, and
+         * readies threads from the DPCs it runs there (the timer DPC waking a
+         * sleeper, for one).
+         */
+        ASSERT(NextThread->State == Standby);
+        NextThread->State = Running;
+
+#ifdef CONFIG_SMP
+        /* The processor does not go idle now */
+        InterlockedClearSetMember(&KiIdleSummary, Prcb->SetMember);
+#endif
+
+        /* Set the thread on standby and as the next thread */
+        Thread->State = Standby;
+        Prcb->NextThread = Thread;
+
+        /* Release the locks */
+        KiReleasePrcbLock(Prcb);
+        KiReleaseThreadLock(Thread);
+
+        /* Check if we're running on another CPU */
+        if (KeGetCurrentProcessorNumber() != Processor)
+        {
+            /* We are, send an IPI */
+            KiIpiSend(AFFINITY_MASK(Processor), IPI_DPC);
+        }
+        return;
+    }
+    else if (NextThread)
     {
         /* Sanity check */
         ASSERT(NextThread->State == Standby);
@@ -346,7 +382,10 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
         if ((OldPriority > NextThread->Priority) &&
             (KeGetCurrentProcessorNumber() == Processor))
         {
-            /* This processor is not switching out its current thread */
+            /* This processor is not switching out its current thread: that
+             * happens at DISPATCH_LEVEL or above, where it runs no DPC (and
+             * the idle thread, which runs them while current, was handled
+             * above) */
             ASSERT(NextThread != Prcb->CurrentThread);
 
             /* Preempt the thread */
@@ -455,6 +494,58 @@ KiSelectNextThread(IN PKPRCB Prcb)
     /* Sanity checks and return the thread */
     ASSERT(Thread != NULL);
     //ASSERT((Thread->BasePriority == 0) || (Thread->Priority != 0));
+    return Thread;
+}
+
+/*
+ * The idle loop of Prcb, the current processor, takes the thread to switch to,
+ * with the PRCB lock held. Returns NULL to stay idle.
+ */
+PKTHREAD
+FASTCALL
+KiIdleTakeNextThread(
+    _In_ PKPRCB Prcb)
+{
+    PKTHREAD Thread;
+
+    ASSERT(Prcb == KeGetCurrentPrcb());
+    ASSERT(Prcb->CurrentThread == Prcb->IdleThread);
+
+    Thread = Prcb->NextThread;
+    if (Thread == Prcb->IdleThread)
+    {
+        /* KiSelectNextThread made the idle thread the next one while it
+         * already was the current one: idle to idle, nothing to swap */
+        Prcb->NextThread = NULL;
+        Thread->State = Running;
+        Thread = NULL;
+    }
+    else if (Thread != NULL)
+    {
+        Prcb->NextThread = NULL;
+    }
+
+    if (Thread == NULL)
+    {
+        /* Run what is ready here. KiSelectNextThread can make the idle thread
+         * the next one of a processor whose current thread may go on running
+         * there (the standby thread that was to preempt it leaves), and that
+         * thread is put on this processor's ready list when it switches to
+         * the idle thread: nobody else takes it from there. */
+        Thread = KiSelectReadyThread(0, Prcb);
+        if (Thread == NULL)
+            return NULL;
+
+#ifdef CONFIG_SMP
+        /* The processor is no longer idle */
+        InterlockedClearSetMember(&KiIdleSummary, Prcb->SetMember);
+#endif
+    }
+
+    /* The thread runs here now */
+    Prcb->IdleSchedule = FALSE;
+    Prcb->CurrentThread = Thread;
+    Thread->State = Running;
     return Thread;
 }
 

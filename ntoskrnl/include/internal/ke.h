@@ -271,6 +271,11 @@ KiIdleSchedule(
     IN PKPRCB Prcb
 );
 
+PKTHREAD
+FASTCALL
+KiIdleTakeNextThread(
+    _In_ PKPRCB Prcb);
+
 VOID
 FASTCALL
 KiProcessDeferredReadyList(

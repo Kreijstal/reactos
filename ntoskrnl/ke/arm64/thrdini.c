@@ -203,21 +203,10 @@ KiIdleLoopMp(
 
         /* Claim the next thread, or a ready one that did not preempt us */
         KiAcquirePrcbLock(Prcb);
-        NewThread = Prcb->NextThread;
+        OldThread = Prcb->CurrentThread;
+        NewThread = KiIdleTakeNextThread(Prcb);
         if (NewThread != NULL)
         {
-            Prcb->NextThread = NULL;
-        }
-        else
-        {
-            NewThread = KiSelectReadyThread(0, Prcb);
-        }
-
-        if (NewThread != NULL)
-        {
-            OldThread = Prcb->CurrentThread;
-            Prcb->CurrentThread = NewThread;
-            NewThread->State = Running;
             KiReleasePrcbLock(Prcb);
 
             /* Switch away; the idle thread resumes here at DISPATCH_LEVEL */
