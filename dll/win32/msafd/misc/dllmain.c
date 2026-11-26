@@ -3841,6 +3841,9 @@ MsafdSetSockOpt(
                   return SOCKET_ERROR;
               }
 
+              /* AFD keeps its window (it refuses the change on a stream
+               * socket that is not connected yet); getsockopt() returns what
+               * was set */
               SetSocketInformation(Socket,
                                    AFD_INFO_SEND_WINDOW_SIZE,
                                    NULL,
@@ -3848,13 +3851,7 @@ MsafdSetSockOpt(
                                    NULL,
                                    NULL,
                                    NULL);
-              GetSocketInformation(Socket,
-                                   AFD_INFO_SEND_WINDOW_SIZE,
-                                   NULL,
-                                   &Socket->SharedData->SizeOfSendBuffer,
-                                   NULL,
-                                   NULL,
-                                   NULL);
+              Socket->SharedData->SizeOfSendBuffer = *(PULONG)optval;
 
               return NO_ERROR;
 
@@ -3865,10 +3862,7 @@ MsafdSetSockOpt(
                   return SOCKET_ERROR;
               }
 
-              /* FIXME: We should not have to limit the packet receive buffer size like this. workaround for CORE-15804 */
-              if (*(PULONG)optval > 0x2000)
-                  *(PULONG)optval = 0x2000;
-
+              /* As SO_SNDBUF */
               SetSocketInformation(Socket,
                                    AFD_INFO_RECEIVE_WINDOW_SIZE,
                                    NULL,
@@ -3876,13 +3870,7 @@ MsafdSetSockOpt(
                                    NULL,
                                    NULL,
                                    NULL);
-              GetSocketInformation(Socket,
-                                   AFD_INFO_RECEIVE_WINDOW_SIZE,
-                                   NULL,
-                                   &Socket->SharedData->SizeOfRecvBuffer,
-                                   NULL,
-                                   NULL,
-                                   NULL);
+              Socket->SharedData->SizeOfRecvBuffer = *(PULONG)optval;
 
               return NO_ERROR;
 

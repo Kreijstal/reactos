@@ -105,7 +105,6 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PAFD_INFO InfoReq = LockRequest(Irp, IrpSp, FALSE, NULL);
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
-    PCHAR NewBuffer;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -124,90 +123,18 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 FCB->OobInline = InfoReq->Information.Boolean;
                 break;
             case AFD_INFO_RECEIVE_WINDOW_SIZE:
-                if (FCB->SharedData.State == SOCKET_STATE_CONNECTED ||
-                    FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)
-                {
-                    /* FIXME: likely not right, check tcpip.sys for TDI_QUERY_MAX_DATAGRAM_INFO */
-                    if (InfoReq->Information.Ulong > 0 && InfoReq->Information.Ulong < 0xFFFF &&
-                        InfoReq->Information.Ulong != FCB->Recv.Size)
-                    {
-                        NewBuffer = ExAllocatePoolWithTag(PagedPool,
-                                                          InfoReq->Information.Ulong,
-                                                          TAG_AFD_DATA_BUFFER);
-
-                        if (NewBuffer)
-                        {
-                            if (FCB->Recv.Content > InfoReq->Information.Ulong)
-                                FCB->Recv.Content = InfoReq->Information.Ulong;
-
-                            if (FCB->Recv.Window)
-                            {
-                                RtlCopyMemory(NewBuffer,
-                                              FCB->Recv.Window,
-                                              FCB->Recv.Content);
-
-                                ExFreePoolWithTag(FCB->Recv.Window, TAG_AFD_DATA_BUFFER);
-                            }
-
-                            FCB->Recv.Size = InfoReq->Information.Ulong;
-                            FCB->Recv.Window = NewBuffer;
-
-                            Status = STATUS_SUCCESS;
-                        }
-                        else
-                        {
-                            Status = STATUS_NO_MEMORY;
-                        }
-                    }
-                    else
-                    {
-                        Status = STATUS_SUCCESS;
-                    }
-                }
-                else
-                {
-                    Status = STATUS_INVALID_PARAMETER;
-                }
-                break;
             case AFD_INFO_SEND_WINDOW_SIZE:
+                /* Taken on a connected or a connectionless socket, refused on
+                 * any other, and the window keeps its size: what
+                 * AfdGetInfo() reports does not change.  SO_RCVBUF and
+                 * SO_SNDBUF are kept by msafd.  A datagram socket's receive
+                 * window is the buffer each datagram is received into: it
+                 * must not shrink below the datagrams the transport hands
+                 * over. */
                 if (FCB->SharedData.State == SOCKET_STATE_CONNECTED ||
                     FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)
                 {
-                    if (InfoReq->Information.Ulong > 0 && InfoReq->Information.Ulong < 0xFFFF &&
-                        InfoReq->Information.Ulong != FCB->Send.Size)
-                    {
-                        NewBuffer = ExAllocatePoolWithTag(PagedPool,
-                                                          InfoReq->Information.Ulong,
-                                                          TAG_AFD_DATA_BUFFER);
-
-                        if (NewBuffer)
-                        {
-                            if (FCB->Send.BytesUsed > InfoReq->Information.Ulong)
-                                FCB->Send.BytesUsed = InfoReq->Information.Ulong;
-
-                            if (FCB->Send.Window)
-                            {
-                                RtlCopyMemory(NewBuffer,
-                                              FCB->Send.Window,
-                                              FCB->Send.BytesUsed);
-
-                                ExFreePoolWithTag(FCB->Send.Window, TAG_AFD_DATA_BUFFER);
-                            }
-
-                            FCB->Send.Size = InfoReq->Information.Ulong;
-                            FCB->Send.Window = NewBuffer;
-
-                            Status = STATUS_SUCCESS;
-                        }
-                        else
-                        {
-                            Status = STATUS_NO_MEMORY;
-                        }
-                    }
-                    else
-                    {
-                        Status = STATUS_SUCCESS;
-                    }
+                    Status = STATUS_SUCCESS;
                 }
                 else
                 {
