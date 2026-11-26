@@ -642,7 +642,7 @@ LRESULT co_UserFreeWindow(PWND Window,
 
    UserClipboardFreeWindow(Window);
 
-   DestroyTimersForWindow(ThreadData, Window);
+   DestroyTimersForWindow(Window);
 
    /* Unregister hot keys */
    UnregisterWindowHotKeys(Window);

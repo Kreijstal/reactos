@@ -50,22 +50,57 @@ ERESOURCE TimerLock;
 
 
 /* FUNCTIONS *****************************************************************/
+/*
+ * The raw input thread walks TimersListHead in ProcessTimers() holding only
+ * TimerLock, not the user lock.  So a timer goes on the list -- complete, with
+ * its owning thread set -- and comes off it only under TimerLock, and it must
+ * be off the list before its thread or window is freed.
+ */
 static
 PTIMER
 FASTCALL
-CreateTimer(VOID)
+CreateTimer(PTHREADINFO pti,
+            PWND Window,
+            UINT_PTR nID,
+            UINT Elapse,
+            TIMERPROC TimerFunc,
+            INT Type)
 {
   HANDLE Handle;
   PTIMER Ret = NULL;
+
+  ASSERT(ExIsResourceAcquiredExclusiveLite(&TimerLock));
+  ASSERT(pti != NULL);
 
   Ret = UserCreateObject(gHandleTable, NULL, NULL, &Handle, TYPE_TIMER, sizeof(TIMER));
   if (Ret)
   {
      UserHMSetHandle(Ret, Handle);
+     Ret->pti          = pti;
+     Ret->pWnd         = Window;
+     Ret->cmsCountdown = Elapse;
+     Ret->cmsRate      = Elapse;
+     Ret->pfn          = TimerFunc;
+     Ret->nID          = nID;
+     Ret->flags        = Type|TMRF_INIT;
      InsertTailList(&TimersListHead, &Ret->ptmrList);
   }
 
   return Ret;
+}
+
+static
+VOID
+FASTCALL
+FreeWindowLessTimerId(UINT_PTR nID)
+{
+  ULONG ulBitmapIndex;
+
+  ASSERT(nID <= MAX_WINDOW_LESS_TIMER_ID);
+  ulBitmapIndex = (ULONG)(MAX_WINDOW_LESS_TIMER_ID - nID);
+  IntLockWindowlessTimerBitmap();
+  RtlClearBit(&WindowLessTimersBitMap, ulBitmapIndex);
+  IntUnlockWindowlessTimerBitmap();
 }
 
 static
@@ -74,19 +109,15 @@ FASTCALL
 RemoveTimer(PTIMER pTmr)
 {
   BOOL Ret = FALSE;
+
+  ASSERT(ExIsResourceAcquiredExclusiveLite(&TimerLock));
+
   if (pTmr)
   {
-     /* Set the flag, it will be removed when ready */
      RemoveEntryList(&pTmr->ptmrList);
      if ((pTmr->pWnd == NULL) && (!(pTmr->flags & TMRF_SYSTEM))) // System timers are reusable.
      {
-        ULONG ulBitmapIndex;
-
-        ASSERT(pTmr->nID <= MAX_WINDOW_LESS_TIMER_ID);
-        ulBitmapIndex = (ULONG)(MAX_WINDOW_LESS_TIMER_ID - pTmr->nID);
-        IntLockWindowlessTimerBitmap();
-        RtlClearBit(&WindowLessTimersBitMap, ulBitmapIndex);
-        IntUnlockWindowlessTimerBitmap();
+        FreeWindowLessTimerId(pTmr->nID);
      }
      UserDereferenceObject(pTmr);
      Ret = UserDeleteObject( UserHMGetHandle(pTmr), TYPE_TIMER);
@@ -186,6 +217,7 @@ IntSetTimer( PWND Window,
                   INT Type)
 {
   PTIMER pTmr;
+  PTHREADINFO pti;
   UINT_PTR Ret = IDEvent;
   ULONG ulBitmapIndex;
   LARGE_INTEGER DueTime;
@@ -219,6 +251,17 @@ IntSetTimer( PWND Window,
   if ((Window) && (IDEvent == 0))
      Ret = 1;
 
+  /* A timer belongs to the thread of its window, or else to the thread setting it */
+  if (Window && (Type & TMRF_TIFROMWND))
+     pti = Window->head.pti;
+  else if (Type & TMRF_RIT)
+     pti = ptiRawInput;
+  else
+     pti = PsGetCurrentThreadWin32Thread();
+  ASSERT(pti != NULL);
+
+  TimerEnterExclusive();
+
   pTmr = FindTimer(Window, IDEvent, Type);
 
   if ((!pTmr) && (Window == NULL) && (!(Type & TMRF_SYSTEM)))
@@ -230,6 +273,7 @@ IntSetTimer( PWND Window,
       if (ulBitmapIndex == ULONG_MAX)
       {
          IntUnlockWindowlessTimerBitmap();
+         TimerLeave();
          ERR("Unable to find a free window-less timer id\n");
          EngSetLastError(ERROR_NO_SYSTEM_RESOURCES);
          return 0;
@@ -244,25 +288,14 @@ IntSetTimer( PWND Window,
 
   if (!pTmr)
   {
-     pTmr = CreateTimer();
-     if (!pTmr) return 0;
-
-     if (Window && (Type & TMRF_TIFROMWND))
-        pTmr->pti = Window->head.pti->pEThread->Tcb.Win32Thread;
-     else
+     pTmr = CreateTimer(pti, Window, IDEvent, Elapse, TimerFunc, Type);
+     if (!pTmr)
      {
-        if (Type & TMRF_RIT)
-           pTmr->pti = ptiRawInput;
-        else
-           pTmr->pti = PsGetCurrentThreadWin32Thread();
+        if ((Window == NULL) && (!(Type & TMRF_SYSTEM)))
+           FreeWindowLessTimerId(IDEvent);
+        TimerLeave();
+        return 0;
      }
-
-     pTmr->pWnd    = Window;
-     pTmr->cmsCountdown = Elapse;
-     pTmr->cmsRate = Elapse;
-     pTmr->pfn     = TimerFunc;
-     pTmr->nID     = IDEvent;
-     pTmr->flags   = Type|TMRF_INIT;
   }
   else
   {
@@ -274,6 +307,8 @@ IntSetTimer( PWND Window,
   // Start the timer thread!
   if (TimersListHead.Flink == TimersListHead.Blink) // There is only one timer
      KeSetTimer(MasterTimer, DueTime, NULL);
+
+  TimerLeave();
 
   return Ret;
 }
@@ -525,7 +560,7 @@ ProcessTimers(VOID)
 }
 
 BOOL FASTCALL
-DestroyTimersForWindow(PTHREADINFO pti, PWND Window)
+DestroyTimersForWindow(PWND Window)
 {
    PLIST_ENTRY pLE;
    PTIMER pTmr;
@@ -540,7 +575,7 @@ DestroyTimersForWindow(PTHREADINFO pti, PWND Window)
    {
       pTmr = CONTAINING_RECORD(pLE, TIMER, ptmrList);
       pLE = pLE->Flink; /* get next timer list entry before current timer is removed */
-      if ((pTmr) && (pTmr->pti == pti) && (pTmr->pWnd == Window))
+      if (pTmr->pWnd == Window)
       {
          TimersRemoved = RemoveTimer(pTmr);
       }
@@ -554,17 +589,18 @@ DestroyTimersForWindow(PTHREADINFO pti, PWND Window)
 BOOL FASTCALL
 DestroyTimersForThread(PTHREADINFO pti)
 {
-   PLIST_ENTRY pLE = TimersListHead.Flink;
+   PLIST_ENTRY pLE;
    PTIMER pTmr;
    BOOL TimersRemoved = FALSE;
 
    TimerEnterExclusive();
 
+   pLE = TimersListHead.Flink;
    while(pLE != &TimersListHead)
    {
       pTmr = CONTAINING_RECORD(pLE, TIMER, ptmrList);
       pLE = pLE->Flink; /* get next timer list entry before current timer is removed */
-      if ((pTmr) && (pTmr->pti == pti))
+      if (pTmr->pti == pti)
       {
          TimersRemoved = RemoveTimer(pTmr);
       }

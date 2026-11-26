@@ -55,9 +55,10 @@ IntClientShutdown(IN PWND pWindow,
             else
             {
                 co_IntSendMessage(UserHMGetHandle(WndChild), WM_ENDSESSION, KillTimers, lParams);
-                if (KillTimers)
+                /* The child may have been destroyed (with its timers) during the send */
+                if (KillTimers && (WndChild = UserGetWindowObject(List[i])))
                 {
-                    DestroyTimersForWindow(WndChild->head.pti, WndChild);
+                    DestroyTimersForWindow(WndChild);
                 }
                 lResult = MCSR_SHUTDOWNFINISHED;
             }
@@ -80,7 +81,7 @@ IntClientShutdown(IN PWND pWindow,
         co_IntSendMessage(UserHMGetHandle(pWindow), WM_ENDSESSION, KillTimers, lParams);
         if (KillTimers)
         {
-            DestroyTimersForWindow(pWindow->head.pti, pWindow);
+            DestroyTimersForWindow(pWindow);
         }
         lResult = MCSR_SHUTDOWNFINISHED;
     }
