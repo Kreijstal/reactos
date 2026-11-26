@@ -344,6 +344,17 @@ DxgkDisplayCommitVidPn(
         return STATUS_INVALID_PARAMETER;
     }
 
+    /* Never set the first mode on a topology without a single path: the
+     * miniport may not have finished detecting its outputs when the VidPN
+     * was built at start (#490: AMD's eDP panel stayed black). */
+    if (!Adapter->VidPnCommitted && VidPn->NumPaths == 0)
+    {
+        DXGKRNL_WARN("DxgkpCommitVidPnToMiniport: no output connected yet; "
+                     "waiting for the miniport to detect one\n");
+        DxgkVidPnWaitForConnectedTarget(Adapter);
+        VidPn = (PDXGKP_VIDPN)Adapter->VidPn;
+    }
+
     DXGKRNL_TRACE("DxgkpCommitVidPnToMiniport: starting mode-set sequence\n");
     DXGKRNL_TRACE("DxgkpCommitVidPnToMiniport: callbacks IsSupportedVidPn=%p "
                   "EnumCofunc=%p CommitVidPn=%p SetVisibility=%p\n",

@@ -741,6 +741,16 @@ DxgkpBuildTargetIds(
                 }
             }
 
+            /* A connection the miniport reported through
+             * DxgkCbIndicateChildStatus counts as well. */
+            if (!Connected)
+            {
+                BOOLEAN Reported;
+
+                if (DxgkpGetReportedChildConnection(Adapter, Desc[i].ChildUid, &Reported))
+                    Connected = Reported;
+            }
+
             DXGKRNL_TRACE("DxgkpBuildTargetIds: target ChildUid=%lu Hpd=%d connected=%d\n",
                           Desc[i].ChildUid,
                           Desc[i].ChildCapabilities.HpdAwareness, Connected);
@@ -1007,6 +1017,83 @@ DxgkVidPnDestroy(
 /* ========================================================================
  * Hot-plug detection support
  * ====================================================================== */
+
+/* How long the first mode set waits for the miniport to detect an output. */
+#define DXGKP_CONNECT_WAIT_MS       3000
+#define DXGKP_CONNECT_POLL_MS       50
+
+/*
+ * DxgkVidPnWaitForConnectedTarget
+ *
+ * The start-time VidPN is built from the connection states the miniport
+ * reports right after DxgkDdiStartDevice.  A miniport may still be
+ * detecting its outputs then (AMD's atikmdag reports the internal eDP
+ * panel, an HpdAwarenessInterruptible child, disconnected on some boots),
+ * which leaves a VidPN without a single path: committing it lights nothing,
+ * so the panel stays black for the whole session.  Windows' first mode set
+ * runs after monitor arrival, so it never commits such a topology.
+ *
+ * Before the first commit, while no output is connected, rebuild the VidPN
+ * from fresh DxgkDdiQueryChildStatus results and DxgkCbIndicateChildStatus
+ * reports until one is connected or DXGKP_CONNECT_WAIT_MS passed.
+ *
+ * Returns STATUS_SUCCESS once Adapter->VidPn has a path, STATUS_TIMEOUT
+ * if no output got connected (Adapter->VidPn is then still valid).
+ *
+ * IRQL: PASSIVE_LEVEL
+ */
+NTSTATUS
+DxgkVidPnWaitForConnectedTarget(
+    _In_ PDXGKRNL_ADAPTER Adapter)
+{
+    ULONGLONG Deadline;
+    LARGE_INTEGER Timeout;
+    ULONG Attempts = 0;
+
+    PAGED_CODE();
+
+    ASSERT(Adapter != NULL);
+    ASSERT(Adapter->VidPn != NULL);
+    ASSERT(!Adapter->VidPnCommitted);
+
+    if (((PDXGKP_VIDPN)Adapter->VidPn)->NumPaths != 0)
+        return STATUS_SUCCESS;
+
+    Deadline = KeQueryInterruptTime() + (ULONGLONG)DXGKP_CONNECT_WAIT_MS * 10000ULL;
+    Timeout.QuadPart = -(LONGLONG)DXGKP_CONNECT_POLL_MS * 10000LL;
+
+    for (;;)
+    {
+        D3DKMDT_HVIDPN hVidPn = NULL;
+        NTSTATUS Status;
+
+        Attempts++;
+        Status = DxgkVidPnCreateForAdapter(Adapter, &hVidPn);
+        if (NT_SUCCESS(Status))
+        {
+            if (((PDXGKP_VIDPN)hVidPn)->NumPaths != 0)
+            {
+                DXGKRNL_WARN("DxgkVidPnWaitForConnectedTarget: an output got "
+                             "connected after %lu queries; VidPN rebuilt\n",
+                             Attempts);
+                DxgkVidPnDestroy((D3DKMDT_HVIDPN)Adapter->VidPn);
+                Adapter->VidPn = (PVOID)hVidPn;
+                return STATUS_SUCCESS;
+            }
+            DxgkVidPnDestroy(hVidPn);
+        }
+
+        if (KeQueryInterruptTime() >= Deadline)
+            break;
+
+        KeWaitForSingleObject(&Adapter->ChildStatusEvent, Executive,
+                              KernelMode, FALSE, &Timeout);
+    }
+
+    DXGKRNL_WARN("DxgkVidPnWaitForConnectedTarget: no output connected after "
+                 "%u ms (%lu queries)\n", DXGKP_CONNECT_WAIT_MS, Attempts);
+    return STATUS_TIMEOUT;
+}
 
 NTSTATUS
 DxgkVidPnRebuildForHotPlug(

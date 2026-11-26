@@ -269,6 +269,9 @@ typedef struct _DXGKARGCB_UNMAP_PHYSICAL_MEMORY
  * validating a miniport-supplied DriverInitDataSize: if the size is at
  * least this large the miniport has declared all WDDM 1.0 callbacks.
  */
+/* Children whose DxgkCbIndicateChildStatus connection reports are kept. */
+#define DXGKRNL_MAX_REPORTED_CHILDREN  16
+
 #define DXGKRNL_DRIVER_INIT_DATA_MIN_SIZE \
     (FIELD_OFFSET(DRIVER_INITIALIZATION_DATA, DxgkDdiSetDisplayPrivateDriverFormat) + \
      sizeof(PDXGKDDI_SET_DISPLAY_PRIVATE_DRIVER_FORMAT))
@@ -537,6 +540,23 @@ struct _DXGKRNL_ADAPTER
     KSPIN_LOCK                  ChildListLock;
     LIST_ENTRY                  ChildListHead;
     ULONG                       ChildPdoCount;
+
+    /*
+     * Connection status the miniport last reported for each child through
+     * DxgkCbIndicateChildStatus(StatusConnection).  The miniport reports it
+     * from its DPC (IRQL <= DISPATCH_LEVEL), so ChildStatusLock is a spin
+     * lock.  ChildStatusEvent is set on every report; the first mode set
+     * waits on it while no output is connected yet (see
+     * DxgkVidPnWaitForConnectedTarget).
+     */
+    KSPIN_LOCK                  ChildStatusLock;
+    KEVENT                      ChildStatusEvent;
+    ULONG                       ChildStatusCount;
+    struct
+    {
+        ULONG                   ChildUid;
+        BOOLEAN                 Connected;
+    }                           ChildStatus[DXGKRNL_MAX_REPORTED_CHILDREN];
 
     /*
      * List of DXGKRNL_DEVICE instances created against this adapter.
@@ -1592,6 +1612,16 @@ DxgkVidPnDestroy(
 NTSTATUS
 DxgkVidPnRebuildForHotPlug(
     _In_ PDXGKRNL_ADAPTER Adapter);
+
+NTSTATUS
+DxgkVidPnWaitForConnectedTarget(
+    _In_ PDXGKRNL_ADAPTER Adapter);
+
+BOOLEAN
+DxgkpGetReportedChildConnection(
+    _In_  PDXGKRNL_ADAPTER Adapter,
+    _In_  ULONG            ChildUid,
+    _Out_ PBOOLEAN         Connected);
 
 /*
  * DxgkCbQueryVidPnInterface — DXGK_INTERFACE callback at offset 0x90.

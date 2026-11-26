@@ -2394,12 +2394,13 @@ DxgkCbUnmapPhysicalMemory(
 /*
  * DxgkCbIndicateChildStatus
  *
- * Called by the miniport when a child device's connection status changes
- * (e.g. a monitor is hot-plugged or removed).  Invalidates the bus
- * relations for the FDO, causing the PnP manager to re-enumerate children.
- * Also triggers a VidPN rebuild to update the display topology.
- *
- * IRQL: PASSIVE_LEVEL
+ * Records the status the miniport reports for one of its children: a
+ * monitor connected to or disconnected from an HpdAwarenessInterruptible
+ * child, a lid opened or closed, or a rotation.  The miniport calls it
+ * from its DPC for ISR or from DxgkDdiNotifyAcpiEvent, so like Windows it
+ * runs at IRQL <= DISPATCH_LEVEL.  The connection state is kept for the
+ * VidPN topology (DxgkpBuildTargetIds), which is how a panel the miniport
+ * only finishes detecting after DxgkDdiStartDevice still gets a path.
  */
 NTSTATUS
 APIENTRY
@@ -2408,8 +2409,10 @@ DxgkCbIndicateChildStatus(
     _In_ PDXGK_CHILD_STATUS  ChildStatus)
 {
     PDXGKRNL_ADAPTER Adapter;
+    KIRQL OldIrql;
+    ULONG i;
 
-    PAGED_CODE();
+    ASSERT(KeGetCurrentIrql() <= DISPATCH_LEVEL);
 
     Adapter = DxgkpHandleToAdapter(DeviceHandle);
     if (Adapter == NULL)
@@ -2419,23 +2422,87 @@ DxgkCbIndicateChildStatus(
         return STATUS_INVALID_HANDLE;
     }
 
+    if (ChildStatus == NULL)
+        return STATUS_INVALID_PARAMETER;
+
     DXGKRNL_TRACE("DxgkCbIndicateChildStatus: adapter %p type %d uid %lu "
                   "connected=%d\n",
-                  Adapter,
-                  ChildStatus ? ChildStatus->Type : -1,
-                  ChildStatus ? ChildStatus->ChildUid : 0,
-                  (ChildStatus && ChildStatus->Type == StatusConnection)
+                  Adapter, ChildStatus->Type, ChildStatus->ChildUid,
+                  (ChildStatus->Type == StatusConnection)
                       ? ChildStatus->HotPlug.Connected : -1);
 
-    /* Trigger VidPN topology rebuild for connector state changes. */
-    if (ChildStatus != NULL && ChildStatus->Type == StatusConnection)
+    if (ChildStatus->Type != StatusConnection)
+        return STATUS_SUCCESS;
+
+    KeAcquireSpinLock(&Adapter->ChildStatusLock, &OldIrql);
+    for (i = 0; i < Adapter->ChildStatusCount; i++)
     {
-        DxgkVidPnRebuildForHotPlug(Adapter);
+        if (Adapter->ChildStatus[i].ChildUid == ChildStatus->ChildUid)
+            break;
+    }
+    if (i == Adapter->ChildStatusCount && i < RTL_NUMBER_OF(Adapter->ChildStatus))
+    {
+        Adapter->ChildStatus[i].ChildUid = ChildStatus->ChildUid;
+        Adapter->ChildStatusCount++;
+    }
+    if (i < Adapter->ChildStatusCount)
+        Adapter->ChildStatus[i].Connected = ChildStatus->HotPlug.Connected;
+    KeReleaseSpinLock(&Adapter->ChildStatusLock, OldIrql);
+
+    if (i == RTL_NUMBER_OF(Adapter->ChildStatus))
+    {
+        DXGKRNL_WARN("DxgkCbIndicateChildStatus: no room for ChildUid %lu\n",
+                     ChildStatus->ChildUid);
+    }
+
+    KeSetEvent(&Adapter->ChildStatusEvent, IO_NO_INCREMENT, FALSE);
+
+    if (Adapter->VidPnCommitted)
+    {
+        /* TODO: rebuild the topology and set a mode with the changed
+         * output, as Windows does on monitor arrival/departure. */
+        DXGKRNL_WARN("DxgkCbIndicateChildStatus: ChildUid %lu now %s after "
+                     "the mode set; the topology is not updated\n",
+                     ChildStatus->ChildUid,
+                     ChildStatus->HotPlug.Connected ? "connected" : "disconnected");
     }
 
     IoInvalidateDeviceRelations(Adapter->PhysicalDeviceObject, BusRelations);
 
     return STATUS_SUCCESS;
+}
+
+/*
+ * DxgkpGetReportedChildConnection
+ *
+ * TRUE, with the state in *Connected, if the miniport has reported the
+ * connection state of ChildUid through DxgkCbIndicateChildStatus.
+ */
+BOOLEAN
+DxgkpGetReportedChildConnection(
+    _In_  PDXGKRNL_ADAPTER Adapter,
+    _In_  ULONG            ChildUid,
+    _Out_ PBOOLEAN         Connected)
+{
+    KIRQL OldIrql;
+    BOOLEAN Found = FALSE;
+    ULONG i;
+
+    *Connected = FALSE;
+
+    KeAcquireSpinLock(&Adapter->ChildStatusLock, &OldIrql);
+    for (i = 0; i < Adapter->ChildStatusCount; i++)
+    {
+        if (Adapter->ChildStatus[i].ChildUid == ChildUid)
+        {
+            *Connected = Adapter->ChildStatus[i].Connected;
+            Found = TRUE;
+            break;
+        }
+    }
+    KeReleaseSpinLock(&Adapter->ChildStatusLock, OldIrql);
+
+    return Found;
 }
 
 /*
@@ -4568,6 +4635,8 @@ DxgkpAddDevice(
     /* Initialise synchronisation primitives. */
     KeInitializeSpinLock(&Adapter->InterruptLock);
     KeInitializeSpinLock(&Adapter->ChildListLock);
+    KeInitializeSpinLock(&Adapter->ChildStatusLock);
+    KeInitializeEvent(&Adapter->ChildStatusEvent, SynchronizationEvent, FALSE);
     KeInitializeSpinLock(&Adapter->SubmitDmaLock);
     KeInitializeEvent(&Adapter->SyncEvent, SynchronizationEvent, FALSE);
     ExInitializeFastMutex(&Adapter->AdapterMutex);
