@@ -395,6 +395,40 @@ acpi_suspend (
 	return status;
 }
 
+/**
+ * acpi_prepare_for_reset - tell the firmware the system leaves S0 for a restart
+ *
+ * Everything an S5 transition does short of entering S5: _TTS(5), then
+ * AcpiEnterSleepStatePrep(S5) (_PTS(5) and _SST), then all GPEs off so no
+ * event runs AML on the way to the reset. The HAL writes the reset register
+ * afterwards. This is the restart path Windows takes (it goes through S5) and
+ * the one Linux takes (tts_notify_reboot, then acpi_power_off_prepare for
+ * SYS_OFF_MODE_RESTART_PREPARE).
+ */
+VOID
+acpi_prepare_for_reset(VOID)
+{
+	ACPI_OBJECT_LIST ArgList;
+	ACPI_OBJECT Arg;
+	ACPI_STATUS Status;
+
+	Arg.Type = ACPI_TYPE_INTEGER;
+	Arg.Integer.Value = ACPI_STATE_S5;
+	ArgList.Count = 1;
+	ArgList.Pointer = &Arg;
+	Status = AcpiEvaluateObject(NULL, "\\_TTS", &ArgList, NULL);
+	if (ACPI_FAILURE(Status) && Status != AE_NOT_FOUND)
+		DPRINT1("ACPI: _TTS(5) failed 0x%X\n", Status);
+
+	Status = AcpiEnterSleepStatePrep(ACPI_STATE_S5);
+	if (ACPI_FAILURE(Status))
+		DPRINT1("ACPI: S5 preparation failed 0x%X\n", Status);
+
+	Status = AcpiDisableAllGpes();
+	if (ACPI_FAILURE(Status))
+		DPRINT1("ACPI: disabling the GPEs failed 0x%X\n", Status);
+}
+
 int
 acpi_system_init (void)
 {

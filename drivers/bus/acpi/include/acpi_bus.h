@@ -336,6 +336,7 @@ int acpi_match_device_ids(struct acpi_device *device,
 int acpi_bus_get_device(ACPI_HANDLE handle, struct acpi_device **device);
 int acpi_init(void);
 ACPI_STATUS acpi_suspend (UINT32 state);
+VOID acpi_prepare_for_reset(VOID);
 
 /*
  * Bind physical devices with ACPI devices

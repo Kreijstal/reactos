@@ -102,12 +102,21 @@ Bus_FDO_Power (
        * PowerActionShutdownReset) must NOT enter S5: the machine would be
        * switched off instead of rebooted -- which is exactly what happened
        * on every software reboot of the ASUS X550DP (docs/asus.txt 2.7).
-       * Windows' acpi.sys sleeps only for a power-off; for a reset it lets
-       * the HAL reset the machine. */
+       * The HAL resets the machine afterwards.
+       *
+       * The firmware is still told that the system is leaving S0 for S5:
+       * Windows goes through S5 for a restart, so firmware writes its reset
+       * path for that, and Linux does the same on restart (_TTS(5) from its
+       * reboot notifier, then acpi_sleep_prepare(S5) = _PTS(5), and all GPEs
+       * disabled). The ASUS X550DP's FADT reset register is an SMI
+       * (0xB2 <- 0x8E); its _PTS(5) prepares the EC (EC0S) and raises the
+       * OEM sleep SMI 0x9D first, and without that the reset SMI leaves the
+       * machine dark (#315). */
       if (AcpiState == ACPI_STATE_S5 &&
           stack->Parameters.Power.ShutdownType == PowerActionShutdownReset)
       {
-          DPRINT1("ACPI: shutdown for reset -- leaving S5 to the HAL\n");
+          DPRINT1("ACPI: shutdown for reset -- preparing S5, the HAL resets\n");
+          acpi_prepare_for_reset();
       }
       else
       {
