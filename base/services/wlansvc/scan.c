@@ -279,8 +279,25 @@ WlanSvcDoScan(PWLANSVC_INTERFACE Iface, PDOT11_SSID pSsid)
 {
     DWORD dwResult;
     ULONG index = Iface->NwifiIndex;
+    ULONG64 luid = Iface->UpperLuid;
+    DOT11_MAC_ADDRESS mac;
     HANDLE event = Iface->ScanCompleteEvent;
     BOOL kicked;
+
+    memcpy(&mac, &Iface->MacAddress, sizeof(mac));
+
+    /*
+     * The event is auto-reset and every scan completion sets it, including
+     * the ones nobody waits for: the miniport's own scan before a connect
+     * into a cold cache, or a WlanScan whose client did not wait.  Left
+     * set, it ended the NEXT wait at once, before that scan had even begun;
+     * the ACM then found nwifi still scanning, declined, and one stale
+     * completion later did the same again -- every pass, for the rest of
+     * the boot (ASUS boot 185: Scans rising, Connects stuck, LastDecline
+     * 7 with nwifi status Scanning).  Clear it, and do not take a stray
+     * completion for ours: wait until nwifi has really left Scanning.
+     */
+    ResetEvent(event);
 
     dwResult = NwifiScan(index, pSsid, dot11_BSS_type_any);
     if (dwResult != ERROR_SUCCESS && dwResult != ERROR_NOT_READY)
@@ -289,10 +306,28 @@ WlanSvcDoScan(PWLANSVC_INTERFACE Iface, PDOT11_SSID pSsid)
 
     if (kicked)
     {
+        DWORD start = GetTickCount();
+        DWORD waited = 0;
+
         LeaveCriticalSection(&WlanSvcLock);
-        if (WaitForSingleObject(event, WLANSVC_SCAN_TIMEOUT_MS) != WAIT_OBJECT_0)
-            DPRINT1("WLANSVC: scan on ifidx %lu did not complete within %u ms\n",
-                    index, WLANSVC_SCAN_TIMEOUT_MS);
+        for (;;)
+        {
+            NWIFI_LINK_STATE ls;
+
+            if (WaitForSingleObject(event, WLANSVC_SCAN_TIMEOUT_MS - waited) !=
+                WAIT_OBJECT_0)
+            {
+                DPRINT1("WLANSVC: scan on ifidx %lu did not complete within %u ms\n",
+                        index, WLANSVC_SCAN_TIMEOUT_MS);
+                break;
+            }
+            if (NwifiQueryState(index, luid, &mac, &ls) != ERROR_SUCCESS ||
+                ls.Status != NwifiLinkScanning)
+                break;
+            waited = GetTickCount() - start;
+            if (waited >= WLANSVC_SCAN_TIMEOUT_MS)
+                break;
+        }
         EnterCriticalSection(&WlanSvcLock);
 
         if (WlanSvcFindInterfaceByIndex(index) != Iface)
