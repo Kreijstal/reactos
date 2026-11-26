@@ -1364,8 +1364,7 @@ AfdDispatchRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION Irp
             return AfdGetTdiHandles(DeviceObject, Irp, IrpSp);
 
         case IOCTL_AFD_DEFER_ACCEPT:
-            DbgPrint("IOCTL_AFD_DEFER_ACCEPT is UNIMPLEMENTED!\n");
-            break;
+            return AfdDeferAccept(DeviceObject, Irp, IrpSp);
 
         case IOCTL_AFD_GET_PENDING_CONNECT_DATA:
             DbgPrint("IOCTL_AFD_GET_PENDING_CONNECT_DATA is UNIMPLEMENTED!\n");

@@ -963,3 +963,75 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     /* Proceed later in SatisfySuperAccept(), when a connection arrives */
     return LeaveIrpUntilLater(Fcb, Irp, FUNCTION_PREACCEPT);
 }
+
+/*
+ * WSAAccept's condition function answered CF_DEFER or CF_REJECT for the
+ * connection IOCTL_AFD_WAIT_FOR_LISTEN gave it.  A deferred connection stays
+ * where it is in the queue, for the next accept; a rejected one is closed.
+ */
+NTSTATUS AfdDeferAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
+                         PIO_STACK_LOCATION IrpSp ) {
+    PFILE_OBJECT FileObject = IrpSp->FileObject;
+    PAFD_FCB FCB = FileObject->FsContext;
+    PAFD_DEFER_ACCEPT_DATA DeferData;
+    PAFD_TDI_OBJECT_QELT Qelt = NULL;
+    PLIST_ENTRY PendingConn;
+    NTSTATUS Status = STATUS_INVALID_PARAMETER;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
+
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(*DeferData))
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
+
+    if( !(DeferData = LockRequest( Irp, IrpSp, FALSE, NULL )) )
+        return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
+
+    for( PendingConn = FCB->PendingConnections.Flink;
+         PendingConn != &FCB->PendingConnections;
+         PendingConn = PendingConn->Flink ) {
+        PAFD_TDI_OBJECT_QELT PendingConnObj =
+            CONTAINING_RECORD( PendingConn, AFD_TDI_OBJECT_QELT, ListEntry );
+
+        if (PendingConnObj->Seq != DeferData->SequenceNumber)
+            continue;
+
+        if (DeferData->RejectConnection)
+        {
+            RemoveEntryList(PendingConn);
+            Qelt = PendingConnObj;
+        }
+
+        Status = STATUS_SUCCESS;
+        break;
+    }
+
+    /* A deferred connection is still there to accept, and signals it again */
+    FCB->EventSelectDisabled &= ~AFD_EVENT_ACCEPT;
+    if( !IsListEmpty( &FCB->PendingConnections ) )
+    {
+        FCB->PollState |= AFD_EVENT_ACCEPT;
+        FCB->PollStatus[FD_ACCEPT_BIT] = STATUS_SUCCESS;
+        PollReeval( FCB->DeviceExt, FCB->FileObject );
+    } else
+        FCB->PollState &= ~AFD_EVENT_ACCEPT;
+
+    SocketStateUnlock( FCB );
+
+    /* Off the queue, the rejected connection is ours alone */
+    if (Qelt)
+    {
+        TdiDisassociateAddressFile(Qelt->Object.Object);
+        ObDereferenceObject(Qelt->Object.Object);
+        ZwClose(Qelt->Object.Handle);
+        AfdFreeQueuedConnection(Qelt);
+    }
+
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = 0;
+    if (Irp->MdlAddress && Irp->Tail.Overlay.DriverContext[0])
+        UnlockRequest(Irp, IrpSp);
+    IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+    return Status;
+}

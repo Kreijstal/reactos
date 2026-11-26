@@ -1990,16 +1990,9 @@ MsafdAccept(
                 return MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
             }
 
-            if (CallBack == CF_REJECT )
-            {
-                if (lpErrno) *lpErrno = WSAECONNREFUSED;
-                return SOCKET_ERROR;
-            }
-            else
-            {
-                if (lpErrno) *lpErrno = WSAECONNREFUSED;
-                return SOCKET_ERROR;
-            }
+            /* A deferred connection is still queued, for the next accept */
+            if (lpErrno) *lpErrno = (CallBack == CF_REJECT) ? WSAECONNREFUSED : WSATRY_AGAIN;
+            return SOCKET_ERROR;
         }
     }
 
