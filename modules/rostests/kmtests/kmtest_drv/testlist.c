@@ -78,6 +78,7 @@ KMT_TESTFUNC Test_KeDeviceQueue;
 KMT_TESTFUNC Test_KeDpc;
 KMT_TESTFUNC Test_KeEvent;
 KMT_TESTFUNC Test_KeFloatPointState;
+KMT_TESTFUNC Test_KeFreezeIrql;
 KMT_TESTFUNC Test_KeGuardedMutex;
 KMT_TESTFUNC Test_KeIrql;
 KMT_TESTFUNC Test_KeIpi;
@@ -251,6 +252,7 @@ const KMT_TEST TestList[] =
     { "KeDpc",                              Test_KeDpc },
     { "KeEvent",                            Test_KeEvent },
     { "KeFloatPointState",                  Test_KeFloatPointState },
+    { "KeFreezeIrql",                       Test_KeFreezeIrql },
     { "KeGuardedMutex",                     Test_KeGuardedMutex },
     { "KeIpi",                              Test_KeIpi },
     { "KeIrql",                             Test_KeIrql },
