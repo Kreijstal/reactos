@@ -1,11 +1,13 @@
 
 list(APPEND SOURCE
+    acceptexcancel.c
     bind.c
     broadcast.c
     cancelrace.c
     close.c
     closeaddr.c
     closerace.c
+    duprace.c
     getaddrinfo.c
     gethostname.c
     getnameinfo.c

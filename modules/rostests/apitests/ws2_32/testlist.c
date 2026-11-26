@@ -2,12 +2,14 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_acceptexcancel(void);
 extern void func_bind(void);
 extern void func_broadcast(void);
 extern void func_cancelrace(void);
 extern void func_close(void);
 extern void func_closeaddr(void);
 extern void func_closerace(void);
+extern void func_duprace(void);
 extern void func_getaddrinfo(void);
 extern void func_gethostname(void);
 extern void func_getnameinfo(void);
@@ -31,12 +33,14 @@ extern void func_WSAStartup(void);
 
 const struct test winetest_testlist[] =
 {
+    { "acceptexcancel", func_acceptexcancel },
     { "bind", func_bind },
     { "broadcast", func_broadcast },
     { "cancelrace", func_cancelrace },
     { "close", func_close },
     { "closeaddr", func_closeaddr },
     { "closerace", func_closerace },
+    { "duprace", func_duprace },
     { "getaddrinfo", func_getaddrinfo },
     { "gethostname", func_gethostname },
     { "getnameinfo", func_getnameinfo },
