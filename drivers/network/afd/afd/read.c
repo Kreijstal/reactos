@@ -287,10 +287,50 @@ static VOID FreeReceiveIrp( PIRP Irp )
     IoFreeIrp( Irp );
 }
 
+/*
+ * Completes the AcceptEx that took a connection for the accept socket FCB and
+ * waits there for its first data (FCB->AcceptIrp, see SatisfySuperAccept()).
+ * Called with FCB's lock held.  The IRP held a reference on the accept
+ * socket's file object; it is returned for the caller to drop once it has
+ * released that lock.
+ */
+PFILE_OBJECT
+AfdCompleteAcceptExIrp(PAFD_FCB FCB, NTSTATUS Status, ULONG_PTR Information)
+{
+    PIRP AcceptIrp = FCB->AcceptIrp;
+    PFILE_OBJECT FileObject;
+    KIRQL OldIrql;
+
+    ASSERT(AcceptIrp != NULL);
+    FCB->AcceptIrp = NULL;
+
+    /* Its cancel routine, AfdCancelAcceptExReceive(), takes the file object
+     * off the IRP under the cancel spin lock; once we have cleared the
+     * routine under that lock it is either done with the IRP or never runs */
+    IoAcquireCancelSpinLock(&OldIrql);
+    (void)IoSetCancelRoutine(AcceptIrp, NULL);
+    FileObject = AcceptIrp->Tail.Overlay.DriverContext[2];
+    AcceptIrp->Tail.Overlay.DriverContext[2] = NULL;
+    IoReleaseCancelSpinLock(OldIrql);
+
+    ASSERT(FileObject != NULL && FileObject->FsContext == FCB);
+
+    MmUnlockPages((PMDL)AcceptIrp->Tail.Overlay.DriverContext[3]);
+    IoFreeMdl((PMDL)AcceptIrp->Tail.Overlay.DriverContext[3]);
+    AcceptIrp->IoStatus.Information = Information;
+    AcceptIrp->IoStatus.Status = Status;
+    if (AcceptIrp->MdlAddress)
+        UnlockRequest(AcceptIrp, IoGetCurrentIrpStackLocation(AcceptIrp));
+    IoCompleteRequest(AcceptIrp, IO_NETWORK_INCREMENT);
+
+    return FileObject;
+}
+
 NTSTATUS NTAPI
 AcceptExReceiveComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
 {
     PAFD_FCB FCB = (PAFD_FCB)Context;
+    PFILE_OBJECT FileObject;
 
     if (!SocketAcquireStateLock(FCB))
     {
@@ -299,7 +339,6 @@ AcceptExReceiveComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
     }
 
     ASSERT(FCB->ReceiveIrp.InFlightRequest == Irp);
-    ASSERT(FCB->AcceptIrp != NULL);
     FCB->ReceiveIrp.InFlightRequest = NULL;
 
     /* A socket whose handle was closed while it waited for the data stays
@@ -307,16 +346,9 @@ AcceptExReceiveComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
     if (FCB->SharedData.State != SOCKET_STATE_CLOSED)
         FCB->SharedData.State = SOCKET_STATE_CONNECTED;
 
-    /* Complete the AcceptEx IRP as the data has been received */
-    MmUnlockPages((PMDL)FCB->AcceptIrp->Tail.Overlay.DriverContext[3]);
-    IoFreeMdl((PMDL)FCB->AcceptIrp->Tail.Overlay.DriverContext[3]);
-    FCB->AcceptIrp->IoStatus.Information = Irp->IoStatus.Information;
-    FCB->AcceptIrp->IoStatus.Status = Irp->IoStatus.Status;
-    if (FCB->AcceptIrp->MdlAddress)
-        UnlockRequest(FCB->AcceptIrp, IoGetCurrentIrpStackLocation(FCB->AcceptIrp));
-    (void)IoSetCancelRoutine(FCB->AcceptIrp, NULL);
-    IoCompleteRequest(FCB->AcceptIrp, IO_NETWORK_INCREMENT);
-    FCB->AcceptIrp = NULL;
+    /* Complete the AcceptEx IRP as the data has been received -- or the
+     * receive was cancelled: the AcceptEx was, or the socket closed */
+    FileObject = AfdCompleteAcceptExIrp(FCB, Irp->IoStatus.Status, Irp->IoStatus.Information);
 
     /* Continue receive activity */
     if (FCB->SharedData.State != SOCKET_STATE_CLOSED)
@@ -325,6 +357,7 @@ AcceptExReceiveComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
     SocketStateUnlock(FCB);
 
     FreeReceiveIrp(Irp);
+    ObDereferenceObject(FileObject);
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
 

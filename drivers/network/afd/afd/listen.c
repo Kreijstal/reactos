@@ -149,6 +149,47 @@ static NTSTATUS SatisfyPreAccept( PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt ) {
     return STATUS_SUCCESS;
 }
 
+/*
+ * Cancel routine of an AcceptEx that took its connection and waits on the
+ * accept socket for the first data (see SatisfySuperAccept()).  Cancelling
+ * that receive completes it, with STATUS_CANCELLED
+ * (AcceptExReceiveComplete()).
+ */
+static DRIVER_CANCEL AfdCancelAcceptExReceive;
+static
+VOID
+NTAPI
+AfdCancelAcceptExReceive(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PFILE_OBJECT FileObject = (PFILE_OBJECT)Irp->Tail.Overlay.DriverContext[2];
+    PAFD_FCB FCB;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    /* The IRP cannot complete while we hold the cancel spin lock
+     * (AfdCompleteAcceptExIrp() clears the routine under it), and its
+     * reference on the accept socket goes when it completes: take one of our
+     * own first */
+    ASSERT(FileObject != NULL);
+    ObReferenceObject(FileObject);
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+
+    FCB = FileObject->FsContext;
+    if (SocketAcquireStateLock(FCB))
+    {
+        /* Unless the data arrived meanwhile */
+        if (FCB->AcceptIrp == Irp)
+        {
+            ASSERT(FCB->ReceiveIrp.InFlightRequest != NULL);
+            IoCancelIrp(FCB->ReceiveIrp.InFlightRequest);
+        }
+
+        SocketStateUnlock(FCB);
+    }
+
+    ObDereferenceObject(FileObject);
+}
+
 static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt)
 {
     PFILE_OBJECT NewFileObject = (PFILE_OBJECT)Irp->Tail.Overlay.DriverContext[2];
@@ -235,8 +276,22 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
 
     if (AcceptInfo->ReceiveDataLength)
     {
-        /* Save this IRP so that it can be completed once the data is received */
+        BOOLEAN Cancelled;
+        KIRQL OldIrql;
+
+        /* The IRP completes once the first data is received
+         * (AcceptExReceiveComplete()).  Until then it is on no list of the
+         * listener's, so the listener's cancel routine cannot find it: it
+         * gets one of its own, which cancels that receive.  The IRP keeps the
+         * reference on the accept socket for it. */
         FCB2->AcceptIrp = Irp;
+        Irp->Tail.Overlay.DriverContext[2] = NewFileObject;
+
+        IoAcquireCancelSpinLock(&OldIrql);
+        Cancelled = Irp->Cancel;
+        if (!Cancelled)
+            (void)IoSetCancelRoutine(Irp, AfdCancelAcceptExReceive);
+        IoReleaseCancelSpinLock(OldIrql);
 
         Status = TdiReceive(&FCB2->ReceiveIrp.InFlightRequest,
                             FCB2->Connection.Object, TDI_RECEIVE_NORMAL,
@@ -245,11 +300,31 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
                             AcceptExReceiveComplete,
                             FCB2);
 
+        /* The receive did not reach the transport, so nothing else completes
+         * the IRP */
+        if (FCB2->AcceptIrp == Irp && !FCB2->ReceiveIrp.InFlightRequest)
+        {
+            ASSERT(!NT_SUCCESS(Status));
+            if (FCB2->SharedData.State != SOCKET_STATE_CLOSED)
+                FCB2->SharedData.State = SOCKET_STATE_CREATED;
+            NewFileObject = AfdCompleteAcceptExIrp(FCB2, Status, 0);
+            SocketStateUnlock(FCB2);
+            ObDereferenceObject(NewFileObject);
+            return Status;
+        }
+
+        /* Cancelled while it waited for the connection: AfdCancelHandler()
+         * found it off the queue already and left it to us */
+        if (Cancelled && FCB2->AcceptIrp == Irp)
+        {
+            ASSERT(FCB2->ReceiveIrp.InFlightRequest != NULL);
+            IoCancelIrp(FCB2->ReceiveIrp.InFlightRequest);
+        }
+
         if (Status == STATUS_PENDING)
             Status = STATUS_SUCCESS;
 
         SocketStateUnlock(FCB2);
-        ObDereferenceObject(NewFileObject);
         return Status;
     }
     else

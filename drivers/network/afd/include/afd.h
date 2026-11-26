@@ -374,6 +374,7 @@ BOOLEAN CheckUnlockExtraBuffers(PAFD_FCB FCB, PIO_STACK_LOCATION IrpSp);
 /* read.c */
 
 IO_COMPLETION_ROUTINE AcceptExReceiveComplete;
+PFILE_OBJECT AfdCompleteAcceptExIrp(PAFD_FCB FCB, NTSTATUS Status, ULONG_PTR Information);
 
 IO_COMPLETION_ROUTINE ReceiveComplete;
 
