@@ -1,4 +1,7 @@
 1 stdcall -noname QueryThemeServices()
+@ stdcall BeginPanningFeedback(ptr)
+@ stdcall EndPanningFeedback(ptr long)
+@ stdcall UpdatePanningFeedback(ptr long long long)
 2 stdcall -noname OpenThemeFile(wstr wstr wstr ptr long)
 3 stdcall -noname CloseThemeFile(ptr)
 4 stdcall -noname ApplyTheme(ptr ptr ptr)

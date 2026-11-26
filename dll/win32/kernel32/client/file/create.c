@@ -14,6 +14,7 @@
 /* INCLUDES *****************************************************************/
 
 #include <k32.h>
+#include <fileapi.h>
 #define NDEBUG
 #include <debug.h>
 
@@ -22,6 +23,34 @@ DEBUG_CHANNEL(kernel32file);
 #endif
 
 /* FUNCTIONS ****************************************************************/
+
+HANDLE
+WINAPI
+CreateFile2(
+    LPCWSTR FileName,
+    DWORD DesiredAccess,
+    DWORD ShareMode,
+    DWORD CreationDisposition,
+    LPCREATEFILE2_EXTENDED_PARAMETERS Parameters)
+{
+    DWORD Flags = FILE_ATTRIBUTE_NORMAL;
+    LPSECURITY_ATTRIBUTES Security = NULL;
+    HANDLE Template = NULL;
+
+    if (Parameters)
+    {
+        if (Parameters->dwSize != sizeof(*Parameters))
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return INVALID_HANDLE_VALUE;
+        }
+        Flags = Parameters->dwFileAttributes | Parameters->dwFileFlags | Parameters->dwSecurityQosFlags;
+        Security = Parameters->lpSecurityAttributes;
+        Template = Parameters->hTemplateFile;
+    }
+    return CreateFileW(FileName, DesiredAccess, ShareMode, Security,
+                       CreationDisposition, Flags, Template);
+}
 
 /*
  * @implemented

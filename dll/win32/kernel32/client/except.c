@@ -1239,6 +1239,35 @@ WerRegisterRuntimeExceptionModule(
     return hr;
 }
 
+HRESULT
+WINAPI
+WerUnregisterRuntimeExceptionModule(
+    _In_ PCWSTR CallbackDll,
+    _In_ PVOID Context)
+{
+    PBASEP_WER_RUNTIME_DLL *Link, Entry = NULL;
+
+    if (!CallbackDll)
+        return E_INVALIDARG;
+
+    RtlAcquirePebLock();
+    for (Link = &BasepWerRuntimeDlls; *Link; Link = &(*Link)->Next)
+    {
+        if ((*Link)->Context == Context && !wcscmp((*Link)->CallbackDllPath, CallbackDll))
+        {
+            Entry = *Link;
+            *Link = Entry->Next;
+            break;
+        }
+    }
+    RtlReleasePebLock();
+
+    if (!Entry)
+        return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Entry);
+    return S_OK;
+}
+
 #endif /* _WIN32_WINNT >= 0x0601 */
 
 /* EOF */

@@ -286,3 +286,24 @@ HRESULT WINAPI EndBufferedAnimation(HANIMATIONBUFFER hbpAnimation, BOOL fUpdateT
 
     return E_NOTIMPL;
 }
+
+BOOL WINAPI BeginPanningFeedback(HWND window)
+{
+    /* The current theme engine has no overpan animation backend. */
+    SetLastError(IsWindow(window) ? ERROR_NOT_SUPPORTED : ERROR_INVALID_WINDOW_HANDLE);
+    return FALSE;
+}
+
+BOOL WINAPI EndPanningFeedback(HWND window, BOOL animate)
+{
+    (void)animate;
+    return BeginPanningFeedback(window);
+}
+
+BOOL WINAPI UpdatePanningFeedback(HWND window, LONG x, LONG y, BOOL inertia)
+{
+    (void)x;
+    (void)y;
+    (void)inertia;
+    return BeginPanningFeedback(window);
+}

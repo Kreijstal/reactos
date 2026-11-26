@@ -420,4 +420,19 @@ RtlSecondsSince1980ToTime(IN ULONG SecondsSince1980,
     Time->QuadPart = ((LONGLONG)SecondsSince1980 * TICKSPERSEC) + TICKSTO1980;
 }
 
+LOGICAL
+NTAPI
+RtlQueryPerformanceCounter(_Out_ PLARGE_INTEGER Counter)
+{
+    return NT_SUCCESS(NtQueryPerformanceCounter(Counter, NULL));
+}
+
+LOGICAL
+NTAPI
+RtlQueryPerformanceFrequency(_Out_ PLARGE_INTEGER Frequency)
+{
+    LARGE_INTEGER Counter;
+    return NT_SUCCESS(NtQueryPerformanceCounter(&Counter, Frequency));
+}
+
 /* EOF */

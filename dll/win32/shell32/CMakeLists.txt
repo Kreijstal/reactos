@@ -43,6 +43,7 @@ list(APPEND SOURCE
     fileclass.cpp
     iconcache.cpp
     propsheet.cpp
+    windowprops.cpp
     shell32.cpp
     utils.cpp
     CShellItem.cpp
@@ -143,6 +144,9 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
 endif()
 add_delay_importlibs(shell32 powrprof shdocvw devmgr winspool.drv winmm mpr uxtheme ole32 oleaut32 userenv browseui version fmifs netapi32 secur32)
 add_importlibs(shell32 advapi32 gdi32 user32 comctl32 comdlg32 shlwapi shcore msvcrt kernel32 ntdll)
+if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
+    add_delay_importlibs(shell32 propsys)
+endif()
 add_dependencies(shell32 stdole2) # shell32_shldisp.tlb needs stdole2.tlb
 add_pch(shell32 precomp.h "${PCH_SKIP_SOURCE}")
 add_cd_file(TARGET shell32 DESTINATION reactos/system32 FOR all)

@@ -1,0 +1,5 @@
+add_executable(win10_apitest core.c windowprops.c security.c testlist.c)
+set_module_type(win10_apitest win32cui)
+target_link_libraries(win10_apitest uuid)
+add_importlibs(win10_apitest advapi32 ole32 user32 msvcrt kernel32 ntdll)
+add_rostests_file(TARGET win10_apitest)

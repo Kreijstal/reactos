@@ -13,6 +13,10 @@ import json
 # These are modules we do not have, so redirect them to ones we do have.
 REDIRECT_APISETS = {
     'api-ms-win-core-path-l1-1-0.dll': 'kernelbase.dll',
+    # Version APIs live in version.dll in ReactOS, not kernelbase/kernel32.
+    'api-ms-win-core-version-l1-1-1.dll': 'version.dll',
+    'api-ms-win-core-versionansi-l1-1-0.dll': 'version.dll',
+    'api-ms-win-core-versionansi-l1-1-1.dll': 'version.dll',
 }
 
 REDIRECT_HOSTS = {

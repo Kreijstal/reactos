@@ -116,6 +116,8 @@
 @ stdcall CreatePopupMenu()
 @ stdcall CreateSystemThreads(long)
 @ stdcall -version=0xA00+ CreateSyntheticPointerDevice(long long long)
+@ stdcall -version=0xA00+ InjectSyntheticPointerInput(ptr ptr long)
+@ stdcall -version=0x602+ GetAutoRotationState(ptr)
 @ stdcall CreateWindowExA(long str str long long long long long long long long ptr)
 @ stdcall CreateWindowExW(long wstr wstr long long long long long long long long ptr)
 @ stdcall CreateWindowStationA(str long long ptr)

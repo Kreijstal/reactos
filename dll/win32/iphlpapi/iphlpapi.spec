@@ -39,7 +39,7 @@
 @ stdcall EnableRouter(ptr ptr)
 @ stdcall FlushIpNetTable(long)
 @ stub FlushIpNetTableFromStack
-@ stdcall -stub -version=0x600+ FreeMibTable(ptr)
+@ stdcall -version=0x600+ FreeMibTable(ptr)
 @ stdcall GetAdapterIndex(wstr ptr)
 @ stdcall GetAdapterOrderMap()
 @ stdcall GetAdaptersAddresses(long long ptr ptr ptr)
@@ -146,6 +146,9 @@
 @ stdcall NhpAllocateAndGetInterfaceInfoFromStack(ptr ptr long ptr long)
 @ stub NhpGetInterfaceIndexFromStack
 @ stdcall NotifyAddrChange(ptr ptr)
+@ stdcall -version=0x600+ NotifyIpInterfaceChange(long ptr ptr long ptr)
+@ stdcall -version=0x600+ GetIpInterfaceTable(long ptr)
+@ stdcall -version=0x600+ CancelMibChangeNotify2(ptr)
 @ stdcall NotifyRouteChange(ptr ptr)
 @ stub NotifyRouteChangeEx
 @ stub NotifySecurityHealthChange

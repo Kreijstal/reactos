@@ -11,6 +11,11 @@
 extern "C" {
 #endif
 
+#if (_WIN32_WINNT >= 0x0602)
+WINBASEAPI BOOL WINAPI GetProcessMitigationPolicy(HANDLE, PROCESS_MITIGATION_POLICY, PVOID, SIZE_T);
+WINBASEAPI BOOL WINAPI SetProcessMitigationPolicy(PROCESS_MITIGATION_POLICY, PVOID, SIZE_T);
+#endif
+
 typedef struct _STARTUPINFOA
 {
     DWORD cb;

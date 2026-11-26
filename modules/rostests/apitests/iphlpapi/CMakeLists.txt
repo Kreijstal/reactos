@@ -11,6 +11,7 @@ list(APPEND SOURCE
     IcmpFlood.c
     IpForwardEntry.c
     IpHelperV2.c
+    NotifyIpInterfaceChange.c
     SendARP.c
     testlist.c)
 

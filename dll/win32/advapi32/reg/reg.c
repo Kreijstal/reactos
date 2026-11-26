@@ -25,6 +25,22 @@ WINE_DEFAULT_DEBUG_CHANNEL(reg);
 
 /* DEFINES ******************************************************************/
 
+LSTATUS
+WINAPI
+RegCreateKeyTransactedW(HKEY Key, LPCWSTR SubKey, DWORD Reserved,
+                       LPWSTR Class, DWORD Options, REGSAM Access,
+                       const LPSECURITY_ATTRIBUTES Security,
+                       PHKEY Result, LPDWORD Disposition,
+                       HANDLE Transaction, PVOID ExtendedParameter)
+{
+    if (Reserved || ExtendedParameter)
+        return ERROR_INVALID_PARAMETER;
+    if (Transaction)
+        return ERROR_NOT_SUPPORTED;
+    return RegCreateKeyExW(Key, SubKey, Reserved, Class, Options, Access,
+                           Security, Result, Disposition);
+}
+
 #define MAX_DEFAULT_HANDLES   6
 #define REG_MAX_NAME_SIZE     256
 #define REG_MAX_DATA_SIZE     2048

@@ -58,9 +58,61 @@ fail_single(PCUNICODE_STRING Apiset)
     winetest_pop_context();
 }
 
+static void
+test_version_host(void)
+{
+    static const UNICODE_STRING Names[] = {
+        RTL_CONSTANT_STRING(L"api-ms-win-core-version-l1-1-0.dll"),
+        RTL_CONSTANT_STRING(L"api-ms-win-core-version-l1-1-1.dll"),
+        RTL_CONSTANT_STRING(L"api-ms-win-core-versionansi-l1-1-0.dll"),
+        RTL_CONSTANT_STRING(L"api-ms-win-core-versionansi-l1-1-1.dll"),
+    };
+    static const char *Exports[] = {
+        "GetFileVersionInfoA", "GetFileVersionInfoW",
+        "GetFileVersionInfoExA", "GetFileVersionInfoExW",
+        "GetFileVersionInfoSizeA", "GetFileVersionInfoSizeW",
+        "GetFileVersionInfoSizeExA", "GetFileVersionInfoSizeExW",
+        "VerQueryValueA", "VerQueryValueW",
+    };
+    UNICODE_STRING Version = RTL_CONSTANT_STRING(L"version.dll");
+
+    for (DWORD i = 0; i < RTL_NUMBER_OF(Names); ++i)
+    {
+        BOOLEAN Resolved = FALSE;
+        UNICODE_STRING Host = {0};
+        NTSTATUS Status;
+        HMODULE Module;
+
+        winetest_push_context("%S", Names[i].Buffer);
+        Status = ApiSetResolveToHost(APISET_WIN10, &Names[i], &Resolved, &Host);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok_eq_bool(Resolved, TRUE);
+        if (!NT_SUCCESS(Status) || !Resolved || !Host.Buffer)
+        {
+            winetest_pop_context();
+            continue;
+        }
+        ok(RtlEqualUnicodeString(&Host, &Version, TRUE), "Unexpected host %S\n", Host.Buffer);
+
+        /* Check the selected host really provides the version API imports. */
+        Module = LoadLibraryW(Host.Buffer);
+        ok(Module != NULL, "Failed to load %S: %lu\n", Host.Buffer, GetLastError());
+        if (Module)
+        {
+            for (DWORD j = 0; j < RTL_NUMBER_OF(Exports); ++j)
+                ok(GetProcAddress(Module, Exports[j]) != NULL,
+                   "%S does not export %s\n", Host.Buffer, Exports[j]);
+            FreeLibrary(Module);
+        }
+        winetest_pop_context();
+    }
+}
+
 
 START_TEST(apisets)
 {
+    test_version_host();
+
     // Ensure we can find some manually selected ones (both with and without extension):
     UNICODE_STRING Console1 = RTL_CONSTANT_STRING(L"api-MS-Win-Core-Console-L1-1-0.dll");
     UNICODE_STRING Console2 = RTL_CONSTANT_STRING(L"api-MS-Win-Core-Console-L1-1-0");

@@ -1018,3 +1018,22 @@ HSYNTHETICPOINTERDEVICE WINAPI CreateSyntheticPointerDevice(POINTER_INPUT_TYPE t
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return NULL;
 }
+
+BOOL WINAPI GetAutoRotationState(PAR_STATE state)
+{
+    if (!state)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    *state = AR_NOT_SUPPORTED;
+    return TRUE;
+}
+
+BOOL WINAPI InjectSyntheticPointerInput(HSYNTHETICPOINTERDEVICE device, const void *pointer_info, UINT count)
+{
+    /* Synthetic pointer devices are not available (see the creation API). */
+    SetLastError(!device ? ERROR_INVALID_HANDLE :
+                 (!pointer_info || !count) ? ERROR_INVALID_PARAMETER : ERROR_NOT_SUPPORTED);
+    return FALSE;
+}

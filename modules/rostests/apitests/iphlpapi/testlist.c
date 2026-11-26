@@ -13,6 +13,7 @@ extern void func_icmp(void);
 extern void func_IcmpFlood(void);
 extern void func_IpForwardEntry(void);
 extern void func_IpHelperV2(void);
+extern void func_NotifyIpInterfaceChange(void);
 extern void func_SendARP(void);
 
 const struct test winetest_testlist[] =
@@ -28,6 +29,7 @@ const struct test winetest_testlist[] =
     { "IcmpFlood",                  func_IcmpFlood },
     { "IpForwardEntry",             func_IpForwardEntry },
     { "IpHelperV2",                 func_IpHelperV2 },
+    { "NotifyIpInterfaceChange",    func_NotifyIpInterfaceChange },
     { "SendARP",                    func_SendARP },
 
     { 0, 0 }

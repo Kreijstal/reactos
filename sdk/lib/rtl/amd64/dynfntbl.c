@@ -51,6 +51,7 @@ typedef struct _DYNAMIC_FUNCTION_TABLE
     PWCHAR OutOfProcessCallbackDll;
     FUNCTION_TABLE_TYPE Type;
     ULONG EntryCount;
+    ULONG MaximumEntryCount;
 #if (NTDDI_VERSION <= NTDDI_WIN10)
     // FIXME: RTL_BALANCED_NODE is defined in ntdef.h, it's impossible to get included here due to precompiled header
     //RTL_BALANCED_NODE TreeNode;
@@ -162,6 +163,89 @@ RtlAddFunctionTable(
     RtlpInsertDynamicFunctionTable(dynamicTable);
 
     return TRUE;
+}
+
+NTSTATUS
+NTAPI
+RtlAddGrowableFunctionTable(
+    _Out_ PVOID *DynamicTable,
+    _In_ PRUNTIME_FUNCTION FunctionTable,
+    _In_ DWORD EntryCount,
+    _In_ DWORD MaximumEntryCount,
+    _In_ ULONG_PTR RangeBase,
+    _In_ ULONG_PTR RangeEnd)
+{
+    PDYNAMIC_FUNCTION_TABLE Table;
+
+    if (!DynamicTable)
+        return STATUS_INVALID_PARAMETER;
+    *DynamicTable = NULL;
+    if (!FunctionTable || EntryCount > MaximumEntryCount || RangeBase >= RangeEnd)
+        return STATUS_INVALID_PARAMETER;
+
+    Table = RtlpAllocateMemory(sizeof(*Table), TAG_RTLDYNFNTBL);
+    if (!Table)
+        return STATUS_NO_MEMORY;
+
+    RtlZeroMemory(Table, sizeof(*Table));
+    Table->FunctionTable = FunctionTable;
+    Table->EntryCount = EntryCount;
+    Table->MaximumEntryCount = MaximumEntryCount;
+    Table->BaseAddress = RangeBase;
+    Table->MinimumAddress = RangeBase;
+    Table->MaximumAddress = RangeEnd;
+    Table->Type = RF_KERNEL_DYNAMIC;
+    RtlpInsertDynamicFunctionTable(Table);
+    *DynamicTable = Table;
+    return STATUS_SUCCESS;
+}
+
+VOID
+NTAPI
+RtlGrowFunctionTable(_In_ PVOID DynamicTable, _In_ DWORD NewEntryCount)
+{
+    PLIST_ENTRY Link;
+    PDYNAMIC_FUNCTION_TABLE Table;
+
+    AcquireDynamicFunctionTableLockExclusive();
+    for (Link = RtlpDynamicFunctionTableList.Flink;
+         Link != &RtlpDynamicFunctionTableList;
+         Link = Link->Flink)
+    {
+        Table = CONTAINING_RECORD(Link, DYNAMIC_FUNCTION_TABLE, ListEntry);
+        if (Table == DynamicTable && Table->Type == RF_KERNEL_DYNAMIC)
+        {
+            if (NewEntryCount > Table->EntryCount && NewEntryCount <= Table->MaximumEntryCount)
+                Table->EntryCount = NewEntryCount;
+            break;
+        }
+    }
+    ReleaseDynamicFunctionTableLockExclusive();
+}
+
+VOID
+NTAPI
+RtlDeleteGrowableFunctionTable(_In_ PVOID DynamicTable)
+{
+    PLIST_ENTRY Link;
+    PDYNAMIC_FUNCTION_TABLE Table, Removed = NULL;
+
+    AcquireDynamicFunctionTableLockExclusive();
+    for (Link = RtlpDynamicFunctionTableList.Flink;
+         Link != &RtlpDynamicFunctionTableList;
+         Link = Link->Flink)
+    {
+        Table = CONTAINING_RECORD(Link, DYNAMIC_FUNCTION_TABLE, ListEntry);
+        if (Table == DynamicTable && Table->Type == RF_KERNEL_DYNAMIC)
+        {
+            RemoveEntryList(Link);
+            Removed = Table;
+            break;
+        }
+    }
+    ReleaseDynamicFunctionTableLockExclusive();
+    if (Removed)
+        RtlpFreeMemory(Removed, TAG_RTLDYNFNTBL);
 }
 
 BOOLEAN

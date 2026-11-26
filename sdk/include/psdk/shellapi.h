@@ -899,6 +899,13 @@ SHQueryUserNotificationState(
 #include <poppack.h>
 #endif
 
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+#ifndef _SHELL32_
+WINSHELLAPI
+#endif
+HRESULT WINAPI SHGetPropertyStoreForWindow(HWND hwnd, REFIID riid, void **ppv);
+#endif
+
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif

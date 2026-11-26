@@ -201,6 +201,9 @@
 @ stdcall CM_Unregister_Device_Interface_ExW(wstr long long) setupapi.CM_Unregister_Device_Interface_ExW
 
 # Deprecated functions, they are not present in Win2003 SP1
+@ stdcall -version=0x602+ CM_Register_Notification(ptr ptr ptr ptr)
+@ stdcall -version=0x602+ CM_Unregister_Notification(ptr)
+
 @ stub CM_Remove_Unmarked_Children # setupapi.CM_Remove_Unmarked_Children
 @ stub CM_Remove_Unmarked_Children_Ex # setupapi.CM_Remove_Unmarked_Children_Ex
 @ stub CM_Reset_Children_Marks # setupapi.CM_Reset_Children_Marks

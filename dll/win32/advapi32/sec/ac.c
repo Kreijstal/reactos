@@ -10,6 +10,51 @@ WINE_DEFAULT_DEBUG_CHANNEL(advapi);
 
 /* --- ACE --- */
 
+BOOL WINAPI AddMandatoryAce(PACL Acl, DWORD Revision, DWORD Flags, DWORD Policy, PSID Sid)
+{
+    union
+    {
+        SYSTEM_MANDATORY_LABEL_ACE Ace;
+        BYTE Bytes[FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) + SECURITY_MAX_SID_SIZE];
+    } Storage;
+    SID_IDENTIFIER_AUTHORITY Authority = SECURITY_MANDATORY_LABEL_AUTHORITY;
+    PACE Free;
+    ULONG Size;
+
+    if (!Sid || !RtlValidSid(Sid) || *RtlSubAuthorityCountSid(Sid) != 1 ||
+        memcmp(RtlIdentifierAuthoritySid(Sid), &Authority, sizeof(Authority)))
+    {
+        SetLastError(ERROR_INVALID_SID);
+        return FALSE;
+    }
+    if (Revision < ACL_REVISION || Revision > ACL_REVISION_DS ||
+        (Flags & ~VALID_INHERIT_FLAGS) || (Policy & ~SYSTEM_MANDATORY_LABEL_VALID_MASK))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!Acl || !RtlValidAcl(Acl) || !RtlFirstFreeAce(Acl, &Free))
+    {
+        SetLastError(ERROR_INVALID_ACL);
+        return FALSE;
+    }
+    Size = FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) + RtlLengthSid(Sid);
+    if (!Free || (ULONG_PTR)Free + Size > (ULONG_PTR)Acl + Acl->AclSize)
+    {
+        SetLastError(ERROR_ALLOTTED_SPACE_EXCEEDED);
+        return FALSE;
+    }
+    Storage.Ace.Header.AceType = SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+    Storage.Ace.Header.AceFlags = Flags;
+    Storage.Ace.Header.AceSize = Size;
+    Storage.Ace.Mask = Policy;
+    RtlCopyMemory(&Storage.Ace.SidStart, Sid, RtlLengthSid(Sid));
+    RtlCopyMemory(Free, &Storage, Size);
+    Acl->AceCount++;
+    Acl->AclRevision = max(Acl->AclRevision, Revision);
+    return TRUE;
+}
+
 /*
  * @implemented
  */

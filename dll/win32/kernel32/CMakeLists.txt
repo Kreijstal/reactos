@@ -22,6 +22,7 @@ list(APPEND SOURCE
     client/context.c
     client/debugger.c
     client/dep.c
+    client/modern.c
     client/dosdev.c
     client/dllmain.c
     client/environ.c
