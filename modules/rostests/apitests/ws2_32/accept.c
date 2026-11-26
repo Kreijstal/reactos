@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS API Tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     Test accepting connections: AcceptEx on a connection that is already queued, what a failed AcceptEx and an accepted connection leave behind, and what WSAAccept's condition function is told
+ * PURPOSE:     Test accepting connections: AcceptEx on a connection that is already queued, what a failed AcceptEx and an accepted connection leave behind, what WSAAccept's condition function is told, and the names of both ends
  * COPYRIGHT:   Copyright 2026 Kreijstal <elektrischrainbow@gmail.com>
  */
 
@@ -465,6 +465,61 @@ Cleanup:
     closesocket(Listener);
 }
 
+/*
+ * Both ends of an accepted connection name the same two addresses: the
+ * client's getsockname() (bound implicitly by connect()) is the accepted
+ * socket's getpeername(), and the other way round.
+ */
+static
+void
+TestConnectedNames(void)
+{
+    SOCKET Listener, Client, Accepted;
+    struct sockaddr_in Address, ClientName, ClientPeer, AcceptedName, AcceptedPeer, FromAccept;
+    int Length, Result;
+
+    Listener = CreateListener(&Address);
+    if (Listener == INVALID_SOCKET)
+        return;
+    Client = Connect(&Address, &ClientName);
+    if (Client == INVALID_SOCKET)
+        goto Cleanup;
+    Length = sizeof(FromAccept);
+    Accepted = accept(Listener, (struct sockaddr *)&FromAccept, &Length);
+    ok(Accepted != INVALID_SOCKET, "accept failed: %d\n", WSAGetLastError());
+    if (Accepted == INVALID_SOCKET)
+    {
+        closesocket(Client);
+        goto Cleanup;
+    }
+
+    Length = sizeof(ClientPeer);
+    Result = getpeername(Client, (struct sockaddr *)&ClientPeer, &Length);
+    ok(Result == 0, "getpeername failed: %d\n", WSAGetLastError());
+    Length = sizeof(AcceptedName);
+    Result = getsockname(Accepted, (struct sockaddr *)&AcceptedName, &Length);
+    ok(Result == 0, "getsockname failed: %d\n", WSAGetLastError());
+    Length = sizeof(AcceptedPeer);
+    Result = getpeername(Accepted, (struct sockaddr *)&AcceptedPeer, &Length);
+    ok(Result == 0, "getpeername failed: %d\n", WSAGetLastError());
+
+    ok(ClientPeer.sin_port == Address.sin_port, "The client's peer port is %u, expected %u\n",
+       ntohs(ClientPeer.sin_port), ntohs(Address.sin_port));
+    ok(AcceptedName.sin_port == Address.sin_port, "The accepted socket's port is %u, expected %u\n",
+       ntohs(AcceptedName.sin_port), ntohs(Address.sin_port));
+    ok(AcceptedPeer.sin_port == FromAccept.sin_port, "The accepted socket's peer port is %u, accept() returned %u\n",
+       ntohs(AcceptedPeer.sin_port), ntohs(FromAccept.sin_port));
+    ok(ClientName.sin_port == AcceptedPeer.sin_port, "The client's port is %u, the accepted socket's peer port %u\n",
+       ntohs(ClientName.sin_port), ntohs(AcceptedPeer.sin_port));
+    ok(ClientName.sin_addr.s_addr == htonl(INADDR_LOOPBACK), "The client's address is %s\n",
+       inet_ntoa(ClientName.sin_addr));
+
+    closesocket(Accepted);
+    closesocket(Client);
+Cleanup:
+    closesocket(Listener);
+}
+
 START_TEST(accept)
 {
     WSADATA WsaData;
@@ -476,6 +531,7 @@ START_TEST(accept)
     Result = WSAStartup(MAKEWORD(2, 2), &WsaData);
     ok(Result == 0, "WSAStartup failed: %d\n", Result);
 
+    TestConnectedNames();
     TestWSAAcceptCondition();
 
     Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
