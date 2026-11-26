@@ -1710,11 +1710,11 @@ MsafdAccept(
     struct timeval              Timeout;
     PVOID                       PendingData = NULL;
     ULONG                       PendingDataLength = 0;
-    PVOID                       CalleeDataBuffer;
+    PVOID                       CalleeDataBuffer = NULL;
     WSABUF                      CallerData, CalleeID, CallerID, CalleeData;
     SOCKADDR_STORAGE            CalleeAddress;
     INT                         CalleeAddressLength;
-    PSOCKADDR                   RemoteAddress =  NULL;
+    SOCKADDR                    CallerAddress;
     GROUP                       GroupID = 0;
     ULONG                       CallBack;
     SOCKET                      AcceptSocket;
@@ -1843,6 +1843,7 @@ MsafdAccept(
                 PendingData = HeapAlloc(GlobalHeap, 0, PendingDataLength);
                 if (!PendingData)
                 {
+                    NtClose( SockEvent );
                     return MsafdReturnWithErrno( STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL );
                 }
 
@@ -1870,6 +1871,7 @@ MsafdAccept(
 
                 if (!NT_SUCCESS(Status))
                 {
+                    HeapFree(GlobalHeap, 0, PendingData);
                     NtClose( SockEvent );
                     return MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
                 }
@@ -1889,26 +1891,20 @@ MsafdAccept(
         if (MsafdGetSockName(Socket, Handle, (LPSOCKADDR)&CalleeAddress,
                              &CalleeAddressLength, lpErrno) == SOCKET_ERROR)
         {
+            if (PendingData)
+                HeapFree(GlobalHeap, 0, PendingData);
             NtClose(SockEvent);
             return SOCKET_ERROR;
         }
         CalleeID.buf = (PVOID)&CalleeAddress;
         CalleeID.len = CalleeAddressLength;
 
-        RemoteAddress = HeapAlloc(GlobalHeap, 0, sizeof(*RemoteAddress));
-        if (!RemoteAddress)
-        {
-            return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL);
-        }
-
-        /* Set up Address in SOCKADDR Format */
-        RtlCopyMemory (RemoteAddress,
-                       &ListenReceiveData->Address.Address[0].AddressType,
-                       sizeof(*RemoteAddress));
-
-        /* Build Caller ID */
-        CallerID.buf = (PVOID)RemoteAddress;
-        CallerID.len = sizeof(*RemoteAddress);
+        /* Build Caller ID: the remote address in SOCKADDR format */
+        RtlCopyMemory(&CallerAddress,
+                      &ListenReceiveData->Address.Address[0].AddressType,
+                      sizeof(CallerAddress));
+        CallerID.buf = (PVOID)&CallerAddress;
+        CallerID.len = sizeof(CallerAddress);
 
         /* Build Caller Data */
         CallerData.buf = PendingData;
@@ -1920,6 +1916,9 @@ MsafdAccept(
             /* Allocate Buffer for Callee Data */
             CalleeDataBuffer = HeapAlloc(GlobalHeap, 0, 4096);
             if (!CalleeDataBuffer) {
+                if (PendingData)
+                    HeapFree(GlobalHeap, 0, PendingData);
+                NtClose( SockEvent );
                 return MsafdReturnWithErrno( STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL );
             }
             CalleeData.buf = CalleeDataBuffer;
@@ -1958,7 +1957,14 @@ MsafdAccept(
                 // SockSetConnectData Sockets(SocketID), IOCTL_AFD_SET_CONNECT_DATA, CalleeData.Buffer, CalleeData.BuffSize, 0
             }
         }
-        else
+
+        /* The condition function is done with the connect data */
+        if (PendingData)
+            HeapFree(GlobalHeap, 0, PendingData);
+        if (CalleeDataBuffer)
+            HeapFree(GlobalHeap, 0, CalleeDataBuffer);
+
+        if (CallBack != CF_ACCEPT)
         {
             /* Callback rejected. Build Defer Structure */
             DeferData.SequenceNumber = ListenReceiveData->SequenceNumber;
@@ -2005,7 +2011,10 @@ MsafdAccept(
                               Socket->SharedData->CreateFlags,
                               lpErrno);
     if (AcceptSocket == INVALID_SOCKET)
+    {
+        NtClose(SockEvent);
         return SOCKET_ERROR;
+    }
 
     /* Set up the Accept Structure */
     AcceptData.ListenHandle = (HANDLE)AcceptSocket;
@@ -2056,9 +2065,9 @@ MsafdAccept(
     {
         RtlCopyMemory (SocketAddress,
                        &ListenReceiveData->Address.Address[0].AddressType,
-                       sizeof(*RemoteAddress));
+                       sizeof(SOCKADDR));
         if( SocketAddressLength )
-            *SocketAddressLength = sizeof(*RemoteAddress);
+            *SocketAddressLength = sizeof(SOCKADDR);
     }
 
     NtClose( SockEvent );
