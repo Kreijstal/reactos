@@ -765,6 +765,7 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB Fcb = FileObject->FsContext;
     PAFD_SUPER_ACCEPT_INFO AcceptRequest;
+    PMDL Mdl;
 
     PFILE_OBJECT NewFileObject = NULL;
 
@@ -778,49 +779,61 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     Fcb->EventSelectDisabled &= ~AFD_EVENT_ACCEPT;
 
-    /* Allow the IRP to access UserBuffer later */
-    Irp->Tail.Overlay.DriverContext[3] = IoAllocateMdl(Irp->UserBuffer, IrpSp->Parameters.DeviceIoControl.OutputBufferLength, FALSE, FALSE, NULL);
-    _SEH2_TRY
-    {
-        MmProbeAndLockPages((PMDL)Irp->Tail.Overlay.DriverContext[3], Irp->RequestorMode, IoWriteAccess);
-    }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-    {
-        Status = _SEH2_GetExceptionCode();
-        return UnlockAndMaybeComplete(Fcb, Status, Irp, 0);
-    }
-    _SEH2_END;
-
     /* Validate that accepting socket is valid, and has not been bound or connected */
     Status = AfdReferenceSocketHandle(AcceptRequest->AcceptHandle, Irp, &NewFileObject);
     if (!NT_SUCCESS(Status))
-    {
-        IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]);
-        Irp->Tail.Overlay.DriverContext[3] = NULL;
         return UnlockAndMaybeComplete(Fcb, Status, Irp, 0);
-    }
 
     PAFD_FCB Fcb2 = NewFileObject->FsContext;
 
-    if (!SocketAcquireStateLock(Fcb2))
-    {
-        ObDereferenceObject(NewFileObject);
-        return LostSocket(Irp);
-    }
+    /* Never fails: AfdReferenceSocketHandle() returned an AFD socket, whose
+     * FCB lives as long as its file object */
+    (void)SocketAcquireStateLock(Fcb2);
 
     /* Verify that the acceptor socket has not been already binded/connected or that it has been used by AcceptEx */
     if (Fcb2->SharedData.State != SOCKET_STATE_CREATED)
     {
-        IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]);
-        Irp->Tail.Overlay.DriverContext[3] = NULL;
         SocketStateUnlock(Fcb2);
         ObDereferenceObject(NewFileObject);
         return UnlockAndMaybeComplete(Fcb, STATUS_INVALID_PARAMETER, Irp, 0);
     }
+
+    /* Lock the output buffer (UserBuffer: METHOD_NEITHER), for the accept to
+     * write the addresses and the first data to.  Whatever fails here hands
+     * back what was taken. */
+    Mdl = IoAllocateMdl(Irp->UserBuffer, IrpSp->Parameters.DeviceIoControl.OutputBufferLength, FALSE, FALSE, NULL);
+    if (!Mdl)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+    }
+    else
+    {
+        _SEH2_TRY
+        {
+            MmProbeAndLockPages(Mdl, Irp->RequestorMode, IoWriteAccess);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+
+        if (!NT_SUCCESS(Status))
+            IoFreeMdl(Mdl);
+    }
+
+    if (!NT_SUCCESS(Status))
+    {
+        SocketStateUnlock(Fcb2);
+        ObDereferenceObject(NewFileObject);
+        return UnlockAndMaybeComplete(Fcb, Status, Irp, 0);
+    }
+
     Fcb2->SharedData.State = SOCKET_STATE_CONNECTING;
 
     Irp->Tail.Overlay.DriverContext[2] = NewFileObject;
-    
+    Irp->Tail.Overlay.DriverContext[3] = Mdl;
+
     /* Proceed later in SatisfyAcceptEx */
     SocketStateUnlock(Fcb2);
 
