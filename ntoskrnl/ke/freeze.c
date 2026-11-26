@@ -34,9 +34,8 @@ KeFreezeExecution(IN PKTRAP_FRAME TrapFrame,
     UNREFERENCED_PARAMETER(ExceptionFrame);
 #endif
 
-    /* Disable interrupts, get previous state and set the freeze flag */
+    /* Disable interrupts and get previous state */
     Enable = KeDisableInterrupts();
-    KiFreezeFlag = 4;
 
 #ifndef CONFIG_SMP
     /* Raise IRQL if we have to */
@@ -53,6 +52,13 @@ KeFreezeExecution(IN PKTRAP_FRAME TrapFrame,
     KxFreezeExecution();
 #endif
 
+    /*
+     * Only now that we own the freeze may we touch the freeze data: another
+     * processor can be in its own KeFreezeExecution, spinning for the freeze,
+     * and it writes the same globals once it gets it.
+     */
+    KiFreezeFlag = 4;
+
     /* Save the old IRQL to be restored on unfreeze */
     KiOldIrql = OldIrql;
 
@@ -64,22 +70,32 @@ VOID
 NTAPI
 KeThawExecution(IN BOOLEAN Enable)
 {
+    KIRQL OldIrql;
+
+    /*
+     * Take our old IRQL and clear the freeze flag while we still own the
+     * freeze. As soon as KxThawExecution gives the freeze up, a processor that
+     * was waiting for it takes it, freezes us (with an NMI, so even with our
+     * interrupts disabled) and stores its own old IRQL in KiOldIrql. Reading
+     * KiOldIrql after that returned us to the other processor's IRQL: a thread
+     * that printed at PASSIVE_LEVEL came back from DbgPrint at DISPATCH_LEVEL.
+     */
+    OldIrql = KiOldIrql;
+    KiFreezeFlag = 0;
+
 #ifdef CONFIG_SMP
     /* Architecture specific thaw code */
     KxThawExecution();
 #endif
-
-    /* Clear the freeze flag */
-    KiFreezeFlag = 0;
 
     /* Cleanup CPU caches */
     KeFlushCurrentTb();
 
     /* Restore the old IRQL */
 #ifndef CONFIG_SMP
-    if (KiOldIrql < DISPATCH_LEVEL)
+    if (OldIrql < DISPATCH_LEVEL)
 #endif
-    KeLowerIrql(KiOldIrql);
+    KeLowerIrql(OldIrql);
 
     /* Re-enable interrupts */
     KeRestoreInterrupts(Enable);
