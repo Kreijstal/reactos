@@ -391,8 +391,7 @@ static VOID DispatchFrame(PAR9485_ADAPTER Adapter, PUCHAR Frame, ULONG Length,
          * 1-3 = a default/group key.  On a WPA/WPA2-mixed AP that is the
          * authoritative cipher discriminator; the DA multicast bit is not
          * (a group-keyed frame can be unicast-addressed). */
-        ULONG KeyId = (Length > DOT11_MAC_HEADER_LEN + 3)
-                      ? (ULONG)(Frame[DOT11_MAC_HEADER_LEN + 3] >> 6) : 0;
+        ULONG KeyId = AR9485TkipRxKeyId(Frame, Length, DOT11_MAC_HEADER_LEN);
         ULONG Cipher = (KeyId == 0) ? Adapter->UnicastCipher
                                     : Adapter->MulticastCipher;
         ULONG HeaderLen = DOT11_CCMP_HEADER_LEN;
@@ -429,14 +428,16 @@ static VOID DispatchFrame(PAR9485_ADAPTER Adapter, PUCHAR Frame, ULONG Length,
                  * ieee80211_rx_h_michael_mic_verify() does. */
                 UCHAR Computed[8];
                 int MicResult;
+                const UCHAR *MicKey = AR9485TkipGroupMicGet(&Adapter->GroupRxMic,
+                                                            KeyId);
 
                 Adapter->RxGroupTkipCount++;
 
-                if (!Adapter->GroupRxMicValid)
+                if (MicKey == NULL)
                 {
-                    /* No group Michael key means no way to check, and an
-                     * unchecked TKIP frame is exactly what Michael exists to
-                     * refuse.  This used to return silently. */
+                    /* No group Michael key under this key ID means no way to
+                     * check, and an unchecked TKIP frame is exactly what
+                     * Michael exists to refuse. */
                     Adapter->RxCryptoErrorCount++;
                     if ((++Adapter->RxGroupNoKeyCount % 1000) == 1)
                         DPRINT1("AR9485: group TKIP but no RX MIC key #%lu "
@@ -448,7 +449,7 @@ static VOID DispatchFrame(PAR9485_ADAPTER Adapter, PUCHAR Frame, ULONG Length,
 
                 MicResult = AR9485TkipRxCheckMic(Frame, Length,
                                                  DOT11_MAC_HEADER_LEN,
-                                                 Adapter->GroupRxMicKey,
+                                                 MicKey,
                                                  Computed);
 
                 /*

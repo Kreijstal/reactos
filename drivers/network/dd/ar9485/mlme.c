@@ -284,10 +284,12 @@ AR9485SetCipherKey(
         }
         else
         {
-            Adapter->GroupKeyValid = FALSE;
-            Adapter->GroupRxMicValid = FALSE;
+            /* Only this key ID goes: during a rekey the other GTK is still
+             * in use. */
+            AR9485TkipGroupMicClear(&Adapter->GroupRxMic, Index);
             if (Index < DOT11_MAX_NUM_DEFAULT_KEY)
                 Adapter->GroupKeyMask &= ~(1UL << Index);
+            Adapter->GroupKeyValid = (Adapter->GroupKeyMask != 0);
         }
         return NDIS_STATUS_SUCCESS;
     }
@@ -364,10 +366,7 @@ AR9485SetCipherKey(
         const UCHAR *MicTx = (Index == AR9485_KEY_PAIRWISE) ? TxMic : RxMic;
 
         if (Index != AR9485_KEY_PAIRWISE)
-        {
-            NdisMoveMemory(Adapter->GroupRxMicKey, RxMic, 8);
-            Adapter->GroupRxMicValid = TRUE;
-        }
+            AR9485TkipGroupMicSet(&Adapter->GroupRxMic, Index, RxMic);
 
         AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY0(MicIndex), AR9485ReadLe32(RxMic + 0));
         AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY1(MicIndex), AR9485ReadLe16(MicTx + 2));
@@ -383,6 +382,11 @@ AR9485SetCipherKey(
     }
     else
     {
+        /* A non-TKIP key at this key ID has no Michael key; one left over
+         * from an earlier TKIP GTK there would be used on its frames. */
+        if (Index != AR9485_KEY_PAIRWISE)
+            AR9485TkipGroupMicClear(&Adapter->GroupRxMic, Index);
+
         AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY0(Index), Key0);
         AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY1(Index), Key1);
         AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY2(Index), Key2);

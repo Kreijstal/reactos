@@ -37,6 +37,7 @@
 /* 802.11 frame layout shared by the transmit path and the MLME. */
 #include "dot11frame.h"
 #include "linkmon.h"
+#include "tkiprx.h"
 
 /* Register offsets and bit math now live under ath9k/reg.h (slice 1) and
  * are consumed via ath9k/hw_min.h's verbatim AR_SREV_* constants
@@ -327,13 +328,14 @@ typedef struct _AR9485_ADAPTER
      * so the stack fills it); the MAC only encrypts with the PN it finds in
      * the frame.  48 bits, per key, starts over when the key is installed. */
     ULONG64                 PairwisePn;
-    BOOLEAN                 GroupKeyValid;
+    BOOLEAN                 GroupKeyValid;      /* GroupKeyMask != 0 */
     UCHAR                   GroupKeyId;
-    /* RX Michael key of the group TKIP key: the hardware cannot verify the
-     * MIC on the group path (key search misses, see receive.c), so software
-     * does, the way mac80211 does. */
-    UCHAR                   GroupRxMicKey[8];
-    BOOLEAN                 GroupRxMicValid;
+    /* RX Michael keys of the group TKIP keys, one per key ID: the hardware
+     * cannot verify the MIC on the group path (key search misses, see
+     * receive.c), so software does, the way mac80211 does -- with the key
+     * the frame's IV names, since an AP rekeying the GTK keeps sending
+     * under the old key ID for a while (tkiprx.h). */
+    AR9485_TKIP_GROUP_MIC   GroupRxMic;
     /* Group-key bookkeeping for post-mortems: installs since load, which
      * default slots hold a key (bit n = key ID n), and group frames that
      * named a key ID no slot holds -- a rekey that never reached us. */

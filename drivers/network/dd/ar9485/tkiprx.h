@@ -244,4 +244,72 @@ AR9485TkipRxCheckMic(const AR9485_TKIP_U8 *Frame,
     return AR9485_TKIPRX_OK;
 }
 
+/* ================================================================== *
+ *  Group Michael keys, one per default key ID
+ * ================================================================== */
+
+/*
+ * A group-TKIP frame is checked with the Michael key of the GTK its IV names
+ * (key ID 1..3), not with whichever GTK was installed last.  During a group
+ * rekey the AP hands out the new GTK under the other key ID and keeps
+ * sending under the old one until every station has answered (hostapd's
+ * GTimeout / the 802.11 "GTK in use" rule), so both live side by side for a
+ * while.  mac80211 keeps one ieee80211_key per key index for exactly this
+ * reason, and ath9k one key cache entry (and MIC entry) per index; a single
+ * shared Michael key failed the first old-key-ID frame after every rekey.
+ */
+#define AR9485_TKIP_GROUP_KEY_IDS 4
+
+typedef struct _AR9485_TKIP_GROUP_MIC
+{
+    AR9485_TKIP_U8  Key[AR9485_TKIP_GROUP_KEY_IDS][AR9485_TKIP_MIC_LEN];
+    AR9485_TKIP_U32 ValidMask;      /* bit n = key ID n holds a key */
+} AR9485_TKIP_GROUP_MIC;
+
+static __inline void
+AR9485TkipGroupMicSet(AR9485_TKIP_GROUP_MIC *Table, AR9485_TKIP_U32 KeyId,
+                      const AR9485_TKIP_U8 *RxMic)
+{
+    AR9485_TKIP_U32 i;
+
+    if (KeyId >= AR9485_TKIP_GROUP_KEY_IDS)
+        return;
+    for (i = 0; i < AR9485_TKIP_MIC_LEN; ++i)
+        Table->Key[KeyId][i] = RxMic[i];
+    Table->ValidMask |= 1u << KeyId;
+}
+
+static __inline void
+AR9485TkipGroupMicClear(AR9485_TKIP_GROUP_MIC *Table, AR9485_TKIP_U32 KeyId)
+{
+    AR9485_TKIP_U32 i;
+
+    if (KeyId >= AR9485_TKIP_GROUP_KEY_IDS)
+        return;
+    for (i = 0; i < AR9485_TKIP_MIC_LEN; ++i)
+        Table->Key[KeyId][i] = 0;
+    Table->ValidMask &= ~(1u << KeyId);
+}
+
+/* The Michael key for a frame under KeyId, or 0 if no GTK sits there. */
+static __inline const AR9485_TKIP_U8 *
+AR9485TkipGroupMicGet(const AR9485_TKIP_GROUP_MIC *Table, AR9485_TKIP_U32 KeyId)
+{
+    if (KeyId >= AR9485_TKIP_GROUP_KEY_IDS ||
+        !(Table->ValidMask & (1u << KeyId)))
+        return 0;
+    return Table->Key[KeyId];
+}
+
+/* The key ID of a protected MPDU: bits 6-7 of the fourth IV octet (TKIP
+ * and CCMP alike, 802.11-2016 12.5.2.2 / 12.5.3.2). */
+static __inline AR9485_TKIP_U32
+AR9485TkipRxKeyId(const AR9485_TKIP_U8 *Frame, AR9485_TKIP_U32 Length,
+                  AR9485_TKIP_U32 HeaderLen)
+{
+    if (Length <= HeaderLen + 3)
+        return 0;
+    return (AR9485_TKIP_U32)(Frame[HeaderLen + 3] >> 6);
+}
+
 #endif /* _AR9485_TKIPRX_H_ */

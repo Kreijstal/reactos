@@ -331,11 +331,105 @@ static void TestDirectionsAndPriority(void)
     }
 }
 
+/* ------------------------------------------------------------------ *
+ *  4.  A group rekey: two GTKs live side by side
+ * ------------------------------------------------------------------ */
+
+/* The GTK hostapd/the FRITZ!Box hand out at the rekey, under the other key
+ * ID.  Only its Michael half matters here. */
+static const unsigned char g_Gtk2[32] = {
+    0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+    0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+    0x31, 0x41, 0x59, 0x26, 0x53, 0x58, 0x97, 0x93,
+    0x23, 0x84, 0x62, 0x64, 0x33, 0x83, 0x27, 0x95
+};
+
+/* BuildGroupFrame with the IV naming KeyId (ExtIV set). */
+static unsigned BuildGroupFrameKeyId(unsigned char *Out,
+                                     const unsigned char *MicKey,
+                                     unsigned KeyId)
+{
+    unsigned Length = BuildGroupFrame(Out, MicKey);
+    Out[24 + 3] = (unsigned char)((KeyId << 6) | 0x20);
+    return Length;
+}
+
+static void TestGroupRekey(void)
+{
+    AR9485_TKIP_GROUP_MIC Table;
+    unsigned char Old[128], New[128];
+    unsigned OldLen, NewLen;
+    const unsigned char *Key;
+
+    printf("group rekey: old and new GTK at once\n");
+    memset(&Table, 0, sizeof(Table));
+
+    /* The 4-way handshake installs GTK 1, the rekey GTK 2 (mlme.c
+     * AR9485SetCipherKey, slot = key ID). */
+    AR9485TkipGroupMicSet(&Table, 1, g_Gtk + 16);
+    AR9485TkipGroupMicSet(&Table, 2, g_Gtk2 + 16);
+
+    OldLen = BuildGroupFrameKeyId(Old, g_Gtk + 16, 1);
+    NewLen = BuildGroupFrameKeyId(New, g_Gtk2 + 16, 2);
+
+    Check("IV key ID of a key-1 frame reads 1",
+          AR9485TkipRxKeyId(Old, OldLen, 24) == 1);
+    Check("IV key ID of a key-2 frame reads 2",
+          AR9485TkipRxKeyId(New, NewLen, 24) == 2);
+
+    /* Boot 185, t=776 s: the first frame after the rekey install was still
+     * under the old key ID and was checked with the new Michael key.  That
+     * is what one shared key does; it must fail here so the table below is
+     * known to be the thing that fixes it. */
+    Check("one shared (last installed) key fails the old key ID's frame",
+          AR9485TkipRxCheckMic(Old, OldLen, 24, g_Gtk2 + 16, NULL) ==
+          AR9485_TKIPRX_MIC_FAIL);
+
+    Key = AR9485TkipGroupMicGet(&Table, AR9485TkipRxKeyId(Old, OldLen, 24));
+    Check("old key ID's frame verifies with its own key after the rekey",
+          Key != NULL &&
+          AR9485TkipRxCheckMic(Old, OldLen, 24, Key, NULL) == AR9485_TKIPRX_OK);
+
+    Key = AR9485TkipGroupMicGet(&Table, AR9485TkipRxKeyId(New, NewLen, 24));
+    Check("new key ID's frame verifies with the new key",
+          Key != NULL &&
+          AR9485TkipRxCheckMic(New, NewLen, 24, Key, NULL) == AR9485_TKIPRX_OK);
+
+    Check("a key ID nobody installed has no Michael key",
+          AR9485TkipGroupMicGet(&Table, 3) == NULL);
+    Check("key IDs past the four default keys have none",
+          AR9485TkipGroupMicGet(&Table, 4) == NULL);
+
+    /* Deleting one GTK (the next rekey reuses ID 1) leaves the other. */
+    AR9485TkipGroupMicClear(&Table, 1);
+    Check("clearing key ID 1 removes only key ID 1",
+          AR9485TkipGroupMicGet(&Table, 1) == NULL &&
+          AR9485TkipGroupMicGet(&Table, 2) != NULL);
+
+    /* The next rekey goes back to ID 1 with a third GTK; ID 2 still works. */
+    AR9485TkipGroupMicSet(&Table, 1, g_Gtk + 24);
+    Key = AR9485TkipGroupMicGet(&Table, 2);
+    Check("ID 2 frames still verify after ID 1 is reinstalled",
+          Key != NULL &&
+          AR9485TkipRxCheckMic(New, NewLen, 24, Key, NULL) == AR9485_TKIPRX_OK);
+
+    /* Link teardown deletes every default key. */
+    AR9485TkipGroupMicClear(&Table, 0);
+    AR9485TkipGroupMicClear(&Table, 1);
+    AR9485TkipGroupMicClear(&Table, 2);
+    AR9485TkipGroupMicClear(&Table, 3);
+    Check("teardown leaves no group Michael key", Table.ValidMask == 0);
+
+    Check("a frame too short for an IV reads key ID 0",
+          AR9485TkipRxKeyId(Old, 24 + 3, 24) == 0);
+}
+
 int main(void)
 {
     TestMichaelVectors();
     TestGroupFrame();
     TestDirectionsAndPriority();
+    TestGroupRekey();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
