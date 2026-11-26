@@ -499,6 +499,30 @@ NwifiMsmConnect(
 {
     PNWIFI_ADAPTER Adapter = Msm->Adapter;
     NDIS_STATUS Status;
+    NWIFI_MSM_STATE Previous;
+
+    /*
+     * Leave the current link before arming the supplicant for the next one,
+     * the way the Windows MSM and wpa_supplicant (wpas_request_connection
+     * deauthenticates first) do.  The miniport has to drop it anyway, and
+     * it says so with NDIS_STATUS_DOT11_DISASSOCIATION -- which stops the
+     * supplicant.  Left to the connect request, that indication arrived
+     * from the miniport's worker AFTER NwifiSupplicantStart below, so every
+     * connect made while associated ran its 4-way handshake with a disarmed
+     * supplicant: message 1 was swallowed unanswered and the AP gave up
+     * ("PTKSTART: Retry limit", deauth reason 15; ASUS boot 185).
+     * OID_DOT11_DISCONNECT_REQUEST completes only after the miniport made
+     * that indication, so by the time this returns it has been consumed.
+     */
+    NdisAcquireSpinLock(&Msm->Lock);
+    Previous = Msm->State;
+    NdisReleaseSpinLock(&Msm->Lock);
+    if (Previous != NwifiMsmIdle && Previous != NwifiMsmScanning)
+    {
+        DPRINT1("NWIFI: connect while in state %d; disconnecting first\n",
+                Previous);
+        NwifiMsmDisconnect(Msm);
+    }
 
     NdisAcquireSpinLock(&Msm->Lock);
     Msm->Connect = *Params;
