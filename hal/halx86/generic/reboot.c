@@ -16,19 +16,36 @@
 static VOID
 HalpWriteResetCommand(VOID)
 {
-    /* Generate RESET signal via keyboard controller. This is the classic PC
-     * lever; on boards where the EC emulates the KBC it is acknowledged and
-     * ignored, so the levers below follow. */
+    ULONG Wait;
+
+    /* The firmware's own lever first: the ACPI FADT reset register, as the
+     * ACPI HAL of Windows and Linux (reboot=acpi, its default) do. The board
+     * names here how it wants to be reset; on the ASUS X550DP it is an SMI
+     * to the firmware (I/O port 0xB2, the SMI command port, <- 0x8E). */
+    if (HalpAcpiWriteResetRegister())
+    {
+        /* Give the firmware time to act before falling back */
+        KeStallExecutionProcessor(500 * 1000);
+    }
+
+    /* Generate RESET signal via keyboard controller. The controller only
+     * takes a command once its input buffer is empty; a byte written while
+     * it is full is lost. On boards where the EC emulates the KBC the pulse
+     * is acknowledged and may be ignored, so the lever below follows. */
+    for (Wait = 0; Wait < 100000; Wait++)
+    {
+        if (!(READ_PORT_UCHAR((PUCHAR)0x64) & 0x02)) break;
+        KeStallExecutionProcessor(2);
+    }
     WRITE_PORT_UCHAR((PUCHAR)0x64, 0xFE);
-    KeStallExecutionProcessor(1000);
+    KeStallExecutionProcessor(50 * 1000);
 
 #if defined(__GNUC__)
-    /* Force a triple fault: a fault with an empty IDT cannot be delivered
-     * and the CPU signals SHUTDOWN, which the chipset turns into a warm
-     * reset. Tried BEFORE the ACPI reset register on purpose: on the ASUS
-     * X550DP the FADT RESET_REG (FCH 0xCF9) powers the machine off instead
-     * of resetting it (docs/asus.txt 2.7, 08-29 boot 78), and a warm reset
-     * through the CPU never touches the FCH reset logic. */
+    /* Last resort, a triple fault: a fault with an empty IDT cannot be
+     * delivered and the CPU enters SHUTDOWN. Whether the chipset turns that
+     * into a reset is chipset policy, and a reset that way may not reset
+     * the PCI devices. It cannot return, so it must come after every lever
+     * that can. */
     {
         static const struct
         {
@@ -40,12 +57,6 @@ HalpWriteResetCommand(VOID)
         __asm__ __volatile__("int3");
     }
 #endif
-
-    /* The firmware's own lever last: the ACPI FADT reset register */
-    if (HalpAcpiWriteResetRegister())
-    {
-        KeStallExecutionProcessor(1000);
-    }
 };
 
 DECLSPEC_NORETURN
