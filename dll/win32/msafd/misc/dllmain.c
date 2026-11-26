@@ -1681,6 +1681,15 @@ GetCurrentTimeInSeconds(VOID)
 }
 
 static
+INT
+MsafdGetSockName(
+    _In_opt_ PSOCKET_INFORMATION Socket,
+    IN SOCKET Handle,
+    OUT LPSOCKADDR Name,
+    IN OUT LPINT NameLength,
+    OUT LPINT lpErrno);
+
+static
 SOCKET
 MsafdAccept(
     _In_opt_ PSOCKET_INFORMATION Socket,
@@ -1703,6 +1712,8 @@ MsafdAccept(
     ULONG                       PendingDataLength = 0;
     PVOID                       CalleeDataBuffer;
     WSABUF                      CallerData, CalleeID, CallerID, CalleeData;
+    SOCKADDR_STORAGE            CalleeAddress;
+    INT                         CalleeAddressLength;
     PSOCKADDR                   RemoteAddress =  NULL;
     GROUP                       GroupID = 0;
     ULONG                       CallBack;
@@ -1870,9 +1881,19 @@ MsafdAccept(
             /* I don't support this yet */
         }
 
-        /* Build Callee ID */
-        CalleeID.buf = (PVOID)Socket->LocalAddress;
-        CalleeID.len = Socket->SharedData->SizeOfLocalAddress;
+        /* Build Callee ID: the local address of the connection, which is
+         * the one the listener is bound to.  AFD holds it (bind() keeps no
+         * copy in Socket->LocalAddress). */
+        ASSERT(Socket->SharedData->SizeOfLocalAddress <= sizeof(CalleeAddress));
+        CalleeAddressLength = sizeof(CalleeAddress);
+        if (MsafdGetSockName(Socket, Handle, (LPSOCKADDR)&CalleeAddress,
+                             &CalleeAddressLength, lpErrno) == SOCKET_ERROR)
+        {
+            NtClose(SockEvent);
+            return SOCKET_ERROR;
+        }
+        CalleeID.buf = (PVOID)&CalleeAddress;
+        CalleeID.len = CalleeAddressLength;
 
         RemoteAddress = HeapAlloc(GlobalHeap, 0, sizeof(*RemoteAddress));
         if (!RemoteAddress)
