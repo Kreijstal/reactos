@@ -232,9 +232,12 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
         goto end;
     }
 
-    BYTE *BufferPtr = MmGetSystemAddressForMdlSafe((PMDL)Irp->Tail.Overlay.DriverContext[3], NormalPagePriority);
-    if (!BufferPtr)
+    /* The output buffer: the first data block, then the local address, then
+     * the remote one */
+    BYTE *OutputBuffer = MmGetSystemAddressForMdlSafe((PMDL)Irp->Tail.Overlay.DriverContext[3], NormalPagePriority);
+    if (!OutputBuffer)
         goto end;
+    BYTE *BufferPtr = OutputBuffer;
 
     /* Query TCPIP to find the local address of the socket */
     LONG RequestSize = (FIELD_OFFSET(TDI_ADDRESS_INFO, Address.Address[0].Address) + FCB->LocalAddress->Address[0].AddressLength);
@@ -307,7 +310,7 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
 
         Status = TdiReceive(&FCB2->ReceiveIrp.InFlightRequest,
                             FCB2->Connection.Object, TDI_RECEIVE_NORMAL,
-                            (PCHAR)BufferPtr,
+                            (PCHAR)OutputBuffer,
                             AcceptInfo->ReceiveDataLength,
                             AcceptExReceiveComplete,
                             FCB2);
