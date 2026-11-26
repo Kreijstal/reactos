@@ -134,6 +134,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeApc.c
     ntos_ke/KeApcAffinityStress.c
     ntos_ke/KeIdleDispatch.c
+    ntos_ke/KeIdleStandby.c
     ntos_ke/KeDevQueue.c
     ntos_ke/KeDpc.c
     ntos_ke/KeEvent.c
