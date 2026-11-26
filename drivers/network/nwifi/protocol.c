@@ -26,45 +26,55 @@ NwifiProtocolDoRequest(
     _In_ ULONG Length,
     _Out_opt_ PULONG BytesProcessed)
 {
-    NDIS_OID_REQUEST Request;
+    NWIFI_SYNC_REQUEST Sync;
+    PNDIS_OID_REQUEST Request = &Sync.Request;
     NDIS_STATUS Status;
 
-    RtlZeroMemory(&Request, sizeof(Request));
-    Request.Header.Type = NDIS_OBJECT_TYPE_OID_REQUEST;
-    Request.Header.Revision = NDIS_OID_REQUEST_REVISION_1;
-    Request.Header.Size = sizeof(NDIS_OID_REQUEST);
-    Request.RequestType = RequestType;
+    RtlZeroMemory(Request, sizeof(*Request));
+    Request->Header.Type = NDIS_OBJECT_TYPE_OID_REQUEST;
+    Request->Header.Revision = NDIS_OID_REQUEST_REVISION_1;
+    Request->Header.Size = sizeof(NDIS_OID_REQUEST);
+    Request->RequestType = RequestType;
 
     if (RequestType == NdisRequestSetInformation)
     {
-        Request.DATA.SET_INFORMATION.Oid = Oid;
-        Request.DATA.SET_INFORMATION.InformationBuffer = Buffer;
-        Request.DATA.SET_INFORMATION.InformationBufferLength = Length;
+        Request->DATA.SET_INFORMATION.Oid = Oid;
+        Request->DATA.SET_INFORMATION.InformationBuffer = Buffer;
+        Request->DATA.SET_INFORMATION.InformationBufferLength = Length;
     }
     else
     {
-        Request.DATA.QUERY_INFORMATION.Oid = Oid;
-        Request.DATA.QUERY_INFORMATION.InformationBuffer = Buffer;
-        Request.DATA.QUERY_INFORMATION.InformationBufferLength = Length;
+        Request->DATA.QUERY_INFORMATION.Oid = Oid;
+        Request->DATA.QUERY_INFORMATION.InformationBuffer = Buffer;
+        Request->DATA.QUERY_INFORMATION.InformationBufferLength = Length;
     }
 
     /* RequestId lets the completion callback recognise our private request. */
-    Request.RequestId = (PVOID)(ULONG_PTR)'qNWI';
+    Request->RequestId = (PVOID)(ULONG_PTR)'qNWI';
 
-    NdisResetEvent(&Adapter->RequestEvent);
+    /*
+     * The event and the status belong to THIS request, not to the adapter.
+     * A pended OID (OID_DOT11_DISCONNECT_REQUEST completes only once the
+     * miniport has torn the link down) overlaps requests from other threads
+     * -- the key-install work item, the scan worker, wlansvc ioctls -- and
+     * with one adapter-wide event another request's NdisResetEvent could
+     * swallow this completion and leave the caller waiting forever.
+     */
+    NdisInitializeEvent(&Sync.Event);
+    Sync.Status = NDIS_STATUS_PENDING;
 
-    Status = NdisOidRequest(Adapter->BindingHandle, &Request);
+    Status = NdisOidRequest(Adapter->BindingHandle, Request);
     if (Status == NDIS_STATUS_PENDING)
     {
-        NdisWaitEvent(&Adapter->RequestEvent, 0);
-        Status = Adapter->RequestStatus;
+        NdisWaitEvent(&Sync.Event, 0);
+        Status = Sync.Status;
     }
 
     if (BytesProcessed != NULL)
     {
         *BytesProcessed = (RequestType == NdisRequestSetInformation)
-            ? Request.DATA.SET_INFORMATION.BytesRead
-            : Request.DATA.QUERY_INFORMATION.BytesWritten;
+            ? Request->DATA.SET_INFORMATION.BytesRead
+            : Request->DATA.QUERY_INFORMATION.BytesWritten;
     }
 
     return Status;
@@ -79,11 +89,15 @@ NwifiProtocolOidRequestComplete(
 {
     PNWIFI_ADAPTER Adapter = (PNWIFI_ADAPTER)ProtocolBindingContext;
 
-    /* Only synchronous NwifiProtocolDoRequest requests carry the 'qNWI' id. */
+    /* Only synchronous NwifiProtocolDoRequest requests carry the 'qNWI' id,
+     * each the first member of its caller's NWIFI_SYNC_REQUEST. */
     if (OidRequest->RequestId == (PVOID)(ULONG_PTR)'qNWI')
     {
-        Adapter->RequestStatus = Status;
-        NdisSetEvent(&Adapter->RequestEvent);
+        PNWIFI_SYNC_REQUEST Sync =
+            CONTAINING_RECORD(OidRequest, NWIFI_SYNC_REQUEST, Request);
+
+        Sync->Status = Status;
+        NdisSetEvent(&Sync->Event);
         return;
     }
 

@@ -174,6 +174,15 @@ typedef enum _NWIFI_STATE
     NwifiStateHalting
 } NWIFI_STATE;
 
+/* One synchronous OID round-trip (NwifiProtocolDoRequest): the request and
+ * the event its completion signals, on the caller's stack. */
+typedef struct _NWIFI_SYNC_REQUEST
+{
+    NDIS_OID_REQUEST Request;
+    NDIS_EVENT       Event;
+    NDIS_STATUS      Status;
+} NWIFI_SYNC_REQUEST, *PNWIFI_SYNC_REQUEST;
+
 /* One bound dot11 device: the protocol binding to the lower miniport plus
  * the upper virtual miniport presented to TCP/IP. */
 typedef struct _NWIFI_ADAPTER
@@ -216,7 +225,8 @@ typedef struct _NWIFI_ADAPTER
     volatile LONG PendingSends;             /* NBLs sent down, not completed */
     volatile LONG PendingReceives;          /* NBLs indicated up, not returned */
 
-    /* ---- Synchronous request plumbing (protocol OID round-trips) ---- */
+    /* ---- Open/close completion (bind and unbind only; OID round-trips
+     * carry their own NWIFI_SYNC_REQUEST) ---- */
     NDIS_EVENT    RequestEvent;
     NDIS_STATUS   RequestStatus;
     NDIS_EVENT    CloseEvent;
