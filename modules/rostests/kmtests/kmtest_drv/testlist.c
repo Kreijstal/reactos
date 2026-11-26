@@ -81,6 +81,7 @@ KMT_TESTFUNC Test_KeFloatPointState;
 KMT_TESTFUNC Test_KeFreezeIrql;
 KMT_TESTFUNC Test_KeGuardedMutex;
 KMT_TESTFUNC Test_KeIrql;
+KMT_TESTFUNC Test_KeInterruptAffinity;
 KMT_TESTFUNC Test_KeIpi;
 KMT_TESTFUNC Test_KeMutex;
 KMT_TESTFUNC Test_KeProcessor;
@@ -254,6 +255,7 @@ const KMT_TEST TestList[] =
     { "KeFloatPointState",                  Test_KeFloatPointState },
     { "KeFreezeIrql",                       Test_KeFreezeIrql },
     { "KeGuardedMutex",                     Test_KeGuardedMutex },
+    { "KeInterruptAffinity",                Test_KeInterruptAffinity },
     { "KeIpi",                              Test_KeIpi },
     { "KeIrql",                             Test_KeIrql },
     { "KeMutex",                            Test_KeMutex },
