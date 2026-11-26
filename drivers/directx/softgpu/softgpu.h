@@ -156,6 +156,26 @@ typedef struct _SOFTGPU_DEVICE
     D3DDDIFORMAT        Format;
 
     /*
+     * Late monitor test mode (service value LateConnectMs != 0): the output
+     * is an HpdAwarenessInterruptible child that reports disconnected until
+     * LateConnectMs after DxgkDdiStartDevice, when a DPC marks it connected
+     * and reports it through DxgkCbIndicateChildStatus, as a miniport that
+     * finishes detecting its panel late does.
+     */
+    ULONG               LateConnectMs;
+    volatile LONG       MonitorConnected;
+    KTIMER              LateConnectTimer;
+    KDPC                LateConnectDpc;
+    volatile LONG       IndicateCount;
+    volatile LONG       IndicateStatus;
+
+    /* What the last DxgkDdiCommitVidPn got (SOFTGPU_ESCAPE_DISPLAY_STATE) */
+    ULONG               CommitCount;
+    ULONG               CommitPathCount;
+    ULONG               CommitSourceWidth;
+    ULONG               CommitSourceHeight;
+
+    /*
      * Fence tracking.
      *
      * CurrentFence  — fence ID of the last SubmitCommand call.
@@ -183,6 +203,9 @@ typedef struct _SOFTGPU_DEVICE
     DXGK_INTERFACE      DxgkInterface;
 
 } SOFTGPU_DEVICE, *PSOFTGPU_DEVICE;
+
+/* Service value LateConnectMs, read in DriverEntry (0 = test mode off) */
+extern ULONG SoftGpuLateConnectMs;
 
 
 /* =========================================================================

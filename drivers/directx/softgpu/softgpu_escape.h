@@ -71,3 +71,18 @@ typedef struct _SOFTGPU_ESCAPE_PRESENT_STATS_DATA
     long                LastLeft, LastTop, LastRight, LastBottom; /* out        */
     unsigned long       DstWidth, DstHeight; /* out: last destination size      */
 } SOFTGPU_ESCAPE_PRESENT_STATS_DATA;
+
+#define SOFTGPU_ESCAPE_DISPLAY_STATE        0x53444753UL    /* 'SGDS' */
+
+typedef struct _SOFTGPU_ESCAPE_DISPLAY_STATE_DATA
+{
+    unsigned long       Code;               /* in: SOFTGPU_ESCAPE_DISPLAY_STATE  */
+    unsigned long       LateConnectMs;      /* out: test mode, 0 = off           */
+    unsigned long       MonitorConnected;   /* out                               */
+    unsigned long       IndicateCount;      /* out: DxgkCbIndicateChildStatus calls */
+    long                IndicateStatus;     /* out: its last status              */
+    unsigned long       CommitCount;        /* out: DxgkDdiCommitVidPn calls     */
+    unsigned long       CommitPathCount;    /* out: paths of the last commit     */
+    unsigned long       CommitSourceWidth;  /* out: its pinned source mode       */
+    unsigned long       CommitSourceHeight;
+} SOFTGPU_ESCAPE_DISPLAY_STATE_DATA;

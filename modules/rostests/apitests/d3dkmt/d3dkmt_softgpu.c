@@ -21,6 +21,12 @@
  *  - SOFTGPU_ESCAPE_SEGMENT returns the segment softgpu reported through
  *    DXGKQAITYPE_QUERYSEGMENT3, which must be what
  *    KMTQAITYPE_GETSEGMENTSIZE then reports as dedicated video memory.
+ *  - SOFTGPU_ESCAPE_DISPLAY_STATE reports what the last DxgkDdiCommitVidPn
+ *    got.  In softgpu's late monitor test mode (service value LateConnectMs)
+ *    its output reports disconnected at start and connects later through
+ *    DxgkCbIndicateChildStatus, from a DPC.  Like Windows, dxgkrnl must then
+ *    set the mode on a topology with a path to it, or the display stays
+ *    dark for the whole session.
  *
  * Other adapters do not know the escapes; the tests skip there.
  */
@@ -251,6 +257,66 @@ Test_DirtyRectPresent(void)
        s2.LastLeft, s2.LastTop, s2.LastRight, s2.LastBottom, s2.DstWidth, s2.DstHeight);
 }
 
+static void
+Test_LateMonitor(void)
+{
+    SOFTGPU_ESCAPE_DISPLAY_STATE_DATA State;
+    DEVMODEW DevMode;
+    NTSTATUS Status;
+    int i;
+
+    memset(&State, 0, sizeof(State));
+    State.Code = SOFTGPU_ESCAPE_DISPLAY_STATE;
+    Status = SoftGpuEscape(&State, sizeof(State));
+    ok(NT_SUCCESS(Status), "display state escape 0x%08lx\n", Status);
+    if (!NT_SUCCESS(Status))
+        return;
+    if (State.LateConnectMs == 0)
+    {
+        skip("softgpu's late monitor test mode is off (LateConnectMs)\n");
+        return;
+    }
+
+    /* The topology update after the report runs in a work item. */
+    for (i = 0; i < 50 && (State.IndicateCount == 0 || State.CommitPathCount == 0); i++)
+    {
+        Sleep(100);
+        ok(NT_SUCCESS(SoftGpuEscape(&State, sizeof(State))), "display state escape failed\n");
+    }
+    trace("late monitor (%lu ms): connected %lu, %lu report(s) 0x%08lx, %lu mode set(s), "
+          "last %lu path(s) %lux%lu\n",
+          State.LateConnectMs, State.MonitorConnected, State.IndicateCount,
+          State.IndicateStatus, State.CommitCount, State.CommitPathCount,
+          State.CommitSourceWidth, State.CommitSourceHeight);
+
+    ok(State.MonitorConnected, "the monitor never got connected\n");
+    ok(State.IndicateCount >= 1, "the connection was never reported\n");
+    ok(State.IndicateStatus == STATUS_SUCCESS,
+       "DxgkCbIndicateChildStatus returned 0x%08lx\n", State.IndicateStatus);
+    ok(State.CommitCount >= 1, "no mode was set\n");
+    ok(State.CommitPathCount >= 1,
+       "the last mode set drove no output: the display stays dark\n");
+    ok(State.CommitSourceWidth != 0 && State.CommitSourceHeight != 0,
+       "the last mode set pinned no source mode (%lux%lu)\n",
+       State.CommitSourceWidth, State.CommitSourceHeight);
+
+    /* The output scans out the desktop GDI draws. */
+    memset(&DevMode, 0, sizeof(DevMode));
+    DevMode.dmSize = sizeof(DevMode);
+    if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &DevMode))
+    {
+        ok(DevMode.dmPelsWidth == State.CommitSourceWidth &&
+           DevMode.dmPelsHeight == State.CommitSourceHeight,
+           "desktop %lux%lu, committed source %lux%lu\n",
+           DevMode.dmPelsWidth, DevMode.dmPelsHeight,
+           State.CommitSourceWidth, State.CommitSourceHeight);
+    }
+    else
+    {
+        ok(0, "EnumDisplaySettingsW(ENUM_CURRENT_SETTINGS) failed %lu\n", GetLastError());
+    }
+}
+
 /* The kernel adapter behind the primary display (D3DKMTOpenAdapterFromHdc
  * reaches dxgkrnl; the GDI display name may be opened in user mode only). */
 static D3DKMT_HANDLE
@@ -290,6 +356,7 @@ START_TEST(softgpu)
     }
     else
     {
+        Test_LateMonitor();
         Test_SegmentSize();
         Test_DirtyRectPresent();
         Test_TimedOperation();

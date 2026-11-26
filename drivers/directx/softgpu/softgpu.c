@@ -83,6 +83,10 @@ static const DXGK_DRIVERCAPS SOFTGPU_DRIVER_CAPS =
  * =========================================================================
  */
 
+static VOID
+SoftGpuReadParameters(
+    _In_ PUNICODE_STRING RegistryPath);
+
 /*
  * DriverEntry
  *
@@ -98,6 +102,8 @@ DriverEntry(
     _In_ PDRIVER_OBJECT  DriverObject,
     _In_ PUNICODE_STRING RegistryPath)
 {
+    SoftGpuReadParameters(RegistryPath);
+
     DRIVER_INITIALIZATION_DATA InitData;
     NTSTATUS                   Status;
 
@@ -223,6 +229,73 @@ DriverEntry(
  *
  * IRQL: PASSIVE_LEVEL
  */
+/* =========================================================================
+ * Late monitor test mode
+ * =========================================================================
+ */
+
+ULONG SoftGpuLateConnectMs = 0;
+
+static VOID
+SoftGpuReadParameters(
+    _In_ PUNICODE_STRING RegistryPath)
+{
+    RTL_QUERY_REGISTRY_TABLE Table[2];
+    ULONG LateConnectMs = 0, Default = 0;
+    PWSTR Path;
+
+    Path = ExAllocatePoolWithTag(PagedPool, RegistryPath->Length + sizeof(WCHAR),
+                                 SOFTGPU_POOL_TAG);
+    if (Path == NULL)
+        return;
+    RtlCopyMemory(Path, RegistryPath->Buffer, RegistryPath->Length);
+    Path[RegistryPath->Length / sizeof(WCHAR)] = UNICODE_NULL;
+
+    RtlZeroMemory(Table, sizeof(Table));
+    Table[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
+    Table[0].Name = L"LateConnectMs";
+    Table[0].EntryContext = &LateConnectMs;
+    Table[0].DefaultType = REG_DWORD;
+    Table[0].DefaultData = &Default;
+    Table[0].DefaultLength = sizeof(Default);
+
+    if (NT_SUCCESS(RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE, Path, Table, NULL, NULL)))
+        SoftGpuLateConnectMs = LateConnectMs;
+    ExFreePoolWithTag(Path, SOFTGPU_POOL_TAG);
+
+    if (SoftGpuLateConnectMs != 0)
+        DPRINT1("SOFTGPU: late monitor test mode: connects %lu ms after start\n",
+                SoftGpuLateConnectMs);
+}
+
+/* The DPC for ISR of a hot-plug interrupt: the monitor got connected. */
+static VOID
+NTAPI
+SoftGpuLateConnectDpcRoutine(
+    _In_     PKDPC Dpc,
+    _In_opt_ PVOID DeferredContext,
+    _In_opt_ PVOID SystemArgument1,
+    _In_opt_ PVOID SystemArgument2)
+{
+    PSOFTGPU_DEVICE Device = (PSOFTGPU_DEVICE)DeferredContext;
+    DXGK_CHILD_STATUS ChildStatus;
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    InterlockedExchange(&Device->MonitorConnected, TRUE);
+
+    RtlZeroMemory(&ChildStatus, sizeof(ChildStatus));
+    ChildStatus.Type = StatusConnection;
+    ChildStatus.ChildUid = 1;
+    ChildStatus.HotPlug.Connected = TRUE;
+    InterlockedExchange(&Device->IndicateStatus,
+                        Device->DxgkInterface.DxgkCbIndicateChildStatus(
+                            Device->DxgkInterface.DeviceHandle, &ChildStatus));
+    InterlockedIncrement(&Device->IndicateCount);
+}
+
 NTSTATUS
 APIENTRY
 SoftGpuDdiAddDevice(
@@ -260,8 +333,12 @@ SoftGpuDdiAddDevice(
     Device->Width           = SOFTGPU_DEFAULT_WIDTH;
     Device->Height          = SOFTGPU_DEFAULT_HEIGHT;
     Device->Format          = SOFTGPU_DEFAULT_FORMAT;
+    Device->LateConnectMs   = SoftGpuLateConnectMs;
+    Device->MonitorConnected = (Device->LateConnectMs == 0);
 
     KeInitializeSpinLock(&Device->FenceLock);
+    KeInitializeTimer(&Device->LateConnectTimer);
+    KeInitializeDpc(&Device->LateConnectDpc, SoftGpuLateConnectDpcRoutine, Device);
 
     /*
      * Allocate the 16 MB write-combined contiguous framebuffer.
@@ -410,6 +487,15 @@ SoftGpuDdiStartDevice(
                     SoftGpuDpcRoutine,
                     Device);
 
+    if (Device->LateConnectMs != 0 && !Device->MonitorConnected &&
+        Device->DxgkInterface.DxgkCbIndicateChildStatus != NULL)
+    {
+        LARGE_INTEGER DueTime;
+
+        DueTime.QuadPart = -(LONGLONG)Device->LateConnectMs * 10000;
+        KeSetTimer(&Device->LateConnectTimer, DueTime, &Device->LateConnectDpc);
+    }
+
     DPRINT("SOFTGPU: StartDevice success: %lu source(s), %lu child(ren)\n",
            Device->NumSources, Device->NumChildren);
     return STATUS_SUCCESS;
@@ -438,6 +524,8 @@ SoftGpuDdiStopDevice(
      * KeRemoveQueueDpc returns FALSE if the DPC was not in the queue.
      */
     KeRemoveQueueDpc(&Device->DpcObject);
+    KeCancelTimer(&Device->LateConnectTimer);
+    KeRemoveQueueDpc(&Device->LateConnectDpc);
     SoftGpuVramTeardown(Device);
 
     return STATUS_SUCCESS;
@@ -936,6 +1024,10 @@ SoftGpuDdiQueryChildRelations(
     ChildRelations[0].ChildCapabilities.HpdAwareness = HpdAwarenessAlwaysConnected;
     ChildRelations[0].ChildUid                       = 1;
 
+    /* Late monitor test mode: a connector that reports hot plug. */
+    if (SoftGpuLateConnectMs != 0)
+        ChildRelations[0].ChildCapabilities.HpdAwareness = HpdAwarenessInterruptible;
+
     return STATUS_SUCCESS;
 }
 
@@ -957,8 +1049,11 @@ SoftGpuDdiQueryChildStatus(
 
     if (ChildStatus->Type == StatusConnection)
     {
-        /* The virtual monitor is always connected. */
-        ChildStatus->HotPlug.Connected = TRUE;
+        PSOFTGPU_DEVICE Device = (PSOFTGPU_DEVICE)MiniportDeviceContext;
+
+        /* The virtual monitor is always connected, except in the late
+         * monitor test mode until its connection was reported. */
+        ChildStatus->HotPlug.Connected = (Device->MonitorConnected != 0);
     }
 
     return STATUS_SUCCESS;

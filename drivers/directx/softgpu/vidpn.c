@@ -179,6 +179,60 @@ SoftGpuDdiEnumVidPnCofuncModality(
  *
  * IRQL: PASSIVE_LEVEL
  */
+/*
+ * Record the topology and the pinned source mode of a committed VidPN
+ * (SOFTGPU_ESCAPE_DISPLAY_STATE), read through the DXGK_VIDPN_INTERFACE
+ * as any miniport reads it.
+ */
+static VOID
+SoftGpuRecordCommit(
+    _In_ PSOFTGPU_DEVICE Device,
+    _In_ D3DKMDT_HVIDPN  hVidPn)
+{
+    CONST DXGK_VIDPN_INTERFACE *VidPnIf = NULL;
+    CONST DXGK_VIDPNTOPOLOGY_INTERFACE *TopologyIf = NULL;
+    CONST DXGK_VIDPNSOURCEMODESET_INTERFACE *SourceIf = NULL;
+    CONST D3DKMDT_VIDPN_SOURCE_MODE *Pinned = NULL;
+    D3DKMDT_HVIDPNTOPOLOGY hTopology = NULL;
+    D3DKMDT_HVIDPNSOURCEMODESET hSourceSet = NULL;
+    SIZE_T NumPaths = 0;
+
+    Device->CommitCount++;
+    Device->CommitPathCount = 0;
+    Device->CommitSourceWidth = 0;
+    Device->CommitSourceHeight = 0;
+
+    if (Device->DxgkInterface.DxgkCbQueryVidPnInterface == NULL ||
+        !NT_SUCCESS(Device->DxgkInterface.DxgkCbQueryVidPnInterface(
+                        hVidPn, DXGK_VIDPN_INTERFACE_VERSION_V1, &VidPnIf)))
+    {
+        return;
+    }
+
+    if (NT_SUCCESS(VidPnIf->pfnGetTopology(hVidPn, &hTopology, &TopologyIf)) &&
+        NT_SUCCESS(TopologyIf->pfnGetNumPaths(hTopology, &NumPaths)))
+    {
+        Device->CommitPathCount = (ULONG)NumPaths;
+    }
+
+    if (NumPaths != 0 &&
+        NT_SUCCESS(VidPnIf->pfnAcquireSourceModeSet(hVidPn, 0, &hSourceSet, &SourceIf)))
+    {
+        if (NT_SUCCESS(SourceIf->pfnAcquirePinnedModeInfo(hSourceSet, &Pinned)) &&
+            Pinned != NULL)
+        {
+            Device->CommitSourceWidth = Pinned->Format.Graphics.PrimSurfSize.cx;
+            Device->CommitSourceHeight = Pinned->Format.Graphics.PrimSurfSize.cy;
+            SourceIf->pfnReleaseModeInfo(hSourceSet, Pinned);
+        }
+        VidPnIf->pfnReleaseSourceModeSet(hVidPn, hSourceSet);
+    }
+
+    DPRINT1("SOFTGPU: CommitVidPn #%lu: %lu path(s), source %lux%lu\n",
+            Device->CommitCount, Device->CommitPathCount,
+            Device->CommitSourceWidth, Device->CommitSourceHeight);
+}
+
 NTSTATUS
 APIENTRY
 SoftGpuDdiCommitVidPn(
@@ -198,6 +252,8 @@ SoftGpuDdiCommitVidPn(
 
     if (CommitVidPn->AffectedVidPnSourceId != 0)
         return STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_SOURCE;
+
+    SoftGpuRecordCommit(Device, CommitVidPn->hFunctionalVidPn);
 
     /*
      * Record the default display geometry.  When the ReactOS VidPN object

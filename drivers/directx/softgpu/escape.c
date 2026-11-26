@@ -170,6 +170,22 @@ SoftGpuDdiEscape(
         Stats->DstHeight = Device->LastBltDstHeight;
         return STATUS_SUCCESS;
     }
+    if (Data->Code == SOFTGPU_ESCAPE_DISPLAY_STATE)
+    {
+        SOFTGPU_ESCAPE_DISPLAY_STATE_DATA *State = Escape->pPrivateDriverData;
+
+        if (Escape->PrivateDriverDataSize < sizeof(*State))
+            return STATUS_BUFFER_TOO_SMALL;
+        State->LateConnectMs = Device->LateConnectMs;
+        State->MonitorConnected = (unsigned long)Device->MonitorConnected;
+        State->IndicateCount = (unsigned long)Device->IndicateCount;
+        State->IndicateStatus = Device->IndicateStatus;
+        State->CommitCount = Device->CommitCount;
+        State->CommitPathCount = Device->CommitPathCount;
+        State->CommitSourceWidth = Device->CommitSourceWidth;
+        State->CommitSourceHeight = Device->CommitSourceHeight;
+        return STATUS_SUCCESS;
+    }
     if (Data->Code == SOFTGPU_ESCAPE_SEGMENT)
     {
         SOFTGPU_ESCAPE_SEGMENT_DATA *Seg = Escape->pPrivateDriverData;
