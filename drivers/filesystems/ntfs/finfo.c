@@ -77,7 +77,7 @@ NtfsGetPositionInformation(PFILE_OBJECT FileObject,
                            PFILE_POSITION_INFORMATION PositionInfo,
                            PULONG BufferLength)
 {
-    DPRINT1("NtfsGetPositionInformation(%p, %p, %p)\n", FileObject, PositionInfo, BufferLength);
+    DPRINT("NtfsGetPositionInformation(%p, %p, %p)\n", FileObject, PositionInfo, BufferLength);
 
     if (*BufferLength < sizeof(FILE_POSITION_INFORMATION))
         return STATUS_BUFFER_TOO_SMALL;
