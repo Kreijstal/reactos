@@ -1420,6 +1420,20 @@ AR9485ChipWorker(_In_ PVOID Context)
 
         if (!AR9485LabOwnsChip() && !(Adapter->Flags & AR9485_FLAG_HALTING))
         {
+            /* A disconnect first: the OID handler dropped any connect that
+             * was queued ahead of it, and one queued after it (nwifi's
+             * reconnect) must find the old link already gone. */
+            PNDIS_OID_REQUEST Disconnect = (PNDIS_OID_REQUEST)
+                InterlockedExchangePointer(
+                    (PVOID volatile *)&Adapter->PendingDisconnect, NULL);
+
+            if (Disconnect != NULL)
+            {
+                AR9485DoDisconnect(Adapter);
+                NdisMOidRequestComplete(Adapter->MiniportAdapterHandle,
+                                        Disconnect, NDIS_STATUS_SUCCESS);
+            }
+
             Command = InterlockedExchange(&Adapter->ChipCommand, AR9485_CMD_NONE);
             switch (Command)
             {
@@ -1434,9 +1448,6 @@ AR9485ChipWorker(_In_ PVOID Context)
                     break;
                 case AR9485_CMD_CONNECT:
                     AR9485DoConnect(Adapter);
-                    break;
-                case AR9485_CMD_DISCONNECT:
-                    AR9485DoDisconnect(Adapter);
                     break;
                 default:
                     break;
@@ -1531,6 +1542,17 @@ AR9485StopChipWorker(_In_ PAR9485_ADAPTER Adapter)
                           FALSE, NULL);
     ObDereferenceObject(Adapter->ChipThread);
     Adapter->ChipThread = NULL;
+
+    /* A disconnect the worker never got to: nobody else would complete it. */
+    {
+        PNDIS_OID_REQUEST Disconnect = (PNDIS_OID_REQUEST)
+            InterlockedExchangePointer(
+                (PVOID volatile *)&Adapter->PendingDisconnect, NULL);
+
+        if (Disconnect != NULL)
+            NdisMOidRequestComplete(Adapter->MiniportAdapterHandle, Disconnect,
+                                    NDIS_STATUS_REQUEST_ABORTED);
+    }
 }
 
 VOID

@@ -476,11 +476,32 @@ AR9485Set(_In_ PAR9485_ADAPTER Adapter, _In_ PNDIS_OID_REQUEST Req)
             return NDIS_STATUS_SUCCESS;
 
         case OID_DOT11_DISCONNECT_REQUEST:
+            /*
+             * Native 802.11: the disassociation indication for the current
+             * peer comes BEFORE this request completes, so the caller knows
+             * the link is gone when it gets its answer.  nwifi relies on that
+             * to disconnect before a connect: an indication that arrived
+             * later would stop the supplicant it had just armed for the next
+             * network.  The teardown runs on the chip worker, so pend the
+             * request and let the worker complete it.
+             */
             if (Adapter->ChipThread == NULL)
                 return NDIS_STATUS_FAILURE;
             Req->DATA.SET_INFORMATION.BytesRead = Length;
-            AR9485QueueCommand(Adapter, AR9485_CMD_DISCONNECT);
-            return NDIS_STATUS_SUCCESS;
+            if (InterlockedCompareExchangePointer(
+                    (PVOID volatile *)&Adapter->PendingDisconnect, Req, NULL) != NULL)
+            {
+                /* nwifi issues one at a time; a second would have nobody to
+                 * complete it. */
+                DPRINT1("AR9485: disconnect request while one is pending\n");
+                return NDIS_STATUS_MEDIA_BUSY;
+            }
+            /* A connect still waiting in the command slot was overtaken by
+             * this disconnect and must not run after it. */
+            InterlockedCompareExchange(&Adapter->ChipCommand, AR9485_CMD_NONE,
+                                       AR9485_CMD_CONNECT);
+            KeSetEvent(&Adapter->ChipWake, IO_NO_INCREMENT, FALSE);
+            return NDIS_STATUS_PENDING;
 
         case OID_DOT11_CIPHER_KEY_MAPPING_KEY:
         {
