@@ -202,6 +202,48 @@ AfdCancelAcceptExReceive(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ObDereferenceObject(FileObject);
 }
 
+/*
+ * The output buffer of an AcceptEx holds the first data block, then the local
+ * address area, then the remote one.  An area holds the address as a sockaddr
+ * (the TDI address type, which is the address family, then the address) at
+ * its start, and the sockaddr's length as a USHORT in its last two bytes,
+ * where WSPGetAcceptExSockaddrs() reads both.  An area of length 0 is left
+ * alone; any other must hold the address and 16 bytes more, as AcceptEx
+ * documents.
+ */
+#define AFD_ACCEPTEX_AREA_SPARE 16
+
+static
+ULONG
+AfdSockaddrLength(PTA_ADDRESS Address)
+{
+    return FIELD_OFFSET(TA_ADDRESS, Address) - FIELD_OFFSET(TA_ADDRESS, AddressType) +
+           Address->AddressLength;
+}
+
+static
+BOOLEAN
+AfdAcceptExAreaFits(ULONG AreaLength, ULONG SockaddrLength)
+{
+    return AreaLength == 0 || AreaLength >= SockaddrLength + AFD_ACCEPTEX_AREA_SPARE;
+}
+
+static
+VOID
+AfdWriteAcceptExAddress(PUCHAR Area, ULONG AreaLength, PTA_ADDRESS Address)
+{
+    USHORT Length = (USHORT)AfdSockaddrLength(Address);
+
+    if (!AreaLength)
+        return;
+
+    /* AfdAcceptExAreaFits() said so */
+    ASSERT(AreaLength >= Length + sizeof(Length));
+
+    RtlCopyMemory(Area, &Address->AddressType, Length);
+    RtlCopyMemory(Area + AreaLength - sizeof(Length), &Length, sizeof(Length));
+}
+
 static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt)
 {
     PFILE_OBJECT NewFileObject = (PFILE_OBJECT)Irp->Tail.Overlay.DriverContext[2];
@@ -219,6 +261,18 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     {
         ASSERT(FALSE);
         return STATUS_FILE_CLOSED;
+    }
+
+    /* Both addresses are of the listener's family.  An address area too
+     * small for one fails the AcceptEx, and the connection waits for the
+     * next accept. */
+    ULONG SockaddrLength = AfdSockaddrLength(&FCB->LocalAddress->Address[0]);
+    if (!AfdAcceptExAreaFits(AcceptInfo->LocalAddressLength, SockaddrLength) ||
+        !AfdAcceptExAreaFits(AcceptInfo->RemoteAddressLength, SockaddrLength))
+    {
+        InsertHeadList(&FCB->PendingConnections, &Qelt->ListEntry);
+        Status = STATUS_BUFFER_TOO_SMALL;
+        goto end;
     }
 
     Status = SatisfyAccept(NULL, Irp, NewFileObject, Qelt, TRUE);
@@ -275,19 +329,16 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     if (!NT_SUCCESS(Status))
         goto end;
 
-    /* Write the local address */
-    LONG LocalAddressLength = min(AcceptInfo->LocalAddressLength, Buffer->Address.Address->AddressLength);
+    /* Write the local address, then the remote one, past the data block:
+     * AfdSuperAccept() checked that the three fit in the buffer */
+    ASSERT(AfdSockaddrLength(Buffer->Address.Address) == SockaddrLength);
+    ASSERT(AfdSockaddrLength(&RemoteAddress->Address[0]) == SockaddrLength);
     BufferPtr += AcceptInfo->ReceiveDataLength;
-    RtlCopyMemory(BufferPtr, &Buffer->Address.Address->AddressType, LocalAddressLength);
-    *(USHORT *)(BufferPtr + AcceptInfo->LocalAddressLength - sizeof(USHORT)) = LocalAddressLength;
+    AfdWriteAcceptExAddress(BufferPtr, AcceptInfo->LocalAddressLength, Buffer->Address.Address);
     ExFreePool(Buffer);
 
-    /* Write the remote address*/
-    LONG RemoteAddressLength = min(AcceptInfo->RemoteAddressLength, RemoteAddress->Address[0].AddressLength);
     BufferPtr += AcceptInfo->LocalAddressLength;
-    RtlCopyMemory(BufferPtr, &RemoteAddress->Address[0].AddressType, RemoteAddressLength);
-
-    *(USHORT *)(BufferPtr + AcceptInfo->RemoteAddressLength - sizeof(USHORT)) = RemoteAddressLength;
+    AfdWriteAcceptExAddress(BufferPtr, AcceptInfo->RemoteAddressLength, &RemoteAddress->Address[0]);
 
     if (AcceptInfo->ReceiveDataLength)
     {
@@ -784,6 +835,7 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB Fcb = FileObject->FsContext;
     PAFD_SUPER_ACCEPT_INFO AcceptRequest;
+    ULONG OutputBufferLength;
     PMDL Mdl;
 
     PFILE_OBJECT NewFileObject = NULL;
@@ -792,9 +844,23 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( !SocketAcquireStateLock( Fcb ) ) return LostSocket( Irp );
 
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(*AcceptRequest))
+        return UnlockAndMaybeComplete(Fcb, STATUS_INVALID_PARAMETER, Irp, 0);
+
     if( !(AcceptRequest = LockRequest( Irp, IrpSp, FALSE, NULL )) )
         return UnlockAndMaybeComplete( Fcb, STATUS_NO_MEMORY, Irp,
                                        0 );
+
+    /* The output buffer holds the first data block and both address areas
+     * (see SatisfySuperAccept()), at the lengths the caller gives */
+    OutputBufferLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+    if (OutputBufferLength == 0 ||
+        (ULONGLONG)AcceptRequest->ReceiveDataLength +
+        AcceptRequest->LocalAddressLength +
+        AcceptRequest->RemoteAddressLength > OutputBufferLength)
+    {
+        return UnlockAndMaybeComplete(Fcb, STATUS_INVALID_PARAMETER, Irp, 0);
+    }
 
     Fcb->EventSelectDisabled &= ~AFD_EVENT_ACCEPT;
 
@@ -820,7 +886,7 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     /* Lock the output buffer (UserBuffer: METHOD_NEITHER), for the accept to
      * write the addresses and the first data to.  Whatever fails here hands
      * back what was taken. */
-    Mdl = IoAllocateMdl(Irp->UserBuffer, IrpSp->Parameters.DeviceIoControl.OutputBufferLength, FALSE, FALSE, NULL);
+    Mdl = IoAllocateMdl(Irp->UserBuffer, OutputBufferLength, FALSE, FALSE, NULL);
     if (!Mdl)
     {
         Status = STATUS_INSUFFICIENT_RESOURCES;
