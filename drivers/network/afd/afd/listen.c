@@ -546,16 +546,26 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
 
     FCB->ListenRearmFailures = 0;
 
+    /* Queue the connection, once everything its queue entry needs is
+     * allocated.  If something is not, the connection stays in FCB->Connection
+     * and WarmSocketForConnection() below closes it: the connection is lost,
+     * not leaked. */
     Qelt = ExAllocatePoolWithTag(NonPagedPool,
                                  sizeof(*Qelt),
                                  TAG_AFD_ACCEPT_QUEUE);
+    if (Qelt)
+    {
+        Status = TdiBuildNullConnectionInfo(&Qelt->ConnInfo,
+                                            FCB->LocalAddress->Address[0].AddressType);
+        if (!NT_SUCCESS(Status))
+        {
+            ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
+            Qelt = NULL;
+        }
+    }
 
-    if( !Qelt ) {
-        Status = STATUS_NO_MEMORY;
-    } else {
-        UINT AddressType =
-            FCB->LocalAddress->Address[0].AddressType;
-
+    if (Qelt)
+    {
         Qelt->Object = FCB->Connection;
         Qelt->Seq = FCB->ConnSeq++;
         /* Ownership moved to the accept queue; clear the FCB slot so the
@@ -563,17 +573,14 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
         FCB->Connection.Object = NULL;
         FCB->Connection.Handle = INVALID_HANDLE_VALUE;
         AFD_DbgPrint(MID_TRACE,("Address Type: %u (RA %p)\n",
-                                AddressType,
+                                FCB->LocalAddress->Address[0].AddressType,
                                 FCB->ListenIrp.
                                 ConnectionReturnInfo->RemoteAddress));
 
-        Status = TdiBuildNullConnectionInfo( &Qelt->ConnInfo, AddressType );
-        if( NT_SUCCESS(Status) ) {
-            TaCopyTransportAddressInPlace
-               ( Qelt->ConnInfo->RemoteAddress,
-                 FCB->ListenIrp.ConnectionReturnInfo->RemoteAddress );
-            InsertTailList( &FCB->PendingConnections, &Qelt->ListEntry );
-        }
+        TaCopyTransportAddressInPlace
+           ( Qelt->ConnInfo->RemoteAddress,
+             FCB->ListenIrp.ConnectionReturnInfo->RemoteAddress );
+        InsertTailList( &FCB->PendingConnections, &Qelt->ListEntry );
     }
 
     /* Satisfy a pre-accept request if one is available */
