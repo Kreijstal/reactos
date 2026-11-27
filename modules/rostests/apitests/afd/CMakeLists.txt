@@ -7,6 +7,7 @@ list(APPEND SOURCE
     requestlength.c
     select.c
     send.c
+    userbuffer.c
     windowsize.c)
 
 list(APPEND PCH_SKIP_SOURCE

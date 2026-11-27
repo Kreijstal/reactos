@@ -56,3 +56,18 @@ AfdGetInformation(
     _In_opt_ PBOOLEAN Boolean,
     _In_opt_ PULONG Ulong,
     _In_opt_ PLARGE_INTEGER LargeInteger);
+
+NTSTATUS
+AfdRequest(
+    _In_ HANDLE SocketHandle,
+    _In_ ULONG IoControlCode,
+    _In_reads_bytes_opt_(InputLength) PVOID Input,
+    _In_ ULONG InputLength,
+    _Out_writes_bytes_opt_(OutputLength) PVOID Output,
+    _In_ ULONG OutputLength,
+    _Out_opt_ PULONG_PTR Information);
+
+SOCKET
+LoopbackSocket(
+    _In_ int SocketType,
+    _Out_ struct sockaddr_in *Address);

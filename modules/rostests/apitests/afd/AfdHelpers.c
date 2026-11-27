@@ -20,6 +20,67 @@ typedef struct _AFD_CREATE_PACKET_NT6 {
     WCHAR                               TransportName[1];
 } AFD_CREATE_PACKET_NT6, *PAFD_CREATE_PACKET_NT6;
 
+/* A request that pends past this is cancelled, and counts as having pended */
+#define REQUEST_TIMEOUT_MS 5000
+
+/* Issues a request and waits for it.  One that pends past REQUEST_TIMEOUT_MS
+ * is cancelled, and returns STATUS_PENDING. */
+NTSTATUS
+AfdRequest(
+    _In_ HANDLE SocketHandle,
+    _In_ ULONG IoControlCode,
+    _In_reads_bytes_opt_(InputLength) PVOID Input,
+    _In_ ULONG InputLength,
+    _Out_writes_bytes_opt_(OutputLength) PVOID Output,
+    _In_ ULONG OutputLength,
+    _Out_opt_ PULONG_PTR Information)
+{
+    NTSTATUS Status;
+    IO_STATUS_BLOCK IoStatus, CancelStatus;
+    LARGE_INTEGER Timeout;
+    HANDLE Event;
+
+    Status = NtCreateEvent(&Event, EVENT_ALL_ACCESS, NULL, NotificationEvent, FALSE);
+    ok(Status == STATUS_SUCCESS, "NtCreateEvent failed with %lx\n", Status);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    IoStatus.Status = STATUS_PENDING;
+    IoStatus.Information = 0;
+    Status = NtDeviceIoControlFile(SocketHandle,
+                                   Event,
+                                   NULL,
+                                   NULL,
+                                   &IoStatus,
+                                   IoControlCode,
+                                   Input,
+                                   InputLength,
+                                   Output,
+                                   OutputLength);
+    if (Status == STATUS_PENDING)
+    {
+        Timeout.QuadPart = -(LONGLONG)REQUEST_TIMEOUT_MS * 10000;
+        if (NtWaitForSingleObject(Event, FALSE, &Timeout) == STATUS_TIMEOUT)
+        {
+            NtCancelIoFile(SocketHandle, &CancelStatus);
+            NtWaitForSingleObject(Event, FALSE, &Timeout);
+        }
+        else
+        {
+            Status = IoStatus.Status;
+        }
+    }
+
+    NtClose(Event);
+
+    /* A request that fails at once leaves the status block alone */
+    if (Information)
+        *Information = NT_ERROR(Status) ? 0 : IoStatus.Information;
+
+    return Status;
+}
+
+
 NTSTATUS
 AfdCreateSocket(
     _Out_ PHANDLE SocketHandle,
@@ -505,4 +566,36 @@ AfdGetInformation(
     }
 
     return Status;
+}
+
+/* A Winsock socket bound to a port of its own on 127.0.0.1, which Address
+ * receives.  Its receives time out after a second.  The socket is an AFD
+ * handle too. */
+SOCKET
+LoopbackSocket(
+    _In_ int SocketType,
+    _Out_ struct sockaddr_in *Address)
+{
+    SOCKET Socket;
+    int Length = sizeof(*Address);
+    DWORD Timeout = 1000;
+
+    Socket = socket(AF_INET, SocketType, SocketType == SOCK_STREAM ? IPPROTO_TCP : IPPROTO_UDP);
+    ok(Socket != INVALID_SOCKET, "socket failed with %d\n", WSAGetLastError());
+    if (Socket == INVALID_SOCKET)
+        return INVALID_SOCKET;
+
+    memset(Address, 0, sizeof(*Address));
+    Address->sin_family = AF_INET;
+    Address->sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (bind(Socket, (struct sockaddr *)Address, sizeof(*Address)) ||
+        getsockname(Socket, (struct sockaddr *)Address, &Length) ||
+        setsockopt(Socket, SOL_SOCKET, SO_RCVTIMEO, (char *)&Timeout, sizeof(Timeout)))
+    {
+        ok(0, "Setting up a socket on 127.0.0.1 failed with %d\n", WSAGetLastError());
+        closesocket(Socket);
+        return INVALID_SOCKET;
+    }
+
+    return Socket;
 }
