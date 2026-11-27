@@ -2090,8 +2090,13 @@ MsafdAccept(
                                                Socket->TdiConnectionHandle,
                                                WSH_NOTIFY_ACCEPT);
 
+        /* The accept fails: the socket it made, and the connection AFD gave
+         * that socket, go */
         if (Status)
         {
+            INT CloseErrno;
+
+            WSPCloseSocket(AcceptSocket, &CloseErrno);
             if (lpErrno) *lpErrno = Status;
             return SOCKET_ERROR;
         }
