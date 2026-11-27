@@ -13,7 +13,7 @@ HRESULT WINAPI DeriveAppContainerSidFromAppContainerName(PCWSTR Name, PSID *Sid)
     UNICODE_STRING Input, Lower = {0};
     BCRYPT_ALG_HANDLE Algorithm = NULL;
     BCRYPT_HASH_HANDLE Hash = NULL;
-    SID_IDENTIFIER_AUTHORITY Authority = SECURITY_APP_PACKAGE_AUTHORITY;
+    SID_IDENTIFIER_AUTHORITY Authority = {SECURITY_APP_PACKAGE_AUTHORITY};
     union { BYTE Bytes[32]; DWORD Words[8]; } Digest;
     PBYTE Object = NULL;
     ULONG ObjectSize, Returned;

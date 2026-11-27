@@ -170,3 +170,25 @@ PowerClearRequest(HANDLE Request, ULONG Type)
 {
     return PowerSetRequest(Request, Type);
 }
+
+#if (DLL_EXPORT_VERSION >= 0x600)
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+OpenProcessToken(IN HANDLE ProcessHandle,
+                 IN DWORD DesiredAccess,
+                 OUT PHANDLE TokenHandle)
+{
+    NTSTATUS Status;
+
+    Status = NtOpenProcessToken(ProcessHandle, DesiredAccess, TokenHandle);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+    return TRUE;
+}
+#endif

@@ -10,7 +10,7 @@ START_TEST(security)
     BOOL (WINAPI *AddLabel)(PACL, DWORD, DWORD, DWORD, PSID);
     HRESULT (WINAPI *Derive)(PCWSTR, PSID *);
     HMODULE Advapi = GetModuleHandleW(L"advapi32.dll"), Userenv = LoadLibraryW(L"userenv.dll");
-    SID_IDENTIFIER_AUTHORITY Authority = SECURITY_MANDATORY_LABEL_AUTHORITY;
+    SID_IDENTIFIER_AUTHORITY Authority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
     union { ACL Acl; BYTE Bytes[128]; } Buffer;
     PSID Label = NULL, A = NULL, B = NULL;
     PSYSTEM_MANDATORY_LABEL_ACE Ace = NULL;
