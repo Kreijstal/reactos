@@ -604,6 +604,71 @@ AfdDestroyFcb(PAFD_FCB FCB)
     ExFreePoolWithTag(FCB, TAG_AFD_FCB);
 }
 
+/*
+ * Whether the socket is done with, its FCB to be freed: its file object is
+ * gone (IRP_MJ_CLOSE), no graceful close goes on, and no request AFD sent the
+ * transport is still in flight -- the completion routine of such a request
+ * gets the FCB as its context, and a cancelled one can still complete after
+ * IRP_MJ_CLOSE.  TRUE to the one caller that is to free it.  Called with the
+ * socket lock held.
+ */
+static
+BOOLEAN
+AfdIsFcbDone(PAFD_FCB FCB)
+{
+    if (FCB->Freeing ||
+        FCB->FileObject ||
+        FCB->CloseLingering ||
+        FCB->ListenIrp.InFlightRequest ||
+        FCB->ReceiveIrp.InFlightRequest ||
+        FCB->SendIrp.InFlightRequest ||
+        FCB->ConnectIrp.InFlightRequest ||
+        FCB->DisconnectIrp.InFlightRequest)
+    {
+        return FALSE;
+    }
+
+    FCB->Freeing = TRUE;
+    return TRUE;
+}
+
+static WORKER_THREAD_ROUTINE AfdFreeFcbWorker;
+static
+VOID
+NTAPI
+AfdFreeFcbWorker(PVOID Context)
+{
+    PAFD_FCB FCB = Context;
+
+    /* Whoever queued us may still hold the socket lock (a request cancelled
+     * under it completed at once): wait for them to drop it */
+    if (SocketAcquireStateLock(FCB))
+        SocketStateUnlock(FCB);
+
+    AfdDestroyFcb(FCB);
+}
+
+/*
+ * Drops the socket lock in the completion routine of a request AFD sent the
+ * transport, once the routine has taken the request off the FCB.  The last
+ * request to complete on a socket whose file object is gone frees the FCB --
+ * from a work item: the routine may run in the IoCancelIrp() of a thread that
+ * holds the lock and goes on using the FCB.
+ */
+VOID
+AfdUnlockFromCompletion(PAFD_FCB FCB)
+{
+    BOOLEAN Done = AfdIsFcbDone(FCB);
+
+    SocketStateUnlock(FCB);
+
+    if (Done)
+    {
+        ExInitializeWorkItem(&FCB->FreeWorkItem, AfdFreeFcbWorker, FCB);
+        ExQueueWorkItem(&FCB->FreeWorkItem, DelayedWorkQueue);
+    }
+}
+
 static WORKER_THREAD_ROUTINE AfdLingeringCloseWorker;
 static
 VOID
@@ -612,12 +677,12 @@ AfdLingeringCloseWorker(PVOID Context)
 {
     PAFD_FCB FCB = Context;
     AFD_TRANSPORT Transport;
-    BOOLEAN FileClosed;
+    BOOLEAN Done;
 
     /* Whoever queued us still held the socket lock; wait for them to drop it.
-     * The send side is finished by now, so nothing else can be in flight --
-     * the receive side was cancelled when the handle closed -- but make sure,
-     * as AfdCleanupSocket() does. */
+     * The send side is finished by now.  The receive side was cancelled when
+     * the handle closed, but its completion may still be on its way; cancel
+     * whatever is left, as AfdCleanupSocket() does. */
     if (!SocketAcquireStateLock(FCB))
     {
         ASSERT(FALSE);
@@ -633,8 +698,10 @@ AfdLingeringCloseWorker(PVOID Context)
     AfdShutdownTransport(FCB, &Transport);
 
     /* The file object may outlive the handle -- a request still completing
-     * holds it -- and then IRP_MJ_CLOSE frees the FCB */
-    FileClosed = (FCB->FileObject == NULL);
+     * holds it -- and then IRP_MJ_CLOSE frees the FCB; so may a request
+     * cancelled above that has yet to complete, and then its completion
+     * routine does */
+    Done = AfdIsFcbDone(FCB);
 
     SocketStateUnlock(FCB);
 
@@ -642,7 +709,7 @@ AfdLingeringCloseWorker(PVOID Context)
 
     AFD_DbgPrint(MID_TRACE,("Lingering close of %p finished\n", FCB));
 
-    if (FileClosed)
+    if (Done)
         AfdDestroyFcb(FCB);
 }
 
@@ -803,7 +870,8 @@ AfdCleanupSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 /*
  * IRP_MJ_CLOSE: the last reference to the file object is gone; the socket was
  * shut down at IRP_MJ_CLEANUP.  A graceful close still going on keeps the FCB
- * and frees it when it is done.
+ * and frees it when it is done, and so does a request the cleanup cancelled
+ * that has yet to complete (see AfdUnlockFromCompletion()).
  */
 static NTSTATUS NTAPI
 AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
@@ -811,7 +879,7 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 {
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
-    BOOLEAN Lingering;
+    BOOLEAN Done;
 
     AFD_DbgPrint(MID_TRACE,("AfdClose(DeviceObject %p Irp %p)\n",
                             DeviceObject, Irp));
@@ -833,11 +901,14 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
      * from now on */
     FCB->FileObject = NULL;
     FileObject->FsContext = NULL;
-    Lingering = FCB->CloseLingering;
+
+    /* Unless a graceful close goes on, or a request the cleanup cancelled has
+     * yet to complete: then they free it */
+    Done = AfdIsFcbDone(FCB);
 
     SocketStateUnlock( FCB );
 
-    if (!Lingering)
+    if (Done)
         AfdDestroyFcb(FCB);
 
     Irp->IoStatus.Status = STATUS_SUCCESS;
@@ -918,7 +989,7 @@ DisconnectComplete(PDEVICE_OBJECT DeviceObject,
     if (FCB->CloseLingering)
         AfdFinishLingeringClose(FCB);
 
-    SocketStateUnlock(FCB);
+    AfdUnlockFromCompletion(FCB);
 
     return Irp->IoStatus.Status;
 }

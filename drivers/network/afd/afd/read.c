@@ -354,7 +354,7 @@ AcceptExReceiveComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
     if (FCB->SharedData.State != SOCKET_STATE_CLOSED)
         ReceiveActivity(FCB, NULL);
 
-    SocketStateUnlock(FCB);
+    AfdUnlockFromCompletion(FCB);
 
     FreeReceiveIrp(Irp);
     ObDereferenceObject(FileObject);
@@ -398,12 +398,12 @@ NTSTATUS NTAPI ReceiveComplete
             (void)IoSetCancelRoutine(NextIrp, NULL);
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
-        SocketStateUnlock( FCB );
+        AfdUnlockFromCompletion(FCB);
         FreeReceiveIrp( Irp );
         return STATUS_MORE_PROCESSING_REQUIRED;
     } else if( FCB->SharedData.State == SOCKET_STATE_LISTENING ) {
         AFD_DbgPrint(MIN_TRACE,("!!! LISTENER GOT A RECEIVE COMPLETE !!!\n"));
-        SocketStateUnlock( FCB );
+        AfdUnlockFromCompletion(FCB);
         FreeReceiveIrp( Irp );
         return STATUS_MORE_PROCESSING_REQUIRED;
     }
@@ -412,7 +412,7 @@ NTSTATUS NTAPI ReceiveComplete
 
     ReceiveActivity( FCB, NULL );
 
-    SocketStateUnlock( FCB );
+    AfdUnlockFromCompletion(FCB);
 
     FreeReceiveIrp( Irp );
     return STATUS_MORE_PROCESSING_REQUIRED;
@@ -751,19 +751,19 @@ PacketSocketRecvComplete(
                ExFreePoolWithTag(DatagramRecv, TAG_AFD_STORED_DATAGRAM);
         }
 
-        SocketStateUnlock( FCB );
+        AfdUnlockFromCompletion(FCB);
         return STATUS_FILE_CLOSED;
     }
 
     if (Irp->IoStatus.Status != STATUS_SUCCESS)
     {
-        SocketStateUnlock(FCB);
+        AfdUnlockFromCompletion(FCB);
         return Irp->IoStatus.Status;
     }
 
     if (FCB->TdiReceiveClosed)
     {
-        SocketStateUnlock(FCB);
+        AfdUnlockFromCompletion(FCB);
         return STATUS_FILE_CLOSED;
     }
 
@@ -791,7 +791,7 @@ PacketSocketRecvComplete(
             ExFreePoolWithTag(DatagramRecv, TAG_AFD_STORED_DATAGRAM);
         }
 
-        SocketStateUnlock( FCB );
+        AfdUnlockFromCompletion(FCB);
         return Status;
     } else {
         FCB->Recv.Content += DatagramRecv->Len;
@@ -857,7 +857,7 @@ PacketSocketRecvComplete(
               FCB );
     }
 
-    SocketStateUnlock( FCB );
+    AfdUnlockFromCompletion(FCB);
 
     return STATUS_SUCCESS;
 }

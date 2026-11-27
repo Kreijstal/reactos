@@ -220,7 +220,7 @@ static NTSTATUS NTAPI SendComplete
 
         RetryDisconnectCompletion(FCB);
 
-        SocketStateUnlock( FCB );
+        AfdUnlockFromCompletion(FCB);
         return STATUS_FILE_CLOSED;
     }
 
@@ -254,7 +254,7 @@ static NTSTATUS NTAPI SendComplete
 
         RetryDisconnectCompletion(FCB);
 
-        SocketStateUnlock( FCB );
+        AfdUnlockFromCompletion(FCB);
 
         return STATUS_SUCCESS;
     }
@@ -406,7 +406,7 @@ static NTSTATUS NTAPI SendComplete
         RetryDisconnectCompletion(FCB);
     }
 
-    SocketStateUnlock( FCB );
+    AfdUnlockFromCompletion(FCB);
 
     return STATUS_SUCCESS;
 }
@@ -447,7 +447,7 @@ static NTSTATUS NTAPI PacketSocketSendComplete
             UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
-        SocketStateUnlock( FCB );
+        AfdUnlockFromCompletion(FCB);
         return STATUS_FILE_CLOSED;
     }
 
@@ -474,7 +474,7 @@ static NTSTATUS NTAPI PacketSocketSendComplete
     FCB->PollStatus[FD_WRITE_BIT] = STATUS_SUCCESS;
     PollReeval(FCB->DeviceExt, FCB->FileObject);
 
-    SocketStateUnlock(FCB);
+    AfdUnlockFromCompletion(FCB);
 
     return STATUS_SUCCESS;
 }

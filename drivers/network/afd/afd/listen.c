@@ -495,7 +495,7 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
             FCB->ListenIrp.ConnectionCallInfo = NULL;
         }
 
-        SocketStateUnlock( FCB );
+        AfdUnlockFromCompletion(FCB);
         IoFreeIrp(Irp);
         return STATUS_MORE_PROCESSING_REQUIRED;
     }
@@ -539,7 +539,7 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
             }
         }
 
-        SocketStateUnlock(FCB);
+        AfdUnlockFromCompletion(FCB);
         IoFreeIrp(Irp);
         return STATUS_MORE_PROCESSING_REQUIRED;
     }
@@ -638,7 +638,7 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
     } else
         FCB->PollState &= ~AFD_EVENT_ACCEPT;
 
-    SocketStateUnlock( FCB );
+    AfdUnlockFromCompletion(FCB);
 
     /* This listen IRP is owned by AFD (IoAllocateIrp); a fresh one was posted
      * above for the next connection.  Free the completed IRP ourselves and tell

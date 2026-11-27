@@ -375,7 +375,7 @@ StreamSocketConnectSendComplete(
         FCB->OnConnectSendBufferSize = 0;
     }
     
-    SocketStateUnlock(FCB);
+    AfdUnlockFromCompletion(FCB);
     
     return STATUS_SUCCESS;
 }
@@ -427,7 +427,7 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                (void)IoSetCancelRoutine(NextIrp, NULL);
                IoCompleteRequest(NextIrp, IO_NETWORK_INCREMENT);
         }
-        SocketStateUnlock( FCB );
+        AfdUnlockFromCompletion(FCB);
         return STATUS_FILE_CLOSED;
     }
 
@@ -519,7 +519,7 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         (void)IoSetCancelRoutine(NextIrp, NULL);
         IoCompleteRequest(NextIrp, IO_NETWORK_INCREMENT);
     }
-    SocketStateUnlock( FCB );
+    AfdUnlockFromCompletion(FCB);
 
     AFD_DbgPrint(MID_TRACE,("Returning %x\n", Status));
 

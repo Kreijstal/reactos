@@ -228,6 +228,10 @@ typedef struct _AFD_FCB {
      * finishes and the file object is gone.  See AfdCleanupSocket(). */
     BOOLEAN CloseLingering;
     WORK_QUEUE_ITEM CloseWorkItem;
+    /* Nothing references the FCB any more and it is being freed: see
+     * AfdUnlockFromCompletion() */
+    BOOLEAN Freeing;
+    WORK_QUEUE_ITEM FreeWorkItem;
     /* See AfdIssueSend() */
     BOOLEAN SendIssuing, SendReissue;
     KMUTEX Mutex;
@@ -370,6 +374,7 @@ VOID OskitDumpBuffer( PCHAR Buffer, UINT Len );
 VOID DestroySocket( PAFD_FCB FCB );
 DRIVER_CANCEL AfdCancelHandler;
 VOID RetryDisconnectCompletion(PAFD_FCB FCB);
+VOID AfdUnlockFromCompletion(PAFD_FCB FCB);
 BOOLEAN CheckUnlockExtraBuffers(PAFD_FCB FCB, PIO_STACK_LOCATION IrpSp);
 
 /* read.c */
