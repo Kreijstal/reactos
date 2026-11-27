@@ -176,16 +176,17 @@ NdisCompleteQueryStatistics(
 
 
 /*
- * @unimplemented
+ * @implemented
+ *
+ * Tears down an upper (virtual) miniport NdisIMInitializeDeviceInstanceEx
+ * created: unbinds its protocols, halts it and deletes the instance.
  */
 NDIS_STATUS
 EXPORT
 NdisIMDeInitializeDeviceInstance(
     IN  NDIS_HANDLE NdisMiniportHandle)
 {
-    UNIMPLEMENTED;
-
-	return NDIS_STATUS_FAILURE;
+    return Ndis6DeInitializeImDeviceInstance((PLOGICAL_ADAPTER)NdisMiniportHandle);
 }
 
 

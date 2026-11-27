@@ -1176,6 +1176,47 @@ Ndis6CreateImInstance(
 }
 
 /* ============================================================================
+ *  Ndis6DeInitializeImDeviceInstance
+ *
+ *  The worker behind NdisIMDeInitializeDeviceInstance: undo
+ *  Ndis6InitializeImDeviceInstance the way REMOVE_DEVICE undoes a PnP start.
+ *  The protocols bound to the upper miniport unbind while it still runs, then
+ *  it is paused and halted (NdisHaltDeviceInstanceDeInitialized), and the
+ *  instance and its device object are destroyed, which frees its name for the
+ *  next NdisIMInitializeDeviceInstanceEx.
+ * ============================================================================ */
+NDIS_STATUS
+Ndis6DeInitializeImDeviceInstance(
+    _In_ PLOGICAL_ADAPTER Adapter)
+{
+    PNDIS6_ADAPTER_EXT Ext;
+
+    if (Adapter == NULL || !Adapter->IsNdis6)
+        return NDIS_STATUS_FAILURE;
+
+    Ext = NDIS6_EXT(Adapter);
+    /* Only an instance Ndis6CreateImInstance made: no bus below, the device
+     * object standing in for its own PDO. */
+    if (Ext == NULL || Ext->IsNetCx ||
+        Ext->PhysicalDeviceObject != Ext->FunctionalDeviceObject ||
+        Adapter->NdisMiniportBlock.NextDeviceObject != NULL)
+    {
+        return NDIS_STATUS_FAILURE;
+    }
+
+    Ndis6UnbindProtocolsFromAdapter(Adapter);
+
+    if (Ext->Initialized)
+    {
+        Ndis6CallMiniportHaltEx(Adapter, NdisHaltDeviceInstanceDeInitialized);
+        Ext->Initialized = FALSE;
+    }
+
+    Ndis6DestroyLogicalAdapter(Adapter);
+    return NDIS_STATUS_SUCCESS;
+}
+
+/* ============================================================================
  *  Ndis6CreateNetCxAdapter
  *
  *  NDIS side of a NetAdapterCx adapter (see ndiswdf.h). The client's

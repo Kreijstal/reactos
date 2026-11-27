@@ -349,6 +349,11 @@ Ndis6InitializeImDeviceInstance(
     _In_ PCUNICODE_STRING       DeviceName,
     _In_ NDIS_HANDLE            DeviceContext);
 
+/* NdisIMDeInitializeDeviceInstance: unbind, halt and destroy that instance. */
+NDIS_STATUS
+Ndis6DeInitializeImDeviceInstance(
+    _In_ PLOGICAL_ADAPTER       Adapter);
+
 /* A4: Pause/Restart state-machine helpers. Called around filter
  * attach/detach, HaltEx, and power transitions. Both wait on the
  * respective event if the driver returned PENDING. */
