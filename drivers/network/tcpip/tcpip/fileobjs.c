@@ -446,10 +446,7 @@ NTSTATUS FileOpenAddress(
   AddrFile->Sharers = 1;
 
   /* Set our default options */
-  AddrFile->TTL = 128;
-  AddrFile->DF = 0;
-  AddrFile->BCast = 1;
-  AddrFile->HeaderIncl = 1;
+  InitializeAddressOptions(&AddrFile->Options);
   AddrFile->ProcessId = PsGetCurrentProcessId();
 
   _SEH2_TRY {

@@ -241,10 +241,10 @@ NTSTATUS UDPSendDatagram(
     }
 
     LocalAddress = AddrFile->Address;
-    if (AddrFile->UnicastIfIndex != 0)
+    if (AddrFile->Options.UnicastIfIndex != 0)
     {
         /* IP_UNICAST_IF pins this address file to one outgoing interface */
-        PIP_INTERFACE Interface = GetInterfaceByIndex(AddrFile->UnicastIfIndex);
+        PIP_INTERFACE Interface = GetInterfaceByIndex(AddrFile->Options.UnicastIfIndex);
         if (!Interface) {
             UnlockObject(AddrFile);
             return STATUS_INVALID_PARAMETER;

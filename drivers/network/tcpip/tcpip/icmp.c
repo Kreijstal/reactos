@@ -466,7 +466,7 @@ DispEchoRequest(
     RtlZeroMemory(Irp->AssociatedIrp.SystemBuffer, OutputBufferLength);
 
     LockObject(AddrFile);
-    AddrFile->TTL = SavedTtl;
+    AddrFile->Options.TTL = SavedTtl;
     UnlockObject(AddrFile);
 
     /* A reply can arrive as soon as the request is sent */

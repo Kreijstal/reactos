@@ -130,7 +130,7 @@ VOID ICMPReply(
 
     /* This is the only data needed to generate a packet */
     FakeAddrFile.Protocol = IPPROTO_ICMP;
-    FakeAddrFile.TTL = 128;
+    FakeAddrFile.Options.TTL = 128;
 
     if (!NT_SUCCESS(BuildRawIpPacket(
         &FakeAddrFile, &NewPacket, &IPPacket->SrcAddr, 0, &Interface->Unicast, 0, IPPacket->Data, DataSize)))

@@ -75,7 +75,7 @@ NTSTATUS AddGenericHeaderIPv4(
     /* One fragment at offset 0 */
     IPHeader->FlagsFragOfs = 0;
     /* Time-to-Live */
-    IPHeader->Ttl = AddrFile->TTL;
+    IPHeader->Ttl = AddrFile->Options.TTL;
     /* Protocol */
     IPHeader->Protocol = Protocol;
     /* Checksum is 0 (for later calculation of this) */
@@ -231,10 +231,10 @@ NTSTATUS RawIPSendDatagram(
     TI_DbgPrint(MID_TRACE,("About to get route to destination\n"));
 
     LocalAddress = AddrFile->Address;
-    if (AddrFile->UnicastIfIndex != 0)
+    if (AddrFile->Options.UnicastIfIndex != 0)
     {
         /* IP_UNICAST_IF pins this address file to one outgoing interface */
-        PIP_INTERFACE Interface = GetInterfaceByIndex(AddrFile->UnicastIfIndex);
+        PIP_INTERFACE Interface = GetInterfaceByIndex(AddrFile->Options.UnicastIfIndex);
         if (!Interface) {
             UnlockObject(AddrFile);
             return STATUS_INVALID_PARAMETER;

@@ -103,7 +103,7 @@ DGDeliverData(
     {
         DataBuffer = IPPacket->Data;
     }
-    else if (AddrFile->HeaderIncl)
+    else if (AddrFile->Options.HeaderIncl)
     {
         DataBuffer = IPPacket->Header;
     }

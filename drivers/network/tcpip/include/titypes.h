@@ -107,6 +107,17 @@ typedef struct _DATAGRAM_SEND_REQUEST {
     ULONG Flags;                          /* Protocol specific flags */
 } DATAGRAM_SEND_REQUEST, *PDATAGRAM_SEND_REQUEST;
 
+/* The options of an address object (INFO_TYPE_ADDRESS_OBJECT): an address
+ * file's, or a connection's own (see CONNECTION_ENDPOINT) */
+typedef struct _ADDRESS_OPTIONS {
+    UCHAR TTL;                            /* Time to live stored in packets sent */
+    UINT DF;                              /* Don't fragment */
+    UINT BCast;                           /* Receive broadcast packets */
+    UINT HeaderIncl;                      /* Include header in RawIP packets */
+    UINT UnicastIfIndex;                  /* Interface index to send from (IP_UNICAST_IF),
+                                             host byte order, 0 means unset */
+} ADDRESS_OPTIONS, *PADDRESS_OPTIONS;
+
 /* Transport address file context structure. The FileObject->FsContext2
    field holds a pointer to this structure */
 typedef struct _ADDRESS_FILE {
@@ -119,12 +130,7 @@ typedef struct _ADDRESS_FILE {
     USHORT Protocol;                      /* Protocol number */
     USHORT Port;                          /* Network port (network byte order) */
     LONG Sharers;                         /* Number of file objects with this addr file */
-    UCHAR TTL;                            /* Time to live stored in packets sent from this address file */
-    UINT DF;                              /* Don't fragment */
-    UINT BCast;                           /* Receive broadcast packets */
-    UINT HeaderIncl;                      /* Include header in RawIP packets */
-    UINT UnicastIfIndex;                  /* Interface index to send from (IP_UNICAST_IF),
-                                             host byte order, 0 means unset */
+    ADDRESS_OPTIONS Options;              /* Its INFO_TYPE_ADDRESS_OBJECT options */
     DATAGRAM_COMPLETION_ROUTINE Complete; /* Completion routine for delete request */
     PVOID Context;                        /* Delete request context */
     DATAGRAM_SEND_ROUTINE Send;           /* Routine to send a datagram */
@@ -264,6 +270,11 @@ typedef struct _CONNECTION_ENDPOINT {
     ERESOURCE Resource;         /* The lock protecting this structure */
     PVOID ClientContext;        /* Pointer to client context information */
     PADDRESS_FILE AddressFile;  /* Associated address file object (NULL if none) */
+
+    /* The address object options set on the connection itself.  An accepted
+     * connection's address file is the listener's: what is set for the one
+     * connection is kept here. */
+    ADDRESS_OPTIONS AddressOptions;
 
     /* Requests */
     LIST_ENTRY ConnectRequest; /* Queued connect requests */

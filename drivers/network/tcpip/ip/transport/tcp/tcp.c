@@ -149,6 +149,10 @@ PCONNECTION_ENDPOINT TCPAllocateConnectionEndpoint( PVOID ClientContext )
         return NULL;
     }
 
+    /* Until they are set on it, a connection's address object options
+     * are those of a new address file */
+    InitializeAddressOptions(&Connection->AddressOptions);
+
     /* Save client context pointer */
     Connection->ClientContext = ClientContext;
 

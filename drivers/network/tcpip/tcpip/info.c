@@ -301,6 +301,9 @@ TDI_STATUS InfoTdiQueryInformationEx(
         case INFO_CLASS_PROTOCOL:
            if (ID->toi_type == INFO_TYPE_ADDRESS_OBJECT)
            {
+               /* A connection's are its own */
+               if (FileType == TDI_CONNECTION_FILE)
+                    return GetConnectionAddressInfo(ID, Request->Handle.ConnectionContext, Buffer, BufferSize);
                if ((EntityListContext = InfoGetAddressFile(Request, FileType, ID->toi_entity)))
                     return GetAddressFileInfo(ID, EntityListContext, Buffer, BufferSize);
                else
@@ -443,6 +446,9 @@ TDI_STATUS InfoTdiSetInformationEx
             {
                 case INFO_TYPE_ADDRESS_OBJECT:
                 {
+                    /* On a connection, for that connection alone */
+                    if (FileType == TDI_CONNECTION_FILE)
+                        return SetConnectionAddressInfo(ID, Request->Handle.ConnectionContext, Buffer, BufferSize);
                     if ((EntityListContext = InfoGetAddressFile(Request, FileType, ID->toi_entity)))
                         return SetAddressFileInfo(ID, EntityListContext, Buffer, BufferSize);
                     else
