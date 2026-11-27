@@ -731,7 +731,9 @@ AfdStreamSocketSuperConnect(
         FCB->OnConnectSendBufferSize = 0;
     }
 
-    if (Irp->UserBuffer)
+    /* The first data to send once connected, if there is any: an output
+     * buffer of no length holds none */
+    if (BufferSize)
     {
          FCB->OnConnectSendBufferSize = BufferSize;
          FCB->OnConnectSendBuffer = ExAllocatePoolWithTag(PagedPool,
