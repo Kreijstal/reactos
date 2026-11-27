@@ -368,6 +368,7 @@ VOID UnlockHandles( PAFD_HANDLE HandleArray, UINT HandleCount );
 PVOID LockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp, BOOLEAN Output, KPROCESSOR_MODE *LockMode, NTSTATUS *Status );
 NTSTATUS AfdCopyToCaller(PIRP Irp, PVOID Destination, const VOID *Source, SIZE_T Length);
 NTSTATUS AfdCopyFromCaller(PIRP Irp, PVOID Destination, const VOID *Source, SIZE_T Length);
+NTSTATUS AfdCaptureTransportAddress(PIRP Irp, PTRANSPORT_ADDRESS Address, PTRANSPORT_ADDRESS *Captured);
 VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp );
 PVOID GetLockedData( PIRP Irp, PIO_STACK_LOCATION IrpSp );
 BOOLEAN AfdRequestHoldsAddress(PIO_STACK_LOCATION IrpSp, PVOID Request, PTRANSPORT_ADDRESS Address);

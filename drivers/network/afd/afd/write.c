@@ -901,6 +901,7 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     PAFD_SEND_INFO_UDP SendReq;
+    PTRANSPORT_ADDRESS RemoteAddress;
     KPROCESSOR_MODE LockMode;
     BOOLEAN Convert32Bit = FALSE;
 
@@ -949,6 +950,14 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     }
 #endif
 
+    /* The remote address is not in the request: it is where the caller says,
+     * and its to give.  Our copy is what we send to. */
+    Status = AfdCaptureTransportAddress(Irp,
+                                        (PTRANSPORT_ADDRESS)SendReq->TdiConnection.RemoteAddress,
+                                        &RemoteAddress);
+    if (!NT_SUCCESS(Status))
+        return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
+
     if (FCB->SharedData.State == SOCKET_STATE_CREATED)
     {
         if (FCB->LocalAddress)
@@ -957,8 +966,7 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         }
 
         FCB->LocalAddress =
-        TaBuildNullTransportAddress( ((PTRANSPORT_ADDRESS)SendReq->TdiConnection.RemoteAddress)->
-                                      Address[0].AddressType );
+        TaBuildNullTransportAddress( RemoteAddress->Address[0].AddressType );
 
         if( FCB->LocalAddress ) {
             Status = WarmSocketForBind( FCB, AFD_SHARE_WILDCARD );
@@ -966,10 +974,16 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             if( NT_SUCCESS(Status) )
                 FCB->SharedData.State = SOCKET_STATE_BOUND;
             else
+            {
+                ExFreePoolWithTag(RemoteAddress, TAG_AFD_TRANSPORT_ADDRESS);
                 return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
+            }
         } else
+        {
+            ExFreePoolWithTag(RemoteAddress, TAG_AFD_TRANSPORT_ADDRESS);
             return UnlockAndMaybeComplete
             ( FCB, STATUS_NO_MEMORY, Irp, 0 );
+        }
     }
 
     SendReq->BufferArray = LockBuffers( SendReq->BufferArray,
@@ -979,18 +993,20 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                         Convert32Bit );
 
     if( !SendReq->BufferArray )
+    {
+        ExFreePoolWithTag(RemoteAddress, TAG_AFD_TRANSPORT_ADDRESS);
         return UnlockAndMaybeComplete( FCB, STATUS_ACCESS_VIOLATION,
                                        Irp, 0 );
+    }
 
     AFD_DbgPrint
         (MID_TRACE,("RemoteAddress #%d Type %u\n",
-                    ((PTRANSPORT_ADDRESS)SendReq->TdiConnection.RemoteAddress)->
-                    TAAddressCount,
-                    ((PTRANSPORT_ADDRESS)SendReq->TdiConnection.RemoteAddress)->
-                    Address[0].AddressType));
+                    RemoteAddress->TAAddressCount,
+                    RemoteAddress->Address[0].AddressType));
 
-    Status = TdiBuildConnectionInfo( &TargetAddress,
-                            ((PTRANSPORT_ADDRESS)SendReq->TdiConnection.RemoteAddress) );
+    Status = TdiBuildConnectionInfo( &TargetAddress, RemoteAddress );
+
+    ExFreePoolWithTag(RemoteAddress, TAG_AFD_TRANSPORT_ADDRESS);
 
     /* Check the size of the Address given ... */
 
