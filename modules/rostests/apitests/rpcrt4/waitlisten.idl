@@ -1,0 +1,16 @@
+/*
+ * PROJECT:     ReactOS API tests
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     Interface for the RpcMgmtWaitServerListen tests
+ * COPYRIGHT:   Copyright 2026 Kreijstal <rainb@tfwno.gf>
+ */
+
+[
+    uuid(5f1a7c2e-6010-4c1e-9a01-7e57da7a0601),
+    version(1.0),
+    explicit_handle
+]
+interface WaitListenTest
+{
+    int Ping([in] handle_t hBinding, [in] int Value);
+}
