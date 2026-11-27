@@ -35,7 +35,7 @@ UserShellFolders[] =
     {L"Favorites", L"Favorites", FALSE, TRUE, TRUE, FALSE},
     {L"Personal", L"Documents", FALSE, TRUE, TRUE, FALSE},
     {L"My Music", L"Music", FALSE, TRUE, TRUE, FALSE},
-    {L"My Pictures", L"Music", FALSE, TRUE, TRUE, FALSE},
+    {L"My Pictures", L"Pictures", FALSE, TRUE, TRUE, FALSE},
     {L"My Video", L"Videos", FALSE, TRUE, TRUE, FALSE},
     {L"NetHood", L"AppData\\Roaming\\Microsoft\\Windows\\Network Shortcuts", TRUE, TRUE, TRUE, FALSE},
     {L"PrintHood", L"AppData\\Roaming\\Microsoft\\Windows\\Printer Shortcuts", TRUE, TRUE, TRUE, FALSE},
