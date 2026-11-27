@@ -1755,11 +1755,20 @@ NTSTATUS DispTdiSetInformationEx(
     PTCP_REQUEST_SET_INFORMATION_EX Info;
     TDI_REQUEST Request;
     TDI_STATUS Status;
+    ULONG InputBufferLength;
 
     TI_DbgPrint(DEBUG_IRP, ("Called.\n"));
 
     TranContext = (PTRANSPORT_CONTEXT)IrpSp->FileObject->FsContext;
     Info        = (PTCP_REQUEST_SET_INFORMATION_EX)Irp->AssociatedIrp.SystemBuffer;
+
+    /* The request holds its header and as much data as it says it has */
+    InputBufferLength = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
+    if (InputBufferLength < FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer) ||
+        Info->BufferSize > InputBufferLength - FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
 
     switch ((ULONG_PTR)IrpSp->FileObject->FsContext2) {
     case TDI_TRANSPORT_ADDRESS_FILE:
