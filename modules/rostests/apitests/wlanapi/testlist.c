@@ -4,6 +4,7 @@
 
 extern void func_acmfallback(void);
 extern void func_devrestart(void);
+extern void func_notifrace(void);
 extern void func_profileedit(void);
 extern void func_profilename(void);
 extern void func_profileorder(void);
@@ -15,6 +16,7 @@ const struct test winetest_testlist[] =
 {
     { "acmfallback", func_acmfallback },
     { "devrestart", func_devrestart },
+    { "notifrace", func_notifrace },
     { "profileedit", func_profileedit },
     { "profilename", func_profilename },
     { "profileorder", func_profileorder },

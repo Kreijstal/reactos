@@ -59,16 +59,18 @@ typedef struct _WLAN_NOTIF_REG
 
 static PWLAN_NOTIF_REG   NotifListHead = NULL;
 static CRITICAL_SECTION  NotifLock;
-static LONG              NotifInit = 0;
 
-static VOID
-WlanNotifEnsureInit(VOID)
+/* DLL_PROCESS_ATTACH: before any thread can register. */
+VOID
+WlanNotifInitialize(VOID)
 {
-    if (InterlockedCompareExchange(&NotifInit, 1, 0) == 0)
-    {
-        InitializeCriticalSection(&NotifLock);
-        NotifListHead = NULL;
-    }
+    InitializeCriticalSection(&NotifLock);
+}
+
+VOID
+WlanNotifUninitialize(VOID)
+{
+    DeleteCriticalSection(&NotifLock);
 }
 
 /* Lock held by caller. */
@@ -222,8 +224,6 @@ WlanRegisterNotificationImpl(HANDLE hClientHandle,
 
     UNREFERENCED_PARAMETER(bIgnoreDuplicate);
 
-    WlanNotifEnsureInit();
-
     EnterCriticalSection(&NotifLock);
     reg = WlanNotifFind(hClientHandle);
     if (reg != NULL)
@@ -349,9 +349,6 @@ VOID
 WlanStopNotificationThread(HANDLE hClientHandle)
 {
     PWLAN_NOTIF_REG reg;
-
-    if (InterlockedCompareExchange(&NotifInit, 1, 1) == 0)
-        return;
 
     EnterCriticalSection(&NotifLock);
     reg = WlanNotifFind(hClientHandle);

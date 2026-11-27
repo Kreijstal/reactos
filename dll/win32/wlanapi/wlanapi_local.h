@@ -55,6 +55,8 @@ VOID  WINAPI WlanFreeMemory(PVOID pMemory);
 
 /* notification.c */
 DWORD WlanStartNotificationThread(HANDLE hClientHandle);
+VOID  WlanNotifInitialize(VOID);
+VOID  WlanNotifUninitialize(VOID);
 VOID  WlanStopNotificationThread(HANDLE hClientHandle);
 DWORD WlanRegisterNotificationImpl(HANDLE hClientHandle,
                                    DWORD dwNotifSource,
