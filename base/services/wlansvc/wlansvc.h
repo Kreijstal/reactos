@@ -229,6 +229,10 @@ extern LIST_ENTRY            WlanSvcInterfaceListHead;
 extern CRITICAL_SECTION      WlanSvcLock;
 extern LIST_ENTRY            WlanSvcHandleListHead;
 
+/* rpcserver.c */
+DWORD WlanSvcStartRpcServer(VOID);
+VOID WlanSvcStopRpcServer(VOID);
+
 /* acm.c */
 VOID WlanSvcAcmStart(VOID);
 VOID WlanSvcAcmStop(VOID);

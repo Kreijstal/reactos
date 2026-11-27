@@ -13,34 +13,44 @@
 
 LIST_ENTRY WlanSvcHandleListHead;
 
-DWORD WINAPI RpcThreadRoutine(LPVOID lpParameter)
+DWORD
+WlanSvcStartRpcServer(VOID)
 {
     RPC_STATUS Status;
-
-    WlanSvcInitialize();
 
     Status = RpcServerUseProtseqEpW(L"ncalrpc", 20, L"wlansvc", NULL);
     if (Status != RPC_S_OK)
     {
-        DPRINT("RpcServerUseProtseqEpW() failed (Status %lx)\n", Status);
-        return 0;
+        DPRINT1("RpcServerUseProtseqEpW() failed (Status %lx)\n", Status);
+        return Status;
     }
 
     Status = RpcServerRegisterIf(wlansvc_interface_v1_0_s_ifspec, NULL, NULL);
     if (Status != RPC_S_OK)
     {
-        DPRINT("RpcServerRegisterIf() failed (Status %lx)\n", Status);
-        return 0;
+        DPRINT1("RpcServerRegisterIf() failed (Status %lx)\n", Status);
+        return Status;
     }
 
-    Status = RpcServerListen(1, RPC_C_LISTEN_MAX_CALLS_DEFAULT, 0);
+    /* Returns once the server listens; the runtime's threads take the calls. */
+    Status = RpcServerListen(1, RPC_C_LISTEN_MAX_CALLS_DEFAULT, TRUE);
     if (Status != RPC_S_OK)
     {
-        DPRINT("RpcServerListen() failed (Status %lx)\n", Status);
+        DPRINT1("RpcServerListen() failed (Status %lx)\n", Status);
+        RpcServerUnregisterIf(wlansvc_interface_v1_0_s_ifspec, NULL, FALSE);
+        return Status;
     }
 
-    DPRINT("RpcServerListen finished\n");
-    return 0;
+    return RPC_S_OK;
+}
+
+/* Stop taking calls.  Not RpcMgmtWaitServerListen: ours also waits for every
+ * idle client connection to close, which can outlast the stop timeout. */
+VOID
+WlanSvcStopRpcServer(VOID)
+{
+    RpcMgmtStopServerListening(NULL);
+    RpcServerUnregisterIf(wlansvc_interface_v1_0_s_ifspec, NULL, FALSE);
 }
 
 /* Lock must be held by the caller. */
@@ -103,9 +113,6 @@ DWORD _RpcOpenHandle(
     LPWLANSVC_RPC_HANDLE phClientHandle)
 {
     PWLANSVCHANDLE lpWlanSvcHandle;
-
-    /* Service start is driven by the RPC thread, but a client may race it. */
-    WlanSvcInitialize();
 
     lpWlanSvcHandle = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(WLANSVCHANDLE));
     if (lpWlanSvcHandle == NULL)
