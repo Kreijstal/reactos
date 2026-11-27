@@ -184,6 +184,30 @@ PVOID LockRequest( PIRP Irp,
     return GetLockedData(Irp, IrpSp);
 }
 
+/* Copies the answer of a request to where its caller wants it, which is the
+ * caller's to give: the output of a METHOD_NEITHER request, or a field of
+ * it.  A user-mode caller's must be user memory, and may not be there. */
+NTSTATUS
+AfdCopyToCaller(PIRP Irp, PVOID Destination, const VOID *Source, SIZE_T Length)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    _SEH2_TRY
+    {
+        if (Irp->RequestorMode != KernelMode)
+            ProbeForWrite(Destination, Length, 1);
+
+        RtlCopyMemory(Destination, Source, Length);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    return Status;
+}
+
 /* Copies from a buffer of a caller in Mode, which is the caller's to give: a
  * user-mode caller's must be user memory, and may not be there */
 static

@@ -226,8 +226,10 @@ AfdGetPeerName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength >= TaLengthOfTransportAddress(FCB->RemoteAddress))
     {
-        RtlCopyMemory(Irp->UserBuffer, FCB->RemoteAddress, TaLengthOfTransportAddress(FCB->RemoteAddress));
-        Status = STATUS_SUCCESS;
+        Status = AfdCopyToCaller(Irp,
+                                 Irp->UserBuffer,
+                                 FCB->RemoteAddress,
+                                 TaLengthOfTransportAddress(FCB->RemoteAddress));
     }
     else
     {

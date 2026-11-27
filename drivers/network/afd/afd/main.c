@@ -47,6 +47,7 @@ NTSTATUS NTAPI
 AfdGetDisconnectOptions(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                         PIO_STACK_LOCATION IrpSp)
 {
+    NTSTATUS Status;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     UINT BufferSize = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
@@ -65,11 +66,12 @@ AfdGetDisconnectOptions(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if (FCB->FilledDisconnectOptions < BufferSize) BufferSize = FCB->FilledDisconnectOptions;
 
-    RtlCopyMemory(Irp->UserBuffer,
-                  FCB->DisconnectOptions,
-                  BufferSize);
+    Status = AfdCopyToCaller(Irp,
+                             Irp->UserBuffer,
+                             FCB->DisconnectOptions,
+                             BufferSize);
 
-    return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, BufferSize);
+    return UnlockAndMaybeComplete(FCB, Status, Irp, NT_SUCCESS(Status) ? BufferSize : 0);
 }
 
 NTSTATUS
@@ -160,6 +162,7 @@ NTSTATUS NTAPI
 AfdGetDisconnectData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                   PIO_STACK_LOCATION IrpSp)
 {
+    NTSTATUS Status;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     UINT BufferSize = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
@@ -179,11 +182,12 @@ AfdGetDisconnectData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (FCB->FilledDisconnectData < BufferSize)
         BufferSize = FCB->FilledDisconnectData;
 
-    RtlCopyMemory(Irp->UserBuffer,
-                  FCB->DisconnectData,
-                  BufferSize);
+    Status = AfdCopyToCaller(Irp,
+                             Irp->UserBuffer,
+                             FCB->DisconnectData,
+                             BufferSize);
 
-    return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, BufferSize);
+    return UnlockAndMaybeComplete(FCB, Status, Irp, NT_SUCCESS(Status) ? BufferSize : 0);
 }
 
 NTSTATUS
@@ -276,6 +280,7 @@ AfdGetTdiHandles(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 PIO_STACK_LOCATION IrpSp)
 {
     NTSTATUS LockStatus;
+    NTSTATUS Status;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     PULONG HandleFlags;
@@ -295,13 +300,25 @@ AfdGetTdiHandles(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (!(HandleFlags = LockRequest(Irp, IrpSp, TRUE, NULL, &LockStatus)))
         return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
+    Status = STATUS_SUCCESS;
+
     if ((*HandleFlags) & AFD_ADDRESS_HANDLE)
-        HandleData->TdiAddressHandle = FCB->AddressFile.Handle;
+    {
+        Status = AfdCopyToCaller(Irp,
+                                 &HandleData->TdiAddressHandle,
+                                 &FCB->AddressFile.Handle,
+                                 sizeof(HandleData->TdiAddressHandle));
+    }
 
-    if ((*HandleFlags) & AFD_CONNECTION_HANDLE)
-        HandleData->TdiConnectionHandle = FCB->Connection.Handle;
+    if (NT_SUCCESS(Status) && ((*HandleFlags) & AFD_CONNECTION_HANDLE))
+    {
+        Status = AfdCopyToCaller(Irp,
+                                 &HandleData->TdiConnectionHandle,
+                                 &FCB->Connection.Handle,
+                                 sizeof(HandleData->TdiConnectionHandle));
+    }
 
-    return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, 0);
+    return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
 }
 
 static NTSTATUS NTAPI

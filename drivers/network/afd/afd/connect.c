@@ -15,6 +15,7 @@ NTAPI
 AfdGetConnectOptions(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                      PIO_STACK_LOCATION IrpSp)
 {
+    NTSTATUS Status;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     UINT BufferSize = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
@@ -33,11 +34,12 @@ AfdGetConnectOptions(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if (FCB->FilledConnectOptions < BufferSize) BufferSize = FCB->FilledConnectOptions;
 
-    RtlCopyMemory(Irp->UserBuffer,
-                  FCB->ConnectOptions,
-                  BufferSize);
+    Status = AfdCopyToCaller(Irp,
+                             Irp->UserBuffer,
+                             FCB->ConnectOptions,
+                             BufferSize);
 
-    return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, BufferSize);
+    return UnlockAndMaybeComplete(FCB, Status, Irp, NT_SUCCESS(Status) ? BufferSize : 0);
 }
 
 NTSTATUS
@@ -129,6 +131,7 @@ NTAPI
 AfdGetConnectData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                   PIO_STACK_LOCATION IrpSp)
 {
+    NTSTATUS Status;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     UINT BufferSize = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
@@ -147,11 +150,12 @@ AfdGetConnectData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if (FCB->FilledConnectData < BufferSize) BufferSize = FCB->FilledConnectData;
 
-    RtlCopyMemory(Irp->UserBuffer,
-                  FCB->ConnectData,
-                  BufferSize);
+    Status = AfdCopyToCaller(Irp,
+                             Irp->UserBuffer,
+                             FCB->ConnectData,
+                             BufferSize);
 
-    return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, BufferSize);
+    return UnlockAndMaybeComplete(FCB, Status, Irp, NT_SUCCESS(Status) ? BufferSize : 0);
 }
 
 NTSTATUS
