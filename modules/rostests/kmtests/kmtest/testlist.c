@@ -77,6 +77,7 @@ KMT_TESTFUNC Test_SystemDllLayout;
 KMT_TESTFUNC Test_TcpIpIoctl;
 KMT_TESTFUNC Test_TcpIpTdi;
 KMT_TESTFUNC Test_TcpIpConnect;
+KMT_TESTFUNC Test_TcpIpMdlChain;
 
 /* tests with a leading '-' will not be listed */
 const KMT_TEST TestList[] =
@@ -150,6 +151,7 @@ const KMT_TEST TestList[] =
     { "SystemDllLayout",              Test_SystemDllLayout },
     { "TcpIpTdi",                     Test_TcpIpTdi },
     { "TcpIpConnect",                 Test_TcpIpConnect },
+    { "TcpIpMdlChain",                Test_TcpIpMdlChain },
 #ifdef _M_AMD64
     { "RtlCaptureContextUM",          Test_RtlCaptureContext },
 #endif
