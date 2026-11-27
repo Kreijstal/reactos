@@ -205,7 +205,7 @@ TestList(HANDLE Client, const GUID *Interface)
     }
 
 done:
-    HeapFree(GetProcessHeap(), 0, Order);
+    HeapFree(GetProcessHeap(), 0, (PVOID)Order);
     WlanFreeMemory(List);
 }
 
