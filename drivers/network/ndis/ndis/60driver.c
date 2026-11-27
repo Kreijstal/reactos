@@ -73,6 +73,47 @@ Ndis6DispatchHybridGeneric(
     _In_ PIRP           Irp);
 
 /* ============================================================================
+ *  The driver object's unload routine
+ *
+ *  NDIS owns DriverObject->DriverUnload for a miniport: the I/O manager calls
+ *  it once the driver's last device object is gone (IopCheckUnloadDriver),
+ *  and it hands over to the miniport's MiniportDriverUnload, which undoes
+ *  DriverEntry -- NdisMDeregisterMiniportDriver frees the block.  Without it
+ *  an NDIS 6 miniport was never unloaded: removing its last device left the
+ *  old image in memory, and enabling the device again ran that image.
+ * ============================================================================ */
+
+static VOID NTAPI
+Ndis6DriverUnload(
+    _In_ PDRIVER_OBJECT DriverObject)
+{
+    MINIPORT_UNLOAD *UnloadHandler = NULL;
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&g_Ndis6DriverListLock, &OldIrql);
+    for (Entry = g_Ndis6DriverList.Flink;
+         Entry != &g_Ndis6DriverList;
+         Entry = Entry->Flink)
+    {
+        PNDIS6_DRIVER_BLOCK Block =
+            CONTAINING_RECORD(Entry, NDIS6_DRIVER_BLOCK, ListEntry);
+
+        if (Block->DriverObject == DriverObject)
+        {
+            UnloadHandler = Block->Characteristics.UnloadHandler;
+            break;
+        }
+    }
+    KeReleaseSpinLock(&g_Ndis6DriverListLock, OldIrql);
+
+    /* The block is freed by NdisMDeregisterMiniportDriver from inside the
+     * handler: nothing of it may be touched after this call. */
+    if (UnloadHandler != NULL)
+        UnloadHandler(DriverObject);
+}
+
+/* ============================================================================
  *  NdisMRegisterMiniportDriver — the entry point e1000e (and others) call
  *  from DriverEntry to register themselves as an NDIS 6 miniport.
  * ============================================================================ */
@@ -170,6 +211,13 @@ Ndis6RegisterMiniportDriverBlock(
 
         DriverObject->DriverExtension->AddDevice         = Ndis6AddDevice;
         DriverObject->MajorFunction[IRP_MJ_PNP]          = Ndis6DispatchPnp;
+        /* A hybrid's KMDF installed its own unload, which reaches the
+         * miniport through EvtDriverUnload. */
+        if (DriverObject->DriverUnload == NULL &&
+            Block->Characteristics.UnloadHandler != NULL)
+        {
+            DriverObject->DriverUnload = Ndis6DriverUnload;
+        }
         DriverObject->MajorFunction[IRP_MJ_POWER]        = Ndis6DispatchPower;
         DriverObject->MajorFunction[IRP_MJ_SYSTEM_CONTROL] = Ndis6DispatchSystemControl;
 
