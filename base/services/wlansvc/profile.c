@@ -289,6 +289,7 @@ WlanSvcSetProfile(PWLANSVC_INTERFACE Iface,
 
         /* An overwritten profile keeps its place in the preference list:
          * the new record takes the old one's slot. */
+        WlanSvcAcmForgetAttempt(Iface, existing->Name);
         InsertTailList(&existing->ListEntry, &prof->ListEntry);
         RemoveEntryList(&existing->ListEntry);
         WlanSvcFreeProfile(existing);
@@ -376,6 +377,7 @@ WlanSvcDeleteProfile(PWLANSVC_INTERFACE Iface, LPCWSTR Name)
     if (prof == NULL)
         return ERROR_NOT_FOUND;
 
+    WlanSvcAcmForgetAttempt(Iface, prof->Name);
     RemoveEntryList(&prof->ListEntry);
     Iface->ProfileCount--;
     WlanSvcFreeProfile(prof);

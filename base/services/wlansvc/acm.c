@@ -8,8 +8,11 @@
  *
  * Like the Windows ACM, a disconnected interface with AutoConfig enabled is
  * reconnected to the first profile (in profile order) whose connectionMode
- * is auto and whose SSID the last scan saw.  An interface the client
- * disconnected through WlanDisconnect stays down until the next WlanConnect.
+ * is auto and whose SSID the last scan saw.  A profile whose connect never
+ * came up is passed over for the next one in the list, until every
+ * candidate has failed once and the walk starts again from the top.  An
+ * interface the client disconnected through WlanDisconnect stays down until
+ * the next WlanConnect.
  *
  * The work runs on its own thread: WlanSvcDoScan waits for the scan-complete
  * event the notify worker sets, so it cannot run on the notify worker.
@@ -69,13 +72,16 @@ static struct
     DWORD LastConnectResult;
     DWORD LastPassTick;
     DWORD LastConnectTick;
+    DWORD FailedAttempts;   /* profile connects that never came up */
+    DWORD ListRestarts;     /* every candidate failed: walked from the top */
 } WlanSvcAcmStats;
 
 static const PCWSTR WlanSvcAcmStatNames[] =
 {
     L"Kicks", L"Passes", L"Wanted", L"LastDecline", L"LastDeclineState",
     L"LastNwifiStatus", L"Scans", L"LastScanResult", L"Connects",
-    L"LastConnectResult", L"LastPassTick", L"LastConnectTick"
+    L"LastConnectResult", L"LastPassTick", L"LastConnectTick",
+    L"FailedAttempts", L"ListRestarts"
 };
 
 static VOID
@@ -164,9 +170,68 @@ WlanSvcAcmWantsConnect(PWLANSVC_INTERFACE Iface)
     return Decline == ACM_DECLINE_NONE;
 }
 
-/* The first auto-connect profile whose SSID is in the BSS cache. */
+/* Lock held.  The connection the interface was asked for came up. */
+VOID
+WlanSvcAcmConnectionUp(PWLANSVC_INTERFACE Iface)
+{
+    PLIST_ENTRY pe;
+
+    Iface->AttemptPending = FALSE;
+
+    /* A working connection ends the walk: after the next drop the list is
+     * tried from the top again, the preferred network first. */
+    for (pe = Iface->ProfileListHead.Flink;
+         pe != &Iface->ProfileListHead;
+         pe = pe->Flink)
+    {
+        CONTAINING_RECORD(pe, WLANSVC_PROFILE, ListEntry)->AcmFailed = FALSE;
+    }
+}
+
+/* Lock held.  ProfileName is being replaced or deleted (NULL: any): its
+ * pending attempt says nothing about the profile that comes next. */
+VOID
+WlanSvcAcmForgetAttempt(PWLANSVC_INTERFACE Iface, LPCWSTR ProfileName)
+{
+    if (Iface->AttemptPending &&
+        (ProfileName == NULL || _wcsicmp(Iface->AttemptProfile, ProfileName) == 0))
+    {
+        Iface->AttemptPending = FALSE;
+    }
+}
+
+/*
+ * Lock held, the interface is down and past the connect grace.  A profile
+ * connect still pending then never came up -- a wrong key, or an AP that
+ * would not have us -- so the walk moves past that profile.
+ */
+static VOID
+WlanSvcAcmJudgeAttempt(PWLANSVC_INTERFACE Iface)
+{
+    PWLANSVC_PROFILE prof;
+
+    if (!Iface->AttemptPending)
+        return;
+    Iface->AttemptPending = FALSE;
+
+    prof = WlanSvcFindProfile(Iface, Iface->AttemptProfile);
+    if (prof != NULL)
+    {
+        prof->AcmFailed = TRUE;
+        WlanSvcAcmStats.FailedAttempts++;
+        DPRINT1("WLANSVC: connect with '%S' never came up; trying the next profile\n",
+                prof->Name);
+    }
+}
+
+/*
+ * The first auto-connect profile whose SSID is in the BSS cache, skipping
+ * the ones that failed (SkipFailed).  *SkippedOne says whether a failed
+ * profile would otherwise have been picked.
+ */
 static PWLANSVC_PROFILE
-WlanSvcAcmPickProfile(PWLANSVC_INTERFACE Iface)
+WlanSvcAcmFindCandidate(PWLANSVC_INTERFACE Iface, BOOL SkipFailed,
+                        PBOOL SkippedOne)
 {
     PLIST_ENTRY pe, be;
 
@@ -191,11 +256,39 @@ WlanSvcAcmPickProfile(PWLANSVC_INTERFACE Iface)
                        prof->Ssid.uSSIDLength) == 0 &&
                 bss->BssType == prof->BssType)
             {
+                if (SkipFailed && prof->AcmFailed)
+                {
+                    *SkippedOne = TRUE;
+                    break;
+                }
                 return prof;
             }
         }
     }
     return NULL;
+}
+
+/* The profile to connect next, walking the preference list on failure. */
+static PWLANSVC_PROFILE
+WlanSvcAcmPickProfile(PWLANSVC_INTERFACE Iface)
+{
+    PWLANSVC_PROFILE prof;
+    PLIST_ENTRY pe;
+    BOOL skipped = FALSE;
+
+    prof = WlanSvcAcmFindCandidate(Iface, TRUE, &skipped);
+    if (prof != NULL || !skipped)
+        return prof;
+
+    /* Every network in range failed once: start over from the top. */
+    for (pe = Iface->ProfileListHead.Flink;
+         pe != &Iface->ProfileListHead;
+         pe = pe->Flink)
+    {
+        CONTAINING_RECORD(pe, WLANSVC_PROFILE, ListEntry)->AcmFailed = FALSE;
+    }
+    WlanSvcAcmStats.ListRestarts++;
+    return WlanSvcAcmFindCandidate(Iface, FALSE, &skipped);
 }
 
 /* Lock held.  WlanSvcDoScan drops it, so the interface is looked up again. */
@@ -211,6 +304,8 @@ WlanSvcAcmServiceInterface(ULONG NwifiIndex)
     iface = WlanSvcFindInterfaceByIndex(NwifiIndex);
     if (iface == NULL || !WlanSvcAcmWantsConnect(iface))
         return;
+
+    WlanSvcAcmJudgeAttempt(iface);
 
     WlanSvcAcmStats.Scans++;
     dwResult = WlanSvcDoScan(iface, NULL);

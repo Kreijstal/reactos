@@ -136,6 +136,9 @@ typedef struct _WLANSVC_PROFILE
     DWORD                   Flags;              /* WLAN_PROFILE_* */
     /* The original XML, returned verbatim by WlanGetProfile. */
     LPWSTR                  Xml;
+    /* The ACM's last connect with this profile never came up: it is passed
+     * over until every other candidate failed too (acm.c). */
+    BOOL                    AcmFailed;
 } WLANSVC_PROFILE, *PWLANSVC_PROFILE;
 
 /* One WLAN interface (one nwifi-presented dot11 adapter). */
@@ -176,6 +179,10 @@ typedef struct _WLANSVC_INTERFACE
     BOOL                  UserDisconnected;
     /* GetTickCount() of the last connect request, for the ACM's back-off. */
     DWORD                 LastConnectTick;
+    /* A profile connect that has not come up yet: AttemptProfile names it
+     * until the connection completes or the ACM finds the link down. */
+    BOOL                  AttemptPending;
+    WCHAR                 AttemptProfile[WLAN_MAX_NAME_LENGTH];
     LONG                  Rssi;
     ULONG                 LinkQuality;
 } WLANSVC_INTERFACE, *PWLANSVC_INTERFACE;
@@ -223,6 +230,8 @@ extern LIST_ENTRY            WlanSvcHandleListHead;
 VOID WlanSvcAcmStart(VOID);
 VOID WlanSvcAcmStop(VOID);
 VOID WlanSvcAcmKick(VOID);
+VOID WlanSvcAcmConnectionUp(PWLANSVC_INTERFACE Iface);
+VOID WlanSvcAcmForgetAttempt(PWLANSVC_INTERFACE Iface, LPCWSTR ProfileName);
 
 /* core.c */
 VOID WlanSvcInitialize(VOID);

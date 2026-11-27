@@ -345,12 +345,15 @@ NwifiDispatchNotification(const NWIFI_NOTIFICATION *pNotif)
             {
                 WlanSvcUpdateLinkState(iface);
                 if (pNotif->StatusCode == 0 /* NDIS_STATUS_SUCCESS */)
+                {
+                    WlanSvcAcmConnectionUp(iface);
                     WlanSvcIndicateConnection(iface,
                         wlan_notification_acm_connection_complete,
                         (iface->ConnectedProfile[0] != L'\0')
                             ? wlan_connection_mode_profile
                             : wlan_connection_mode_discovery_unsecure,
                         iface->ConnectedProfile, WLAN_REASON_CODE_SUCCESS);
+                }
                 else
                     WlanSvcIndicateConnection(iface,
                         wlan_notification_acm_connection_attempt_fail,

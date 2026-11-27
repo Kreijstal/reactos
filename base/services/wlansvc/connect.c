@@ -178,6 +178,11 @@ WlanSvcConnect(PWLANSVC_INTERFACE Iface, const PWLAN_CONNECTION_PARAMETERS pPara
     else
         ZeroMemory(&Iface->ConnectedBssid, sizeof(DOT11_MAC_ADDRESS));
 
+    /* Until it comes up, this is the attempt the ACM judges (acm.c). */
+    Iface->AttemptPending = (profileName[0] != L'\0');
+    wcsncpy(Iface->AttemptProfile, profileName, WLAN_MAX_NAME_LENGTH - 1);
+    Iface->AttemptProfile[WLAN_MAX_NAME_LENGTH - 1] = L'\0';
+
     dwResult = NwifiConnect(&req);
     if (dwResult != ERROR_SUCCESS)
     {
@@ -201,6 +206,8 @@ WlanSvcDisconnect(PWLANSVC_INTERFACE Iface)
     WlanSvcIndicateAcm(Iface, wlan_notification_acm_disconnecting);
     Iface->State = wlan_interface_state_disconnecting;
     Iface->UserDisconnected = TRUE;
+    /* Left on purpose: whatever was pending did not fail. */
+    WlanSvcAcmForgetAttempt(Iface, NULL);
 
     dwResult = NwifiDisconnect(Iface->NwifiIndex, Iface->UpperLuid,
                                &Iface->MacAddress);
