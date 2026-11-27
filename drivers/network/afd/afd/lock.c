@@ -168,6 +168,8 @@ PVOID LockRequest( PIRP Irp,
             Irp->Tail.Overlay.DriverContext[1] = NULL;
             Irp->Tail.Overlay.DriverContext[2] = NULL;
 
+            /* The array is ours, and NtReadFile() or NtWriteFile() probed
+             * the buffer for the requestor */
             if (LockMode != NULL)
                 *LockMode = KernelMode;
             break;
@@ -180,6 +182,30 @@ PVOID LockRequest( PIRP Irp,
 
     *Status = STATUS_SUCCESS;
     return GetLockedData(Irp, IrpSp);
+}
+
+/* Copies from a buffer of a caller in Mode, which is the caller's to give: a
+ * user-mode caller's must be user memory, and may not be there */
+static
+NTSTATUS
+AfdCopyIn(KPROCESSOR_MODE Mode, PVOID Destination, const VOID *Source, SIZE_T Length)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    _SEH2_TRY
+    {
+        if (Mode != KernelMode)
+            ProbeForRead(Source, Length, 1);
+
+        RtlCopyMemory(Destination, Source, Length);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    return Status;
 }
 
 /* Whether a request that ends in a transport address, as locked by
@@ -282,6 +308,7 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
     PAFD_WSABUF NewBuf;
     BOOLEAN LockFailed = FALSE;
     PAFD_MAPBUF MapBuf;
+    NTSTATUS CopyStatus;
 
     /* The count is the caller's.  One whose copy, with the address buffers,
      * would not fit in a UINT names more buffers than there is memory for. */
@@ -301,44 +328,58 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
 
         MapBuf = (PAFD_MAPBUF)(NewBuf + Count + Lock);
 
-        _SEH2_TRY {
+        /* The array, and the address length, are the caller's: a user-mode
+         * caller's must be user memory.  The count check above keeps their
+         * size in a UINT. */
 #ifdef _WIN64
-            if (Wow64Is32Bit)
+        if (Wow64Is32Bit)
+        {
+            /* Into the room of the map buffers first, which holds it */
+            PAFD_WSABUF32 Buf32 = (PAFD_WSABUF32)MapBuf;
+
+            C_ASSERT(sizeof(AFD_WSABUF32) <= sizeof(AFD_MAPBUF));
+            CopyStatus = AfdCopyIn(LockMode, Buf32, Buf, Count * sizeof(AFD_WSABUF32));
+            if (NT_SUCCESS(CopyStatus))
             {
                 for (i = 0; i < Count; i++)
                 {
-                    NewBuf[i].buf = (PVOID)(ULONG_PTR)((PAFD_WSABUF32)Buf)[i].buf;
-                    NewBuf[i].len = ((PAFD_WSABUF32)Buf)[i].len;
+                    NewBuf[i].buf = (PVOID)(ULONG_PTR)Buf32[i].buf;
+                    NewBuf[i].len = Buf32[i].len;
                 }
+                RtlZeroMemory(MapBuf, (Count + Lock) * sizeof(AFD_MAPBUF));
             }
-            else
+        }
+        else
 #endif
-            {
-                RtlCopyMemory(NewBuf, Buf, sizeof(AFD_WSABUF) * Count);
+        {
+            CopyStatus = AfdCopyIn(LockMode, NewBuf, Buf, Count * sizeof(AFD_WSABUF));
+        }
+
+        if (NT_SUCCESS(CopyStatus) && LockAddress) {
+            if (AddressBuf && AddressLen) {
+                INT AddressLength;
+
+                CopyStatus = AfdCopyIn(LockMode, &AddressLength, AddressLen, sizeof(AddressLength));
+                NewBuf[Count].buf = AddressBuf;
+                NewBuf[Count].len = AddressLength;
+                NewBuf[Count + 1].buf = (PVOID)AddressLen;
+                NewBuf[Count + 1].len = sizeof(*AddressLen);
             }
-            
-            if( LockAddress ) {
-                if (AddressBuf && AddressLen) {
-                    NewBuf[Count].buf = AddressBuf;
-                    NewBuf[Count].len = *AddressLen;
-                    NewBuf[Count + 1].buf = (PVOID)AddressLen;
-                    NewBuf[Count + 1].len = sizeof(*AddressLen);
-                }
-                Count += 2;
-            }
-        } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+            Count += 2;
+        }
+
+        if (!NT_SUCCESS(CopyStatus)) {
             AFD_DbgPrint(MIN_TRACE,("Access violation copying buffer info "
                                     "from userland (%p %p)\n",
                                     Buf, AddressLen));
             ExFreePoolWithTag(NewBuf, TAG_AFD_WSA_BUFFER);
-            _SEH2_YIELD(return NULL);
-        } _SEH2_END;
+            return NULL;
+        }
 
         for( i = 0; i < Count; i++ ) {
             PVOID UserBuf;
             ULONG UserLen;
             PVOID KernelBuf;
-            NTSTATUS CopyStatus;
 
             AFD_DbgPrint(MID_TRACE,("Locking buffer %u (%p:%u)\n",
                                     i, NewBuf[i].buf, NewBuf[i].len));
@@ -351,6 +392,28 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
                 MapBuf[i].Mdl = NULL;
                 MapBuf[i].OriginalUserBuffer = NULL;
                 continue;
+            }
+
+            /* A user-mode caller's buffer must be user memory, where we read
+             * the data to send from, or write what was received */
+            if (LockMode != KernelMode)
+            {
+                CopyStatus = STATUS_SUCCESS;
+                _SEH2_TRY {
+                    if (Write)
+                        ProbeForWrite(UserBuf, UserLen, 1);
+                    else
+                        ProbeForRead(UserBuf, UserLen, 1);
+                } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+                    CopyStatus = _SEH2_GetExceptionCode();
+                } _SEH2_END;
+
+                if (!NT_SUCCESS(CopyStatus)) {
+                    AFD_DbgPrint(MIN_TRACE,("Buffer %u (%p:%u) is not the caller's: 0x%08lx\n",
+                                            i, UserBuf, UserLen, (ULONG)CopyStatus));
+                    ExFreePoolWithTag(NewBuf, TAG_AFD_WSA_BUFFER);
+                    return NULL;
+                }
             }
 
             /* dev-nt6-1: same kernel-pool trick as LockRequest. ReactOS's
