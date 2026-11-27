@@ -72,7 +72,7 @@ WSPSocket(int AddressFamily,
     PHELPER_DATA                HelperData;
     PVOID                       HelperDLLContext;
     DWORD                       HelperEvents;
-    UNICODE_STRING              TransportName;
+    UNICODE_STRING              TransportName = { 0, 0, NULL };
     UNICODE_STRING              DevName;
     LARGE_INTEGER               GroupData;
     INT                         Status;
@@ -449,6 +449,9 @@ ok:
     /* Notify Winsock */
     Upcalls.lpWPUModifyIFSHandle(Socket->ProtocolInfo.dwCatalogEntryId, (SOCKET)Sock, lpErrno);
 
+    /* The helper allocated the transport name for us; AFD has its own copy */
+    RtlFreeUnicodeString(&TransportName);
+
     /* Return Socket Handle */
     TRACE("Success %x\n", Sock);
 
@@ -456,6 +459,8 @@ ok:
 
 error:
     TRACE("Ending %x\n", Status);
+
+    RtlFreeUnicodeString(&TransportName);
 
     if( SharedData )
     {
