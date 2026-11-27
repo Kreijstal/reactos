@@ -6,6 +6,7 @@
 
 #include <kmt_test.h>
 
+KMT_TESTFUNC Test_AfdEventSelect;
 KMT_TESTFUNC Test_CddDisplay;
 KMT_TESTFUNC Test_InbvOwnership;
 KMT_TESTFUNC Test_CmKeyName;
@@ -181,6 +182,7 @@ KMT_TESTFUNC Test_UsbStorageRead;
 
 const KMT_TEST TestList[] =
 {
+    { "AfdEventSelect",                     Test_AfdEventSelect },
     { "CddDisplay",                         Test_CddDisplay },
     { "InbvOwnership",                      Test_InbvOwnership },
     { "CmKeyName",                          Test_CmKeyName },

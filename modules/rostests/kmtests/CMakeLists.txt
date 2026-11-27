@@ -50,6 +50,7 @@ list(APPEND KMTEST_DRV_SOURCE
     kmtest_drv/testlist.c
     kmtest_drv/vm_detect.c
 
+    afd/AfdEventSelect.c
     example/Example.c
     example/KernelType.c
     hal/HalPerformanceCounter.c

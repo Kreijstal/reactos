@@ -566,7 +566,7 @@ AfdEventSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                             EventObject,
                                             EVENT_ALL_ACCESS,
                                             *ExEventObjectType,
-                                            UserMode,
+                                            Irp->RequestorMode,
                                             (PVOID *)&FCB->EventSelect,
                                             NULL );
 
@@ -627,7 +627,7 @@ AfdEnumEvents( PDEVICE_OBJECT DeviceObject, PIRP Irp,
         Status = ObReferenceObjectByHandle(EnumReq->Event,
                                            EVENT_ALL_ACCESS,
                                            *ExEventObjectType,
-                                           UserMode,
+                                           Irp->RequestorMode,
                                            (PVOID *)&UserEvent,
                                            NULL);
         if (!NT_SUCCESS(Status))
