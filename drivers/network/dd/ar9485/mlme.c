@@ -1434,7 +1434,7 @@ AR9485ChipWorker(_In_ PVOID Context)
                                         Disconnect, NDIS_STATUS_SUCCESS);
             }
 
-            Command = InterlockedExchange(&Adapter->ChipCommand, AR9485_CMD_NONE);
+            Command = AR9485CmdTake(&Adapter->ChipCommand);
             switch (Command)
             {
                 case AR9485_CMD_SCAN:
@@ -1558,6 +1558,12 @@ AR9485StopChipWorker(_In_ PAR9485_ADAPTER Adapter)
 VOID
 AR9485QueueCommand(_In_ PAR9485_ADAPTER Adapter, _In_ LONG Command)
 {
-    InterlockedExchange(&Adapter->ChipCommand, Command);
+    /* A scan still waiting in the slot will never run now; its caller is
+     * owed a SCAN_CONFIRM all the same (#431). */
+    if (AR9485CmdPost(&Adapter->ChipCommand, Command))
+    {
+        DPRINT1("AR9485: queued scan displaced by command %ld\n", Command);
+        AR9485IndicateScanConfirm(Adapter, NDIS_STATUS_MEDIA_BUSY);
+    }
     KeSetEvent(&Adapter->ChipWake, IO_NO_INCREMENT, FALSE);
 }

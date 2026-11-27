@@ -498,8 +498,7 @@ AR9485Set(_In_ PAR9485_ADAPTER Adapter, _In_ PNDIS_OID_REQUEST Req)
             }
             /* A connect still waiting in the command slot was overtaken by
              * this disconnect and must not run after it. */
-            InterlockedCompareExchange(&Adapter->ChipCommand, AR9485_CMD_NONE,
-                                       AR9485_CMD_CONNECT);
+            AR9485CmdCancelConnect(&Adapter->ChipCommand);
             KeSetEvent(&Adapter->ChipWake, IO_NO_INCREMENT, FALSE);
             return NDIS_STATUS_PENDING;
 

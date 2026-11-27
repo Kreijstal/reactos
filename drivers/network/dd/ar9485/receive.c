@@ -777,9 +777,8 @@ NDIS_STATUS AR9485StartScan(PAR9485_ADAPTER Adapter)
         return NDIS_STATUS_MEDIA_BUSY;
 
     /* The command slot holds one request: a scan must not overwrite a
-     * connect or disconnect the worker has not picked up yet. */
-    if (InterlockedCompareExchange(&Adapter->ChipCommand, AR9485_CMD_SCAN,
-                                   AR9485_CMD_NONE) != AR9485_CMD_NONE)
+     * connect the worker has not picked up yet. */
+    if (!AR9485CmdPostScan(&Adapter->ChipCommand))
         return NDIS_STATUS_MEDIA_BUSY;
     KeSetEvent(&Adapter->ChipWake, IO_NO_INCREMENT, FALSE);
     return NDIS_STATUS_SUCCESS;

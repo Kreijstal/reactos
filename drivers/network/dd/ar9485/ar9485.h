@@ -38,6 +38,7 @@
 #include "dot11frame.h"
 #include "linkmon.h"
 #include "tkiprx.h"
+#include "chipcmd.h"
 
 /* Register offsets and bit math now live under ath9k/reg.h (slice 1) and
  * are consumed via ath9k/hw_min.h's verbatim AR_SREV_* constants
@@ -86,12 +87,7 @@
 #define AR9485_KEY_PAIRWISE         4
 #define AR9485_KEY_CACHE_SIZE       128
 
-/* Background chip-worker commands.  A disconnect is not one of them: it is
- * the pended OID in PendingDisconnect, so it can never be overwritten in
- * this one-request slot. */
-#define AR9485_CMD_NONE             0
-#define AR9485_CMD_SCAN             1
-#define AR9485_CMD_CONNECT          2
+/* Background chip-worker commands: see chipcmd.h. */
 
 typedef struct _AR9485_RX_BUFFER
 {
