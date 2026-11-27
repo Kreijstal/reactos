@@ -673,6 +673,7 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
 
 NTSTATUS AfdListenSocket( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                           PIO_STACK_LOCATION IrpSp ) {
+    NTSTATUS LockStatus;
     NTSTATUS Status = STATUS_SUCCESS;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
@@ -684,8 +685,8 @@ NTSTATUS AfdListenSocket( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
 
-    if( !(ListenReq = LockRequest( Irp, IrpSp, FALSE, NULL )) )
-        return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp,
+    if( !(ListenReq = LockRequest( Irp, IrpSp, FALSE, NULL, &LockStatus )) )
+        return UnlockAndMaybeComplete( FCB, LockStatus, Irp,
                                        0 );
 
     if( FCB->SharedData.State != SOCKET_STATE_BOUND ) {
@@ -862,6 +863,7 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                     PIO_STACK_LOCATION IrpSp ) {
+    NTSTATUS LockStatus;
     NTSTATUS Status = STATUS_SUCCESS;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB Fcb = FileObject->FsContext;
@@ -878,8 +880,8 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     /* AfdDispatchRequest() checked */
     ASSERT(IrpSp->Parameters.DeviceIoControl.InputBufferLength >= sizeof(*AcceptRequest));
 
-    if( !(AcceptRequest = LockRequest( Irp, IrpSp, FALSE, NULL )) )
-        return UnlockAndMaybeComplete( Fcb, STATUS_NO_MEMORY, Irp,
+    if( !(AcceptRequest = LockRequest( Irp, IrpSp, FALSE, NULL, &LockStatus )) )
+        return UnlockAndMaybeComplete( Fcb, LockStatus, Irp,
                                        0 );
 
     /* The output buffer holds the first data block and both address areas
@@ -995,6 +997,7 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
  */
 NTSTATUS AfdDeferAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                          PIO_STACK_LOCATION IrpSp ) {
+    NTSTATUS LockStatus;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     PAFD_DEFER_ACCEPT_DATA DeferData;
@@ -1009,8 +1012,8 @@ NTSTATUS AfdDeferAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     /* AfdDispatchRequest() checked */
     ASSERT(IrpSp->Parameters.DeviceIoControl.InputBufferLength >= sizeof(*DeferData));
 
-    if( !(DeferData = LockRequest( Irp, IrpSp, FALSE, NULL )) )
-        return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
+    if( !(DeferData = LockRequest( Irp, IrpSp, FALSE, NULL, &LockStatus )) )
+        return UnlockAndMaybeComplete( FCB, LockStatus, Irp, 0 );
 
     for( PendingConn = FCB->PendingConnections.Flink;
          PendingConn != &FCB->PendingConnections;

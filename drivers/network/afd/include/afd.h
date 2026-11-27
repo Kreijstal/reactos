@@ -365,7 +365,7 @@ NTSTATUS LostSocket( PIRP Irp );
 NTSTATUS AfdReferenceSocketHandle(HANDLE Handle, PIRP Irp, PFILE_OBJECT *FileObject);
 PAFD_HANDLE LockHandles(PAFD_HANDLE HandleArray, UINT HandleCount, BOOLEAN Wow64Is32Bit, PIRP Irp);
 VOID UnlockHandles( PAFD_HANDLE HandleArray, UINT HandleCount );
-PVOID LockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp, BOOLEAN Output, KPROCESSOR_MODE *LockMode );
+PVOID LockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp, BOOLEAN Output, KPROCESSOR_MODE *LockMode, NTSTATUS *Status );
 VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp );
 PVOID GetLockedData( PIRP Irp, PIO_STACK_LOCATION IrpSp );
 BOOLEAN AfdRequestHoldsAddress(PIO_STACK_LOCATION IrpSp, PVOID Request, PTRANSPORT_ADDRESS Address);

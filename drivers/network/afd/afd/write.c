@@ -537,6 +537,7 @@ AfdConnectedSocketWriteDataUdp(PAFD_FCB FCB,
                                PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                PIO_STACK_LOCATION IrpSp, BOOLEAN Short)
 {
+    NTSTATUS LockStatus;
     PAFD_SEND_INFO_UDP SendReq;
     PTDI_CONNECTION_INFORMATION TargetAddress;
     KPROCESSOR_MODE LockMode;
@@ -552,9 +553,9 @@ AfdConnectedSocketWriteDataUdp(PAFD_FCB FCB,
                                       0);
     }
 
-    if (!(SendReq = LockRequest(Irp, IrpSp, FALSE, &LockMode)))
+    if (!(SendReq = LockRequest(Irp, IrpSp, FALSE, &LockMode, &LockStatus)))
     {
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
     }
     
 #ifdef _WIN64
@@ -688,6 +689,7 @@ AfdReleaseSendWindowOwnership(PAFD_FCB FCB, PIRP Irp)
 NTSTATUS NTAPI
 AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                             PIO_STACK_LOCATION IrpSp, BOOLEAN Short) {
+    NTSTATUS LockStatus;
     NTSTATUS Status = STATUS_SUCCESS;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
@@ -746,9 +748,9 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete(FCB, STATUS_FILE_CLOSED, Irp, 0);
     }
 
-    if( !(SendReq = LockRequest( Irp, IrpSp, FALSE, &LockMode )) )
+    if( !(SendReq = LockRequest( Irp, IrpSp, FALSE, &LockMode, &LockStatus )) )
         return UnlockAndMaybeComplete
-            ( FCB, STATUS_NO_MEMORY, Irp, 0 );
+            ( FCB, LockStatus, Irp, 0 );
             
 #ifdef _WIN64
     if ((IrpSp->MajorFunction == IRP_MJ_DEVICE_CONTROL ||
@@ -893,6 +895,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 NTSTATUS NTAPI
 AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                          PIO_STACK_LOCATION IrpSp) {
+    NTSTATUS LockStatus;
     NTSTATUS Status = STATUS_SUCCESS;
     PTDI_CONNECTION_INFORMATION TargetAddress;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
@@ -928,8 +931,8 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete(FCB, STATUS_FILE_CLOSED, Irp, 0);
     }
 
-    if( !(SendReq = LockRequest( Irp, IrpSp, FALSE, &LockMode )) )
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+    if( !(SendReq = LockRequest( Irp, IrpSp, FALSE, &LockMode, &LockStatus )) )
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
 #ifdef _WIN64
     if ((IrpSp->MajorFunction == IRP_MJ_DEVICE_CONTROL ||

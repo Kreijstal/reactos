@@ -70,16 +70,17 @@ AfdGetContextSize( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 NTSTATUS NTAPI
 AfdSetContext( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                PIO_STACK_LOCATION IrpSp ) {
+    NTSTATUS LockStatus;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
-    PVOID Context = LockRequest(Irp, IrpSp, FALSE, NULL);
+    PVOID Context = LockRequest(Irp, IrpSp, FALSE, NULL, &LockStatus);
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
 
     if (!Context)
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
     if( FCB->Context ) {
         ExFreePoolWithTag(FCB->Context, TAG_AFD_SOCKET_CONTEXT);

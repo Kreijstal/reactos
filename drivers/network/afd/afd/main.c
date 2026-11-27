@@ -77,9 +77,10 @@ NTAPI
 AfdSetDisconnectOptions(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                         PIO_STACK_LOCATION IrpSp)
 {
+    NTSTATUS LockStatus;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
-    PVOID DisconnectOptions = LockRequest(Irp, IrpSp, FALSE, NULL);
+    PVOID DisconnectOptions = LockRequest(Irp, IrpSp, FALSE, NULL, &LockStatus);
     UINT DisconnectOptionsSize = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
 
     UNREFERENCED_PARAMETER(DeviceObject);
@@ -87,7 +88,7 @@ AfdSetDisconnectOptions(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
 
     if (!DisconnectOptions)
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
     if (FCB->DisconnectOptions)
     {
@@ -118,6 +119,7 @@ NTAPI
 AfdSetDisconnectOptionsSize(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                       PIO_STACK_LOCATION IrpSp)
 {
+    NTSTATUS LockStatus;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     PUINT DisconnectOptionsSize;
@@ -133,8 +135,8 @@ AfdSetDisconnectOptionsSize(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, 0);
     }
 
-    if (!(DisconnectOptionsSize = LockRequest(Irp, IrpSp, FALSE, NULL)))
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+    if (!(DisconnectOptionsSize = LockRequest(Irp, IrpSp, FALSE, NULL, &LockStatus)))
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
     if (FCB->DisconnectOptions)
     {
@@ -189,9 +191,10 @@ NTAPI
 AfdSetDisconnectData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                      PIO_STACK_LOCATION IrpSp)
 {
+    NTSTATUS LockStatus;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
-    PVOID DisconnectData = LockRequest(Irp, IrpSp, FALSE, NULL);
+    PVOID DisconnectData = LockRequest(Irp, IrpSp, FALSE, NULL, &LockStatus);
     UINT DisconnectDataSize = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
 
     UNREFERENCED_PARAMETER(DeviceObject);
@@ -199,7 +202,7 @@ AfdSetDisconnectData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
 
     if (!DisconnectData)
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
     if (FCB->DisconnectData)
     {
@@ -230,6 +233,7 @@ NTAPI
 AfdSetDisconnectDataSize(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                       PIO_STACK_LOCATION IrpSp)
 {
+    NTSTATUS LockStatus;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     PUINT DisconnectDataSize;
@@ -245,8 +249,8 @@ AfdSetDisconnectDataSize(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, 0);
     }
 
-    if (!(DisconnectDataSize = LockRequest(Irp, IrpSp, FALSE, NULL)))
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+    if (!(DisconnectDataSize = LockRequest(Irp, IrpSp, FALSE, NULL, &LockStatus)))
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
     if (FCB->DisconnectData)
     {
@@ -271,6 +275,7 @@ static NTSTATUS NTAPI
 AfdGetTdiHandles(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 PIO_STACK_LOCATION IrpSp)
 {
+    NTSTATUS LockStatus;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     PULONG HandleFlags;
@@ -287,8 +292,8 @@ AfdGetTdiHandles(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, 0);
     }
 
-    if (!(HandleFlags = LockRequest(Irp, IrpSp, TRUE, NULL)))
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+    if (!(HandleFlags = LockRequest(Irp, IrpSp, TRUE, NULL, &LockStatus)))
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
     if ((*HandleFlags) & AFD_ADDRESS_HANDLE)
         HandleData->TdiAddressHandle = FCB->AddressFile.Handle;
@@ -1048,6 +1053,7 @@ RetryDisconnectCompletion(PAFD_FCB FCB)
 static NTSTATUS NTAPI
 AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
               PIO_STACK_LOCATION IrpSp) {
+    NTSTATUS LockStatus;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     PAFD_DISCONNECT_INFO DisReq;
@@ -1060,8 +1066,8 @@ AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
 
-    if (!(DisReq = LockRequest(Irp, IrpSp, FALSE, NULL)))
-        return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY,
+    if (!(DisReq = LockRequest(Irp, IrpSp, FALSE, NULL, &LockStatus)))
+        return UnlockAndMaybeComplete( FCB, LockStatus,
                                        Irp, 0 );
 
     /* Only AFD_DISCONNECT_ABORT resets the connection.  shutdown(SD_BOTH)

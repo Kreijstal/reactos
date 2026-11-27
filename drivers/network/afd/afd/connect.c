@@ -45,9 +45,10 @@ NTAPI
 AfdSetConnectOptions(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                      PIO_STACK_LOCATION IrpSp)
 {
+    NTSTATUS LockStatus;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
-    PVOID ConnectOptions = LockRequest(Irp, IrpSp, FALSE, NULL);
+    PVOID ConnectOptions = LockRequest(Irp, IrpSp, FALSE, NULL, &LockStatus);
     UINT ConnectOptionsSize = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
 
     UNREFERENCED_PARAMETER(DeviceObject);
@@ -55,7 +56,7 @@ AfdSetConnectOptions(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
 
     if (!ConnectOptions)
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
     if (FCB->ConnectOptions)
     {
@@ -86,6 +87,7 @@ NTAPI
 AfdSetConnectOptionsSize(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                          PIO_STACK_LOCATION IrpSp)
 {
+    NTSTATUS LockStatus;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     PUINT ConnectOptionsSize;
@@ -101,8 +103,8 @@ AfdSetConnectOptionsSize(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, 0);
     }
 
-    if (!(ConnectOptionsSize = LockRequest(Irp, IrpSp, FALSE, NULL)))
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+    if (!(ConnectOptionsSize = LockRequest(Irp, IrpSp, FALSE, NULL, &LockStatus)))
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
     if (FCB->ConnectOptions)
     {
@@ -157,9 +159,10 @@ NTAPI
 AfdSetConnectData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                   PIO_STACK_LOCATION IrpSp)
 {
+    NTSTATUS LockStatus;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
-    PVOID ConnectData = LockRequest(Irp, IrpSp, FALSE, NULL);
+    PVOID ConnectData = LockRequest(Irp, IrpSp, FALSE, NULL, &LockStatus);
     UINT ConnectDataSize = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
 
     UNREFERENCED_PARAMETER(DeviceObject);
@@ -167,7 +170,7 @@ AfdSetConnectData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
 
     if (!ConnectData)
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
     if (FCB->ConnectData)
     {
@@ -197,6 +200,7 @@ NTAPI
 AfdSetConnectDataSize(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                       PIO_STACK_LOCATION IrpSp)
 {
+    NTSTATUS LockStatus;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     PUINT ConnectDataSize;
@@ -212,8 +216,8 @@ AfdSetConnectDataSize(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, 0);
     }
 
-    if (!(ConnectDataSize = LockRequest(Irp, IrpSp, FALSE, NULL)))
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+    if (!(ConnectDataSize = LockRequest(Irp, IrpSp, FALSE, NULL, &LockStatus)))
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
     if (FCB->ConnectData)
     {
@@ -532,6 +536,7 @@ NTSTATUS
 NTAPI
 AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                        PIO_STACK_LOCATION IrpSp) {
+    NTSTATUS LockStatus;
     NTSTATUS Status = STATUS_INVALID_PARAMETER;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
@@ -541,8 +546,8 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     UNREFERENCED_PARAMETER(DeviceObject);
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
-    if( !(ConnectReq = LockRequest( Irp, IrpSp, FALSE, NULL )) )
-        return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp,
+    if( !(ConnectReq = LockRequest( Irp, IrpSp, FALSE, NULL, &LockStatus )) )
+        return UnlockAndMaybeComplete( FCB, LockStatus, Irp,
                                        0 );
 
     if (!AfdRequestHoldsAddress(IrpSp, ConnectReq, &ConnectReq->RemoteAddress))
@@ -698,6 +703,7 @@ AfdStreamSocketSuperConnect(
     PIRP Irp,
     PIO_STACK_LOCATION IrpSp)
 {
+    NTSTATUS LockStatus;
     NTSTATUS Status = STATUS_INVALID_PARAMETER;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
@@ -711,9 +717,9 @@ AfdStreamSocketSuperConnect(
     if (!SocketAcquireStateLock(FCB))
         return LostSocket(Irp);
 
-    ConnectReq = LockRequest(Irp, IrpSp, FALSE, &LockMode);
+    ConnectReq = LockRequest(Irp, IrpSp, FALSE, &LockMode, &LockStatus);
     if (!ConnectReq)
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
     if (!AfdRequestHoldsAddress(IrpSp, ConnectReq, &ConnectReq->RemoteAddress))
         return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);

@@ -13,8 +13,9 @@
 NTSTATUS NTAPI
 AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
             PIO_STACK_LOCATION IrpSp ) {
+    NTSTATUS LockStatus;
     NTSTATUS Status = STATUS_SUCCESS;
-    PAFD_INFO InfoReq = LockRequest(Irp, IrpSp, TRUE, NULL);
+    PAFD_INFO InfoReq = LockRequest(Irp, IrpSp, TRUE, NULL, &LockStatus);
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     PLIST_ENTRY CurrentEntry;
@@ -27,7 +28,7 @@ AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
 
     if (!InfoReq)
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
     _SEH2_TRY {
         switch( InfoReq->InformationClass ) {
@@ -101,8 +102,9 @@ AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 NTSTATUS NTAPI
 AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
             PIO_STACK_LOCATION IrpSp ) {
+    NTSTATUS LockStatus;
     NTSTATUS Status = STATUS_SUCCESS;
-    PAFD_INFO InfoReq = LockRequest(Irp, IrpSp, FALSE, NULL);
+    PAFD_INFO InfoReq = LockRequest(Irp, IrpSp, FALSE, NULL, &LockStatus);
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
 
@@ -111,7 +113,7 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
 
     if (!InfoReq)
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
     _SEH2_TRY {
         switch (InfoReq->InformationClass) {

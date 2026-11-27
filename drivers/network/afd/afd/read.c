@@ -522,6 +522,7 @@ SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
 NTSTATUS NTAPI
 AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                            PIO_STACK_LOCATION IrpSp, BOOLEAN Short) {
+    NTSTATUS LockStatus;
     NTSTATUS Status = STATUS_INVALID_PARAMETER;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
@@ -555,8 +556,8 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return STATUS_INVALID_PARAMETER;
     }
 
-    if( !(RecvReq = LockRequest( Irp, IrpSp, FALSE, &LockMode )) )
-        return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY,
+    if( !(RecvReq = LockRequest( Irp, IrpSp, FALSE, &LockMode, &LockStatus )) )
+        return UnlockAndMaybeComplete( FCB, LockStatus,
                                        Irp, 0 );
 
 #ifdef _WIN64
@@ -865,6 +866,7 @@ PacketSocketRecvComplete(
 NTSTATUS NTAPI
 AfdPacketSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                         PIO_STACK_LOCATION IrpSp ) {
+    NTSTATUS LockStatus;
     NTSTATUS Status = STATUS_SUCCESS;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
@@ -894,8 +896,8 @@ AfdPacketSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete(FCB, STATUS_FILE_CLOSED, Irp, 0);
     }
 
-    if( !(RecvReq = LockRequest( Irp, IrpSp, FALSE, &LockMode )) )
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+    if( !(RecvReq = LockRequest( Irp, IrpSp, FALSE, &LockMode, &LockStatus )) )
+        return UnlockAndMaybeComplete(FCB, LockStatus, Irp, 0);
 
     AFD_DbgPrint(MID_TRACE,("Recv flags %x\n", RecvReq->AfdFlags));
 

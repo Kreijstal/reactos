@@ -81,6 +81,7 @@ NTSTATUS WarmSocketForBind( PAFD_FCB FCB, ULONG ShareType ) {
 NTSTATUS NTAPI
 AfdBindSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
               PIO_STACK_LOCATION IrpSp) {
+    NTSTATUS LockStatus;
     NTSTATUS Status = STATUS_SUCCESS;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
@@ -92,8 +93,8 @@ AfdBindSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     AFD_DbgPrint(MID_TRACE,("Called\n"));
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
-    if( !(BindReq = LockRequest( Irp, IrpSp, FALSE, NULL )) )
-        return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY,
+    if( !(BindReq = LockRequest( Irp, IrpSp, FALSE, NULL, &LockStatus )) )
+        return UnlockAndMaybeComplete( FCB, LockStatus,
                                        Irp, 0 );
 
     if (!AfdRequestHoldsAddress(IrpSp, BindReq, &BindReq->Address))

@@ -34,7 +34,8 @@ PVOID GetLockedData(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 PVOID LockRequest( PIRP Irp,
                    PIO_STACK_LOCATION IrpSp,
                    BOOLEAN Output,
-                   KPROCESSOR_MODE *LockMode) {
+                   KPROCESSOR_MODE *LockMode,
+                   NTSTATUS *Status) {
     PVOID  UserBuffer;
     ULONG  BufferLength;
     PVOID  KernelBuffer;
@@ -42,11 +43,16 @@ PVOID LockRequest( PIRP Irp,
 
     ASSERT(!Irp->MdlAddress);
 
+    /* Why it failed: no memory, unless the caller's buffer was not there */
+    *Status = STATUS_NO_MEMORY;
+
     switch (IrpSp->MajorFunction)
     {
         case IRP_MJ_DEVICE_CONTROL:
         case IRP_MJ_INTERNAL_DEVICE_CONTROL:
-            ASSERT(IrpSp->Parameters.DeviceIoControl.Type3InputBuffer);
+            /* The input is the caller's to give, and may not be there.  The
+             * request's handler, or AfdDispatchRequest(), checked it has a
+             * length. */
             ASSERT(IrpSp->Parameters.DeviceIoControl.InputBufferLength);
             UserBuffer   = IrpSp->Parameters.DeviceIoControl.Type3InputBuffer;
             BufferLength = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
@@ -73,6 +79,7 @@ PVOID LockRequest( PIRP Irp,
                 AFD_DbgPrint(MIN_TRACE,("SEH-copy from user buffer failed 0x%08lx\n",
                                         (ULONG)CopyStatus));
                 ExFreePoolWithTag(KernelBuffer, TAG_AFD_DATA_BUFFER);
+                *Status = CopyStatus;
                 return NULL;
             }
 
@@ -112,8 +119,7 @@ PVOID LockRequest( PIRP Irp,
         {
             PAFD_RECV_INFO AfdInfo;
 
-            ASSERT(Irp->UserBuffer);
-
+            /* The caller's buffer: NULL for a read or write of nothing */
             UserBuffer   = Irp->UserBuffer;
             BufferLength = (IrpSp->MajorFunction == IRP_MJ_READ)
                 ? IrpSp->Parameters.Read.Length
@@ -161,6 +167,7 @@ PVOID LockRequest( PIRP Irp,
             return NULL;
     }
 
+    *Status = STATUS_SUCCESS;
     return GetLockedData(Irp, IrpSp);
 }
 

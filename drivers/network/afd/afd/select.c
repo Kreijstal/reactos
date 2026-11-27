@@ -537,10 +537,11 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 NTSTATUS NTAPI
 AfdEventSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 PIO_STACK_LOCATION IrpSp ) {
+    NTSTATUS LockStatus;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     NTSTATUS Status = STATUS_NO_MEMORY;
     PAFD_EVENT_SELECT_INFO EventSelectInfo =
-        (PAFD_EVENT_SELECT_INFO)LockRequest( Irp, IrpSp, FALSE, NULL );
+        (PAFD_EVENT_SELECT_INFO)LockRequest( Irp, IrpSp, FALSE, NULL, &LockStatus );
     PAFD_FCB FCB = FileObject->FsContext;
 
     UNREFERENCED_PARAMETER(DeviceObject);
@@ -550,7 +551,7 @@ AfdEventSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     }
 
     if ( !EventSelectInfo ) {
-         return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp,
+         return UnlockAndMaybeComplete( FCB, LockStatus, Irp,
                                         0 );
     }
     AFD_DbgPrint(MID_TRACE,("Called (Event %p Triggers %u)\n",
@@ -600,9 +601,10 @@ AfdEventSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 NTSTATUS NTAPI
 AfdEnumEvents( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                PIO_STACK_LOCATION IrpSp ) {
+    NTSTATUS LockStatus;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_ENUM_NETWORK_EVENTS_INFO EnumReq =
-        (PAFD_ENUM_NETWORK_EVENTS_INFO)LockRequest( Irp, IrpSp, TRUE, NULL );
+        (PAFD_ENUM_NETWORK_EVENTS_INFO)LockRequest( Irp, IrpSp, TRUE, NULL, &LockStatus );
     PAFD_FCB FCB = FileObject->FsContext;
     PKEVENT UserEvent;
     NTSTATUS Status;
@@ -616,7 +618,7 @@ AfdEnumEvents( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     }
 
     if ( !EnumReq ) {
-         return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
+         return UnlockAndMaybeComplete( FCB, LockStatus, Irp, 0 );
     }
 
     /* An event may optionally be provided for us to clear */
