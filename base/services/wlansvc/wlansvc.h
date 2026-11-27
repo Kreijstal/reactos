@@ -136,6 +136,9 @@ typedef struct _WLANSVC_PROFILE
     DWORD                   Flags;              /* WLAN_PROFILE_* */
     /* The original XML, returned verbatim by WlanGetProfile. */
     LPWSTR                  Xml;
+    /* Names the profile's file in the store (store.c); GUID_NULL until
+     * the profile was first written. */
+    GUID                    FileGuid;
     /* The ACM's last connect with this profile never came up: it is passed
      * over until every other candidate failed too (acm.c). */
     BOOL                    AcmFailed;
@@ -275,6 +278,12 @@ DWORD WlanSvcGetProfile(PWLANSVC_INTERFACE Iface, LPCWSTR Name,
                         BOOL bPlaintextKey, LPWSTR *ppXml, PDWORD pdwFlags);
 DWORD WlanSvcDeleteProfile(PWLANSVC_INTERFACE Iface, LPCWSTR Name);
 VOID  WlanSvcFreeProfile(PWLANSVC_PROFILE Profile);
+
+/* store.c */
+VOID  WlanSvcStoreLoadProfiles(PWLANSVC_INTERFACE Iface);
+VOID  WlanSvcStoreSaveProfile(PWLANSVC_INTERFACE Iface, PWLANSVC_PROFILE Profile);
+VOID  WlanSvcStoreDeleteProfile(PWLANSVC_INTERFACE Iface, PWLANSVC_PROFILE Profile);
+VOID  WlanSvcStoreSaveOrder(PWLANSVC_INTERFACE Iface);
 
 /* notify.c */
 VOID WlanSvcIndicateAcm(PWLANSVC_INTERFACE Iface, DWORD NotificationCode);

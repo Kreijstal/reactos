@@ -16,6 +16,7 @@ list(APPEND SOURCE
     scan.c
     connect.c
     profile.c
+    store.c
     notify.c
     nwifi_ioctl.c
     precomp.h
@@ -33,6 +34,6 @@ if(NOT MSVC)
 endif()
 
 set_module_type(wlansvc win32cui UNICODE)
-add_importlibs(wlansvc advapi32 rpcrt4 iphlpapi kernel32_vista msvcrt kernel32 ntdll)
+add_importlibs(wlansvc advapi32 crypt32 rpcrt4 iphlpapi kernel32_vista msvcrt kernel32 ntdll)
 add_pch(wlansvc precomp.h SOURCE)
 add_cd_file(TARGET wlansvc DESTINATION reactos/system32 FOR all)

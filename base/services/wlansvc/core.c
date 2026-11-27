@@ -38,9 +38,9 @@ static VOID
 WlanSvcSynthesizeGuid(PNWIFI_INTERFACE_REF Ref, GUID *pGuid)
 {
     ZeroMemory(pGuid, sizeof(*pGuid));
-    /* {00000000-0000-11EC-WIFI-<6-byte MAC>}, Data1 = nwifi index. */
-    pGuid->Data1 = Ref->InterfaceIndex;
-    pGuid->Data2 = (USHORT)(Ref->UpperLuid & 0xFFFF);
+    /* {00000000-0000-11EC-WIFI-<6-byte MAC>}.  The MAC alone, so the GUID
+     * names the same adapter on every boot: the profile store is keyed by
+     * it (store.c), and neither the nwifi index nor the LUID is stable. */
     pGuid->Data3 = 0x11EC;
     pGuid->Data4[0] = 'W';
     pGuid->Data4[1] = 'i';
@@ -154,6 +154,8 @@ WlanSvcPopulateInterfacesLocked(VOID)
             HeapFree(GetProcessHeap(), 0, iface);
             continue;
         }
+
+        WlanSvcStoreLoadProfiles(iface);
 
         InsertTailList(&WlanSvcInterfaceListHead, &iface->ListEntry);
         DPRINT("wlansvc: added interface '%S' (nwifi idx %lu)\n",
