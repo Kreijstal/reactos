@@ -82,6 +82,7 @@ SetProcessMitigationPolicy(PROCESS_MITIGATION_POLICY Policy, PVOID Buffer, SIZE_
     return SetProcessDEPPolicy(Flags);
 }
 
+#if (NTDDI_VERSION >= NTDDI_WIN10)
 BOOL
 WINAPI
 GetSystemCpuSetInformation(PSYSTEM_CPU_SET_INFORMATION Information,
@@ -106,6 +107,7 @@ GetSystemCpuSetInformation(PSYSTEM_CPU_SET_INFORMATION Information,
     }
     return TRUE;
 }
+#endif
 
 LONG
 WINAPI

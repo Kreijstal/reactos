@@ -5,6 +5,9 @@
  */
 
 #include <apitest.h>
+
+#if (DLL_EXPORT_VERSION >= 0x600)
+
 #include <winsock2.h>
 #include <ws2ipdef.h>
 #include <iphlpapi.h>
@@ -107,3 +110,12 @@ START_TEST(NotifyIpInterfaceChange)
     CloseHandle(State.Event);
     FreeLibrary(Module);
 }
+
+#else
+
+START_TEST(NotifyIpInterfaceChange)
+{
+    skip("NotifyIpInterfaceChange requires NT 6.0 or later\n");
+}
+
+#endif
