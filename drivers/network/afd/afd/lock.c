@@ -291,6 +291,27 @@ VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp )
     Irp->MdlAddress = NULL;
 }
 
+/* Gives back what LockBuffers() took for the first Locked buffers, and its
+ * copy of the array */
+static
+VOID
+AfdReleaseLockedBuffers(PAFD_WSABUF NewBuf, PAFD_MAPBUF MapBuf, UINT Locked)
+{
+    UINT i;
+
+    for (i = 0; i < Locked; i++)
+    {
+        if (MapBuf[i].Mdl)
+        {
+            MmUnlockPages(MapBuf[i].Mdl);
+            IoFreeMdl(MapBuf[i].Mdl);
+            ExFreePoolWithTag(NewBuf[i].buf, TAG_AFD_DATA_BUFFER);
+        }
+    }
+
+    ExFreePoolWithTag(NewBuf, TAG_AFD_WSA_BUFFER);
+}
+
 /* Note: We add an extra buffer if LockAddress is true.  This allows us to
  * treat the address buffer as an ordinary client buffer.  It's only used
  * for datagrams. */
@@ -411,7 +432,7 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
                 if (!NT_SUCCESS(CopyStatus)) {
                     AFD_DbgPrint(MIN_TRACE,("Buffer %u (%p:%u) is not the caller's: 0x%08lx\n",
                                             i, UserBuf, UserLen, (ULONG)CopyStatus));
-                    ExFreePoolWithTag(NewBuf, TAG_AFD_WSA_BUFFER);
+                    AfdReleaseLockedBuffers(NewBuf, MapBuf, i);
                     return NULL;
                 }
             }
@@ -426,7 +447,7 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
                                               TAG_AFD_DATA_BUFFER);
             if (KernelBuf == NULL) {
                 AFD_DbgPrint(MIN_TRACE,("Failed to allocate kernel buffer\n"));
-                ExFreePoolWithTag(NewBuf, TAG_AFD_WSA_BUFFER);
+                AfdReleaseLockedBuffers(NewBuf, MapBuf, i);
                 return NULL;
             }
 
@@ -451,7 +472,7 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
                 AFD_DbgPrint(MIN_TRACE,("SEH-copy from user failed 0x%08lx\n",
                                         (ULONG)CopyStatus));
                 ExFreePoolWithTag(KernelBuf, TAG_AFD_DATA_BUFFER);
-                ExFreePoolWithTag(NewBuf, TAG_AFD_WSA_BUFFER);
+                AfdReleaseLockedBuffers(NewBuf, MapBuf, i);
                 return NULL;
             }
 
@@ -459,7 +480,7 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
                                           FALSE, FALSE, NULL);
             if (MapBuf[i].Mdl == NULL) {
                 ExFreePoolWithTag(KernelBuf, TAG_AFD_DATA_BUFFER);
-                ExFreePoolWithTag(NewBuf, TAG_AFD_WSA_BUFFER);
+                AfdReleaseLockedBuffers(NewBuf, MapBuf, i);
                 return NULL;
             }
             /* Lock the MDL via KernelMode probe - kernel pool is always
@@ -480,7 +501,7 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
                 IoFreeMdl(MapBuf[i].Mdl);
                 MapBuf[i].Mdl = NULL;
                 ExFreePoolWithTag(KernelBuf, TAG_AFD_DATA_BUFFER);
-                ExFreePoolWithTag(NewBuf, TAG_AFD_WSA_BUFFER);
+                AfdReleaseLockedBuffers(NewBuf, MapBuf, i);
                 return NULL;
             }
 
