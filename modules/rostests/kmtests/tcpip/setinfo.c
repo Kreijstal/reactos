@@ -19,6 +19,7 @@
 /* The TTL each step sets, none of them the default */
 #define TTL_BY_ENTITY  33
 #define TTL_BY_HANDLE  77
+#define TTL_BY_CONNECTION 66
 
 static
 USHORT
@@ -415,6 +416,17 @@ TestSetInformation(void)
     Status = SetInformationEx(AddressFile, AddressEntity, INFO_TYPE_CONNECTION, TCP_SOCKET_NODELAY,
                               TRUE, FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer) + sizeof(ULONG));
     ok_eq_hex(Status, STATUS_INVALID_PARAMETER);
+
+    /* An address object option on a connection is the connection's own:
+     * its address object can be a listener's, which many connections share */
+    ok_eq_ulong(QueryTtl(ConnectionFile, OtherEntity), 128UL);
+    Status = SetInformationEx(ConnectionFile, OtherEntity, INFO_TYPE_ADDRESS_OBJECT, AO_OPTION_TTL,
+                              TTL_BY_CONNECTION, FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer) + sizeof(ULONG));
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_ulong(QueryTtl(ConnectionFile, OtherEntity), (ULONG)TTL_BY_CONNECTION);
+    ok_eq_ulong(QueryTtl(ConnectionFile, AddressEntity), (ULONG)TTL_BY_CONNECTION);
+    ok_eq_ulong(QueryTtl(ControlFile, AddressEntity), (ULONG)TTL_BY_HANDLE);
+    ok_eq_ulong(QueryTtl(ControlFile, OtherEntity), (ULONG)TTL_BY_ENTITY);
 
     /* A request holds as much data as it says it has */
     Status = SetInformationEx(ControlFile, OtherEntity, INFO_TYPE_ADDRESS_OBJECT, AO_OPTION_TTL,
