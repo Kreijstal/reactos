@@ -29,6 +29,9 @@
  *    dark for the whole session.  Like Windows, dxgkrnl asks for the
  *    children (DxgkDdiQueryChildRelations) once, at start: the descriptors
  *    list every child the miniport can have.
+ *  - SOFTGPU_ESCAPE_LID switches the lid of softgpu's lid test mode (service
+ *    value LidTest: its output is an internal panel) and
+ *    SOFTGPU_ESCAPE_LID_STATE reports what dxgkrnl did about it.
  *
  * Other adapters do not know the escapes; the tests skip there.
  */
@@ -38,6 +41,10 @@
 #include "../../../../drivers/directx/softgpu/softgpu_escape.h"
 
 #define MS(x) ((long long)(x) * 10000)
+
+/* dispmprt.h DXGK_EVENT_TYPE and wdm.h \Callback\PowerState argument */
+#define DxgkPowerStateEvent     2
+#define PO_CB_LID_SWITCH_STATE  4
 
 static D3DKMT_HANDLE g_hAdapter, g_hDevice;
 
@@ -322,6 +329,119 @@ Test_LateMonitor(void)
     }
 }
 
+static BOOL
+GetLidState(SOFTGPU_ESCAPE_LID_STATE_DATA *State)
+{
+    memset(State, 0, sizeof(*State));
+    State->Code = SOFTGPU_ESCAPE_LID_STATE;
+    return NT_SUCCESS(SoftGpuEscape(State, sizeof(*State)));
+}
+
+static BOOL
+SwitchLid(BOOL Open)
+{
+    SOFTGPU_ESCAPE_LID_DATA Lid;
+    NTSTATUS Status;
+
+    memset(&Lid, 0, sizeof(Lid));
+    Lid.Code = SOFTGPU_ESCAPE_LID;
+    Lid.Open = Open;
+    Status = SoftGpuEscape(&Lid, sizeof(Lid));
+    ok(NT_SUCCESS(Status), "lid %s: escape 0x%08lx\n", Open ? "open" : "closed", Status);
+    return NT_SUCCESS(Status);
+}
+
+static void
+TraceLidState(const char *When, const SOFTGPU_ESCAPE_LID_STATE_DATA *State)
+{
+    trace("%s: %lu notification(s), last type %lu event %lu arg %lu, sync 0x%08lx; "
+          "seq close %ld open %ld hide %ld show %ld D3 %ld D0 %ld; panel D%lu blanked %lu\n",
+          When, State->LidEventCount, State->LidEventType, State->LidEvent,
+          State->LidArgument, State->LidSyncStatus, State->LidCloseSeq, State->LidOpenSeq,
+          State->HideSeq, State->ShowSeq, State->PanelD3Seq, State->PanelD0Seq,
+          State->PanelPowerState - 1, State->PanelBlanked);
+}
+
+/*
+ * The lid of a laptop closes and opens again.  dxgkrnl tells the miniport
+ * (DxgkDdiNotifyAcpiEvent(DxgkPowerStateEvent, PO_CB_LID_SWITCH_STATE)) at
+ * PASSIVE_LEVEL; softgpu then blanks its panel from DISPATCH_LEVEL through
+ * DxgkCbSynchronizeExecution, which the WDK allows there.  As Windows turns
+ * the display off while the lid is closed, the internal panel's source
+ * stops scanning out and the panel goes to D3; when the lid opens, the
+ * panel goes back to D0 and then its source scans out again.  Before that,
+ * the ASUS X550DP's panel stayed blanked after the lid reopened.
+ */
+static void
+Test_Lid(void)
+{
+    SOFTGPU_ESCAPE_LID_STATE_DATA State;
+    ULONG Count;
+    int i;
+
+    if (!GetLidState(&State))
+    {
+        ok(0, "lid state escape failed\n");
+        return;
+    }
+    if (!State.LidTest)
+    {
+        skip("softgpu's lid test mode is off (LidTest)\n");
+        return;
+    }
+
+    /* The lid closes.  dxgkrnl tells the miniport from a work item. */
+    Count = State.LidEventCount;
+    if (!SwitchLid(FALSE))
+        return;
+    for (i = 0; i < 50; i++)
+    {
+        Sleep(100);
+        if (GetLidState(&State) && State.LidEventCount != Count &&
+            State.PanelD3Seq > State.LidCloseSeq)
+            break;
+    }
+    TraceLidState("lid closed", &State);
+    ok(State.LidEventCount == Count + 1, "%lu lid notifications, expected 1\n",
+       State.LidEventCount - Count);
+    ok(State.LidEventType == DxgkPowerStateEvent && State.LidEvent == PO_CB_LID_SWITCH_STATE &&
+       State.LidArgument == 0,
+       "lid closed notified as type %lu event %lu argument %lu\n",
+       State.LidEventType, State.LidEvent, State.LidArgument);
+    ok(State.LidSyncStatus == STATUS_SUCCESS,
+       "DxgkCbSynchronizeExecution at DISPATCH_LEVEL returned 0x%08lx\n", State.LidSyncStatus);
+    ok(State.HideSeq > State.LidCloseSeq, "the panel's source was not hidden\n");
+    ok(State.PanelD3Seq > State.HideSeq, "the panel was not powered down after its source "
+       "was hidden (hide %ld, D3 %ld)\n", State.HideSeq, State.PanelD3Seq);
+    ok(State.PanelPowerState == PowerDeviceD3, "the panel is D%lu with the lid closed\n",
+       State.PanelPowerState - 1);
+
+    /* The lid opens. */
+    Count = State.LidEventCount;
+    if (!SwitchLid(TRUE))
+        return;
+    for (i = 0; i < 50; i++)
+    {
+        Sleep(100);
+        if (GetLidState(&State) && State.LidEventCount != Count &&
+            State.ShowSeq > State.PanelD0Seq && State.PanelD0Seq > State.LidOpenSeq)
+            break;
+    }
+    TraceLidState("lid open", &State);
+    ok(State.LidEventCount == Count + 1, "%lu lid notifications, expected 1\n",
+       State.LidEventCount - Count);
+    ok(State.LidEventType == DxgkPowerStateEvent && State.LidEvent == PO_CB_LID_SWITCH_STATE &&
+       State.LidArgument == 1,
+       "lid open notified as type %lu event %lu argument %lu\n",
+       State.LidEventType, State.LidEvent, State.LidArgument);
+    ok(State.PanelD0Seq > State.LidOpenSeq, "the panel was not powered up after the lid opened\n");
+    ok(State.ShowSeq > State.PanelD0Seq, "the panel's source was not shown after the panel "
+       "was powered up (D0 %ld, show %ld)\n", State.PanelD0Seq, State.ShowSeq);
+    ok(State.PanelPowerState == PowerDeviceD0, "the panel is D%lu with the lid open\n",
+       State.PanelPowerState - 1);
+    ok(!State.PanelBlanked, "the panel stays blanked after the lid opened\n");
+}
+
 /* The kernel adapter behind the primary display (D3DKMTOpenAdapterFromHdc
  * reaches dxgkrnl; the GDI display name may be opened in user mode only). */
 static D3DKMT_HANDLE
@@ -362,6 +482,7 @@ START_TEST(softgpu)
     else
     {
         Test_LateMonitor();
+        Test_Lid();
         Test_SegmentSize();
         Test_DirtyRectPresent();
         Test_TimedOperation();
