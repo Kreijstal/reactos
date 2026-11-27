@@ -427,7 +427,7 @@ SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
     PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation( Irp );
     PAFD_RECV_INFO RecvReq =
     GetLockedData(Irp, IrpSp);
-    UINT BytesToCopy = 0, BytesAvailable = DatagramRecv->Len, AddrLen = 0;
+    UINT BytesToCopy = 0, BytesAvailable = DatagramRecv->Len, AddrLen = 0, i;
     PAFD_MAPBUF Map, AddressMap;
     BOOLEAN ExtraBuffers = CheckUnlockExtraBuffers(FCB, IrpSp);
 
@@ -476,32 +476,35 @@ SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
         AddressMap[1].BytesWritten = sizeof(INT);
     }
 
-    /* The datagram goes to the first buffer, which a receive of no buffers
-     * does not have */
+    /* The datagram is scattered across the caller's buffers in their order,
+     * as much of it as they hold; a receive of no buffers holds none of it */
     *TotalBytesCopied = 0;
-    if (RecvReq->BufferCount && Map[0].Mdl) {
-        BytesToCopy = MIN( RecvReq->BufferArray[0].len, BytesAvailable );
+    for (i = 0; i < RecvReq->BufferCount && BytesAvailable; i++)
+    {
+        if (!Map[i].Mdl)
+            continue;
+
+        BytesToCopy = MIN( RecvReq->BufferArray[i].len, BytesAvailable );
 
         AFD_DbgPrint(MID_TRACE,("BytesToCopy: %u len %u\n", BytesToCopy,
-                                RecvReq->BufferArray[0].len));
+                                RecvReq->BufferArray[i].len));
 
-        AFD_DbgPrint(MID_TRACE,("Mapping data buffer pages\n"));
+        Map[i].BufferAddress = MmMapLockedPages( Map[i].Mdl, KernelMode );
 
-        Map[0].BufferAddress = MmMapLockedPages( Map[0].Mdl, KernelMode );
-
-        AFD_DbgPrint(MID_TRACE,("Buffer %d: %p:%u\n",
-                                0,
-                                Map[0].BufferAddress,
+        AFD_DbgPrint(MID_TRACE,("Buffer %u: %p:%u\n",
+                                i,
+                                Map[i].BufferAddress,
                                 BytesToCopy));
 
-        RtlCopyMemory( Map[0].BufferAddress,
-                      DatagramRecv->Buffer,
+        RtlCopyMemory( Map[i].BufferAddress,
+                      DatagramRecv->Buffer + *TotalBytesCopied,
                       BytesToCopy );
 
-        MmUnmapLockedPages( Map[0].BufferAddress, Map[0].Mdl );
-        Map[0].BytesWritten = BytesToCopy;
+        MmUnmapLockedPages( Map[i].BufferAddress, Map[i].Mdl );
+        Map[i].BytesWritten = BytesToCopy;
 
-        *TotalBytesCopied = BytesToCopy;
+        *TotalBytesCopied += BytesToCopy;
+        BytesAvailable -= BytesToCopy;
     }
 
     if (*TotalBytesCopied == DatagramRecv->Len)
