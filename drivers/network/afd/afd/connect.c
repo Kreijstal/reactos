@@ -753,7 +753,15 @@ AfdStreamSocketSuperConnect(
          if (!FCB->OnConnectSendBuffer)
              return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
 
-         RtlCopyMemory(FCB->OnConnectSendBuffer, Irp->UserBuffer, BufferSize);
+         /* From the output, which is the caller's to give */
+         Status = AfdCopyFromCaller(Irp, FCB->OnConnectSendBuffer, Irp->UserBuffer, BufferSize);
+         if (!NT_SUCCESS(Status))
+         {
+             ExFreePoolWithTag(FCB->OnConnectSendBuffer, TAG_AFD_SUPER_CONNECT_BUFFER);
+             FCB->OnConnectSendBuffer = NULL;
+             FCB->OnConnectSendBufferSize = 0;
+             return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
+         }
     }
 
     if (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)

@@ -232,6 +232,14 @@ AfdCopyIn(KPROCESSOR_MODE Mode, PVOID Destination, const VOID *Source, SIZE_T Le
     return Status;
 }
 
+/* Copies what a request's caller passed besides its input, which is the
+ * caller's to give, as AfdCopyToCaller() copies the answer back */
+NTSTATUS
+AfdCopyFromCaller(PIRP Irp, PVOID Destination, const VOID *Source, SIZE_T Length)
+{
+    return AfdCopyIn(Irp->RequestorMode, Destination, Source, Length);
+}
+
 /* Whether a request that ends in a transport address, as locked by
  * LockRequest(), holds the whole of its first address: TaCopyTransportAddress()
  * copies as much.  AfdDispatchRequest() checked that the request holds the
