@@ -481,11 +481,20 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
             UserBuf = NewBuf[i].buf;
             UserLen = NewBuf[i].len;
 
-            if( !UserBuf || !UserLen ) {
+            /* An empty buffer is nothing to lock, wherever it is */
+            if( !UserLen ) {
                 MapBuf[i].BufferAddress = NULL;
                 MapBuf[i].Mdl = NULL;
                 MapBuf[i].OriginalUserBuffer = NULL;
                 continue;
+            }
+
+            /* One at NULL that is not is no memory of the caller's */
+            if (!UserBuf) {
+                AFD_DbgPrint(MIN_TRACE,("Buffer %u (NULL:%u) is not the caller's\n",
+                                        i, UserLen));
+                AfdReleaseLockedBuffers(NewBuf, MapBuf, i);
+                return NULL;
             }
 
             /* A user-mode caller's buffer must be user memory, where we read
