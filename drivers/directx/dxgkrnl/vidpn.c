@@ -1053,6 +1053,7 @@ DxgkVidPnRefreshTopology(
     New = (PDXGKP_VIDPN)hNew;
 
     /* Both are built from the same child descriptors. */
+    ASSERT(New->NumSources == Cur->NumSources && New->NumTargets == Cur->NumTargets);
     if (New->NumSources != Cur->NumSources || New->NumTargets != Cur->NumTargets)
     {
         DXGKRNL_WARN("DxgkVidPnRefreshTopology: %lu/%lu sources/targets, was %lu/%lu\n",

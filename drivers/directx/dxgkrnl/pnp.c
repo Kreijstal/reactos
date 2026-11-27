@@ -240,8 +240,8 @@ DxgkpDeleteChildPdo(
  * IRP_MN_QUERY_DEVICE_RELATIONS(BusRelations) to the GPU FDO.
  *
  * This function:
- *   1. Calls DxgkDdiQueryChildRelations on the miniport to get the
- *      child device descriptor array.
+ *   1. Takes the child descriptors the miniport reported at start
+ *      (DxgkpQueryChildDescriptors).
  *   2. For each child device reported (TypeVideoOutput or TypeOther),
  *      creates a PDO if one does not already exist for that ChildUid.
  *   3. Builds a DEVICE_RELATIONS struct referencing all current child
@@ -374,10 +374,22 @@ DxgkpQueryBusRelations(
         return STATUS_SUCCESS;
     }
 
-    Status = DxgkpQueryChildDescriptors(Adapter);
-    if (!NT_SUCCESS(Status))
-        return Status;
+    /*
+     * Like Windows, ask the miniport for its children once, at start: the
+     * descriptors list every child it can ever have, so they stay valid
+     * while the adapter runs and the VidPN code reads them without a lock.
+     * Asking again here freed the array while a topology update read it
+     * (DxgkCbIndicateChildStatus invalidates the bus relations): AMD's
+     * eDP panel connection was then dropped and the panel stayed dark.
+     */
+    if (Adapter->ChildDescriptors == NULL)
+    {
+        Status = DxgkpQueryChildDescriptors(Adapter);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
     ChildRelations = Adapter->ChildDescriptors;
+    ASSERT(ChildRelations != NULL);
 
     /*
      * Walk the descriptor array and create PDOs for each valid child.

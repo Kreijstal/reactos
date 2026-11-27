@@ -422,8 +422,9 @@ struct _DXGKRNL_ADAPTER
 
     /*
      * Child descriptor array, Pool-allocated with TAG_DXGK_RESOURCES.
-     * Filled in during DxgkDdiQueryChildRelations; NULL until then.
-     * Count matches NumberOfChildren.
+     * Filled in by DxgkDdiQueryChildRelations once per start; NULL until
+     * then.  It does not change while the adapter is started, so it is
+     * read without a lock.  Count matches NumberOfChildren.
      */
     PDXGK_CHILD_DESCRIPTOR      ChildDescriptors;
 
