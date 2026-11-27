@@ -625,6 +625,147 @@ TestEmptyDatagram(void)
     closesocket(Sender);
 }
 
+/* A buffer at NULL that is not empty is not the caller's memory: a send or
+ * receive of it fails with WSAEFAULT, alone or among others, and sends
+ * nothing.  One of no bytes is only empty. */
+static
+void
+TestNullBuffer(void)
+{
+    NTSTATUS Status;
+    SOCKET Sender, Receiver, Listener, Client, Server;
+    struct sockaddr_in SenderAddress, ReceiverAddress, From;
+    INT FromLength;
+    AFD_WSABUF Buffers[2];
+    WSABUF WsaBuffers[2];
+    CHAR First[] = "data", Buffer[2 * DATAGRAM_LENGTH];
+    ULONG_PTR Information;
+    DWORD Count, Flags;
+
+    Sender = LoopbackSocket(SOCK_DGRAM, &SenderAddress);
+    if (Sender == INVALID_SOCKET)
+        return;
+    Receiver = LoopbackSocket(SOCK_DGRAM, &ReceiverAddress);
+    if (Receiver == INVALID_SOCKET)
+    {
+        closesocket(Sender);
+        return;
+    }
+
+    Buffers[0].buf = NULL;
+    Buffers[0].len = 5;
+    Buffers[1].buf = First;
+    Buffers[1].len = 4;
+    Status = SendDatagram(Sender, Buffers, 1, &ReceiverAddress, &Information);
+    ok(Status == STATUS_ACCESS_VIOLATION, "IOCTL_AFD_SEND_DATAGRAM of a buffer at NULL returned %lx\n", Status);
+    Status = SendDatagram(Sender, Buffers, 2, &ReceiverAddress, &Information);
+    ok(Status == STATUS_ACCESS_VIOLATION, "IOCTL_AFD_SEND_DATAGRAM with a buffer at NULL returned %lx\n", Status);
+
+    WsaBuffers[0].buf = First;
+    WsaBuffers[0].len = 4;
+    WsaBuffers[1].buf = NULL;
+    WsaBuffers[1].len = 5;
+    Count = 0xdeadbeef;
+    ok(WSASendTo(Sender, WsaBuffers, 2, &Count, 0, (struct sockaddr *)&ReceiverAddress, sizeof(ReceiverAddress),
+                 NULL, NULL) == SOCKET_ERROR,
+       "WSASendTo with a buffer at NULL succeeded, sent %lu bytes\n", Count);
+    ok(WSAGetLastError() == WSAEFAULT, "WSASendTo failed with %d\n", WSAGetLastError());
+    ok(sendto(Sender, NULL, 5, 0, (struct sockaddr *)&ReceiverAddress, sizeof(ReceiverAddress)) == SOCKET_ERROR,
+       "sendto of a buffer at NULL succeeded\n");
+    ok(WSAGetLastError() == WSAEFAULT, "sendto failed with %d\n", WSAGetLastError());
+
+    /* None of them sent anything */
+    ok(!WaitReadable(Receiver), "A datagram arrived\n");
+
+    /* At NULL and empty, it is only empty */
+    Buffers[0].len = 0;
+    Status = SendDatagram(Sender, Buffers, 2, &ReceiverAddress, &Information);
+    ok(Status == STATUS_SUCCESS, "IOCTL_AFD_SEND_DATAGRAM with an empty buffer at NULL returned %lx\n", Status);
+    ok(Information == 4, "Sent %Iu bytes\n", Information);
+    ExpectDatagram(Receiver, First, 4, &SenderAddress);
+
+    /* A receive, with a datagram waiting */
+    ok(sendto(Sender, DATAGRAM, DATAGRAM_LENGTH, 0, (struct sockaddr *)&ReceiverAddress, sizeof(ReceiverAddress)) == DATAGRAM_LENGTH,
+       "sendto failed with %d\n", WSAGetLastError());
+    ok(WaitReadable(Receiver), "The datagram did not arrive\n");
+    Buffers[0].len = 5;
+    Buffers[1].buf = Buffer;
+    Buffers[1].len = sizeof(Buffer);
+    FromLength = sizeof(From);
+    Status = ReceiveDatagram(Receiver, Buffers, 2, &From, &FromLength, &Information);
+    ok(Status == STATUS_ACCESS_VIOLATION, "IOCTL_AFD_RECV_DATAGRAM with a buffer at NULL returned %lx\n", Status);
+    WsaBuffers[0].buf = Buffer;
+    WsaBuffers[0].len = sizeof(Buffer);
+    Count = 0xdeadbeef;
+    Flags = 0;
+    FromLength = sizeof(From);
+    ok(WSARecvFrom(Receiver, WsaBuffers, 2, &Count, &Flags, (struct sockaddr *)&From, &FromLength,
+                   NULL, NULL) == SOCKET_ERROR,
+       "WSARecvFrom with a buffer at NULL succeeded, received %lu bytes\n", Count);
+    ok(WSAGetLastError() == WSAEFAULT, "WSARecvFrom failed with %d\n", WSAGetLastError());
+
+    closesocket(Receiver);
+    closesocket(Sender);
+
+    /* A stream */
+    Listener = LoopbackSocket(SOCK_STREAM, &ReceiverAddress);
+    if (Listener == INVALID_SOCKET)
+        return;
+    ok(listen(Listener, 1) == 0, "listen failed with %d\n", WSAGetLastError());
+    Client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ok(Client != INVALID_SOCKET, "socket failed with %d\n", WSAGetLastError());
+    ok(connect(Client, (struct sockaddr *)&ReceiverAddress, sizeof(ReceiverAddress)) == 0,
+       "connect failed with %d\n", WSAGetLastError());
+    Server = accept(Listener, NULL, NULL);
+    ok(Server != INVALID_SOCKET, "accept failed with %d\n", WSAGetLastError());
+    if (Server == INVALID_SOCKET)
+    {
+        closesocket(Client);
+        closesocket(Listener);
+        return;
+    }
+
+    Buffers[1].buf = First;
+    Buffers[1].len = 4;
+    Status = Transfer(Client, IOCTL_AFD_SEND, Buffers, 2, &Information);
+    ok(Status == STATUS_ACCESS_VIOLATION, "IOCTL_AFD_SEND with a buffer at NULL returned %lx\n", Status);
+    WsaBuffers[0].buf = First;
+    WsaBuffers[0].len = 4;
+    Count = 0xdeadbeef;
+    ok(WSASend(Client, WsaBuffers, 2, &Count, 0, NULL, NULL) == SOCKET_ERROR,
+       "WSASend with a buffer at NULL succeeded, sent %lu bytes\n", Count);
+    ok(WSAGetLastError() == WSAEFAULT, "WSASend failed with %d\n", WSAGetLastError());
+    ok(send(Client, NULL, 5, 0) == SOCKET_ERROR, "send of a buffer at NULL succeeded\n");
+    ok(WSAGetLastError() == WSAEFAULT, "send failed with %d\n", WSAGetLastError());
+
+    /* Nothing was sent: what comes next is the first data */
+    ok(send(Client, DATAGRAM, DATAGRAM_LENGTH, 0) == DATAGRAM_LENGTH, "send failed with %d\n", WSAGetLastError());
+    ok(WaitReadable(Server), "The data did not arrive\n");
+
+    Buffers[1].buf = Buffer;
+    Buffers[1].len = sizeof(Buffer);
+    Status = Transfer(Server, IOCTL_AFD_RECV, Buffers, 2, &Information);
+    ok(Status == STATUS_ACCESS_VIOLATION, "IOCTL_AFD_RECV with a buffer at NULL returned %lx\n", Status);
+    WsaBuffers[0].buf = Buffer;
+    WsaBuffers[0].len = sizeof(Buffer);
+    Count = 0xdeadbeef;
+    Flags = 0;
+    ok(WSARecv(Server, WsaBuffers, 2, &Count, &Flags, NULL, NULL) == SOCKET_ERROR,
+       "WSARecv with a buffer at NULL succeeded, received %lu bytes\n", Count);
+    ok(WSAGetLastError() == WSAEFAULT, "WSARecv failed with %d\n", WSAGetLastError());
+    ok(recv(Server, NULL, 5, 0) == SOCKET_ERROR, "recv into a buffer at NULL succeeded\n");
+    ok(WSAGetLastError() == WSAEFAULT, "recv failed with %d\n", WSAGetLastError());
+
+    /* The failed receives took nothing */
+    memset(Buffer, 0, sizeof(Buffer));
+    ok(recv(Server, Buffer, sizeof(Buffer), 0) == DATAGRAM_LENGTH, "recv failed with %d\n", WSAGetLastError());
+    ok(!memcmp(Buffer, DATAGRAM, DATAGRAM_LENGTH), "Received %.8s\n", Buffer);
+
+    closesocket(Server);
+    closesocket(Client);
+    closesocket(Listener);
+}
+
 START_TEST(buffercount)
 {
     WSADATA WsaData;
@@ -644,6 +785,7 @@ START_TEST(buffercount)
     TestGatherSend();
     TestScatterReceive();
     TestEmptyDatagram();
+    TestNullBuffer();
 
     WSACleanup();
 }
