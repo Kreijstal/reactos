@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS API Tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     Test accepting connections: AcceptEx on a connection that is already queued, what a failed AcceptEx and an accepted connection leave behind, what WSAAccept's condition function is told, and the names of both ends
+ * PURPOSE:     Test accepting connections: AcceptEx on a connection that is already queued, what a failed AcceptEx and an accepted connection leave behind, what WSAAccept's condition function is told and what its answers do, the names of both ends, and the lengths AcceptEx is given
  * COPYRIGHT:   Copyright 2026 Kreijstal <elektrischrainbow@gmail.com>
  */
 
@@ -423,6 +423,294 @@ Condition(LPWSABUF lpCallerId, LPWSABUF lpCallerData, LPQOS lpSQOS, LPQOS lpGQOS
 }
 
 static
+int
+CALLBACK
+Defer(LPWSABUF lpCallerId, LPWSABUF lpCallerData, LPQOS lpSQOS, LPQOS lpGQOS,
+      LPWSABUF lpCalleeId, LPWSABUF lpCalleeData, GROUP *g, DWORD_PTR dwCallbackData)
+{
+    ((CONDITION_RESULT *)dwCallbackData)->Calls++;
+    return CF_DEFER;
+}
+
+static
+int
+CALLBACK
+Reject(LPWSABUF lpCallerId, LPWSABUF lpCallerData, LPQOS lpSQOS, LPQOS lpGQOS,
+       LPWSABUF lpCalleeId, LPWSABUF lpCalleeData, GROUP *g, DWORD_PTR dwCallbackData)
+{
+    ((CONDITION_RESULT *)dwCallbackData)->Calls++;
+    return CF_REJECT;
+}
+
+/* accept(), once a connection is there to take: never blocks the test */
+static
+SOCKET
+AcceptReady(SOCKET Listener, struct sockaddr_in *Peer)
+{
+    struct timeval Timeout = { ACCEPT_WAIT_MS / 1000, 0 };
+    fd_set Set;
+    int Length = sizeof(*Peer), Result;
+
+    FD_ZERO(&Set);
+    FD_SET(Listener, &Set);
+    Result = select(0, &Set, NULL, NULL, &Timeout);
+    ok(Result == 1, "No connection to accept: %d, %d\n", Result, WSAGetLastError());
+    if (Result != 1)
+        return INVALID_SOCKET;
+    return accept(Listener, (struct sockaddr *)Peer, &Length);
+}
+
+/*
+ * A condition function that returns CF_DEFER leaves the connection queued:
+ * WSAAccept fails with WSATRY_AGAIN, and the next accept takes that
+ * connection.  CF_REJECT fails WSAAccept with WSAECONNREFUSED and drops the
+ * connection: the next accept takes the next client.
+ */
+static
+void
+TestWSAAcceptDeferReject(void)
+{
+    SOCKET Listener, Client, Next = INVALID_SOCKET, Accepted;
+    struct sockaddr_in Address, ClientAddress, NextAddress, Peer;
+    CONDITION_RESULT Result;
+    DWORD Timeout = ACCEPT_WAIT_MS;
+    char Byte;
+    int Received;
+
+    Listener = CreateListener(&Address);
+    if (Listener == INVALID_SOCKET)
+        return;
+    Client = Connect(&Address, &ClientAddress);
+    if (Client == INVALID_SOCKET)
+        goto Cleanup;
+
+    memset(&Result, 0, sizeof(Result));
+    Accepted = WSAAccept(Listener, NULL, NULL, Defer, (DWORD_PTR)&Result);
+    ok(Accepted == INVALID_SOCKET && WSAGetLastError() == WSATRY_AGAIN,
+       "WSAAccept with CF_DEFER returned %Iu: %d\n", (ULONG_PTR)Accepted, WSAGetLastError());
+    ok(Result.Calls == 1, "The condition function was called %lu times\n", Result.Calls);
+    if (Accepted != INVALID_SOCKET)
+        closesocket(Accepted);
+
+    memset(&Peer, 0, sizeof(Peer));
+    Accepted = AcceptReady(Listener, &Peer);
+    ok(Accepted != INVALID_SOCKET, "The deferred connection was not accepted: %d\n", WSAGetLastError());
+    ok(Peer.sin_port == ClientAddress.sin_port, "accept took port %u, the deferred connection is %u\n",
+       ntohs(Peer.sin_port), ntohs(ClientAddress.sin_port));
+    if (Accepted != INVALID_SOCKET)
+        closesocket(Accepted);
+    closesocket(Client);
+
+    /* CF_REJECT */
+    Client = Connect(&Address, &ClientAddress);
+    if (Client == INVALID_SOCKET)
+        goto Cleanup;
+    memset(&Result, 0, sizeof(Result));
+    Accepted = WSAAccept(Listener, NULL, NULL, Reject, (DWORD_PTR)&Result);
+    ok(Accepted == INVALID_SOCKET && WSAGetLastError() == WSAECONNREFUSED,
+       "WSAAccept with CF_REJECT returned %Iu: %d\n", (ULONG_PTR)Accepted, WSAGetLastError());
+    ok(Result.Calls == 1, "The condition function was called %lu times\n", Result.Calls);
+    if (Accepted != INVALID_SOCKET)
+        closesocket(Accepted);
+
+    /* The rejected client's connection ends */
+    setsockopt(Client, SOL_SOCKET, SO_RCVTIMEO, (char *)&Timeout, sizeof(Timeout));
+    Received = recv(Client, &Byte, sizeof(Byte), 0);
+    ok(Received == 0 || (Received == SOCKET_ERROR && WSAGetLastError() != WSAETIMEDOUT),
+       "recv on the rejected connection returned %d: %d\n", Received, WSAGetLastError());
+
+    /* And the next accept takes the next client */
+    Next = Connect(&Address, &NextAddress);
+    if (Next == INVALID_SOCKET)
+        goto Cleanup;
+    memset(&Peer, 0, sizeof(Peer));
+    Accepted = AcceptReady(Listener, &Peer);
+    ok(Accepted != INVALID_SOCKET, "The next connection was not accepted: %d\n", WSAGetLastError());
+    ok(Peer.sin_port == NextAddress.sin_port, "accept took port %u, expected the next client's %u (the rejected one is %u)\n",
+       ntohs(Peer.sin_port), ntohs(NextAddress.sin_port), ntohs(ClientAddress.sin_port));
+    if (Accepted != INVALID_SOCKET)
+        closesocket(Accepted);
+
+Cleanup:
+    if (Next != INVALID_SOCKET)
+        closesocket(Next);
+    if (Client != INVALID_SOCKET)
+        closesocket(Client);
+    closesocket(Listener);
+}
+
+/* The private memory the process has committed, its heaps' included */
+static
+SIZE_T
+GetPrivateCommit(void)
+{
+    MEMORY_BASIC_INFORMATION Info;
+    PUCHAR Address = NULL;
+    SIZE_T Committed = 0;
+
+    while (VirtualQuery(Address, &Info, sizeof(Info)) == sizeof(Info))
+    {
+        if (Info.State == MEM_COMMIT && Info.Type == MEM_PRIVATE)
+            Committed += Info.RegionSize;
+        Address = (PUCHAR)Info.BaseAddress + Info.RegionSize;
+        if (Address < (PUCHAR)Info.BaseAddress)
+            break;
+    }
+    return Committed;
+}
+
+/*
+ * A socket gives back what it allocated when it is closed, and WSAAccept with
+ * a condition function what it allocated for the condition function, whether
+ * it accepts the connection or not.  A leak of a small block per call shows
+ * in the memory the process commits once the process heap has no committed
+ * free space left: use that up first, and check that as many blocks as the
+ * leak would leave do show.
+ */
+#define CONDITION_LEAK_ITERATIONS 2000
+#define CONDITION_LEAK_WARMUP 100
+#define CONDITION_LEAK_BLOCK sizeof(struct sockaddr_in)
+#define CONDITION_LEAK_FILL_MAX 0x40000
+
+typedef enum _ACCEPT_LOOP
+{
+    SocketOnly,
+    AcceptPlain,
+    AcceptCondition,
+} ACCEPT_LOOP;
+
+static const char *AcceptLoopName[] = { "socket()", "accept()", "WSAAccept with a condition function" };
+
+/* What CONDITION_LEAK_ITERATIONS sockets, or connections accepted that way,
+ * commit */
+static
+BOOL
+MeasureAcceptLoop(SOCKET Listener, const struct sockaddr_in *Address, ACCEPT_LOOP Loop, SIZE_T *Committed)
+{
+    SOCKET Client, Accepted;
+    struct sockaddr_in Peer;
+    CONDITION_RESULT Result;
+    SIZE_T Before = 0;
+    ULONG i;
+
+    for (i = 0; i < CONDITION_LEAK_ITERATIONS + CONDITION_LEAK_WARMUP; i++)
+    {
+        if (i == CONDITION_LEAK_WARMUP)
+            Before = GetPrivateCommit();
+
+        if (Loop == SocketOnly)
+        {
+            Client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            closesocket(Client);
+            continue;
+        }
+
+        Client = Connect(Address, NULL);
+        if (Client == INVALID_SOCKET)
+            return FALSE;
+        memset(&Result, 0, sizeof(Result));
+        Result.Calls = 1;
+        if (Loop == AcceptPlain)
+        {
+            Accepted = AcceptReady(Listener, &Peer);
+        }
+        else
+        {
+            Result.Calls = 0;
+            if (i & 1)
+            {
+                Accepted = WSAAccept(Listener, NULL, NULL, Reject, (DWORD_PTR)&Result);
+                if (Accepted == INVALID_SOCKET && WSAGetLastError() != WSAECONNREFUSED)
+                {
+                    /* Still queued: take it */
+                    Accepted = AcceptReady(Listener, &Peer);
+                }
+            }
+            else
+            {
+                Accepted = WSAAccept(Listener, NULL, NULL, Condition, (DWORD_PTR)&Result);
+                ok(Accepted != INVALID_SOCKET, "WSAAccept failed: %d\n", WSAGetLastError());
+            }
+        }
+        if (Accepted != INVALID_SOCKET)
+            closesocket(Accepted);
+        closesocket(Client);
+        if (Result.Calls != 1)
+        {
+            ok(0, "Iteration %lu: the condition function was called %lu times\n", i, Result.Calls);
+            return FALSE;
+        }
+    }
+
+    *Committed = GetPrivateCommit() - Before;
+    return TRUE;
+}
+
+static
+void
+TestWSAAcceptConditionLeak(void)
+{
+    SOCKET Listener;
+    struct sockaddr_in Address;
+    PVOID *Blocks;
+    SIZE_T Before, Probe, Count = 0, Filled, Committed;
+    ACCEPT_LOOP Loop;
+    ULONG i;
+
+    Blocks = VirtualAlloc(NULL, (CONDITION_LEAK_FILL_MAX + CONDITION_LEAK_ITERATIONS) * sizeof(*Blocks),
+                          MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ok(Blocks != NULL, "VirtualAlloc failed: %lu\n", GetLastError());
+    if (!Blocks)
+        return;
+
+    /* Use up the committed free space of the process heap */
+    Before = GetPrivateCommit();
+    while (Count < CONDITION_LEAK_FILL_MAX)
+    {
+        Blocks[Count] = HeapAlloc(GetProcessHeap(), 0, CONDITION_LEAK_BLOCK);
+        if (!Blocks[Count])
+            break;
+        Count++;
+        if (Count % 64 == 0 && GetPrivateCommit() != Before)
+            break;
+    }
+    Filled = Count;
+
+    /* The oracle: as many blocks as the leak would leave, kept allocated */
+    Before = GetPrivateCommit();
+    for (i = 0; i < CONDITION_LEAK_ITERATIONS && Count && Blocks[Count - 1]; i++)
+        Blocks[Count++] = HeapAlloc(GetProcessHeap(), 0, CONDITION_LEAK_BLOCK);
+    Probe = GetPrivateCommit();
+    if (Probe - Before < CONDITION_LEAK_ITERATIONS * CONDITION_LEAK_BLOCK / 2)
+    {
+        skip("Committed memory does not show the heap growing: %Iu bytes for %u blocks (%Iu filled the heap)\n",
+             Probe - Before, CONDITION_LEAK_ITERATIONS, Filled);
+        goto Free;
+    }
+
+    Listener = CreateListener(&Address);
+    if (Listener == INVALID_SOCKET)
+        goto Free;
+
+    for (Loop = SocketOnly; Loop <= AcceptCondition; Loop++)
+    {
+        if (!MeasureAcceptLoop(Listener, &Address, Loop, &Committed))
+            break;
+        ok(Committed < CONDITION_LEAK_ITERATIONS * CONDITION_LEAK_BLOCK / 2,
+           "%u %s commit %Iu bytes\n", CONDITION_LEAK_ITERATIONS, AcceptLoopName[Loop], Committed);
+    }
+
+    closesocket(Listener);
+Free:
+    while (Count)
+    {
+        if (Blocks[--Count])
+            HeapFree(GetProcessHeap(), 0, Blocks[Count]);
+    }
+    VirtualFree(Blocks, 0, MEM_RELEASE);
+}
+
+static
 void
 TestWSAAcceptCondition(void)
 {
@@ -520,19 +808,384 @@ Cleanup:
     closesocket(Listener);
 }
 
-START_TEST(accept)
+/*
+ * The AcceptEx output buffers below sit in a page of their own, at
+ * ACCEPTEX_GUARD bytes into it, with every other byte of the page a canary:
+ * AcceptEx writes nothing outside the buffer it is given.
+ */
+#define ACCEPTEX_GUARD 64
+#define ACCEPTEX_CANARY 0xcc
+
+static
+PUCHAR
+AllocateGuardedBuffer(void)
 {
-    WSADATA WsaData;
+    PUCHAR Page = VirtualAlloc(NULL, PAGE_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+    ok(Page != NULL, "VirtualAlloc failed: %lu\n", GetLastError());
+    if (Page)
+        memset(Page, ACCEPTEX_CANARY, PAGE_SIZE);
+    return Page;
+}
+
+/* The first byte outside [Offset, Offset + Length) of the page that is not
+ * a canary, or -1 */
+static
+LONG
+FindWriteOutside(const UCHAR *Page, ULONG Offset, ULONG Length)
+{
+    ULONG i;
+
+    for (i = 0; i < PAGE_SIZE; i++)
+    {
+        if (i >= Offset && i - Offset < Length)
+            continue;
+        if (Page[i] != ACCEPTEX_CANARY)
+            return i;
+    }
+    return -1;
+}
+
+static
+BOOL
+IsZero(const void *Buffer, SIZE_T Length)
+{
+    const UCHAR *Bytes = Buffer;
+
+    while (Length--)
+    {
+        if (*Bytes++)
+            return FALSE;
+    }
+    return TRUE;
+}
+
+/*
+ * GetAcceptExSockaddrs returns both addresses as whole sockaddr_in, with
+ * their length: sizeof(struct sockaddr_in), its sin_zero included.
+ */
+static
+void
+TestAcceptExAddresses(void)
+{
+    SOCKET Listener, Acceptor = INVALID_SOCKET, Client = INVALID_SOCKET;
+    struct sockaddr_in Address, ClientAddress, *Local, *Remote;
+    WSAOVERLAPPED Overlapped;
+    DWORD Bytes = 0, Wait, Error;
+    int LocalLength, RemoteLength;
+    PUCHAR Page, Buffer;
+    BOOL Success, Pending = FALSE;
+
+    memset(&Overlapped, 0, sizeof(Overlapped));
+    Page = AllocateGuardedBuffer();
+    Listener = CreateListener(&Address);
+    if (!Page || Listener == INVALID_SOCKET)
+        goto Cleanup;
+    Buffer = Page + ACCEPTEX_GUARD;
+    Acceptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ok(Acceptor != INVALID_SOCKET, "socket failed: %d\n", WSAGetLastError());
+
+    Overlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    Success = pAcceptEx(Listener, Acceptor, Buffer, 0,
+                        ACCEPT_ADDRESS_LENGTH, ACCEPT_ADDRESS_LENGTH,
+                        &Bytes, &Overlapped);
+    Error = WSAGetLastError();
+    ok(!Success && Error == ERROR_IO_PENDING, "AcceptEx returned %d: %lu\n", Success, Error);
+    if (Success || Error != ERROR_IO_PENDING)
+        goto Cleanup;
+    Pending = TRUE;
+
+    Client = Connect(&Address, &ClientAddress);
+    Wait = WaitForSingleObject(Overlapped.hEvent, ACCEPT_WAIT_MS);
+    ok(Wait == WAIT_OBJECT_0, "AcceptEx did not complete: %lu\n", Wait);
+    if (Wait != WAIT_OBJECT_0)
+        goto Cleanup;
+    Pending = FALSE;
+    Success = WSAGetOverlappedResult(Listener, &Overlapped, &Bytes, FALSE, &Error);
+    ok(Success, "AcceptEx failed: %d\n", WSAGetLastError());
+    ok(FindWriteOutside(Page, ACCEPTEX_GUARD, 2 * ACCEPT_ADDRESS_LENGTH) == -1,
+       "AcceptEx wrote at %ld, outside its buffer\n", FindWriteOutside(Page, ACCEPTEX_GUARD, 2 * ACCEPT_ADDRESS_LENGTH));
+    if (!Success)
+        goto Cleanup;
+
+    Local = Remote = NULL;
+    LocalLength = RemoteLength = 0;
+    pGetAcceptExSockaddrs(Buffer, 0, ACCEPT_ADDRESS_LENGTH, ACCEPT_ADDRESS_LENGTH,
+                          (struct sockaddr **)&Local, &LocalLength,
+                          (struct sockaddr **)&Remote, &RemoteLength);
+    ok(LocalLength == sizeof(struct sockaddr_in), "The local address has %d bytes\n", LocalLength);
+    ok(RemoteLength == sizeof(struct sockaddr_in), "The remote address has %d bytes\n", RemoteLength);
+    ok(Local != NULL && Remote != NULL, "No address: %p, %p\n", Local, Remote);
+    if (!Local || !Remote)
+        goto Cleanup;
+    ok(Local->sin_family == AF_INET && Local->sin_port == Address.sin_port &&
+       Local->sin_addr.s_addr == Address.sin_addr.s_addr,
+       "The local address is %u %s:%u, expected the listener's %u\n",
+       Local->sin_family, inet_ntoa(Local->sin_addr), ntohs(Local->sin_port), ntohs(Address.sin_port));
+    ok(IsZero(Local->sin_zero, sizeof(Local->sin_zero)), "The local address's sin_zero is %02x %02x .. %02x %02x\n",
+       (UCHAR)Local->sin_zero[0], (UCHAR)Local->sin_zero[1], (UCHAR)Local->sin_zero[6], (UCHAR)Local->sin_zero[7]);
+    ok(Remote->sin_family == AF_INET && Remote->sin_port == ClientAddress.sin_port &&
+       Remote->sin_addr.s_addr == ClientAddress.sin_addr.s_addr,
+       "The remote address is %u %s:%u, expected the client's %u\n",
+       Remote->sin_family, inet_ntoa(Remote->sin_addr), ntohs(Remote->sin_port), ntohs(ClientAddress.sin_port));
+    ok(IsZero(Remote->sin_zero, sizeof(Remote->sin_zero)), "The remote address's sin_zero is %02x %02x .. %02x %02x\n",
+       (UCHAR)Remote->sin_zero[0], (UCHAR)Remote->sin_zero[1], (UCHAR)Remote->sin_zero[6], (UCHAR)Remote->sin_zero[7]);
+
+Cleanup:
+    if (Client != INVALID_SOCKET)
+        closesocket(Client);
+    if (Acceptor != INVALID_SOCKET)
+        closesocket(Acceptor);
+    if (Listener != INVALID_SOCKET)
+        closesocket(Listener);
+    if (Pending)
+        WaitForSingleObject(Overlapped.hEvent, ACCEPT_WAIT_MS);
+    if (Overlapped.hEvent)
+        CloseHandle(Overlapped.hEvent);
+    if (Page)
+        VirtualFree(Page, 0, MEM_RELEASE);
+}
+
+/*
+ * An AcceptEx with no local address area (dwLocalAddressLength 0) takes the
+ * connection and writes the remote address only; GetAcceptExSockaddrs then
+ * leaves the local address alone.
+ */
+static
+void
+TestAcceptExNoLocalAddress(void)
+{
+    SOCKET Listener, Acceptor = INVALID_SOCKET, Client = INVALID_SOCKET;
+    struct sockaddr_in Address, ClientAddress, *Local, *Remote;
+    WSAOVERLAPPED Overlapped;
+    DWORD Bytes = 0, Wait, Error;
+    int LocalLength, RemoteLength;
+    PUCHAR Page, Buffer;
+    LONG Outside;
+    BOOL Success, Pending = FALSE;
+
+    memset(&Overlapped, 0, sizeof(Overlapped));
+    Page = AllocateGuardedBuffer();
+    Listener = CreateListener(&Address);
+    if (!Page || Listener == INVALID_SOCKET)
+        goto Cleanup;
+    Buffer = Page + ACCEPTEX_GUARD;
+    Acceptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ok(Acceptor != INVALID_SOCKET, "socket failed: %d\n", WSAGetLastError());
+
+    Overlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    Success = pAcceptEx(Listener, Acceptor, Buffer, 0, 0, ACCEPT_ADDRESS_LENGTH,
+                        &Bytes, &Overlapped);
+    Error = WSAGetLastError();
+    ok(!Success && Error == ERROR_IO_PENDING, "AcceptEx returned %d: %lu\n", Success, Error);
+    if (Success || Error != ERROR_IO_PENDING)
+        goto Cleanup;
+    Pending = TRUE;
+
+    Client = Connect(&Address, &ClientAddress);
+    Wait = WaitForSingleObject(Overlapped.hEvent, ACCEPT_WAIT_MS);
+    ok(Wait == WAIT_OBJECT_0, "AcceptEx did not complete: %lu\n", Wait);
+    if (Wait != WAIT_OBJECT_0)
+        goto Cleanup;
+    Pending = FALSE;
+    Success = WSAGetOverlappedResult(Listener, &Overlapped, &Bytes, FALSE, &Error);
+    ok(Success, "AcceptEx failed: %d\n", WSAGetLastError());
+    ok(Bytes == 0, "AcceptEx received %lu bytes\n", Bytes);
+    Outside = FindWriteOutside(Page, ACCEPTEX_GUARD, ACCEPT_ADDRESS_LENGTH);
+    ok(Outside == -1, "AcceptEx wrote at %ld (its buffer is at %u)\n", Outside, ACCEPTEX_GUARD);
+    if (!Success)
+        goto Cleanup;
+
+    Local = (struct sockaddr_in *)(ULONG_PTR)0xdeadbeef;
+    Remote = NULL;
+    LocalLength = 0xdeadbeef;
+    RemoteLength = 0;
+    pGetAcceptExSockaddrs(Buffer, 0, 0, ACCEPT_ADDRESS_LENGTH,
+                          (struct sockaddr **)&Local, &LocalLength,
+                          (struct sockaddr **)&Remote, &RemoteLength);
+    ok(Local == (struct sockaddr_in *)(ULONG_PTR)0xdeadbeef, "The local address is %p\n", Local);
+    ok(LocalLength == (int)0xdeadbeef, "The local address has %d bytes\n", LocalLength);
+    ok(RemoteLength == sizeof(struct sockaddr_in), "The remote address has %d bytes\n", RemoteLength);
+    ok(Remote && Remote->sin_port == ClientAddress.sin_port &&
+       Remote->sin_addr.s_addr == ClientAddress.sin_addr.s_addr,
+       "The remote address is port %u, expected the client's %u\n",
+       Remote ? ntohs(Remote->sin_port) : 0, ntohs(ClientAddress.sin_port));
+
+Cleanup:
+    if (Client != INVALID_SOCKET)
+        closesocket(Client);
+    if (Acceptor != INVALID_SOCKET)
+        closesocket(Acceptor);
+    if (Listener != INVALID_SOCKET)
+        closesocket(Listener);
+    if (Pending)
+        WaitForSingleObject(Overlapped.hEvent, ACCEPT_WAIT_MS);
+    if (Overlapped.hEvent)
+        CloseHandle(Overlapped.hEvent);
+    if (Page)
+        VirtualFree(Page, 0, MEM_RELEASE);
+}
+
+/*
+ * An address area too small for the address and 16 bytes more fails the
+ * AcceptEx once a connection arrives, with ERROR_INSUFFICIENT_BUFFER, and
+ * writes nothing outside its buffer.  The connection stays queued for the
+ * next accept.
+ */
+static
+void
+TestAcceptExSmallArea(DWORD LocalLength, DWORD RemoteLength)
+{
+    SOCKET Listener, Acceptor = INVALID_SOCKET, Client = INVALID_SOCKET, Accepted;
+    struct sockaddr_in Address, ClientAddress, Peer;
+    WSAOVERLAPPED Overlapped;
+    DWORD Bytes = 0, Wait, Error;
+    PUCHAR Page, Buffer;
+    LONG Outside;
+    BOOL Success, Pending = FALSE;
+
+    memset(&Overlapped, 0, sizeof(Overlapped));
+    Page = AllocateGuardedBuffer();
+    Listener = CreateListener(&Address);
+    if (!Page || Listener == INVALID_SOCKET)
+        goto Cleanup;
+    Buffer = Page + ACCEPTEX_GUARD;
+    Acceptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ok(Acceptor != INVALID_SOCKET, "socket failed: %d\n", WSAGetLastError());
+
+    Overlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    Success = pAcceptEx(Listener, Acceptor, Buffer, 0, LocalLength, RemoteLength,
+                        &Bytes, &Overlapped);
+    Error = WSAGetLastError();
+    ok(!Success && Error == ERROR_IO_PENDING, "%lu, %lu: AcceptEx returned %d: %lu\n",
+       LocalLength, RemoteLength, Success, Error);
+    if (Success || Error != ERROR_IO_PENDING)
+        goto Cleanup;
+    Pending = TRUE;
+
+    Client = Connect(&Address, &ClientAddress);
+    Wait = WaitForSingleObject(Overlapped.hEvent, ACCEPT_WAIT_MS);
+    ok(Wait == WAIT_OBJECT_0, "%lu, %lu: AcceptEx did not complete: %lu\n", LocalLength, RemoteLength, Wait);
+    if (Wait != WAIT_OBJECT_0)
+        goto Cleanup;
+    Pending = FALSE;
+    Bytes = 0xdeadbeef;
+    SetLastError(0xdeadbeef);
+    Success = GetOverlappedResult((HANDLE)Listener, &Overlapped, &Bytes, FALSE);
+    Error = GetLastError();
+    ok(!Success && Error == ERROR_INSUFFICIENT_BUFFER, "%lu, %lu: AcceptEx returned %d: %lu\n",
+       LocalLength, RemoteLength, Success, Error);
+    ok((NTSTATUS)Overlapped.Internal == STATUS_BUFFER_TOO_SMALL, "%lu, %lu: AcceptEx completed with 0x%lx\n",
+       LocalLength, RemoteLength, (NTSTATUS)Overlapped.Internal);
+    ok(Bytes == 0, "%lu, %lu: AcceptEx received %lu bytes\n", LocalLength, RemoteLength, Bytes);
+    Outside = FindWriteOutside(Page, ACCEPTEX_GUARD, LocalLength + RemoteLength);
+    ok(Outside == -1, "%lu, %lu: AcceptEx wrote at %ld (its buffer is at %u)\n",
+       LocalLength, RemoteLength, Outside, ACCEPTEX_GUARD);
+
+    /* The connection was not taken */
+    closesocket(Acceptor);
+    Acceptor = INVALID_SOCKET;
+    memset(&Peer, 0, sizeof(Peer));
+    Accepted = AcceptReady(Listener, &Peer);
+    ok(Accepted != INVALID_SOCKET, "%lu, %lu: The connection was not left for accept: %d\n",
+       LocalLength, RemoteLength, WSAGetLastError());
+    ok(Peer.sin_port == ClientAddress.sin_port, "%lu, %lu: accept took port %u, expected %u\n",
+       LocalLength, RemoteLength, ntohs(Peer.sin_port), ntohs(ClientAddress.sin_port));
+    if (Accepted != INVALID_SOCKET)
+        closesocket(Accepted);
+
+Cleanup:
+    if (Client != INVALID_SOCKET)
+        closesocket(Client);
+    if (Acceptor != INVALID_SOCKET)
+        closesocket(Acceptor);
+    if (Listener != INVALID_SOCKET)
+        closesocket(Listener);
+    if (Pending)
+        WaitForSingleObject(Overlapped.hEvent, ACCEPT_WAIT_MS);
+    if (Overlapped.hEvent)
+        CloseHandle(Overlapped.hEvent);
+    if (Page)
+        VirtualFree(Page, 0, MEM_RELEASE);
+}
+
+/*
+ * The lengths of AcceptEx describe its buffer: lengths that add up past
+ * 4 GB, to the size of a small buffer, describe a buffer nobody gave it.
+ * Such an AcceptEx fails -- right away, or once a connection arrives -- and
+ * writes nothing outside the buffer.
+ */
+static
+void
+TestAcceptExLengthOverflow(DWORD DataLength, DWORD BufferLength)
+{
+    SOCKET Listener, Acceptor = INVALID_SOCKET, Client = INVALID_SOCKET;
+    struct sockaddr_in Address;
+    WSAOVERLAPPED Overlapped;
+    DWORD Bytes = 0, Wait, Error;
+    PUCHAR Page, Buffer;
+    LONG Outside;
+    BOOL Success, Pending = FALSE;
+
+    memset(&Overlapped, 0, sizeof(Overlapped));
+    Page = AllocateGuardedBuffer();
+    Listener = CreateListener(&Address);
+    if (!Page || Listener == INVALID_SOCKET)
+        goto Cleanup;
+    Buffer = Page + ACCEPTEX_GUARD;
+    Acceptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ok(Acceptor != INVALID_SOCKET, "socket failed: %d\n", WSAGetLastError());
+
+    /* What the lengths add up to, in 32 bits */
+    ok((DWORD)(DataLength + 2 * ACCEPT_ADDRESS_LENGTH) == BufferLength, "Bad test\n");
+
+    Overlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    Success = pAcceptEx(Listener, Acceptor, Buffer, DataLength,
+                        ACCEPT_ADDRESS_LENGTH, ACCEPT_ADDRESS_LENGTH,
+                        &Bytes, &Overlapped);
+    Error = WSAGetLastError();
+    ok(!Success, "0x%lx: AcceptEx succeeded\n", DataLength);
+    if (!Success && Error == ERROR_IO_PENDING)
+    {
+        Pending = TRUE;
+        Client = Connect(&Address, NULL);
+        Wait = WaitForSingleObject(Overlapped.hEvent, ACCEPT_WAIT_MS);
+        if (Wait == WAIT_OBJECT_0)
+        {
+            Pending = FALSE;
+            Success = WSAGetOverlappedResult(Listener, &Overlapped, &Bytes, FALSE, &Error);
+            ok(!Success, "0x%lx: AcceptEx succeeded, with %lu bytes\n", DataLength, Bytes);
+        }
+    }
+    Outside = FindWriteOutside(Page, ACCEPTEX_GUARD, BufferLength);
+    ok(Outside == -1, "0x%lx: AcceptEx wrote at %ld (its buffer is at %u)\n", DataLength, Outside, ACCEPTEX_GUARD);
+
+Cleanup:
+    if (Client != INVALID_SOCKET)
+        closesocket(Client);
+    if (Acceptor != INVALID_SOCKET)
+        closesocket(Acceptor);
+    if (Listener != INVALID_SOCKET)
+        closesocket(Listener);
+    if (Pending)
+    {
+        Wait = WaitForSingleObject(Overlapped.hEvent, ACCEPT_WAIT_MS);
+        ok(Wait == WAIT_OBJECT_0, "0x%lx: the AcceptEx never completed: %lu\n", DataLength, Wait);
+    }
+    if (Overlapped.hEvent)
+        CloseHandle(Overlapped.hEvent);
+    if (Page)
+        VirtualFree(Page, 0, MEM_RELEASE);
+}
+
+static
+BOOL
+GetAcceptExFunctions(void)
+{
     GUID AcceptExGuid = WSAID_ACCEPTEX, SockaddrsGuid = WSAID_GETACCEPTEXSOCKADDRS;
     SOCKET Socket;
     DWORD Bytes;
     int Result;
-
-    Result = WSAStartup(MAKEWORD(2, 2), &WsaData);
-    ok(Result == 0, "WSAStartup failed: %d\n", Result);
-
-    TestConnectedNames();
-    TestWSAAcceptCondition();
 
     Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     ok(Socket != INVALID_SOCKET, "socket failed: %d\n", WSAGetLastError());
@@ -547,6 +1200,48 @@ START_TEST(accept)
     if (Result != 0 || !pAcceptEx || !pGetAcceptExSockaddrs)
     {
         skip("No AcceptEx: %d\n", WSAGetLastError());
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* The lengths an AcceptEx is given */
+START_TEST(acceptexlengths)
+{
+    WSADATA WsaData;
+    int Result;
+
+    Result = WSAStartup(MAKEWORD(2, 2), &WsaData);
+    ok(Result == 0, "WSAStartup failed: %d\n", Result);
+
+    if (GetAcceptExFunctions())
+    {
+        TestAcceptExAddresses();
+        TestAcceptExNoLocalAddress();
+        TestAcceptExSmallArea(3, ACCEPT_ADDRESS_LENGTH);
+        TestAcceptExSmallArea(sizeof(struct sockaddr_in) + 4, ACCEPT_ADDRESS_LENGTH);
+        TestAcceptExLengthOverflow((DWORD)(0 - 2 * ACCEPT_ADDRESS_LENGTH + 48), 48);
+        TestAcceptExLengthOverflow((DWORD)(0 - 2 * ACCEPT_ADDRESS_LENGTH), 0);
+    }
+
+    WSACleanup();
+}
+
+START_TEST(accept)
+{
+    WSADATA WsaData;
+    int Result;
+
+    Result = WSAStartup(MAKEWORD(2, 2), &WsaData);
+    ok(Result == 0, "WSAStartup failed: %d\n", Result);
+
+    TestConnectedNames();
+    TestWSAAcceptCondition();
+    TestWSAAcceptDeferReject();
+    TestWSAAcceptConditionLeak();
+
+    if (!GetAcceptExFunctions())
+    {
         WSACleanup();
         return;
     }
