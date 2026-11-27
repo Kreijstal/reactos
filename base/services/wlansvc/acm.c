@@ -194,7 +194,7 @@ VOID
 WlanSvcAcmForgetAttempt(PWLANSVC_INTERFACE Iface, LPCWSTR ProfileName)
 {
     if (Iface->AttemptPending &&
-        (ProfileName == NULL || _wcsicmp(Iface->AttemptProfile, ProfileName) == 0))
+        (ProfileName == NULL || wcscmp(Iface->AttemptProfile, ProfileName) == 0))
     {
         Iface->AttemptPending = FALSE;
     }

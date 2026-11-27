@@ -49,8 +49,70 @@ XmlFindOpen(LPCWSTR xml, LPCWSTR tag)
 }
 
 /*
+ * The character the entity reference at p ("&...;") stands for, in *c, and
+ * the length of the reference; 0 if p is no reference this parser knows.
+ */
+static size_t
+XmlDecodeEntity(LPCWSTR p, LPCWSTR end, PULONG c)
+{
+    static const struct
+    {
+        LPCWSTR Name;
+        WCHAR Char;
+    } Named[] =
+    {
+        { L"&amp;", L'&' }, { L"&lt;", L'<' }, { L"&gt;", L'>' },
+        { L"&quot;", L'"' }, { L"&apos;", L'\'' }
+    };
+    LPCWSTR q;
+    ULONG value = 0, digits = 0, base = 10;
+    size_t i, len;
+
+    for (i = 0; i < ARRAYSIZE(Named); i++)
+    {
+        len = wcslen(Named[i].Name);
+        if ((size_t)(end - p) >= len && wcsncmp(p, Named[i].Name, len) == 0)
+        {
+            *c = Named[i].Char;
+            return len;
+        }
+    }
+
+    /* &#ddd; or &#xhhh; */
+    if (end - p < 4 || p[1] != L'#')
+        return 0;
+    q = p + 2;
+    if (*q == L'x')
+    {
+        base = 16;
+        q++;
+    }
+    for (; q < end && *q != L';'; q++, digits++)
+    {
+        ULONG d;
+
+        if (*q >= L'0' && *q <= L'9')
+            d = *q - L'0';
+        else if (base == 16 && *q >= L'a' && *q <= L'f')
+            d = *q - L'a' + 10;
+        else if (base == 16 && *q >= L'A' && *q <= L'F')
+            d = *q - L'A' + 10;
+        else
+            return 0;
+        value = value * base + d;
+        if (value > 0x10FFFF)
+            return 0;
+    }
+    if (q >= end || digits == 0 || value == 0)
+        return 0;
+    *c = value;
+    return (size_t)(q + 1 - p);
+}
+
+/*
  * Extract the text content of the first <tag>...</tag> into out (NUL-terminated,
- * up to outChars-1 chars).  Returns TRUE on success.  Leading/trailing ASCII
+ * up to outChars-1 chars), with its entity references replaced by the
+ * characters they stand for.  Returns TRUE on success.  Leading/trailing ASCII
  * whitespace is trimmed.
  */
 static BOOL
@@ -75,9 +137,32 @@ XmlGetText(LPCWSTR xml, LPCWSTR tag, LPWSTR out, size_t outChars)
                      start[n - 1] == L'\r' || start[n - 1] == L'\n'))
         n--;
 
-    if (n >= outChars)
-        n = outChars - 1;
-    memcpy(out, start, n * sizeof(WCHAR));
+    end = start + n;
+    n = 0;
+    while (start < end && n < outChars - 1)
+    {
+        ULONG c;
+        size_t len = (*start == L'&') ? XmlDecodeEntity(start, end, &c) : 0;
+
+        if (len == 0)
+        {
+            out[n++] = *start++;
+            continue;
+        }
+        start += len;
+        if (c > 0xFFFF)
+        {
+            if (n + 2 > outChars - 1)
+                break;
+            c -= 0x10000;
+            out[n++] = (WCHAR)(0xD800 + (c >> 10));
+            out[n++] = (WCHAR)(0xDC00 + (c & 0x3FF));
+        }
+        else
+        {
+            out[n++] = (WCHAR)c;
+        }
+    }
     out[n] = L'\0';
     return TRUE;
 }
@@ -234,7 +319,7 @@ WlanSvcParseProfileXml(LPCWSTR Xml, PWLANSVC_PROFILE *ppProfile)
     return ERROR_SUCCESS;
 }
 
-/* Lock held by caller. */
+/* Lock held by caller.  Profile names are case-sensitive. */
 PWLANSVC_PROFILE
 WlanSvcFindProfile(PWLANSVC_INTERFACE Iface, LPCWSTR Name)
 {
@@ -249,7 +334,7 @@ WlanSvcFindProfile(PWLANSVC_INTERFACE Iface, LPCWSTR Name)
     {
         PWLANSVC_PROFILE prof =
             CONTAINING_RECORD(entry, WLANSVC_PROFILE, ListEntry);
-        if (_wcsicmp(prof->Name, Name) == 0)
+        if (wcscmp(prof->Name, Name) == 0)
             return prof;
     }
     return NULL;
@@ -592,9 +677,9 @@ WlanSvcRenameProfile(PWLANSVC_INTERFACE Iface, LPCWSTR OldName, LPCWSTR NewName)
         return ERROR_NOT_ENOUGH_MEMORY;
 
     /* The profile keeps its place, its file and its connection. */
-    if (_wcsicmp(Iface->ConnectedProfile, prof->Name) == 0)
+    if (wcscmp(Iface->ConnectedProfile, prof->Name) == 0)
         wcscpy(Iface->ConnectedProfile, NewName);
-    if (_wcsicmp(Iface->AttemptProfile, prof->Name) == 0)
+    if (wcscmp(Iface->AttemptProfile, prof->Name) == 0)
         wcscpy(Iface->AttemptProfile, NewName);
 
     SecureZeroMemory(prof->Xml, wcslen(prof->Xml) * sizeof(WCHAR));
