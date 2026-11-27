@@ -1719,12 +1719,18 @@ MsafdAccept(
     WSABUF                      CallerData, CalleeID, CallerID, CalleeData;
     SOCKADDR_STORAGE            CalleeAddress;
     INT                         CalleeAddressLength;
-    SOCKADDR                    CallerAddress;
+    INT                         CallerAddressLength;
     GROUP                       GroupID = 0;
     ULONG                       CallBack;
     SOCKET                      AcceptSocket;
     PSOCKET_INFORMATION         AcceptSocketInfo;
-    UCHAR                       ReceiveBuffer[0x1A];
+    ULONG                       ReceiveLength;
+    union
+    {
+        AFD_RECEIVED_ACCEPT_DATA Data;
+        UCHAR Bytes[FIELD_OFFSET(AFD_RECEIVED_ACCEPT_DATA, Address.Address[0].AddressType) +
+                    sizeof(SOCKADDR_STORAGE)];
+    }                           ReceiveBuffer;
     HANDLE                      SockEvent;
 
     if (!Socket)
@@ -1739,7 +1745,7 @@ MsafdAccept(
     }
     if ((SocketAddress && !SocketAddressLength) ||
         (SocketAddressLength && !SocketAddress) ||
-        (SocketAddressLength && *SocketAddressLength < sizeof(SOCKADDR)))
+        (SocketAddressLength && *SocketAddressLength < Socket->HelperData->MinWSAddressLength))
     {
        if (lpErrno) *lpErrno = WSAEFAULT;
        return INVALID_SOCKET;
@@ -1756,8 +1762,12 @@ MsafdAccept(
         return SOCKET_ERROR;
     }
 
-    /* Dynamic Structure...ugh */
-    ListenReceiveData = (PAFD_RECEIVED_ACCEPT_DATA)ReceiveBuffer;
+    /* The answer holds the remote address, which is a TDI address of the
+     * socket's family.  It is a socket address past its TDI header. */
+    ListenReceiveData = &ReceiveBuffer.Data;
+    ReceiveLength = FIELD_OFFSET(AFD_RECEIVED_ACCEPT_DATA, Address) +
+                    Socket->HelperData->MaxTDIAddressLength;
+    ASSERT(ReceiveLength <= sizeof(ReceiveBuffer));
 
     /* If this is non-blocking, make sure there's something for us to accept */
     if (Socket->SharedData->NonBlocking)
@@ -1791,7 +1801,7 @@ MsafdAccept(
                                    NULL,
                                    0,
                                    ListenReceiveData,
-                                   0xA + sizeof(*ListenReceiveData));
+                                   ReceiveLength);
 
     /* Wait for return */
     if (Status == STATUS_PENDING)
@@ -1805,6 +1815,10 @@ MsafdAccept(
         NtClose( SockEvent );
         return MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
     }
+
+    CallerAddressLength = FIELD_OFFSET(SOCKADDR, sa_data) +
+                          ListenReceiveData->Address.Address[0].AddressLength;
+    ASSERT(CallerAddressLength <= Socket->HelperData->MaxWSAddressLength);
 
     if (lpfnCondition != NULL)
     {
@@ -1905,11 +1919,8 @@ MsafdAccept(
         CalleeID.len = CalleeAddressLength;
 
         /* Build Caller ID: the remote address in SOCKADDR format */
-        RtlCopyMemory(&CallerAddress,
-                      &ListenReceiveData->Address.Address[0].AddressType,
-                      sizeof(CallerAddress));
-        CallerID.buf = (PVOID)&CallerAddress;
-        CallerID.len = sizeof(CallerAddress);
+        CallerID.buf = (PVOID)&ListenReceiveData->Address.Address[0].AddressType;
+        CallerID.len = CallerAddressLength;
 
         /* Build Caller Data */
         CallerData.buf = PendingData;
@@ -2065,14 +2076,14 @@ MsafdAccept(
     AcceptSocketInfo->SharedData->NonBlocking = Socket->SharedData->NonBlocking;
     DereferenceSocket(AcceptSocketInfo);
 
-    /* Return Address in SOCKADDR FORMAT */
+    /* Return Address in SOCKADDR FORMAT, as much of it as there is room for */
     if( SocketAddress )
     {
+        if (*SocketAddressLength > CallerAddressLength)
+            *SocketAddressLength = CallerAddressLength;
         RtlCopyMemory (SocketAddress,
                        &ListenReceiveData->Address.Address[0].AddressType,
-                       sizeof(SOCKADDR));
-        if( SocketAddressLength )
-            *SocketAddressLength = sizeof(SOCKADDR);
+                       *SocketAddressLength);
     }
 
     NtClose( SockEvent );
