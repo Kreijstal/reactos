@@ -21,7 +21,13 @@ typedef struct _SYS_BUTTON_CONTEXT
     KEVENT Event;
     IO_STATUS_BLOCK IoStatusBlock;
     ULONG SysButton;
+    /* The lid switched: query its state before waiting for the next event */
+    BOOLEAN LidChanged;
 } SYS_BUTTON_CONTEXT, *PSYS_BUTTON_CONTEXT;
+
+/* The lid device, and the last state it reported: -1 unknown, 0 closed, 1 open */
+static PDEVICE_OBJECT PopLidDevice;
+static LONG PopLidState = -1;
 
 static VOID
 NTAPI
@@ -33,6 +39,92 @@ PKWIN32_POWEREVENT_CALLOUT PopEventCallout;
 extern PCALLBACK_OBJECT SetSystemTimeCallback;
 
 /* FUNCTIONS *****************************************************************/
+
+/* Asks a lid device whether the lid is open (IOCTL_QUERY_LID) */
+static
+NTSTATUS
+PopQueryLidState(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Out_ PBOOLEAN Open)
+{
+    IO_STATUS_BLOCK IoStatusBlock;
+    KEVENT Event;
+    ULONG LidState = 0;
+    PIRP Irp;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp = IoBuildDeviceIoControlRequest(IOCTL_QUERY_LID,
+                                        DeviceObject,
+                                        NULL,
+                                        0,
+                                        &LidState,
+                                        sizeof(LidState),
+                                        FALSE,
+                                        &Event,
+                                        &IoStatusBlock);
+    if (!Irp)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = IoCallDriver(DeviceObject, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = IoStatusBlock.Status;
+    }
+    if (NT_SUCCESS(Status) && IoStatusBlock.Information < sizeof(LidState))
+        Status = STATUS_INVALID_DEVICE_REQUEST;
+
+    *Open = (LidState != 0);
+    return Status;
+}
+
+/*
+ * Reports the state of the lid through GUID_LIDSWITCH_STATE_CHANGE (0 closed,
+ * 1 open).  As on Windows, a registration gets no call until a lid device was
+ * found and its state is known.  The first state is known when the lid device
+ * arrives, which for a lid present at boot is before the power setting worker
+ * makes its first calls, so a display driver knows whether its panel is in
+ * use before the first mode set.  A change is also notified on
+ * \Callback\PowerState (PO_CB_LID_SWITCH_STATE).
+ */
+static
+VOID
+PopReportLidState(VOID)
+{
+    BOOLEAN Open;
+    LONG Previous;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    /* Any pending button request may complete with the lid event */
+    if (!PopLidDevice)
+        return;
+
+    Status = PopQueryLidState(PopLidDevice, &Open);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Querying the lid state failed with status 0x%08lx\n", Status);
+        return;
+    }
+
+    Previous = InterlockedExchange(&PopLidState, Open ? 1 : 0);
+    if (Previous == (Open ? 1 : 0))
+        return;
+
+    DPRINT1("Lid %s\n", Open ? "open" : "closed");
+    PopSetLidSwitchState(Open);
+
+    if (Previous != -1)
+    {
+        ExNotifyCallback(PowerStateCallback,
+                         (PVOID)(ULONG_PTR)PO_CB_LID_SWITCH_STATE,
+                         (PVOID)(ULONG_PTR)Open);
+    }
+}
 
 VOID
 NTAPI
@@ -77,6 +169,10 @@ PopGetSysButtonCompletion(
         if (SysButton == 0) DbgPrint(" WAKE");
         DbgPrint(" )\n");
 
+        /* The lid state is read at PASSIVE_LEVEL, before the next wait */
+        if (SysButton & SYS_BUTTON_LID)
+            SysButtonContext->LidChanged = TRUE;
+
         if (SysButton & SYS_BUTTON_POWER)
         {
             /* FIXME: Read registry for the action we should perform here */
@@ -111,6 +207,12 @@ PopGetSysButton(
     PSYS_BUTTON_CONTEXT SysButtonContext = Context;
     PIO_WORKITEM CurrentWorkItem = SysButtonContext->WorkItem;
     PIRP Irp;
+
+    if (SysButtonContext->LidChanged)
+    {
+        SysButtonContext->LidChanged = FALSE;
+        PopReportLidState();
+    }
 
     /* Get button pressed (IOCTL_GET_SYS_BUTTON_EVENT) */
     KeInitializeEvent(&SysButtonContext->Event, NotificationEvent, FALSE);
@@ -151,7 +253,7 @@ PopAddRemoveSysCapsCallback(IN PVOID NotificationStructure,
     PSYS_BUTTON_CONTEXT SysButtonContext;
     OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE FileHandle;
-    PDEVICE_OBJECT DeviceObject;
+    PDEVICE_OBJECT DeviceObject, OldLidDevice;
     PFILE_OBJECT FileObject;
     PIRP Irp;
     IO_STATUS_BLOCK IoStatusBlock;
@@ -274,6 +376,13 @@ PopAddRemoveSysCapsCallback(IN PVOID NotificationStructure,
         {
             DPRINT("LID present\n");
             PopCapabilities.LidPresent = TRUE;
+
+            /* The lid state is known from the start, not only once it changes */
+            ObReferenceObject(DeviceObject);
+            OldLidDevice = InterlockedExchangePointer((PVOID*)&PopLidDevice, DeviceObject);
+            if (OldLidDevice)
+                ObDereferenceObject(OldLidDevice);
+            PopReportLidState();
         }
 
         SysButtonContext = ExAllocatePoolWithTag(NonPagedPool,
@@ -289,6 +398,7 @@ PopAddRemoveSysCapsCallback(IN PVOID NotificationStructure,
         /* Queue a work item to get sys button event */
         SysButtonContext->WorkItem = IoAllocateWorkItem(DeviceObject);
         SysButtonContext->DeviceObject = DeviceObject;
+        SysButtonContext->LidChanged = FALSE;
         if (!SysButtonContext->WorkItem)
         {
             DPRINT1("IoAllocateWorkItem() failed\n");

@@ -800,6 +800,53 @@ PopSetPowerSource(
     KeReleaseGuardedMutex(&PopSettingLock);
 }
 
+/*
+ * The lid device reported the lid state (GUID_LIDSWITCH_STATE_CHANGE: 0 closed,
+ * 1 open).  The setting has no value, and its registrations get no call, until
+ * the first report.
+ */
+VOID
+NTAPI
+PopSetLidSwitchState(
+    _In_ BOOLEAN Open)
+{
+    ULONG State = Open ? 1 : 0;
+    PPOP_POWER_SETTING Setting;
+    PPOP_SETTING_VALUE Value;
+    ULONG Condition;
+
+    PAGED_CODE();
+
+    Value = PopAllocateSettingValue(&State, sizeof(State));
+    if (!Value)
+    {
+        DPRINT1("No memory for the lid state\n");
+        return;
+    }
+
+    KeAcquireGuardedMutex(&PopSettingLock);
+    Setting = PopFindPowerSetting(&GUID_LIDSWITCH_STATE_CHANGE);
+    if (!Setting)
+        Setting = PopCreatePowerSetting(&GUID_LIDSWITCH_STATE_CHANGE);
+    if (Setting)
+    {
+        /* Produced by the kernel, never read from the scheme store */
+        Setting->Builtin = TRUE;
+        Setting->SchemeRead = TRUE;
+
+        /* The same value on every power source */
+        for (Condition = PoAc; Condition < PoConditionMaximum; Condition++)
+        {
+            PopReferenceSettingValue(Value);
+            PopStoreSettingValue(Setting, (SYSTEM_POWER_CONDITION)Condition, Value);
+        }
+        KeSetEvent(&PopSettingWorkEvent, IO_NO_INCREMENT, FALSE);
+    }
+    KeReleaseGuardedMutex(&PopSettingLock);
+
+    PopDereferenceSettingValue(Value);
+}
+
 /* A battery arrived: query the source again (on the worker, never in the PnP notification) */
 VOID
 NTAPI

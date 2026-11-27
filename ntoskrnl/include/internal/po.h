@@ -343,6 +343,11 @@ PopStartPowerSettingWorker(
 
 VOID
 NTAPI
+PopSetLidSwitchState(
+    _In_ BOOLEAN Open);
+
+VOID
+NTAPI
 PopSetPowerSource(
     _In_ SYSTEM_POWER_CONDITION Source
 );
