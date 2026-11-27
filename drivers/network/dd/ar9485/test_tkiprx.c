@@ -15,7 +15,9 @@
  *   - and it does NOT verify with GTK[24..31], so a half-swap regression
  *     cannot pass silently;
  *   - the trailer arithmetic puts the MIC where the MIC is and leaves the
- *     driver's post-strip frame exactly the 802.11 header + SNAP + payload.
+ *     driver's post-strip frame exactly the 802.11 header + SNAP + payload;
+ *   - the IV is found after the frame's real MAC header (26 bytes for QoS
+ *     data, 30/32 with Address4, +4 with HT control), not at a fixed 24.
  */
 
 #include <stdio.h>
@@ -424,12 +426,128 @@ static void TestGroupRekey(void)
           AR9485TkipRxKeyId(Old, 24 + 3, 24) == 0);
 }
 
+/* ------------------------------------------------------------------ *
+ *  5.  Where the IV starts (#434)
+ * ------------------------------------------------------------------ */
+
+/*
+ * The receive path reads the key ID from the IV, runs Michael and strips
+ * the cipher header at the end of the MAC header -- which is 24 bytes only
+ * for a three-address non-QoS data frame.  receive.c used to take 24 for
+ * every frame; on a QoS data frame that reads the key ID out of the IV's
+ * second octet and leaves two IV bytes in front of the payload after the
+ * strip.  This runs the same three steps DispatchFrame runs.
+ */
+
+/* A protected QoS data frame, TID 5, under group key ID 2: header(26),
+ * IV(8), SNAP + ARP(36), MIC(8), ICV(4). */
+static unsigned BuildQosGroupFrame(unsigned char *Out)
+{
+    unsigned char Mic[8];
+    unsigned Length;
+
+    memcpy(Out, g_Header, 24);
+    Out[0] = 0x88;                          /* QoS Data */
+    Out[24] = 0x05;                         /* QoS control: TID 5 */
+    Out[25] = 0x00;
+    memcpy(Out + 26, g_Iv, 8);
+    Out[26 + 3] = (unsigned char)((2 << 6) | 0x20);     /* key ID 2, ExtIV */
+    memcpy(Out + 34, g_Payload, sizeof(g_Payload));
+    AR9485MichaelMic(g_Gtk2 + 16, Out + 4, Out + 16, 5,
+                     g_Payload, (AR9485_TKIP_U32)sizeof(g_Payload), Mic);
+    memcpy(Out + 34 + sizeof(g_Payload), Mic, 8);
+    Length = 34 + (unsigned)sizeof(g_Payload) + 8;
+    Out[Length + 0] = 0xde; Out[Length + 1] = 0xad;
+    Out[Length + 2] = 0xbe; Out[Length + 3] = 0xef;
+    return Length + 4;
+}
+
+static void TestMacHeaderLength(void)
+{
+    unsigned char Frame[128];
+    unsigned Length, HeaderLen, NewLength;
+    AR9485_TKIP_GROUP_MIC Table;
+    const unsigned char *Key;
+
+    printf("MAC header length on the receive path\n");
+
+    /* The header shapes a station can receive. */
+    memcpy(Frame, g_Header, 24);
+    Check("three-address data: 24", AR9485RxMacHeaderLen(Frame, 80) == 24);
+    Frame[0] = 0x80;                        /* beacon */
+    Check("management: 24", AR9485RxMacHeaderLen(Frame, 80) == 24);
+    Frame[0] = 0x88; Frame[1] = 0x42;
+    Check("QoS data: 26", AR9485RxMacHeaderLen(Frame, 80) == 26);
+    Frame[1] = 0x43;                        /* ToDS + FromDS + Protected */
+    Check("QoS data, four addresses: 32",
+          AR9485RxMacHeaderLen(Frame, 80) == 32);
+    Frame[1] = 0xc2;                        /* Order + Protected + FromDS */
+    Check("QoS data with HT control: 30",
+          AR9485RxMacHeaderLen(Frame, 80) == 30);
+    Frame[0] = 0x08; Frame[1] = 0x43;
+    Check("data, four addresses: 30", AR9485RxMacHeaderLen(Frame, 80) == 30);
+    Frame[1] = 0xc2;
+    Check("non-QoS data ignores the Order bit: 24",
+          AR9485RxMacHeaderLen(Frame, 80) == 24);
+    Frame[0] = 0x88; Frame[1] = 0x42;
+    Check("a frame shorter than its header has none",
+          AR9485RxMacHeaderLen(Frame, 25) == 0);
+
+    /* Now the receive steps over a QoS group frame. */
+    Length = BuildQosGroupFrame(Frame);
+    HeaderLen = AR9485RxMacHeaderLen(Frame, Length);
+
+    Check("QoS frame: key ID read from the IV is 2",
+          AR9485TkipRxKeyId(Frame, Length, HeaderLen) == 2);
+
+    memset(&Table, 0, sizeof(Table));
+    AR9485TkipGroupMicSet(&Table, 2, g_Gtk2 + 16);
+    Key = AR9485TkipGroupMicGet(&Table, AR9485TkipRxKeyId(Frame, Length,
+                                                          HeaderLen));
+    Check("QoS frame: Michael verifies with that key ID's key",
+          Key != NULL &&
+          AR9485TkipRxCheckMic(Frame, Length, HeaderLen, Key, NULL) ==
+          AR9485_TKIPRX_OK);
+
+    NewLength = AR9485RxStripCipher(Frame, Length, HeaderLen,
+                                    AR9485_TKIP_IV_LEN,
+                                    AR9485_TKIP_TRAILER_LEN);
+    Check("QoS frame: stripped length is header + payload",
+          NewLength == 26 + sizeof(g_Payload));
+    Check("QoS frame: the payload follows the header after the strip",
+          memcmp(Frame + AR9485_TKIP_IV_LEN + 26, g_Payload,
+                 sizeof(g_Payload)) == 0);
+    Check("QoS frame: the QoS control field survives the strip",
+          Frame[AR9485_TKIP_IV_LEN + 24] == 0x05 &&
+          Frame[AR9485_TKIP_IV_LEN + 25] == 0x00);
+    Check("QoS frame: Protected is cleared, the rest of FC kept",
+          Frame[AR9485_TKIP_IV_LEN + 0] == 0x88 &&
+          Frame[AR9485_TKIP_IV_LEN + 1] == 0x02);
+
+    /* The three-address frame still strips to what it always did. */
+    Length = BuildGroupFrame(Frame, g_Gtk + 16);
+    HeaderLen = AR9485RxMacHeaderLen(Frame, Length);
+    NewLength = AR9485RxStripCipher(Frame, Length, HeaderLen,
+                                    AR9485_TKIP_IV_LEN,
+                                    AR9485_TKIP_TRAILER_LEN);
+    Check("three-address frame strips to 24 + payload",
+          NewLength == 60 &&
+          memcmp(Frame + AR9485_TKIP_IV_LEN + 2, g_Header + 2, 22) == 0 &&
+          Frame[AR9485_TKIP_IV_LEN + 1] == 0x02 &&
+          memcmp(Frame + AR9485_TKIP_IV_LEN + 24, g_Payload,
+                 sizeof(g_Payload)) == 0);
+
+    Check("nothing left after the strip is refused",
+          AR9485RxStripCipher(Frame, 24 + 8 + 12, 24, 8, 12) == 0);
+}
+
 int main(void)
 {
     TestMichaelVectors();
     TestGroupFrame();
     TestDirectionsAndPriority();
     TestGroupRekey();
+    TestMacHeaderLength();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

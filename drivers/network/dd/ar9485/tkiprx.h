@@ -301,6 +301,70 @@ AR9485TkipGroupMicGet(const AR9485_TKIP_GROUP_MIC *Table, AR9485_TKIP_U32 KeyId)
     return Table->Key[KeyId];
 }
 
+/* ================================================================== *
+ *  MAC header length
+ * ================================================================== */
+
+#define AR9485_RX_FC0_TYPE_MASK     0x0c
+#define AR9485_RX_FC0_TYPE_DATA     0x08
+#define AR9485_RX_FC0_SUBTYPE_QOS   0x80
+#define AR9485_RX_FC1_DSTODS        0x03
+#define AR9485_RX_FC1_PROTECTED     0x40
+#define AR9485_RX_FC1_ORDER         0x80
+
+/*
+ * The length of the MAC header in front of a frame's body, which is where
+ * the IV of a protected frame starts (ieee80211_hdrlen()): 24 bytes, plus
+ * Address4 (6) on a frame with both ToDS and FromDS, plus QoS Control (2)
+ * on a QoS data frame, plus HT Control (4) on a QoS data frame with the
+ * Order bit set.  Returns 0 if Length cannot hold that header.
+ */
+static __inline AR9485_TKIP_U32
+AR9485RxMacHeaderLen(const AR9485_TKIP_U8 *Frame, AR9485_TKIP_U32 Length)
+{
+    AR9485_TKIP_U32 HeaderLen = 24;
+
+    if (Length < 2)
+        return 0;
+    if ((Frame[0] & AR9485_RX_FC0_TYPE_MASK) == AR9485_RX_FC0_TYPE_DATA)
+    {
+        if ((Frame[1] & AR9485_RX_FC1_DSTODS) == AR9485_RX_FC1_DSTODS)
+            HeaderLen += 6;
+        if (Frame[0] & AR9485_RX_FC0_SUBTYPE_QOS)
+        {
+            HeaderLen += 2;
+            if (Frame[1] & AR9485_RX_FC1_ORDER)
+                HeaderLen += 4;
+        }
+    }
+    return (Length < HeaderLen) ? 0 : HeaderLen;
+}
+
+/*
+ * Turn a decrypted MPDU into an unprotected one in place: move the MAC
+ * header up over the IvLen bytes of cipher header, clear the Protected bit
+ * and drop TrailerLen bytes of MIC/ICV.  The frame then starts at
+ * Frame + IvLen.  Returns the new length, or 0 if the frame is too short to
+ * hold header, cipher header and trailer with any body at all.
+ */
+static __inline AR9485_TKIP_U32
+AR9485RxStripCipher(AR9485_TKIP_U8 *Frame, AR9485_TKIP_U32 Length,
+                    AR9485_TKIP_U32 MacHeaderLen, AR9485_TKIP_U32 IvLen,
+                    AR9485_TKIP_U32 TrailerLen)
+{
+    AR9485_TKIP_U32 i;
+
+    if (Length <= MacHeaderLen + IvLen + TrailerLen)
+        return 0;
+
+    /* Overlapping, destination above the source: copy from the top. */
+    for (i = MacHeaderLen; i-- > 0; )
+        Frame[IvLen + i] = Frame[i];
+    Frame[IvLen + 1] &= (AR9485_TKIP_U8)~AR9485_RX_FC1_PROTECTED;
+
+    return Length - IvLen - TrailerLen;
+}
+
 /* The key ID of a protected MPDU: bits 6-7 of the fourth IV octet (TKIP
  * and CCMP alike, 802.11-2016 12.5.2.2 / 12.5.3.2). */
 static __inline AR9485_TKIP_U32

@@ -249,25 +249,6 @@ static VOID IndicateDataFrame(PAR9485_ADAPTER Adapter, PUCHAR Frame,
     NdisFreeMdl(Mdl);
 }
 
-/*
- * A frame the hardware decrypted still carries the CCMP header the sender
- * inserted and the MIC the sender appended; 802.11 leaves stripping them to
- * the layer above the MAC.  Do it here so nwifi's translator sees an
- * ordinary unprotected data frame.  Returns the new length, or 0 if the
- * frame is too short to be one.
- */
-static ULONG StripCipher(PUCHAR Frame, ULONG Length, ULONG HeaderLen,
-                         ULONG TrailerLen)
-{
-    if (Length <= DOT11_MAC_HEADER_LEN + HeaderLen + TrailerLen)
-        return 0;
-
-    RtlMoveMemory(Frame + HeaderLen, Frame, DOT11_MAC_HEADER_LEN);
-    Frame[HeaderLen + 1] &= (UCHAR)~DOT11_FC1_PROTECTED;
-
-    return Length - HeaderLen - TrailerLen;
-}
-
 static VOID DispatchFrame(PAR9485_ADAPTER Adapter, PUCHAR Frame, ULONG Length,
                           ULONG Frequency, LONG Rssi, ULONG Rate,
                           ULONG Status11)
@@ -324,6 +305,10 @@ static VOID DispatchFrame(PAR9485_ADAPTER Adapter, PUCHAR Frame, ULONG Length,
 
     if (Frame[1] & DOT11_FC1_PROTECTED)
     {
+        /* Where the IV starts: the header is 24 bytes only for a plain
+         * three-address data frame (#434). */
+        ULONG MacHeaderLen = AR9485RxMacHeaderLen(Frame, Length);
+
         /*
          * Which key the MAC used, and how much of the crypto work it did,
          * is decided exactly as ath9k decides it.
@@ -392,11 +377,21 @@ static VOID DispatchFrame(PAR9485_ADAPTER Adapter, PUCHAR Frame, ULONG Length,
          * 1-3 = a default/group key.  On a WPA/WPA2-mixed AP that is the
          * authoritative cipher discriminator; the DA multicast bit is not
          * (a group-keyed frame can be unicast-addressed). */
-        ULONG KeyId = AR9485TkipRxKeyId(Frame, Length, DOT11_MAC_HEADER_LEN);
-        ULONG Cipher = (KeyId == 0) ? Adapter->UnicastCipher
-                                    : Adapter->MulticastCipher;
-        ULONG HeaderLen = DOT11_CCMP_HEADER_LEN;
+        ULONG KeyId;
+        ULONG Cipher;
+        ULONG IvLen = DOT11_CCMP_HEADER_LEN;
         ULONG TrailerLen = DOT11_CCMP_MIC_LEN;
+
+        if (MacHeaderLen == 0)
+        {
+            Adapter->RxCryptoErrorCount++;
+            Adapter->RxDropShort++;
+            return;
+        }
+
+        KeyId = AR9485TkipRxKeyId(Frame, Length, MacHeaderLen);
+        Cipher = (KeyId == 0) ? Adapter->UnicastCipher
+                              : Adapter->MulticastCipher;
 
         /* A group frame under a key ID no slot holds: the AP rekeyed and the
          * new GTK never reached us.  Counted, not dropped here -- the crypto
@@ -419,7 +414,7 @@ static VOID DispatchFrame(PAR9485_ADAPTER Adapter, PUCHAR Frame, ULONG Length,
              * cut is MIC(8) + ICV(4) -- cutting only the ICV, as this used
              * to, hands nwifi eight bytes of MIC as if they were payload.
              */
-            HeaderLen = DOT11_TKIP_HEADER_LEN;
+            IvLen = DOT11_TKIP_HEADER_LEN;
             TrailerLen = AR9485_TKIP_TRAILER_LEN;
 
             if (!ValidTkip)
@@ -449,7 +444,7 @@ static VOID DispatchFrame(PAR9485_ADAPTER Adapter, PUCHAR Frame, ULONG Length,
                 }
 
                 MicResult = AR9485TkipRxCheckMic(Frame, Length,
-                                                 DOT11_MAC_HEADER_LEN,
+                                                 MacHeaderLen,
                                                  MicKey,
                                                  Computed);
 
@@ -464,9 +459,9 @@ static VOID DispatchFrame(PAR9485_ADAPTER Adapter, PUCHAR Frame, ULONG Length,
                  * pass, rather than the key being wrong.
                  */
                 if (Adapter->RxGroupTkipCount <= 3 &&
-                    Length > DOT11_MAC_HEADER_LEN + HeaderLen + 6)
+                    Length > MacHeaderLen + IvLen + 6)
                 {
-                    const UCHAR *Snap = Frame + DOT11_MAC_HEADER_LEN + HeaderLen;
+                    const UCHAR *Snap = Frame + MacHeaderLen + IvLen;
                     DPRINT1("AR9485: group TKIP #%lu len %lu s11 0x%08lx snap "
                             "%02x%02x%02x%02x%02x%02x mic %s\n",
                             Adapter->RxGroupTkipCount, Length, Status11,
@@ -507,16 +502,17 @@ static VOID DispatchFrame(PAR9485_ADAPTER Adapter, PUCHAR Frame, ULONG Length,
             }
         }
 
-        Length = StripCipher(Frame, Length, HeaderLen, TrailerLen);
+        Length = AR9485RxStripCipher(Frame, Length, MacHeaderLen, IvLen,
+                                     TrailerLen);
         if (Length == 0)
         {
             Adapter->RxCryptoErrorCount++;
             if ((++Adapter->RxDropShort % 1000) == 1)
                 DPRINT1("AR9485: protected data too short for %lu+%lu trailer #%lu\n",
-                        HeaderLen, TrailerLen, Adapter->RxDropShort);
+                        IvLen, TrailerLen, Adapter->RxDropShort);
             return;
         }
-        Frame += HeaderLen;
+        Frame += IvLen;
     }
 
     IndicateDataFrame(Adapter, Frame, Length, Rssi, Rate);
