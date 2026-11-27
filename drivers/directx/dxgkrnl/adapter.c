@@ -920,6 +920,144 @@ DxgkReleaseTrackedDmaBuffers(
  *
  * IRQL: PASSIVE_LEVEL
  */
+/* ========================================================================
+ * Lid switch: DxgkDdiNotifyAcpiEvent(DxgkPowerStateEvent, PO_CB_LID_SWITCH_STATE)
+ * ====================================================================== */
+
+typedef struct _DXGKP_LID_WORK
+{
+    WORK_QUEUE_ITEM Item;
+    BOOLEAN         Open;
+} DXGKP_LID_WORK, *PDXGKP_LID_WORK;
+
+#define DXGKP_MAX_LID_ADAPTERS  8
+
+/*
+ * Tells every started adapter that the lid opened or closed, as Windows
+ * does through DxgkDdiNotifyAcpiEvent(DxgkPowerStateEvent,
+ * PO_CB_LID_SWITCH_STATE).  A miniport that wants its children polled
+ * again (DXGK_ACPI_POLL_DISPLAY_CHILDREN) gets a topology update; it may
+ * also report the change itself through DxgkCbIndicateChildStatus.
+ *
+ * IRQL: PASSIVE_LEVEL
+ */
+static WORKER_THREAD_ROUTINE DxgkpLidWorker;
+
+static VOID
+NTAPI
+DxgkpLidWorker(
+    _In_ PVOID Parameter)
+{
+    PDXGKP_LID_WORK Work = (PDXGKP_LID_WORK)Parameter;
+    PDXGKRNL_ADAPTER Adapters[DXGKP_MAX_LID_ADAPTERS];
+    PDXGKDDI_NOTIFY_ACPI_EVENT NotifyAcpiEvent;
+    PLIST_ENTRY Entry;
+    ULONG Count = 0, i, AcpiFlags;
+    KIRQL OldIrql;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    /* The FDO reference keeps each adapter while it is called */
+    KeAcquireSpinLock(&DxgkAdapterGlobalListLock, &OldIrql);
+    for (Entry = DxgkAdapterGlobalListHead.Flink;
+         Entry != &DxgkAdapterGlobalListHead && Count < RTL_NUMBER_OF(Adapters);
+         Entry = Entry->Flink)
+    {
+        PDXGKRNL_ADAPTER Adapter =
+            CONTAINING_RECORD(Entry, DXGKRNL_ADAPTER, GlobalAdapterListEntry);
+
+        if (Adapter->State != DxgkAdapterStateStarted)
+            continue;
+        ObReferenceObject(Adapter->FunctionalDeviceObject);
+        Adapters[Count++] = Adapter;
+    }
+    KeReleaseSpinLock(&DxgkAdapterGlobalListLock, OldIrql);
+
+    for (i = 0; i < Count; i++)
+    {
+        PDXGKRNL_ADAPTER Adapter = Adapters[i];
+
+        NotifyAcpiEvent = DXGK_CB(Adapter, DxgkDdiNotifyAcpiEvent);
+        if (NotifyAcpiEvent != NULL && Adapter->State == DxgkAdapterStateStarted)
+        {
+            AcpiFlags = 0;
+            Status = NotifyAcpiEvent(Adapter->MiniportDeviceContext,
+                                     DxgkPowerStateEvent,
+                                     PO_CB_LID_SWITCH_STATE,
+                                     (PVOID)(ULONG_PTR)Work->Open,
+                                     &AcpiFlags);
+            DXGKRNL_WARN("DxgkpLidWorker: lid %s: DxgkDdiNotifyAcpiEvent 0x%08lX flags 0x%lx\n",
+                         Work->Open ? "open" : "closed", Status, AcpiFlags);
+
+            if (NT_SUCCESS(Status) && (AcpiFlags & DXGK_ACPI_POLL_DISPLAY_CHILDREN))
+                DxgkDisplayUpdateTopology(Adapter);
+            if (NT_SUCCESS(Status) && (AcpiFlags & DXGK_ACPI_CHANGE_DISPLAY_MODE))
+            {
+                /* TODO: DxgkDdiRecommendFunctionalVidPn and a mode set (#523) */
+                DXGKRNL_WARN("DxgkpLidWorker: the miniport asks for a new mode; not done\n");
+            }
+        }
+
+        ObDereferenceObject(Adapter->FunctionalDeviceObject);
+    }
+
+    ExFreePoolWithTag(Work, TAG_DXGK_ADAPTER);
+}
+
+/* \Callback\PowerState: runs at IRQL <= DISPATCH_LEVEL */
+static CALLBACK_FUNCTION DxgkpPowerStateCallback;
+
+static VOID
+NTAPI
+DxgkpPowerStateCallback(
+    _In_opt_ PVOID CallbackContext,
+    _In_opt_ PVOID Argument1,
+    _In_opt_ PVOID Argument2)
+{
+    PDXGKP_LID_WORK Work;
+
+    UNREFERENCED_PARAMETER(CallbackContext);
+
+    if ((ULONG_PTR)Argument1 != PO_CB_LID_SWITCH_STATE)
+        return;
+
+    Work = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Work), TAG_DXGK_ADAPTER);
+    if (Work == NULL)
+    {
+        DXGKRNL_ERR("DxgkpPowerStateCallback: no memory; the lid change is not reported\n");
+        return;
+    }
+    Work->Open = ((ULONG_PTR)Argument2 != 0);
+    ExInitializeWorkItem(&Work->Item, DxgkpLidWorker, Work);
+    ExQueueWorkItem(&Work->Item, DelayedWorkQueue);
+}
+
+static VOID
+DxgkpRegisterPowerStateCallback(VOID)
+{
+    static PCALLBACK_OBJECT CallbackObject;
+    static PVOID Registration;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Callback\\PowerState");
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    InitializeObjectAttributes(&ObjectAttributes, &Name,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = ExCreateCallback(&CallbackObject, &ObjectAttributes, FALSE, TRUE);
+    if (!NT_SUCCESS(Status))
+    {
+        DXGKRNL_ERR("DxgkpRegisterPowerStateCallback: ExCreateCallback 0x%08lX\n", Status);
+        return;
+    }
+
+    Registration = ExRegisterCallback(CallbackObject, DxgkpPowerStateCallback, NULL);
+    if (Registration == NULL)
+        DXGKRNL_ERR("DxgkpRegisterPowerStateCallback: ExRegisterCallback failed\n");
+}
+
 static VOID
 DxgkpFirstInit(VOID)
 {
@@ -937,6 +1075,9 @@ DxgkpFirstInit(VOID)
 
     /* Seed D3DKMT handle cookie. */
     DxgkContextInit();
+
+    /* Lid open/close reaches the miniports through DxgkDdiNotifyAcpiEvent. */
+    DxgkpRegisterPowerStateCallback();
 
     DXGKRNL_TRACE("DxgkpFirstInit: one-time init complete\n");
 }
@@ -2490,6 +2631,24 @@ DxgkCbIndicateChildStatus(
     if (i < Adapter->ChildStatusCount)
         Adapter->ChildStatus[i].Connected = ChildStatus->HotPlug.Connected;
     KeReleaseSpinLock(&Adapter->ChildStatusLock, OldIrql);
+
+    /* The child PDO follows the report as well */
+    {
+        PLIST_ENTRY Entry;
+
+        KeAcquireSpinLock(&Adapter->ChildListLock, &OldIrql);
+        for (Entry = Adapter->ChildListHead.Flink;
+             Entry != &Adapter->ChildListHead;
+             Entry = Entry->Flink)
+        {
+            PDXGK_CHILD_PDO_EXTENSION Child =
+                CONTAINING_RECORD(Entry, DXGK_CHILD_PDO_EXTENSION, ListEntry);
+
+            if (Child->Descriptor.ChildUid == ChildStatus->ChildUid)
+                Child->Connected = ChildStatus->HotPlug.Connected;
+        }
+        KeReleaseSpinLock(&Adapter->ChildListLock, OldIrql);
+    }
 
     if (i == RTL_NUMBER_OF(Adapter->ChildStatus))
     {
