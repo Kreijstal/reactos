@@ -9,6 +9,11 @@ typedef [context_handle] PVOID WLANSVC_RPC_HANDLE;
 typedef WLANSVC_RPC_HANDLE *LPWLANSVC_RPC_HANDLE;
 typedef [handle, string] LPWSTR WLANSVC_HANDLE;
 
+/* One name of a profile list: laid out as the LPCWSTR it wraps. */
+typedef struct _WLANSVC_PROFILE_NAME {
+    [string] LPWSTR Name;
+} WLANSVC_PROFILE_NAME, *LPWLANSVC_PROFILE_NAME;
+
 /* FIXME */
 typedef struct struct_C {
     ULONGLONG elem_1;
@@ -206,8 +211,8 @@ interface wlansvc_interface
     DWORD _RpcSetProfileList(
         [in] WLANSVC_RPC_HANDLE hClientHandle,
         [in] const GUID* pInterfaceGuid,
-        [in] DWORD dwItems,
-        [in] /* [string] */ [size_is(dwItems)] /* wchar_t */ BYTE ** strProfileNames); /* FIXME */
+        [in, range(1, 1024)] DWORD dwItems,
+        [in, size_is(dwItems)] LPWLANSVC_PROFILE_NAME strProfileNames);
 
     /* Function: 0x16 */
     DWORD _RpcGetProfileList(

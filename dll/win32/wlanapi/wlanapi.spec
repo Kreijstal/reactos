@@ -31,6 +31,6 @@
 @ stub WlanSetProfileEapUserData
 @ stub WlanSetProfileEapXmlUserData
 @ stdcall WlanSetProfileList (ptr ptr long ptr ptr)
-@ stub WlanSetProfilePosition
+@ stdcall WlanSetProfilePosition (ptr ptr wstr long ptr)
 @ stub WlanSetPsdIEDataList
 @ stdcall WlanSetSecuritySettings (ptr long ptr)

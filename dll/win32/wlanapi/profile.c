@@ -223,9 +223,49 @@ WlanSetProfileList(IN HANDLE hClientHandle,
                    IN LPCWSTR *strProfileNames,
                    PVOID pReserved)
 {
+    DWORD dwResult = ERROR_SUCCESS;
+
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (strProfileNames  == NULL) || (dwItems == 0))
         return ERROR_INVALID_PARAMETER;
 
-    UNIMPLEMENTED;
-    return ERROR_SUCCESS;
+    RpcTryExcept
+    {
+        /* An array of string pointers, as the interface declares it. */
+        dwResult = _RpcSetProfileList(hClientHandle, pInterfaceGuid, dwItems,
+                                      (LPWLANSVC_PROFILE_NAME)strProfileNames);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwResult = RpcExceptionCode();
+    }
+    RpcEndExcept;
+
+    return dwResult;
+}
+
+DWORD
+WINAPI
+WlanSetProfilePosition(IN HANDLE hClientHandle,
+                       IN const GUID *pInterfaceGuid,
+                       IN LPCWSTR strProfileName,
+                       IN DWORD dwPosition,
+                       PVOID pReserved)
+{
+    DWORD dwResult = ERROR_SUCCESS;
+
+    if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (strProfileName == NULL))
+        return ERROR_INVALID_PARAMETER;
+
+    RpcTryExcept
+    {
+        dwResult = _RpcSetProfilePosition(hClientHandle, pInterfaceGuid,
+                                          (LPWSTR)strProfileName, dwPosition);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwResult = RpcExceptionCode();
+    }
+    RpcEndExcept;
+
+    return dwResult;
 }

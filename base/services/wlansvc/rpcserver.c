@@ -751,18 +751,56 @@ DWORD _RpcRenameProfile(
     const wchar_t *strOldProfileName,
     const wchar_t *strNewProfileName)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    PWLANSVC_INTERFACE iface;
+    DWORD dwResult;
+
+    if (strOldProfileName == NULL || strNewProfileName == NULL)
+        return ERROR_INVALID_PARAMETER;
+
+    if (!WlanSvcValidateHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+
+    EnterCriticalSection(&WlanSvcLock);
+    iface = WlanSvcFindInterface(pInterfaceGuid);
+    if (iface == NULL)
+    {
+        LeaveCriticalSection(&WlanSvcLock);
+        return ERROR_NOT_FOUND;
+    }
+
+    dwResult = WlanSvcRenameProfile(iface, strOldProfileName, strNewProfileName);
+    LeaveCriticalSection(&WlanSvcLock);
+    return dwResult;
 }
 
 DWORD _RpcSetProfileList(
     WLANSVC_RPC_HANDLE hClientHandle,
     const GUID *pInterfaceGuid,
     DWORD dwItems,
-    BYTE **strProfileNames)
+    LPWLANSVC_PROFILE_NAME strProfileNames)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    PWLANSVC_INTERFACE iface;
+    DWORD dwResult;
+
+    C_ASSERT(sizeof(WLANSVC_PROFILE_NAME) == sizeof(LPCWSTR));
+
+    if (dwItems == 0 || strProfileNames == NULL)
+        return ERROR_INVALID_PARAMETER;
+
+    if (!WlanSvcValidateHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+
+    EnterCriticalSection(&WlanSvcLock);
+    iface = WlanSvcFindInterface(pInterfaceGuid);
+    if (iface == NULL)
+    {
+        LeaveCriticalSection(&WlanSvcLock);
+        return ERROR_NOT_FOUND;
+    }
+
+    dwResult = WlanSvcSetProfileList(iface, dwItems, (LPCWSTR *)strProfileNames);
+    LeaveCriticalSection(&WlanSvcLock);
+    return dwResult;
 }
 
 DWORD _RpcGetProfileList(
@@ -827,8 +865,26 @@ DWORD _RpcSetProfilePosition(
     wchar_t *strProfileName,
     DWORD dwPosition)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    PWLANSVC_INTERFACE iface;
+    DWORD dwResult;
+
+    if (strProfileName == NULL)
+        return ERROR_INVALID_PARAMETER;
+
+    if (!WlanSvcValidateHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+
+    EnterCriticalSection(&WlanSvcLock);
+    iface = WlanSvcFindInterface(pInterfaceGuid);
+    if (iface == NULL)
+    {
+        LeaveCriticalSection(&WlanSvcLock);
+        return ERROR_NOT_FOUND;
+    }
+
+    dwResult = WlanSvcSetProfilePosition(iface, strProfileName, dwPosition);
+    LeaveCriticalSection(&WlanSvcLock);
+    return dwResult;
 }
 
 DWORD _RpcSetProfileCustomUserData(

@@ -392,3 +392,217 @@ WlanSvcDeleteProfile(PWLANSVC_INTERFACE Iface, LPCWSTR Name)
     WlanSvcIndicateAcm(Iface, wlan_notification_acm_profile_change);
     return ERROR_SUCCESS;
 }
+
+/* The number of group policy profiles: they lead the list, in a fixed order. */
+static ULONG
+WlanSvcCountPolicyProfiles(PWLANSVC_INTERFACE Iface)
+{
+    PLIST_ENTRY entry;
+    ULONG count = 0;
+
+    for (entry = Iface->ProfileListHead.Flink;
+         entry != &Iface->ProfileListHead;
+         entry = entry->Flink)
+    {
+        if (!(CONTAINING_RECORD(entry, WLANSVC_PROFILE, ListEntry)->Flags &
+              WLAN_PROFILE_GROUP_POLICY))
+            break;
+        count++;
+    }
+    return count;
+}
+
+DWORD
+WlanSvcSetProfilePosition(PWLANSVC_INTERFACE Iface, LPCWSTR Name,
+                          DWORD Position)
+{
+    PWLANSVC_PROFILE prof = WlanSvcFindProfile(Iface, Name);
+    PLIST_ENTRY entry;
+    ULONG first, index;
+
+    if (prof == NULL)
+        return ERROR_NOT_FOUND;
+    /* The position of a group policy profile cannot be changed... */
+    if (prof->Flags & WLAN_PROFILE_GROUP_POLICY)
+        return ERROR_ACCESS_DENIED;
+
+    /* ... nor can another profile go ahead of them. */
+    first = WlanSvcCountPolicyProfiles(Iface);
+    if (Position < first)
+        Position = first;
+
+    RemoveEntryList(&prof->ListEntry);
+    for (entry = Iface->ProfileListHead.Flink, index = 0;
+         entry != &Iface->ProfileListHead && index < Position;
+         entry = entry->Flink, index++)
+    {
+        /* Count. */
+    }
+    /* In front of the profile now at Position, or last. */
+    InsertTailList(entry, &prof->ListEntry);
+
+    WlanSvcStoreSaveOrder(Iface);
+    WlanSvcIndicateAcm(Iface, wlan_notification_acm_profile_change);
+    return ERROR_SUCCESS;
+}
+
+DWORD
+WlanSvcSetProfileList(PWLANSVC_INTERFACE Iface, DWORD Count, LPCWSTR *Names)
+{
+    PWLANSVC_PROFILE *order;
+    DWORD dwResult = ERROR_SUCCESS;
+    DWORD i, j;
+
+    order = HeapAlloc(GetProcessHeap(), 0, (Count ? Count : 1) * sizeof(*order));
+    if (order == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    for (i = 0; i < Count && dwResult == ERROR_SUCCESS; i++)
+    {
+        if (Names[i] == NULL)
+        {
+            dwResult = ERROR_INVALID_PARAMETER;
+            break;
+        }
+        order[i] = WlanSvcFindProfile(Iface, Names[i]);
+        if (order[i] == NULL)
+        {
+            dwResult = ERROR_NOT_FOUND;
+            break;
+        }
+        /* The same profile twice. */
+        for (j = 0; j < i; j++)
+        {
+            if (order[j] == order[i])
+                dwResult = ERROR_INVALID_PARAMETER;
+        }
+    }
+
+    /* The list names every profile, each once. */
+    if (dwResult == ERROR_SUCCESS && Count != Iface->ProfileCount)
+        dwResult = ERROR_INVALID_PARAMETER;
+
+    if (dwResult == ERROR_SUCCESS)
+    {
+        /* Group policy profiles keep their places ahead of the others,
+         * whose order the list sets. */
+        for (i = 0; i < Count; i++)
+        {
+            if (!(order[i]->Flags & WLAN_PROFILE_GROUP_POLICY))
+            {
+                RemoveEntryList(&order[i]->ListEntry);
+                InsertTailList(&Iface->ProfileListHead, &order[i]->ListEntry);
+            }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, order);
+    if (dwResult != ERROR_SUCCESS)
+        return dwResult;
+
+    WlanSvcStoreSaveOrder(Iface);
+    WlanSvcIndicateAcm(Iface, wlan_notification_acm_profile_change);
+    return ERROR_SUCCESS;
+}
+
+/* The XML-escaped form of one character, or NULL if it stands as it is. */
+static LPCWSTR
+WlanSvcXmlEntity(WCHAR c)
+{
+    switch (c)
+    {
+        case L'&':  return L"&amp;";
+        case L'<':  return L"&lt;";
+        case L'>':  return L"&gt;";
+        case L'"':  return L"&quot;";
+        case L'\'': return L"&apos;";
+        default:    return NULL;
+    }
+}
+
+/* Xml with the text of its profile <name> (the first one) replaced by Name,
+ * escaped; heap block, caller frees. */
+static LPWSTR
+WlanSvcXmlWithName(LPCWSTR Xml, LPCWSTR Name)
+{
+    LPCWSTR start = XmlFindOpen(Xml, L"name");
+    LPCWSTR end, p, entity;
+    SIZE_T head, tail, nameLen = 0;
+    LPWSTR out, q;
+
+    if (start == NULL)
+        return NULL;
+    end = wcschr(start, L'<');
+    if (end == NULL)
+        return NULL;
+
+    for (p = Name; *p != UNICODE_NULL; p++)
+    {
+        entity = WlanSvcXmlEntity(*p);
+        nameLen += (entity != NULL) ? wcslen(entity) : 1;
+    }
+
+    head = start - Xml;
+    tail = wcslen(end);
+    out = HeapAlloc(GetProcessHeap(), 0, (head + nameLen + tail + 1) * sizeof(WCHAR));
+    if (out == NULL)
+        return NULL;
+
+    memcpy(out, Xml, head * sizeof(WCHAR));
+    q = out + head;
+    for (p = Name; *p != UNICODE_NULL; p++)
+    {
+        entity = WlanSvcXmlEntity(*p);
+        if (entity != NULL)
+        {
+            wcscpy(q, entity);
+            q += wcslen(entity);
+        }
+        else
+        {
+            *q++ = *p;
+        }
+    }
+    memcpy(q, end, (tail + 1) * sizeof(WCHAR));
+    return out;
+}
+
+DWORD
+WlanSvcRenameProfile(PWLANSVC_INTERFACE Iface, LPCWSTR OldName, LPCWSTR NewName)
+{
+    PWLANSVC_PROFILE prof = WlanSvcFindProfile(Iface, OldName);
+    PWLANSVC_PROFILE other;
+    LPWSTR xml;
+    size_t len;
+
+    if (prof == NULL)
+        return ERROR_NOT_FOUND;
+
+    len = wcslen(NewName);
+    if (len == 0 || len >= WLAN_MAX_NAME_LENGTH)
+        return ERROR_INVALID_PARAMETER;
+
+    other = WlanSvcFindProfile(Iface, NewName);
+    if (other != NULL && other != prof)
+        return ERROR_ALREADY_EXISTS;
+
+    if (prof->Xml == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    xml = WlanSvcXmlWithName(prof->Xml, NewName);
+    if (xml == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    /* The profile keeps its place, its file and its connection. */
+    if (_wcsicmp(Iface->ConnectedProfile, prof->Name) == 0)
+        wcscpy(Iface->ConnectedProfile, NewName);
+    if (_wcsicmp(Iface->AttemptProfile, prof->Name) == 0)
+        wcscpy(Iface->AttemptProfile, NewName);
+
+    SecureZeroMemory(prof->Xml, wcslen(prof->Xml) * sizeof(WCHAR));
+    HeapFree(GetProcessHeap(), 0, prof->Xml);
+    prof->Xml = xml;
+    wcscpy(prof->Name, NewName);
+
+    WlanSvcStoreSaveProfile(Iface, prof);
+    WlanSvcIndicateAcm(Iface, wlan_notification_acm_profile_change);
+    return ERROR_SUCCESS;
+}

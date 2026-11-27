@@ -285,6 +285,12 @@ DWORD WlanSvcSetProfile(PWLANSVC_INTERFACE Iface, DWORD dwFlags, LPCWSTR Xml,
 DWORD WlanSvcGetProfile(PWLANSVC_INTERFACE Iface, LPCWSTR Name,
                         BOOL bPlaintextKey, LPWSTR *ppXml, PDWORD pdwFlags);
 DWORD WlanSvcDeleteProfile(PWLANSVC_INTERFACE Iface, LPCWSTR Name);
+DWORD WlanSvcSetProfilePosition(PWLANSVC_INTERFACE Iface, LPCWSTR Name,
+                                DWORD Position);
+DWORD WlanSvcSetProfileList(PWLANSVC_INTERFACE Iface, DWORD Count,
+                            LPCWSTR *Names);
+DWORD WlanSvcRenameProfile(PWLANSVC_INTERFACE Iface, LPCWSTR OldName,
+                           LPCWSTR NewName);
 VOID  WlanSvcFreeProfile(PWLANSVC_PROFILE Profile);
 
 /* store.c */

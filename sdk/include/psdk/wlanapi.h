@@ -448,6 +448,7 @@ DWORD WINAPI WlanSetProfile(IN HANDLE hClientHandle, IN const GUID *pInterfaceGu
 DWORD WINAPI WlanSetProfileCustomUserData(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN LPCWSTR strProfileName, IN DWORD dwDataSize, IN const PBYTE pData, PVOID pReserved);
 DWORD WINAPI WlanSetProfileEapUserData(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN LPCWSTR strProfileName, IN EAP_METHOD_TYPE eapType, IN DWORD dwFlags, IN DWORD dwEapUserDataSize, IN const LPBYTE pbEapUserData, PVOID pReserved);
 DWORD WINAPI WlanSetProfileList(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, DWORD dwItems, IN LPCWSTR *strProfileNames, PVOID pReserved);
+DWORD WINAPI WlanSetProfilePosition(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN LPCWSTR strProfileName, IN DWORD dwPosition, PVOID pReserved);
 DWORD WINAPI WlanSetSecuritySettings(IN HANDLE hClientHandle, IN WLAN_SECURABLE_OBJECT SecurableObject, IN LPCWSTR strModifiedSDDL);
 DWORD WINAPI WlanScan(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN PDOT11_SSID pDot11Ssid, IN PWLAN_RAW_DATA pIeData, PVOID pReserved);
 #endif
