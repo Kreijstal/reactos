@@ -329,6 +329,42 @@ ACPIDispatchDeviceControl(
               }
               break;
 
+           case IOCTL_QUERY_LID:
+           {
+              PPDO_DEVICE_DATA PdoData = (PPDO_DEVICE_DATA)commonData;
+              unsigned long long LidOpen;
+              ACPI_STATUS AcpiStatus;
+
+              /* The power manager asks for the lid state when the lid
+               * arrives and after each lid notification: _LID, nonzero
+               * if the lid is open */
+              if (irpStack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(ULONG))
+              {
+                  status = STATUS_BUFFER_TOO_SMALL;
+                  break;
+              }
+              if (PdoData->AcpiHandle == NULL || PdoData->HardwareIDs == NULL ||
+                  !wcsstr(PdoData->HardwareIDs, L"PNP0C0D"))
+              {
+                  status = STATUS_INVALID_DEVICE_REQUEST;
+                  break;
+              }
+
+              ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+              AcpiStatus = acpi_evaluate_integer(PdoData->AcpiHandle, "_LID", NULL, &LidOpen);
+              if (ACPI_FAILURE(AcpiStatus))
+              {
+                  DPRINT1("Evaluating _LID failed: 0x%x\n", AcpiStatus);
+                  status = STATUS_UNSUCCESSFUL;
+                  break;
+              }
+
+              *(PULONG)Irp->AssociatedIrp.SystemBuffer = (LidOpen != 0);
+              Irp->IoStatus.Information = sizeof(ULONG);
+              status = STATUS_SUCCESS;
+              break;
+           }
+
            case IOCTL_GET_SYS_BUTTON_EVENT:
               PsCreateSystemThread(&ThreadHandle, THREAD_ALL_ACCESS, 0, 0, 0, ButtonWaitThread, Irp);
               ZwClose(ThreadHandle);
