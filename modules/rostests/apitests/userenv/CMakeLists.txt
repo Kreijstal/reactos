@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    DeleteProfile.c
     GetProfileDirs.c
     LoadUserProfile.c
     testlist.c)

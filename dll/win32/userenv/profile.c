@@ -1196,20 +1196,21 @@ DeleteProfileW(
         return FALSE;
     }
 
-    if (lpProfilePath != NULL)
+    dwError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                            L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
+                            0,
+                            KEY_QUERY_VALUE,
+                            &hProfilesKey);
+    if (dwError != ERROR_SUCCESS)
     {
-        dwError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                                L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
-                                0,
-                                KEY_QUERY_VALUE,
-                                &hProfilesKey);
-        if (dwError != ERROR_SUCCESS)
-        {
-            DPRINT1("Error: %lu\n", dwError);
-            goto done;
-        }
+        DPRINT1("Error: %lu\n", dwError);
+        goto done;
+    }
 
-        dwError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+    if (lpProfilePath == NULL)
+    {
+        /* Take the profile path from the profile's ProfileList entry */
+        dwError = RegOpenKeyExW(hProfilesKey,
                                 lpSidString,
                                 0,
                                 KEY_QUERY_VALUE,
@@ -1228,11 +1229,14 @@ DeleteProfileW(
                                    &dwType,
                                    (PBYTE)szRawProfilePath,
                                    &dwLength);
+        if (dwError == ERROR_SUCCESS && dwType != REG_SZ && dwType != REG_EXPAND_SZ)
+            dwError = ERROR_INVALID_DATA;
         if (dwError != ERROR_SUCCESS)
         {
              DPRINT1("Error: %lu\n", dwError);
              goto done;
         }
+        szRawProfilePath[ARRAYSIZE(szRawProfilePath) - 1] = UNICODE_NULL;
 
         if (!ExpandEnvironmentStringsW(szRawProfilePath,
                                        szProfilePath,
@@ -1257,6 +1261,16 @@ DeleteProfileW(
         goto done;
     }
 
+    /* The profile is gone: remove its ProfileList entry */
+    dwError = RegDeleteKeyW(hProfilesKey, lpSidString);
+    if (dwError == ERROR_FILE_NOT_FOUND)
+        dwError = ERROR_SUCCESS;
+    if (dwError != ERROR_SUCCESS)
+    {
+        DPRINT1("Error: %lu\n", dwError);
+        goto done;
+    }
+
     bRet = TRUE;
 
 done:
@@ -1265,6 +1279,9 @@ done:
 
     if (hProfilesKey != NULL)
         RegCloseKey(hProfilesKey);
+
+    if (!bRet)
+        SetLastError(dwError);
 
     return bRet;
 }
