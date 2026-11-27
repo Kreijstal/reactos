@@ -1129,9 +1129,18 @@ NTSTATUS DispTdiSendDatagram(
 
 	TI_DbgPrint(MID_TRACE,("About to query buffer %x\n", Irp->MdlAddress));
 
-	NdisQueryBuffer( (PNDIS_BUFFER)Irp->MdlAddress,
-			 &DataBuffer,
-			 &BufferSize );
+        /* The empty datagram comes with no buffer */
+        if (Irp->MdlAddress)
+        {
+            NdisQueryBuffer( (PNDIS_BUFFER)Irp->MdlAddress,
+                             &DataBuffer,
+                             &BufferSize );
+        }
+        else
+        {
+            DataBuffer = NULL;
+            BufferSize = 0;
+        }
 
         /* FIXME: DgramInfo->SendDatagramInformation->RemoteAddress
            must be of type PTDI_ADDRESS_IP */
