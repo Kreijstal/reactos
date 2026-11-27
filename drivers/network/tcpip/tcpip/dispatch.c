@@ -1623,6 +1623,7 @@ NTSTATUS DispTdiQueryInformationEx(
                 Request.RequestNotifyObject = DispTdiQueryInformationExComplete;
                 Request.RequestContext      = QueryContext;
                 Status = InfoTdiQueryInformationEx(&Request,
+                    (ULONG)(ULONG_PTR)IrpSp->FileObject->FsContext2,
                     &QueryContext->QueryInfo.ID, OutputMdl,
                     &Size, &QueryContext->QueryInfo.Context);
                 DispTdiQueryInformationExComplete(QueryContext, Status, Size);
@@ -1724,6 +1725,7 @@ NTSTATUS DispTdiQueryInformationEx(
         Request.RequestNotifyObject = DispTdiQueryInformationExComplete;
         Request.RequestContext      = QueryContext;
         Status = InfoTdiQueryInformationEx(&Request,
+                                           (ULONG)(ULONG_PTR)IrpSp->FileObject->FsContext2,
                                            &QueryContext->QueryInfo.ID,
                                            NULL,
                                            &Size,
@@ -1795,8 +1797,9 @@ NTSTATUS DispTdiSetInformationEx(
     Request.RequestNotifyObject = NULL;
     Request.RequestContext      = NULL;
 
-    Status = InfoTdiSetInformationEx(&Request, &Info->ID,
-            &Info->Buffer, Info->BufferSize);
+    Status = InfoTdiSetInformationEx(&Request,
+            (ULONG)(ULONG_PTR)IrpSp->FileObject->FsContext2,
+            &Info->ID, &Info->Buffer, Info->BufferSize);
 
     return Status;
 }

@@ -217,8 +217,38 @@ InfoTdiQueryGetATInfo(
     return Status;
 }
 
+/* The address file an INFO_TYPE_ADDRESS_OBJECT request is for.  A request
+ * on an address file is for that address file, whatever entity it names;
+ * only one on the control channel names its address file by the entity */
+static
+PADDRESS_FILE
+InfoGetAddressFile(
+    PTDI_REQUEST Request,
+    ULONG FileType,
+    TDIEntityID Entity)
+{
+    switch (FileType)
+    {
+        case TDI_TRANSPORT_ADDRESS_FILE:
+            return Request->Handle.AddressHandle;
+
+        case TDI_CONTROL_CHANNEL_FILE:
+            if (Entity.tei_entity != CO_TL_ENTITY &&
+                Entity.tei_entity != CL_TL_ENTITY &&
+                Entity.tei_entity != ER_ENTITY)
+            {
+                return NULL;
+            }
+            return GetContext(Entity);
+
+        default:
+            return NULL;
+    }
+}
+
 TDI_STATUS InfoTdiQueryInformationEx(
   PTDI_REQUEST Request,
+  ULONG FileType,
   TDIObjectID *ID,
   PNDIS_BUFFER Buffer,
   PUINT BufferSize,
@@ -227,6 +257,7 @@ TDI_STATUS InfoTdiQueryInformationEx(
  * FUNCTION: Returns extended information
  * ARGUMENTS:
  *   Request    = Pointer to TDI request structure for the request
+ *   FileType   = The kind of file object the request came on
  *   ID         = TDI object ID
  *   Buffer     = Pointer to buffer with data to use
  *   BufferSize = Pointer to buffer with size of Buffer. On return
@@ -270,7 +301,7 @@ TDI_STATUS InfoTdiQueryInformationEx(
         case INFO_CLASS_PROTOCOL:
            if (ID->toi_type == INFO_TYPE_ADDRESS_OBJECT)
            {
-               if ((EntityListContext = GetContext(ID->toi_entity)))
+               if ((EntityListContext = InfoGetAddressFile(Request, FileType, ID->toi_entity)))
                     return GetAddressFileInfo(ID, EntityListContext, Buffer, BufferSize);
                else
                     return TDI_INVALID_PARAMETER;
@@ -386,6 +417,7 @@ TDI_STATUS InfoTdiQueryInformationEx(
 
 TDI_STATUS InfoTdiSetInformationEx
 (PTDI_REQUEST Request,
+ ULONG FileType,
  TDIObjectID *ID,
  PVOID Buffer,
  UINT BufferSize)
@@ -393,6 +425,7 @@ TDI_STATUS InfoTdiSetInformationEx
  * FUNCTION: Sets extended information
  * ARGUMENTS:
  *   Request    = Pointer to TDI request structure for the request
+ *   FileType   = The kind of file object the request came on
  *   ID         = Pointer to TDI object ID
  *   Buffer     = Pointer to buffer with data to use
  *   BufferSize = Size of Buffer
@@ -410,17 +443,19 @@ TDI_STATUS InfoTdiSetInformationEx
             {
                 case INFO_TYPE_ADDRESS_OBJECT:
                 {
-                    if ((EntityListContext = GetContext(ID->toi_entity)))
+                    if ((EntityListContext = InfoGetAddressFile(Request, FileType, ID->toi_entity)))
                         return SetAddressFileInfo(ID, EntityListContext, Buffer, BufferSize);
                     else
                         return TDI_INVALID_PARAMETER;
                 }
                 case INFO_TYPE_CONNECTION:
                 {
-                    PADDRESS_FILE AddressFile = GetContext(ID->toi_entity);
-                    if (AddressFile == NULL)
+                    /* The connection is the one the request came on: no
+                     * entity names a connection (an address file can hold
+                     * many, a listening one all it accepted) */
+                    if (FileType != TDI_CONNECTION_FILE)
                         return TDI_INVALID_PARAMETER;
-                    return SetConnectionInfo(ID, AddressFile->Connection, Buffer, BufferSize);
+                    return SetConnectionInfo(ID, Request->Handle.ConnectionContext, Buffer, BufferSize);
                 }
                 case INFO_TYPE_PROVIDER:
                 {

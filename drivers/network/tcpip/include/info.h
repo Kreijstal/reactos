@@ -91,6 +91,7 @@ TDI_STATUS InfoCopyOut( PCHAR DataOut, UINT SizeOut,
 
 TDI_STATUS InfoTdiQueryInformationEx(
     PTDI_REQUEST Request,
+    ULONG FileType,
     TDIObjectID *ID,
     PNDIS_BUFFER Buffer,
     PUINT BufferSize,
@@ -98,6 +99,7 @@ TDI_STATUS InfoTdiQueryInformationEx(
 
 TDI_STATUS InfoTdiSetInformationEx(
     PTDI_REQUEST Request,
+    ULONG FileType,
     TDIObjectID *ID,
     PVOID Buffer,
     UINT BufferSize);
