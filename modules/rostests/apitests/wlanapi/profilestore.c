@@ -149,6 +149,178 @@ CheckProfileFile(const GUID *Interface)
     ok(Found, "No profile file names %ls\n", ProfileName);
 }
 
+/* How many files of the interface's store hold the test profile. */
+static ULONG
+CountProfileFiles(const GUID *Interface, PCWSTR ProgramData)
+{
+    WCHAR Path[MAX_PATH * 2], FilePath[MAX_PATH * 2];
+    WIN32_FIND_DATAW Find;
+    HANDLE Search, File;
+    CHAR Text[8192], Name[64];
+    DWORD Read;
+    ULONG Count = 0;
+
+    _snwprintf(Path, ARRAYSIZE(Path),
+               L"%s\\Microsoft\\Wlansvc\\Profiles\\Interfaces\\"
+               L"{%08lX-%04hX-%04hX-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+               ProgramData, Interface->Data1, Interface->Data2, Interface->Data3,
+               Interface->Data4[0], Interface->Data4[1], Interface->Data4[2],
+               Interface->Data4[3], Interface->Data4[4], Interface->Data4[5],
+               Interface->Data4[6], Interface->Data4[7]);
+    Path[ARRAYSIZE(Path) - 1] = UNICODE_NULL;
+    _snwprintf(FilePath, ARRAYSIZE(FilePath), L"%s\\*.xml", Path);
+    FilePath[ARRAYSIZE(FilePath) - 1] = UNICODE_NULL;
+    sprintf(Name, "<name>%ls</name>", ProfileName);
+
+    Search = FindFirstFileW(FilePath, &Find);
+    if (Search == INVALID_HANDLE_VALUE)
+        return 0;
+    do
+    {
+        _snwprintf(FilePath, ARRAYSIZE(FilePath), L"%s\\%s", Path, Find.cFileName);
+        FilePath[ARRAYSIZE(FilePath) - 1] = UNICODE_NULL;
+        File = CreateFileW(FilePath, GENERIC_READ, FILE_SHARE_READ, NULL,
+                           OPEN_EXISTING, 0, NULL);
+        if (File == INVALID_HANDLE_VALUE)
+            continue;
+        Read = 0;
+        ReadFile(File, Text, sizeof(Text) - 1, &Read, NULL);
+        CloseHandle(File);
+        Text[Read] = '\0';
+        if (strstr(Text, Name) != NULL)
+            Count++;
+    } while (FindNextFileW(Search, &Find));
+    FindClose(Search);
+    return Count;
+}
+
+static DWORD
+OpenAfterRestart(HANDLE *Client, const GUID *Interface)
+{
+    DWORD Negotiated, Ret = ERROR_SUCCESS;
+    ULONG i;
+
+    for (i = 0; i < 100; i++)
+    {
+        Ret = WlanOpenHandle(2, NULL, &Negotiated, Client);
+        if (Ret == ERROR_SUCCESS)
+            break;
+        Sleep(100);
+    }
+    if (Ret != ERROR_SUCCESS)
+        return Ret;
+    for (i = 0; i < 100; i++)
+    {
+        GUID Again;
+        if (FirstInterface(*Client, &Again) && IsEqualGUID(&Again, Interface))
+            break;
+        Sleep(100);
+    }
+    return ERROR_SUCCESS;
+}
+
+/*
+ * A profile is one file, kept by its name.  The service must find the store
+ * it writes to whenever it reads it: without the ProfileList ProgramData
+ * value (it is missing on some installs until something sets it) the store
+ * is where setup puts ProgramData, not "nowhere".  Before, the store was
+ * not read at the start, and a profile set again once the value was there
+ * got a second file next to the first one.
+ */
+static VOID
+TestStoreWithoutProgramDataValue(const GUID *Interface, PCWSTR Xml)
+{
+    WCHAR Saved[MAX_PATH], Expanded[MAX_PATH], Default[MAX_PATH];
+    DWORD Type, Size = sizeof(Saved), Ret, Reason = 0, Flags = 0, Granted = 0;
+    DWORD Negotiated;
+    HANDLE Client;
+    LPWSTR Stored = NULL;
+    HKEY Key;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
+                      0, KEY_QUERY_VALUE | KEY_SET_VALUE, &Key) != ERROR_SUCCESS)
+    {
+        skip("Cannot open ProfileList for writing\n");
+        return;
+    }
+    if (RegQueryValueExW(Key, L"ProgramData", NULL, &Type, (LPBYTE)Saved,
+                         &Size) != ERROR_SUCCESS ||
+        (Type != REG_SZ && Type != REG_EXPAND_SZ) || Size < sizeof(WCHAR))
+    {
+        skip("No ProgramData value to take away\n");
+        RegCloseKey(Key);
+        return;
+    }
+    Saved[min(Size / sizeof(WCHAR), ARRAYSIZE(Saved) - 1)] = UNICODE_NULL;
+    ExpandEnvironmentStringsW(Saved, Expanded, ARRAYSIZE(Expanded));
+    ExpandEnvironmentStringsW(L"%SystemDrive%\\ProgramData", Default,
+                              ARRAYSIZE(Default));
+    if (_wcsicmp(Expanded, Default) != 0)
+    {
+        skip("ProgramData is %ls, not at %ls\n", Expanded, Default);
+        RegCloseKey(Key);
+        return;
+    }
+
+    /* The profile is in the store, one file. */
+    Ret = WlanOpenHandle(2, NULL, &Negotiated, &Client);
+    if (Ret != ERROR_SUCCESS)
+    {
+        skip("WlanOpenHandle returned %lu\n", Ret);
+        RegCloseKey(Key);
+        return;
+    }
+    Ret = WlanSetProfile(Client, Interface, 0, Xml, NULL, TRUE, NULL, &Reason);
+    ok(Ret == ERROR_SUCCESS, "WlanSetProfile returned %lu (%lu)\n", Ret, Reason);
+    WlanCloseHandle(Client, NULL);
+    ok(CountProfileFiles(Interface, Expanded) == 1, "%lu files for %ls\n",
+       CountProfileFiles(Interface, Expanded), ProfileName);
+
+    /* The service starts while the value is missing ... */
+    Ret = RegDeleteValueW(Key, L"ProgramData");
+    ok(Ret == ERROR_SUCCESS, "RegDeleteValueW returned %lu\n", Ret);
+    if (!RestartWlanSvc())
+        skip("Cannot restart WlanSvc (%lu)\n", GetLastError());
+    /* Up and serving its interface: it has read its store by now. */
+    Ret = OpenAfterRestart(&Client, Interface);
+    ok(Ret == ERROR_SUCCESS, "WlanOpenHandle after the restart returned %lu\n", Ret);
+    if (Ret == ERROR_SUCCESS)
+        WlanCloseHandle(Client, NULL);
+
+    /* ... and the value comes back while it runs. */
+    Ret = RegSetValueExW(Key, L"ProgramData", 0, Type, (const BYTE *)Saved,
+                         (DWORD)((wcslen(Saved) + 1) * sizeof(WCHAR)));
+    ok(Ret == ERROR_SUCCESS, "Restoring ProgramData returned %lu\n", Ret);
+    RegCloseKey(Key);
+
+    Ret = OpenAfterRestart(&Client, Interface);
+    if (Ret != ERROR_SUCCESS)
+        return;
+
+    /* The store was read at the start: the profile is there ... */
+    Ret = WlanGetProfile(Client, Interface, ProfileName, NULL, &Stored, &Flags,
+                         &Granted);
+    ok(Ret == ERROR_SUCCESS, "Profile not loaded without the ProgramData value: %lu\n",
+       Ret);
+    if (Ret == ERROR_SUCCESS && Stored != NULL)
+        WlanFreeMemory(Stored);
+
+    /* ... so setting it again rewrites its file, and adds none. */
+    Ret = WlanSetProfile(Client, Interface, 0, Xml, NULL, TRUE, NULL, &Reason);
+    ok(Ret == ERROR_SUCCESS, "WlanSetProfile returned %lu (%lu)\n", Ret, Reason);
+    ok(CountProfileFiles(Interface, Expanded) == 1,
+       "%lu files for %ls after setting it again\n",
+       CountProfileFiles(Interface, Expanded), ProfileName);
+
+    /* Deleted, it is gone from the disk too. */
+    Ret = WlanDeleteProfile(Client, Interface, ProfileName, NULL);
+    ok(Ret == ERROR_SUCCESS, "WlanDeleteProfile returned %lu\n", Ret);
+    ok(CountProfileFiles(Interface, Expanded) == 0, "%lu files left for %ls\n",
+       CountProfileFiles(Interface, Expanded), ProfileName);
+    WlanCloseHandle(Client, NULL);
+}
+
 START_TEST(profilestore)
 {
     WCHAR Xml[2048];
@@ -247,4 +419,6 @@ START_TEST(profilestore)
     Ret = WlanDeleteProfile(Client, &Interface, ProfileName, NULL);
     ok(Ret == ERROR_SUCCESS, "WlanDeleteProfile returned %lu\n", Ret);
     WlanCloseHandle(Client, NULL);
+
+    TestStoreWithoutProgramDataValue(&Interface, Xml);
 }

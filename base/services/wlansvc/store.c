@@ -59,7 +59,10 @@ StoreStringToGuid(PCWSTR Text, GUID *Guid)
     return UuidFromStringW((RPC_WSTR)Inner, Guid) == RPC_S_OK;
 }
 
-/* Where ProgramData is: the ProfileList value, as the shell finds it. */
+/* Where ProgramData is: the ProfileList value, as the shell finds it, or
+ * where setup puts it when the value is missing.  A service has no
+ * %ProgramData% in its environment, so that is no fallback: the store would
+ * be found at one time and not at another. */
 static BOOL
 StoreGetProgramData(PWCHAR Path, DWORD Count)
 {
@@ -83,27 +86,54 @@ StoreGetProgramData(PWCHAR Path, DWORD Count)
         RegCloseKey(Key);
     }
     if (!Found)
-        wcscpy(Raw, L"%ProgramData%");
+        wcscpy(Raw, L"%SystemDrive%\\ProgramData");
 
     Length = ExpandEnvironmentStringsW(Raw, Path, Count);
     return Length != 0 && Length <= Count && wcschr(Path, L'%') == NULL;
 }
 
-/* The interface's profile directory, created on the way if Create. */
+/* Find the interface's profile directory and remember it in StoreDir. */
+static BOOL
+StoreFindInterfaceDir(PWLANSVC_INTERFACE Iface)
+{
+    WCHAR Path[MAX_PATH], GuidText[39];
+
+    if (!StoreGetProgramData(Path, ARRAYSIZE(Path)))
+        return FALSE;
+    StoreGuidToString(&Iface->InterfaceGuid, GuidText);
+    /* Room for "\{profile}.xml.new" below it. */
+    if (wcslen(Path) + wcslen(STORE_SUBDIR) + wcslen(GuidText) + 45 >=
+        ARRAYSIZE(Iface->StoreDir))
+    {
+        return FALSE;
+    }
+    wcscpy(Iface->StoreDir, Path);
+    wcscat(Iface->StoreDir, STORE_SUBDIR);
+    wcscat(Iface->StoreDir, GuidText);
+    return TRUE;
+}
+
+static VOID StoreLoadProfiles(PWLANSVC_INTERFACE Iface);
+
+/* The interface's profile directory, created on the way if Create.  Always
+ * the one the profiles were read from: a store that could not be found when
+ * the interface arrived is read now, before anything is written to it, so
+ * no profile already on disk is written a second time under a new file. */
 static BOOL
 StoreGetInterfaceDir(PWLANSVC_INTERFACE Iface, PWCHAR Path, SIZE_T Count,
                      BOOL Create)
 {
-    WCHAR GuidText[39];
     PWCHAR p;
 
-    if (!StoreGetProgramData(Path, (DWORD)Count))
+    if (Iface->StoreDir[0] == UNICODE_NULL)
+    {
+        StoreLoadProfiles(Iface);
+        if (Iface->StoreDir[0] == UNICODE_NULL)
+            return FALSE;
+    }
+    if (wcslen(Iface->StoreDir) + 45 >= Count)
         return FALSE;
-    StoreGuidToString(&Iface->InterfaceGuid, GuidText);
-    if (wcslen(Path) + wcslen(STORE_SUBDIR) + wcslen(GuidText) + 45 >= Count)
-        return FALSE;
-    wcscat(Path, STORE_SUBDIR);
-    wcscat(Path, GuidText);
+    wcscpy(Path, Iface->StoreDir);
 
     if (Create)
     {
@@ -431,6 +461,9 @@ WlanSvcStoreSaveProfile(PWLANSVC_INTERFACE Iface, PWLANSVC_PROFILE Profile)
 
     if (Profile->Xml == NULL)
         return;
+    /* Read the store first if it is not yet: the profile may have a file. */
+    if (!StoreGetInterfaceDir(Iface, Path, ARRAYSIZE(Path), TRUE))
+        return;
     if (IsEqualGUID(&Profile->FileGuid, &StoreNoGuid) &&
         UuidCreate(&Profile->FileGuid) != RPC_S_OK)
         return;
@@ -460,8 +493,11 @@ WlanSvcStoreDeleteProfile(PWLANSVC_INTERFACE Iface, PWLANSVC_PROFILE Profile)
 {
     WCHAR Path[MAX_PATH];
 
-    if (IsEqualGUID(&Profile->FileGuid, &StoreNoGuid))
+    if (!StoreGetInterfaceDir(Iface, Path, ARRAYSIZE(Path), FALSE) ||
+        IsEqualGUID(&Profile->FileGuid, &StoreNoGuid))
+    {
         return;
+    }
     if (StoreProfilePath(Iface, &Profile->FileGuid, Path, ARRAYSIZE(Path), FALSE) &&
         !DeleteFileW(Path) && GetLastError() != ERROR_FILE_NOT_FOUND)
     {
@@ -553,8 +589,24 @@ StoreLoadOne(PWLANSVC_INTERFACE Iface, PCWSTR Dir, const GUID *FileGuid)
 
     if (WlanSvcParseProfileXml(Plain, &prof) == ERROR_SUCCESS)
     {
-        if (WlanSvcFindProfile(Iface, prof->Name) != NULL)
+        PWLANSVC_PROFILE existing = WlanSvcFindProfile(Iface, prof->Name);
+
+        if (existing != NULL)
         {
+            /* A profile is one file, found by its name.  One set before its
+             * store was read takes over the file of that name; a second file
+             * of a name already loaded is a stale copy, which would come
+             * back once the profile is deleted. */
+            if (IsEqualGUID(&existing->FileGuid, &StoreNoGuid))
+            {
+                existing->FileGuid = *FileGuid;
+            }
+            else
+            {
+                DPRINT1("WLANSVC: %S repeats profile '%S', deleting it\n",
+                        Path, prof->Name);
+                DeleteFileW(Path);
+            }
             WlanSvcFreeProfile(prof);
         }
         else
@@ -567,8 +619,8 @@ StoreLoadOne(PWLANSVC_INTERFACE Iface, PCWSTR Dir, const GUID *FileGuid)
     StoreFreeSecret(Plain);
 }
 
-VOID
-WlanSvcStoreLoadProfiles(PWLANSVC_INTERFACE Iface)
+static VOID
+StoreLoadProfiles(PWLANSVC_INTERFACE Iface)
 {
     WCHAR Dir[MAX_PATH], Pattern[MAX_PATH + 8];
     WIN32_FIND_DATAW Find;
@@ -577,8 +629,12 @@ WlanSvcStoreLoadProfiles(PWLANSVC_INTERFACE Iface)
     PCHAR Order, Line;
     DWORD Size;
 
-    if (!StoreGetInterfaceDir(Iface, Dir, ARRAYSIZE(Dir) - 16, FALSE))
+    if (!StoreFindInterfaceDir(Iface))
+    {
+        DPRINT1("WLANSVC: no profile store for this interface yet\n");
         return;
+    }
+    wcscpy(Dir, Iface->StoreDir);
 
     /* The saved order first. */
     _snwprintf(Pattern, ARRAYSIZE(Pattern), L"%s\\%s", Dir, STORE_ORDER);
@@ -624,4 +680,10 @@ WlanSvcStoreLoadProfiles(PWLANSVC_INTERFACE Iface)
     FindClose(Search);
 
     DPRINT1("WLANSVC: %lu profiles loaded from %S\n", Iface->ProfileCount, Dir);
+}
+
+VOID
+WlanSvcStoreLoadProfiles(PWLANSVC_INTERFACE Iface)
+{
+    StoreLoadProfiles(Iface);
 }

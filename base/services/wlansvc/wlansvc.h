@@ -169,6 +169,10 @@ typedef struct _WLANSVC_INTERFACE
     /* Profile store. */
     LIST_ENTRY            ProfileListHead;
     ULONG                 ProfileCount;
+    /* The directory the profiles were read from, and are written back to,
+     * for as long as the interface is known (store.c); empty until it was
+     * found. */
+    WCHAR                 StoreDir[MAX_PATH];
 
     /* Current connection (valid when State == connected/associating). */
     BOOL                  Connected;
