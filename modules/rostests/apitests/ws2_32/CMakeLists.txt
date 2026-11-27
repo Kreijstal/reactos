@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     accept.c
+    acceptinherit.c
     acceptexcancel.c
     bind.c
     broadcast.c

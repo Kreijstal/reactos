@@ -2,7 +2,8 @@
  * PROJECT:     ReactOS API Tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     Test that TCP_NODELAY reaches the connection of the socket it is
- *              set on: an accepted one, one set before connect, after connect
+ *              set on: an accepted one, one set before connect, after connect,
+ *              and one an accepted socket has from its listener
  */
 
 #include "ws2_32.h"
@@ -20,7 +21,8 @@ typedef enum _NODELAY_WHEN
 {
     NoDelayNever,
     NoDelayBeforeConnect,
-    NoDelayAfterConnect
+    NoDelayAfterConnect,
+    NoDelayOnListener
 } NODELAY_WHEN;
 
 static
@@ -37,7 +39,7 @@ SetNoDelay(
 }
 
 /* A connection on the loopback: Client connected to Accepted, with
- * TCP_NODELAY on the client When says */
+ * TCP_NODELAY on the client When says, or on the listener */
 static
 BOOL
 Connect(
@@ -58,6 +60,11 @@ Connect(
     ok(Listener != INVALID_SOCKET, "socket failed with %d\n", WSAGetLastError());
     if (Listener == INVALID_SOCKET)
         return FALSE;
+    if (When == NoDelayOnListener && !SetNoDelay(Listener))
+    {
+        closesocket(Listener);
+        return FALSE;
+    }
     ZeroMemory(&Address, sizeof(Address));
     Address.sin_family = AF_INET;
     Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -216,6 +223,31 @@ TestClient(
     closesocket(Accepted);
 }
 
+/* An accepted socket has the TCP_NODELAY of its listener: its connection
+ * does */
+static
+VOID
+TestListener(void)
+{
+    SOCKET Client, Accepted;
+    DWORD Elapsed;
+
+    if (!Connect(&Client, &Accepted, NoDelayOnListener))
+        return;
+
+    Elapsed = RoundTrips(Accepted, Client);
+    ok(Elapsed < SLOW_MS, "%d rounds with TCP_NODELAY on the listener took %lu ms\n",
+       ROUNDS, Elapsed);
+
+    /* The client still has Nagle's algorithm */
+    Elapsed = RoundTrips(Client, Accepted);
+    ok(Elapsed >= SLOW_MS && Elapsed != INFINITE,
+       "%d rounds from the client without TCP_NODELAY took %lu ms\n", ROUNDS, Elapsed);
+
+    closesocket(Client);
+    closesocket(Accepted);
+}
+
 START_TEST(nodelay)
 {
     WSADATA WsaData;
@@ -230,6 +262,7 @@ START_TEST(nodelay)
     TestAccepted();
     TestClient(NoDelayBeforeConnect);
     TestClient(NoDelayAfterConnect);
+    TestListener();
 
     WSACleanup();
 }

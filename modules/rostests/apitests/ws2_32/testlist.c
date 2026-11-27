@@ -3,6 +3,7 @@
 #include <apitest.h>
 
 extern void func_accept(void);
+extern void func_acceptinherit(void);
 extern void func_acceptexlengths(void);
 extern void func_acceptexcancel(void);
 extern void func_bind(void);
@@ -37,6 +38,7 @@ extern void func_WSAStartup(void);
 const struct test winetest_testlist[] =
 {
     { "accept", func_accept },
+    { "acceptinherit", func_acceptinherit },
     { "acceptexcancel", func_acceptexcancel },
     { "acceptexlengths", func_acceptexlengths },
     { "bind", func_bind },
