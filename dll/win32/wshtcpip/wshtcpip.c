@@ -28,6 +28,32 @@ SendOrQueueRequest(
     _In_opt_ HANDLE TdiAddressObjectHandle,
     _In_opt_ HANDLE TdiConnectionObjectHandle);
 
+static
+INT
+SetOption(
+    _In_ PSOCKET_CONTEXT Context,
+    _In_ SOCKET_OPTION_SLOT Slot,
+    _In_reads_bytes_(Length) const VOID *Value,
+    _In_ ULONG Length,
+    _In_opt_ HANDLE TdiAddressObjectHandle,
+    _In_opt_ HANDLE TdiConnectionObjectHandle);
+
+/* What TCP/IP calls the option of each slot */
+static const struct
+{
+    ULONG Type;
+    ULONG Id;
+} OptionIds[OptionSlotCount] =
+{
+    { INFO_TYPE_CONNECTION,     TCP_SOCKET_KEEPALIVE },      /* OptionKeepAlive */
+    { INFO_TYPE_CONNECTION,     TCP_SOCKET_KEEPALIVEVALS },  /* OptionKeepAliveValues */
+    { INFO_TYPE_ADDRESS_OBJECT, AO_OPTION_TTL },             /* OptionTtl */
+    { INFO_TYPE_ADDRESS_OBJECT, AO_OPTION_IP_DONTFRAGMENT }, /* OptionDontFragment */
+    { INFO_TYPE_ADDRESS_OBJECT, AO_OPTION_IP_HDRINCL },      /* OptionHeaderInclude */
+    { INFO_TYPE_ADDRESS_OBJECT, AO_OPTION_IP_UCASTIF },      /* OptionUnicastIf */
+    { INFO_TYPE_CONNECTION,     TCP_SOCKET_NODELAY },        /* OptionNoDelay */
+};
+
 BOOL
 EXPORT
 DllMain(HANDLE hInstDll,
@@ -173,79 +199,6 @@ WSHGetSockaddrType(
     return NO_ERROR;
 }
 
-static
-void
-GetTdiTypeId(
-    _In_ INT Level,
-    _In_ INT OptionName,
-    _Out_ PULONG TdiType,
-    _Out_ PULONG TdiId)
-{
-    switch (Level)
-    {
-       case SOL_SOCKET:
-          *TdiType = INFO_TYPE_CONNECTION;
-          switch (OptionName)
-          {
-             case SO_KEEPALIVE:
-                *TdiId = TCP_SOCKET_KEEPALIVE;
-                return;
-             default:
-                break;
-          }
-          break;
-
-       case IPPROTO_IP:
-          *TdiType = INFO_TYPE_ADDRESS_OBJECT;
-          switch (OptionName)
-          {
-             case IP_TTL:
-                *TdiId = AO_OPTION_TTL;
-                return;
-
-             case IP_DONTFRAGMENT:
-                 *TdiId = AO_OPTION_IP_DONTFRAGMENT;
-                 return;
-
-#if 0
-             case IP_RECEIVE_BROADCAST:
-                 *TdiId = AO_OPTION_BROADCAST;
-                 return;
-#endif
-
-             case IP_HDRINCL:
-                 *TdiId = AO_OPTION_IP_HDRINCL;
-                 return;
-
-             case IP_UNICAST_IF:
-                 *TdiId = AO_OPTION_IP_UCASTIF;
-                 return;
-
-             default:
-                break;
-          }
-          break;
-
-       case IPPROTO_TCP:
-          *TdiType = INFO_TYPE_CONNECTION;
-          switch (OptionName)
-          {
-             case TCP_NODELAY:
-                 *TdiId = TCP_SOCKET_NODELAY;
-                 return;
-             default:
-                 break;
-          }
-
-       default:
-          break;
-    }
-
-    DPRINT1("Unknown level/option name: %d %d\n", Level, OptionName);
-    *TdiType = 0;
-    *TdiId = 0;
-}
-
 INT
 EXPORT
 WSHGetSocketInformation(
@@ -259,9 +212,25 @@ WSHGetSocketInformation(
     OUT LPINT OptionLength)
 {
     PSOCKET_CONTEXT Context = HelperDllSocketContext;
-    ULONG TdiType, TdiId;
 
-    if (!OptionLength || !OptionValue)
+    if (!OptionLength)
+        return WSAEFAULT;
+
+    /* The socket's context, for a socket it accepts: without a buffer, how
+     * large it is */
+    if (Level == SOL_INTERNAL && OptionName == SO_CONTEXT)
+    {
+        if (OptionValue)
+        {
+            if (*OptionLength < (INT)sizeof(*Context))
+                return WSAEFAULT;
+            RtlCopyMemory(OptionValue, Context, sizeof(*Context));
+        }
+        *OptionLength = sizeof(*Context);
+        return NO_ERROR;
+    }
+
+    if (!OptionValue)
         return WSAEFAULT;
 
     switch (Level)
@@ -309,11 +278,31 @@ WSHGetSocketInformation(
                     return NO_ERROR;
             }
             break;
-    }
 
-    GetTdiTypeId(Level, OptionName, &TdiType, &TdiId);
-    if (TdiType == 0 || TdiId == 0)
-        return WSAENOPROTOOPT;
+        case IPPROTO_TCP:
+            switch (OptionName)
+            {
+                case TCP_NODELAY:
+                    if (Context->SocketType != SOCK_STREAM)
+                        return WSAENOPROTOOPT;
+
+                    /* A BOOLEAN, whatever length it was set with */
+                    if (*OptionLength < (INT)sizeof(BOOLEAN))
+                        return WSAEFAULT;
+
+                    *(BOOLEAN*)OptionValue = Context->NoDelay;
+                    *OptionLength = sizeof(BOOLEAN);
+                    return NO_ERROR;
+            }
+            break;
+
+        case IPPROTO_UDP:
+            break;
+
+        default:
+            /* Not a level of this helper */
+            return WSAEINVAL;
+    }
 
     /* The TCP/IP stack does not expose a generic TDI query path here yet. */
     return WSAENOPROTOOPT;
@@ -425,7 +414,6 @@ WSHIoctl(
 {
     INT res;
     PSOCKET_CONTEXT Context = HelperDllSocketContext;
-    PTCP_REQUEST_SET_INFORMATION_EX Info;
 
     if (NeedsCompletion)
         *NeedsCompletion = FALSE;
@@ -452,12 +440,8 @@ WSHIoctl(
         /* Track the on/off state so WSHGetSocketInformation can report it */
         Context->KeepAlive = (((struct tcp_keepalive*)InputBuffer)->onoff != 0);
 
-        Info = AllocateRequest(Context, INFO_TYPE_CONNECTION, TCP_SOCKET_KEEPALIVEVALS,
-                               InputBuffer, InputBufferLength);
-        if (!Info)
-            return WSAENOBUFS;
-
-        return SendOrQueueRequest(Context, Info, TdiAddressObjectHandle, TdiConnectionObjectHandle);
+        return SetOption(Context, OptionKeepAliveValues, InputBuffer, InputBufferLength,
+                         TdiAddressObjectHandle, TdiConnectionObjectHandle);
     }
 
     return WSAEINVAL;
@@ -487,8 +471,10 @@ WSHJoinLeaf(
 }
 
 /* The handle Info goes on: a request for a connection goes on the socket's
- * TDI connection object, any other on its address object.  Either is NULL
- * until the socket has that object. */
+ * TDI connection object, any other on its address object.  An accepted
+ * socket has no address object of its own (its connection's is the
+ * listener's): its address object options go on its connection, which
+ * keeps them for itself.  Either is NULL until the socket has that object. */
 static
 HANDLE
 GetRequestHandle(
@@ -499,7 +485,7 @@ GetRequestHandle(
     if (Info->ID.toi_type == INFO_TYPE_CONNECTION)
         return TdiConnectionObjectHandle;
 
-    return TdiAddressObjectHandle;
+    return TdiAddressObjectHandle ? TdiAddressObjectHandle : TdiConnectionObjectHandle;
 }
 
 /* Sets an option of the socket's TDI object Handle: the object the request is
@@ -622,6 +608,80 @@ SendQueuedRequests(
         HeapFree(GetProcessHeap(), 0, Queued->Info);
         HeapFree(GetProcessHeap(), 0, Queued);
     }
+}
+
+/* Sets the option of Slot to the Length bytes of Value, now or once the
+ * socket has the object it is for, and remembers it for the sockets this
+ * one accepts */
+static
+INT
+SetOption(
+    _In_ PSOCKET_CONTEXT Context,
+    _In_ SOCKET_OPTION_SLOT Slot,
+    _In_reads_bytes_(Length) const VOID *Value,
+    _In_ ULONG Length,
+    _In_opt_ HANDLE TdiAddressObjectHandle,
+    _In_opt_ HANDLE TdiConnectionObjectHandle)
+{
+    PTCP_REQUEST_SET_INFORMATION_EX Info;
+    PSOCKET_OPTION Option = &Context->Options[Slot];
+    ULONG Kept;
+    INT Status;
+
+    Info = AllocateRequest(Context, OptionIds[Slot].Type, OptionIds[Slot].Id, Value, Length);
+    if (!Info)
+        return WSAENOBUFS;
+
+    /* TCP/IP reads no option past its first sizeof(Option->Value) bytes */
+    Kept = min(Length, sizeof(Option->Value));
+
+    Status = SendOrQueueRequest(Context, Info, TdiAddressObjectHandle, TdiConnectionObjectHandle);
+    if (Status == NO_ERROR)
+    {
+        RtlCopyMemory(Option->Value, Value, Kept);
+        Option->Length = Kept;
+    }
+
+    return Status;
+}
+
+/* A socket the listening socket whose context Parent is a copy of accepted
+ * has the options that one has.  Context is the accepted socket's. */
+static
+INT
+InheritOptions(
+    _In_ PSOCKET_CONTEXT Context,
+    _In_reads_bytes_(ParentLength) const SOCKET_CONTEXT *Parent,
+    _In_ INT ParentLength,
+    _In_opt_ HANDLE TdiAddressObjectHandle,
+    _In_opt_ HANDLE TdiConnectionObjectHandle)
+{
+    ULONG Slot;
+
+    if (!Context || !Parent || ParentLength < (INT)sizeof(*Parent))
+        return WSAEINVAL;
+
+    Context->DontRoute = Parent->DontRoute;
+    Context->KeepAlive = Parent->KeepAlive;
+    Context->NoDelay = Parent->NoDelay;
+    Context->UnicastIf = Parent->UnicastIf;
+
+    /* Set on this socket's own objects, as the listening socket set them
+     * (an option that does not take on them now is not one it has) */
+    for (Slot = 0; Slot < OptionSlotCount; Slot++)
+    {
+        if (!Parent->Options[Slot].Length)
+            continue;
+
+        SetOption(Context,
+                  (SOCKET_OPTION_SLOT)Slot,
+                  Parent->Options[Slot].Value,
+                  Parent->Options[Slot].Length,
+                  TdiAddressObjectHandle,
+                  TdiConnectionObjectHandle);
+    }
+
+    return NO_ERROR;
 }
 
 INT
@@ -852,10 +912,23 @@ WSHSetSocketInformation(
     IN  INT OptionLength)
 {
     PSOCKET_CONTEXT Context = HelperDllSocketContext;
-    ULONG TdiType, TdiId, IfIndex;
-    PTCP_REQUEST_SET_INFORMATION_EX Info;
+    SOCKET_OPTION_SLOT Slot;
+    ULONG IfIndex;
+    BOOLEAN NoDelay;
+    INT Status;
 
     DPRINT("WSHSetSocketInformation\n");
+
+    /* A socket the listening socket accepted: OptionValue is the listening
+     * socket's context, whose options it has too */
+    if (Level == SOL_INTERNAL && OptionName == SO_CONTEXT)
+    {
+        return InheritOptions(Context,
+                              (const SOCKET_CONTEXT *)OptionValue,
+                              OptionLength,
+                              TdiAddressObjectHandle,
+                              TdiConnectionObjectHandle);
+    }
 
     switch (Level)
     {
@@ -879,6 +952,7 @@ WSHSetSocketInformation(
                     /* Remember it for WSHGetSocketInformation, then let the
                      * option travel down to TCPIP as TCP_SOCKET_KEEPALIVE */
                     Context->KeepAlive = (*(DWORD*)OptionValue != 0);
+                    Slot = OptionKeepAlive;
                     break;
 
                 default:
@@ -891,10 +965,17 @@ WSHSetSocketInformation(
         case IPPROTO_IP:
             switch (OptionName)
             {
+                /* Send these to TCPIP */
                 case IP_TTL:
+                    Slot = OptionTtl;
+                    break;
+
                 case IP_DONTFRAGMENT:
+                    Slot = OptionDontFragment;
+                    break;
+
                 case IP_HDRINCL:
-                    /* Send these to TCPIP */
+                    Slot = OptionHeaderInclude;
                     break;
 
                 case IP_UNICAST_IF:
@@ -902,9 +983,16 @@ WSHSetSocketInformation(
                     {
                         return WSAEFAULT;
                     }
-                    /* Remember it for WSHGetSocketInformation and send it to TCPIP */
-                    Context->UnicastIf = *(DWORD*)OptionValue;
-                    break;
+                    /* Windows takes the interface index in network byte
+                     * order here.  TCPIP stores and compares it in host byte
+                     * order */
+                    IfIndex = RtlUlongByteSwap(*(PULONG)OptionValue);
+                    Status = SetOption(Context, OptionUnicastIf, &IfIndex, sizeof(IfIndex),
+                                       TdiAddressObjectHandle, TdiConnectionObjectHandle);
+                    /* Remember it for WSHGetSocketInformation */
+                    if (Status == NO_ERROR)
+                        Context->UnicastIf = *(DWORD*)OptionValue;
+                    return Status;
 
                 default:
                     /* Invalid option -- FIXME */
@@ -917,11 +1005,18 @@ WSHSetSocketInformation(
             switch (OptionName)
             {
                 case TCP_NODELAY:
-                    if (OptionLength < sizeof(CHAR))
+                    /* Any length: the option is its first byte */
+                    if (OptionLength < (INT)sizeof(CHAR))
                     {
                         return WSAEFAULT;
                     }
-                    break;
+                    NoDelay = (*OptionValue != 0);
+                    Status = SetOption(Context, OptionNoDelay, &NoDelay, sizeof(NoDelay),
+                                       TdiAddressObjectHandle, TdiConnectionObjectHandle);
+                    /* Remember it for WSHGetSocketInformation */
+                    if (Status == NO_ERROR)
+                        Context->NoDelay = NoDelay;
+                    return Status;
 
                 default:
                     /* Invalid option */
@@ -935,25 +1030,8 @@ WSHSetSocketInformation(
             return 0;
     }
 
-    /* If we get here, GetAddressOption must return something valid */
-    GetTdiTypeId(Level, OptionName, &TdiType, &TdiId);
-    ASSERT((TdiId != 0) && (TdiType != 0));
-
-    if (Level == IPPROTO_IP && OptionName == IP_UNICAST_IF)
-    {
-        /* Windows takes the interface index in network byte order here.
-         * TCPIP stores and compares it in host byte order */
-        IfIndex = RtlUlongByteSwap(*(PULONG)OptionValue);
-        Info = AllocateRequest(Context, TdiType, TdiId, &IfIndex, sizeof(IfIndex));
-    }
-    else
-    {
-        Info = AllocateRequest(Context, TdiType, TdiId, OptionValue, OptionLength);
-    }
-    if (!Info)
-        return WSAENOBUFS;
-
-    return SendOrQueueRequest(Context, Info, TdiAddressObjectHandle, TdiConnectionObjectHandle);
+    return SetOption(Context, Slot, OptionValue, OptionLength,
+                     TdiAddressObjectHandle, TdiConnectionObjectHandle);
 }
 
 

@@ -780,6 +780,88 @@ MsafdGetTdiHandles(
 }
 
 /*
+ * Gives Socket, which Listener accepted, the options of Listener: an
+ * accepted socket has the properties of the listening one.  Those msafd
+ * keeps it copies; those the helper keeps the helper gives it, from the
+ * listening socket's context (SOL_INTERNAL/SO_CONTEXT), on the TDI objects
+ * Socket has now.
+ */
+static
+INT
+MsafdInheritListenerOptions(
+    _In_ PSOCKET_INFORMATION Listener,
+    _In_ PSOCKET_INFORMATION Socket)
+{
+    PSOCK_SHARED_INFO From = Listener->SharedData, To = Socket->SharedData;
+    PVOID HelperContext;
+    INT Length = 0;
+    INT Errno;
+
+    To->LingerData = From->LingerData;
+    To->SendTimeout = From->SendTimeout;
+    To->RecvTimeout = From->RecvTimeout;
+    To->Broadcast = From->Broadcast;
+    To->Debug = From->Debug;
+    To->OobInline = From->OobInline;
+    To->ReuseAddresses = From->ReuseAddresses;
+    To->ExclusiveAddressUse = From->ExclusiveAddressUse;
+    To->NonBlocking = From->NonBlocking;
+
+    /* AFD keeps the windows: a size set on the listener is the connection's */
+    if (To->SizeOfSendBuffer != From->SizeOfSendBuffer)
+    {
+        To->SizeOfSendBuffer = From->SizeOfSendBuffer;
+        SetSocketInformation(Socket, AFD_INFO_SEND_WINDOW_SIZE, NULL,
+                             &To->SizeOfSendBuffer, NULL, NULL, NULL);
+    }
+    if (To->SizeOfRecvBuffer != From->SizeOfRecvBuffer)
+    {
+        To->SizeOfRecvBuffer = From->SizeOfRecvBuffer;
+        SetSocketInformation(Socket, AFD_INFO_RECEIVE_WINDOW_SIZE, NULL,
+                             &To->SizeOfRecvBuffer, NULL, NULL, NULL);
+    }
+
+    /* How large the listening socket's helper context is */
+    Errno = Listener->HelperData->WSHGetSocketInformation(Listener->HelperContext,
+                                                          Listener->Handle,
+                                                          Listener->TdiAddressHandle,
+                                                          Listener->TdiConnectionHandle,
+                                                          SOL_INTERNAL,
+                                                          SO_CONTEXT,
+                                                          NULL,
+                                                          &Length);
+    if (Errno != NO_ERROR || Length <= 0)
+        return Errno;
+
+    HelperContext = HeapAlloc(GlobalHeap, 0, Length);
+    if (!HelperContext)
+        return WSAENOBUFS;
+
+    Errno = Listener->HelperData->WSHGetSocketInformation(Listener->HelperContext,
+                                                          Listener->Handle,
+                                                          Listener->TdiAddressHandle,
+                                                          Listener->TdiConnectionHandle,
+                                                          SOL_INTERNAL,
+                                                          SO_CONTEXT,
+                                                          HelperContext,
+                                                          &Length);
+    if (Errno == NO_ERROR)
+    {
+        Errno = Socket->HelperData->WSHSetSocketInformation(Socket->HelperContext,
+                                                            Socket->Handle,
+                                                            Socket->TdiAddressHandle,
+                                                            Socket->TdiConnectionHandle,
+                                                            SOL_INTERNAL,
+                                                            SO_CONTEXT,
+                                                            HelperContext,
+                                                            Length);
+    }
+
+    HeapFree(GlobalHeap, 0, HelperContext);
+    return Errno;
+}
+
+/*
  * Waits for a blocking (non-overlapped) send or receive whose IOCTL returned
  * STATUS_PENDING, honouring SO_SNDTIMEO/SO_RCVTIMEO. A timeout of 0 (or
  * INFINITE) means wait forever. When the timeout expires the request is
@@ -1786,6 +1868,7 @@ MsafdAccept(
     SOCKET                      AcceptSocket;
     PSOCKET_INFORMATION         AcceptSocketInfo;
     ULONG                       ReceiveLength;
+    INT                         Errno;
     union
     {
         AFD_RECEIVED_ACCEPT_DATA Data;
@@ -2133,11 +2216,23 @@ MsafdAccept(
 
     AcceptSocketInfo->SharedData->State = SocketConnected;
     AcceptSocketInfo->SharedData->ConnectTime = GetCurrentTimeInSeconds();
-    AcceptSocketInfo->SharedData->NonBlocking = Socket->SharedData->NonBlocking;
 
     /* The handles of the accepted socket's own TDI objects, for its helper.
      * Without them the helper keeps the socket's options until it has them. */
     MsafdGetTdiHandles(AcceptSocketInfo, AFD_ADDRESS_HANDLE | AFD_CONNECTION_HANDLE);
+
+    /* It has the listening socket's options, set on those objects */
+    Errno = MsafdInheritListenerOptions(Socket, AcceptSocketInfo);
+    if (Errno != NO_ERROR)
+    {
+        INT CloseErrno;
+
+        NtClose(SockEvent);
+        DereferenceSocket(AcceptSocketInfo);
+        WSPCloseSocket(AcceptSocket, &CloseErrno);
+        if (lpErrno) *lpErrno = Errno;
+        return SOCKET_ERROR;
+    }
 
     /* Return Address in SOCKADDR FORMAT, as much of it as there is room for */
     if( SocketAddress )
@@ -3690,9 +3785,14 @@ MsafdGetSockOpt(
 
             return 0;
 
-        default:
+        case SOL_INTERNAL:
+            /* Between msafd and the helper only */
             if (lpErrno) *lpErrno = WSAEINVAL;
             return SOCKET_ERROR;
+
+        default:
+            /* The other levels are the helper's, which says which it has */
+            break;
     }
 
 SendToHelper:
@@ -3730,10 +3830,16 @@ WSPGetSockOpt(IN SOCKET Handle,
 }
 
 
+/*
+ * Makes the socket Handle, which ConnectEx connected or AcceptEx accepted
+ * for Listener, the connected socket it now is.  The helper hears of the
+ * connect, or of the accept (and the socket gets Listener's options).
+ */
+static
 INT
-NTAPI
-MsafdUpdateConnectionContext(
+MsafdUpdateContext(
     _In_ SOCKET Handle,
+    _In_opt_ PSOCKET_INFORMATION Listener,
     _Out_ LPINT lpErrno)
 {
     IO_STATUS_BLOCK            DummyIOSB;
@@ -3741,6 +3847,8 @@ MsafdUpdateConnectionContext(
     NTSTATUS                   Status;
     SOCK_SHARED_INFO SharedData;
     HANDLE SockEvent;
+    INT Errno;
+    DWORD NotifyEvent = Listener ? WSH_NOTIFY_ACCEPT : WSH_NOTIFY_CONNECT;
     PSOCKET_INFORMATION Socket = GetSocketStructure(Handle);
 
     if (!Socket)
@@ -3815,11 +3923,32 @@ MsafdUpdateConnectionContext(
     /* FIXME: THIS IS NOT RIGHT!!! HACK HACK HACK! */
     SockReenableAsyncSelectEvent(Socket, FD_CONNECT);
 
-    Socket->HelperData->WSHNotify(Socket->HelperContext,
-                                  Socket->Handle,
-                                  Socket->TdiAddressHandle,
-                                  Socket->TdiConnectionHandle,
-                                  WSH_NOTIFY_CONNECT);
+    /* An accepted socket has the listening socket's options from now on */
+    if (Listener)
+    {
+        Errno = MsafdInheritListenerOptions(Listener, Socket);
+        if (Errno != NO_ERROR)
+        {
+            DereferenceSocket(Socket);
+            if (lpErrno) *lpErrno = Errno;
+            return SOCKET_ERROR;
+        }
+    }
+
+    if (Socket->HelperEvents & NotifyEvent)
+    {
+        Errno = Socket->HelperData->WSHNotify(Socket->HelperContext,
+                                              Socket->Handle,
+                                              Socket->TdiAddressHandle,
+                                              Socket->TdiConnectionHandle,
+                                              NotifyEvent);
+        if (Errno != NO_ERROR)
+        {
+            DereferenceSocket(Socket);
+            if (lpErrno) *lpErrno = Errno;
+            return SOCKET_ERROR;
+        }
+    }
 
 Quit:
     DereferenceSocket(Socket);
@@ -3827,6 +3956,51 @@ Quit:
         return NO_ERROR;
     if (lpErrno) *lpErrno = TranslateNtStatusError(Status);
     return SOCKET_ERROR;
+}
+
+INT
+NTAPI
+MsafdUpdateConnectionContext(
+    _In_ SOCKET Handle,
+    _Out_ LPINT lpErrno)
+{
+    return MsafdUpdateContext(Handle, NULL, lpErrno);
+}
+
+/*
+ * SO_UPDATE_ACCEPT_CONTEXT: the socket Handle, which AcceptEx accepted for
+ * the listening socket ListenHandle names, is the connected socket it now
+ * is, with the listening socket's options.
+ */
+static
+INT
+MsafdUpdateAcceptContext(
+    _In_ SOCKET Handle,
+    _In_reads_bytes_(Length) CONST CHAR FAR *ListenHandle,
+    _In_ INT Length,
+    _Out_ LPINT lpErrno)
+{
+    PSOCKET_INFORMATION Listener;
+    SOCKET ListenSocket;
+    INT Result;
+
+    if (!ListenHandle || Length < (INT)sizeof(SOCKET))
+    {
+        if (lpErrno) *lpErrno = WSAEFAULT;
+        return SOCKET_ERROR;
+    }
+    RtlCopyMemory(&ListenSocket, ListenHandle, sizeof(ListenSocket));
+
+    Listener = GetSocketStructure(ListenSocket);
+    if (!Listener)
+    {
+        if (lpErrno) *lpErrno = WSAENOTSOCK;
+        return SOCKET_ERROR;
+    }
+
+    Result = MsafdUpdateContext(Handle, Listener, lpErrno);
+    DereferenceSocket(Listener);
+    return Result;
 }
 
 static
@@ -3853,6 +4027,13 @@ MsafdSetSockOpt(
         return SOCKET_ERROR;
     }
 
+
+    /* SOL_INTERNAL is between msafd and the helper only */
+    if (level == SOL_INTERNAL)
+    {
+        if (lpErrno) *lpErrno = WSAEINVAL;
+        return SOCKET_ERROR;
+    }
 
     /* FIXME: We should handle some more cases here */
     if (level == SOL_SOCKET)
@@ -3956,8 +4137,10 @@ MsafdSetSockOpt(
               return NO_ERROR;
 
            case SO_UPDATE_CONNECT_CONTEXT:
-           case SO_UPDATE_ACCEPT_CONTEXT:
               return MsafdUpdateConnectionContext(s, lpErrno);
+
+           case SO_UPDATE_ACCEPT_CONTEXT:
+              return MsafdUpdateAcceptContext(s, optval, optlen, lpErrno);
 
            case SO_ERROR:
               if (optlen < sizeof(INT))
