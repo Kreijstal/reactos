@@ -187,6 +187,38 @@ SoftGpuDdiEscape(
         State->ChildRelationsCount = (unsigned long)Device->ChildRelationsCount;
         return STATUS_SUCCESS;
     }
+    if (Data->Code == SOFTGPU_ESCAPE_LID)
+    {
+        SOFTGPU_ESCAPE_LID_DATA *Lid = Escape->pPrivateDriverData;
+
+        if (Escape->PrivateDriverDataSize < sizeof(*Lid))
+            return STATUS_BUFFER_TOO_SMALL;
+        if (!Device->LidTest)
+            return STATUS_NOT_SUPPORTED;
+        return SoftGpuNotifyLidSwitch(Lid->Open != 0);
+    }
+    if (Data->Code == SOFTGPU_ESCAPE_LID_STATE)
+    {
+        SOFTGPU_ESCAPE_LID_STATE_DATA *State = Escape->pPrivateDriverData;
+
+        if (Escape->PrivateDriverDataSize < sizeof(*State))
+            return STATUS_BUFFER_TOO_SMALL;
+        State->LidTest = Device->LidTest;
+        State->LidEventCount = Device->LidEventCount;
+        State->LidEventType = Device->LidEventType;
+        State->LidEvent = Device->LidEvent;
+        State->LidArgument = Device->LidArgument;
+        State->LidSyncStatus = Device->LidSyncStatus;
+        State->LidCloseSeq = Device->LidCloseSeq;
+        State->LidOpenSeq = Device->LidOpenSeq;
+        State->HideSeq = Device->HideSeq;
+        State->ShowSeq = Device->ShowSeq;
+        State->PanelD3Seq = Device->PanelD3Seq;
+        State->PanelD0Seq = Device->PanelD0Seq;
+        State->PanelPowerState = (unsigned long)Device->PanelPowerState;
+        State->PanelBlanked = (unsigned long)Device->PanelBlanked;
+        return STATUS_SUCCESS;
+    }
     if (Data->Code == SOFTGPU_ESCAPE_SEGMENT)
     {
         SOFTGPU_ESCAPE_SEGMENT_DATA *Seg = Escape->pPrivateDriverData;

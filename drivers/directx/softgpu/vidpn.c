@@ -392,6 +392,21 @@ SoftGpuDdiSetVidPnSourceVisibility(
     if (SetVidPnSourceVisibility->VidPnSourceId != 0)
         return STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_SOURCE;
 
+    /* Lid test mode: a powered panel scans out again once it is shown */
+    if (Device->LidTest)
+    {
+        if (SetVidPnSourceVisibility->Visible)
+        {
+            Device->ShowSeq = InterlockedIncrement(&Device->LidSeq);
+            if (Device->PanelPowerState == PowerDeviceD0)
+                InterlockedExchange(&Device->PanelBlanked, FALSE);
+        }
+        else
+        {
+            Device->HideSeq = InterlockedIncrement(&Device->LidSeq);
+        }
+    }
+
     /* No hardware visibility control. */
     return STATUS_SUCCESS;
 }

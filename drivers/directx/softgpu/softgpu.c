@@ -126,6 +126,7 @@ DriverEntry(
     InitData.DxgkDdiRemoveDevice                    = SoftGpuDdiRemoveDevice;
     InitData.DxgkDdiResetDevice                     = SoftGpuDdiResetDevice;
     InitData.DxgkDdiSetPowerState                   = SoftGpuDdiSetPowerState;
+    InitData.DxgkDdiNotifyAcpiEvent                 = SoftGpuDdiNotifyAcpiEvent;
 
     /* --- Adapter information --------------------------------------------- */
     InitData.DxgkDdiQueryAdapterInfo                = SoftGpuDdiQueryAdapterInfo;
@@ -235,13 +236,14 @@ DriverEntry(
  */
 
 ULONG SoftGpuLateConnectMs = 0;
+ULONG SoftGpuLidTest = 0;
 
 static VOID
 SoftGpuReadParameters(
     _In_ PUNICODE_STRING RegistryPath)
 {
-    RTL_QUERY_REGISTRY_TABLE Table[2];
-    ULONG LateConnectMs = 0, Default = 0;
+    RTL_QUERY_REGISTRY_TABLE Table[3];
+    ULONG LateConnectMs = 0, LidTest = 0, Default = 0;
     PWSTR Path;
 
     Path = ExAllocatePoolWithTag(PagedPool, RegistryPath->Length + sizeof(WCHAR),
@@ -258,10 +260,22 @@ SoftGpuReadParameters(
     Table[0].DefaultType = REG_DWORD;
     Table[0].DefaultData = &Default;
     Table[0].DefaultLength = sizeof(Default);
+    Table[1].Flags = RTL_QUERY_REGISTRY_DIRECT;
+    Table[1].Name = L"LidTest";
+    Table[1].EntryContext = &LidTest;
+    Table[1].DefaultType = REG_DWORD;
+    Table[1].DefaultData = &Default;
+    Table[1].DefaultLength = sizeof(Default);
 
     if (NT_SUCCESS(RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE, Path, Table, NULL, NULL)))
+    {
         SoftGpuLateConnectMs = LateConnectMs;
+        SoftGpuLidTest = LidTest;
+    }
     ExFreePoolWithTag(Path, SOFTGPU_POOL_TAG);
+
+    if (SoftGpuLidTest != 0)
+        DPRINT1("SOFTGPU: lid test mode: the output is an internal panel\n");
 
     if (SoftGpuLateConnectMs != 0)
         DPRINT1("SOFTGPU: late monitor test mode: connects %lu ms after start\n",
@@ -335,6 +349,8 @@ SoftGpuDdiAddDevice(
     Device->Format          = SOFTGPU_DEFAULT_FORMAT;
     Device->LateConnectMs   = SoftGpuLateConnectMs;
     Device->MonitorConnected = (Device->LateConnectMs == 0);
+    Device->LidTest         = (SoftGpuLidTest != 0);
+    Device->PanelPowerState = PowerDeviceD0;
 
     KeInitializeSpinLock(&Device->FenceLock);
     KeInitializeTimer(&Device->LateConnectTimer);
@@ -1032,6 +1048,11 @@ SoftGpuDdiQueryChildRelations(
     if (SoftGpuLateConnectMs != 0)
         ChildRelations[0].ChildCapabilities.HpdAwareness = HpdAwarenessInterruptible;
 
+    /* Lid test mode: the panel of a laptop. */
+    if (SoftGpuLidTest != 0)
+        ChildRelations[0].ChildCapabilities.Type.VideoOutput.InterfaceTechnology =
+            D3DKMDT_VOT_INTERNAL;
+
     return STATUS_SUCCESS;
 }
 
@@ -1122,7 +1143,8 @@ SoftGpuDdiSetPowerState(
     _In_ DEVICE_POWER_STATE DevicePowerState,
     _In_ POWER_ACTION       ActionType)
 {
-    UNREFERENCED_PARAMETER(MiniportDeviceContext);
+    PSOFTGPU_DEVICE Device = (PSOFTGPU_DEVICE)MiniportDeviceContext;
+
     UNREFERENCED_PARAMETER(ActionType);
 
     if (DeviceUid != 0 && DeviceUid != 1)
@@ -1131,6 +1153,117 @@ SoftGpuDdiSetPowerState(
     if (DevicePowerState > PowerDeviceD3)
         return STATUS_INVALID_PARAMETER;
 
+    /* The monitor (child 1): its panel goes off and on */
+    if (DeviceUid == 1 && Device != NULL && Device->Magic == SOFTGPU_DEVICE_MAGIC &&
+        Device->LidTest)
+    {
+        Device->PanelPowerState = DevicePowerState;
+        if (DevicePowerState == PowerDeviceD0)
+            Device->PanelD0Seq = InterlockedIncrement(&Device->LidSeq);
+        else if (DevicePowerState == PowerDeviceD3)
+            Device->PanelD3Seq = InterlockedIncrement(&Device->LidSeq);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+
+/* =========================================================================
+ * Lid test mode
+ * =========================================================================
+ */
+
+/* Runs synchronized with the ISR: the panel stops scanning out */
+static BOOLEAN
+NTAPI
+SoftGpuBlankPanel(
+    _In_opt_ PVOID Context)
+{
+    PSOFTGPU_DEVICE Device = (PSOFTGPU_DEVICE)Context;
+
+    InterlockedExchange(&Device->PanelBlanked, TRUE);
+    return TRUE;
+}
+
+/*
+ * The lid opened or closed (DxgkPowerStateEvent, PO_CB_LID_SWITCH_STATE,
+ * Argument 0 closed / 1 open).  On close the panel is blanked, as AMD's
+ * atikmdag does, from DISPATCH_LEVEL (the WDK allows DxgkCbSynchronizeExecution
+ * there).  Nothing is asked of dxgkrnl (AcpiFlags 0).
+ *
+ * IRQL: PASSIVE_LEVEL
+ */
+NTSTATUS
+APIENTRY
+SoftGpuDdiNotifyAcpiEvent(
+    _In_      PVOID             MiniportDeviceContext,
+    _In_      DXGK_EVENT_TYPE   EventType,
+    _In_      ULONG             Event,
+    _In_      PVOID             Argument,
+    _Out_opt_ PULONG            AcpiFlags)
+{
+    PSOFTGPU_DEVICE Device = (PSOFTGPU_DEVICE)MiniportDeviceContext;
+    BOOLEAN Result;
+    KIRQL OldIrql;
+
+    PAGED_CODE();
+
+    if (AcpiFlags != NULL)
+        *AcpiFlags = 0;
+    if (Device == NULL || Device->Magic != SOFTGPU_DEVICE_MAGIC)
+        return STATUS_INVALID_PARAMETER;
+    if (!Device->LidTest)
+        return STATUS_SUCCESS;
+
+    Device->LidEventCount++;
+    Device->LidEventType = (ULONG)EventType;
+    Device->LidEvent = Event;
+    Device->LidArgument = (ULONG)(ULONG_PTR)Argument;
+    if (EventType != DxgkPowerStateEvent || Event != PO_CB_LID_SWITCH_STATE)
+        return STATUS_SUCCESS;
+
+    if (Argument == NULL)
+    {
+        Device->LidCloseSeq = InterlockedIncrement(&Device->LidSeq);
+        KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+        Device->LidSyncStatus = Device->DxgkInterface.DxgkCbSynchronizeExecution(
+                                    Device->DxgkInterface.DeviceHandle,
+                                    SoftGpuBlankPanel, Device, 0, &Result);
+        KeLowerIrql(OldIrql);
+    }
+    else
+    {
+        Device->LidOpenSeq = InterlockedIncrement(&Device->LidSeq);
+    }
+    return STATUS_SUCCESS;
+}
+
+/*
+ * Notifies \Callback\PowerState as the power manager does when the lid
+ * switches.
+ *
+ * IRQL: PASSIVE_LEVEL
+ */
+NTSTATUS
+SoftGpuNotifyLidSwitch(
+    _In_ BOOLEAN Open)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Callback\\PowerState");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    PCALLBACK_OBJECT Callback;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    InitializeObjectAttributes(&ObjectAttributes, &Name,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = ExCreateCallback(&Callback, &ObjectAttributes, FALSE, TRUE);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    ExNotifyCallback(Callback, (PVOID)(ULONG_PTR)PO_CB_LID_SWITCH_STATE,
+                     (PVOID)(ULONG_PTR)(Open ? 1 : 0));
+    ObDereferenceObject(Callback);
     return STATUS_SUCCESS;
 }
 

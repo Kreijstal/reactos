@@ -172,6 +172,30 @@ typedef struct _SOFTGPU_DEVICE
     /* DxgkDdiQueryChildRelations calls (SOFTGPU_ESCAPE_DISPLAY_STATE) */
     volatile LONG       ChildRelationsCount;
 
+    /*
+     * Lid test mode (service value LidTest != 0): the output is a panel
+     * built into the computer (D3DKMDT_VOT_INTERNAL).  When told that the lid
+     * closed, softgpu blanks it from DISPATCH_LEVEL through
+     * DxgkCbSynchronizeExecution, as AMD's atikmdag does.  It records the
+     * order of the lid notifications and the calls that power the panel and
+     * show its source (SOFTGPU_ESCAPE_LID_STATE).
+     */
+    BOOLEAN             LidTest;
+    volatile LONG       LidSeq;
+    LONG                LidCloseSeq;
+    LONG                LidOpenSeq;
+    LONG                HideSeq;
+    LONG                ShowSeq;
+    LONG                PanelD3Seq;
+    LONG                PanelD0Seq;
+    ULONG               LidEventCount;
+    ULONG               LidEventType;
+    ULONG               LidEvent;
+    ULONG               LidArgument;
+    LONG                LidSyncStatus;
+    volatile LONG       PanelBlanked;
+    DEVICE_POWER_STATE  PanelPowerState;
+
     /* What the last DxgkDdiCommitVidPn got (SOFTGPU_ESCAPE_DISPLAY_STATE) */
     ULONG               CommitCount;
     ULONG               CommitPathCount;
@@ -212,6 +236,23 @@ typedef struct _SOFTGPU_DEVICE
 
 /* Service value LateConnectMs, read in DriverEntry (0 = test mode off) */
 extern ULONG SoftGpuLateConnectMs;
+
+/* Service value LidTest, read in DriverEntry (0 = test mode off) */
+extern ULONG SoftGpuLidTest;
+
+NTSTATUS
+APIENTRY
+SoftGpuDdiNotifyAcpiEvent(
+    _In_      PVOID             MiniportDeviceContext,
+    _In_      DXGK_EVENT_TYPE   EventType,
+    _In_      ULONG             Event,
+    _In_      PVOID             Argument,
+    _Out_opt_ PULONG            AcpiFlags);
+
+/* SOFTGPU_ESCAPE_LID: what the power manager does on a lid switch */
+NTSTATUS
+SoftGpuNotifyLidSwitch(
+    _In_ BOOLEAN Open);
 
 
 /* =========================================================================

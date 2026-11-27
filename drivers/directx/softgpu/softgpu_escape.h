@@ -87,3 +87,41 @@ typedef struct _SOFTGPU_ESCAPE_DISPLAY_STATE_DATA
     unsigned long       CommitSourceHeight;
     unsigned long       ChildRelationsCount; /* out: DxgkDdiQueryChildRelations calls */
 } SOFTGPU_ESCAPE_DISPLAY_STATE_DATA;
+
+/*
+ * SOFTGPU_ESCAPE_LID notifies \Callback\PowerState as the power manager
+ * does when the lid opens or closes.  SOFTGPU_ESCAPE_LID_STATE returns, in
+ * softgpu's lid test mode (service value LidTest), the order (sequence
+ * numbers, 0 = never) in which the lid notifications
+ * (DxgkDdiNotifyAcpiEvent) and the calls that hide or show the source
+ * (DxgkDdiSetVidPnSourceVisibility) and power the panel
+ * (DxgkDdiSetPowerState on the child) came.
+ */
+#define SOFTGPU_ESCAPE_LID                  0x4C4C4753UL    /* 'SGLL' */
+#define SOFTGPU_ESCAPE_LID_STATE            0x534C4753UL    /* 'SGLS' */
+
+typedef struct _SOFTGPU_ESCAPE_LID_DATA
+{
+    unsigned long       Code;           /* in: SOFTGPU_ESCAPE_LID               */
+    unsigned long       Open;           /* in: 0 closed, 1 open                 */
+} SOFTGPU_ESCAPE_LID_DATA;
+
+typedef struct _SOFTGPU_ESCAPE_LID_STATE_DATA
+{
+    unsigned long       Code;           /* in: SOFTGPU_ESCAPE_LID_STATE         */
+    unsigned long       LidTest;        /* out: test mode, 0 = off              */
+    unsigned long       LidEventCount;  /* out: DxgkDdiNotifyAcpiEvent calls    */
+    unsigned long       LidEventType;   /* out: the last one's EventType        */
+    unsigned long       LidEvent;       /* out: its Event                       */
+    unsigned long       LidArgument;    /* out: its Argument                    */
+    long                LidSyncStatus;  /* out: DxgkCbSynchronizeExecution at
+                                           DISPATCH_LEVEL on the last close     */
+    long                LidCloseSeq;    /* out: last lid closed notification    */
+    long                LidOpenSeq;     /* out: last lid open notification      */
+    long                HideSeq;        /* out: last Visible = FALSE            */
+    long                ShowSeq;        /* out: last Visible = TRUE             */
+    long                PanelD3Seq;     /* out: last panel D3                   */
+    long                PanelD0Seq;     /* out: last panel D0                   */
+    unsigned long       PanelPowerState; /* out: DEVICE_POWER_STATE             */
+    unsigned long       PanelBlanked;   /* out: blanked since the lid closed    */
+} SOFTGPU_ESCAPE_LID_STATE_DATA;
