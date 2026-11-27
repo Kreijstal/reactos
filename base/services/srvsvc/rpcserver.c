@@ -351,12 +351,19 @@ NetrServerGetInfo(
     LPSERVER_INFO *InfoStruct)
 {
     WCHAR szComputerName[MAX_COMPUTERNAME_LENGTH + 1];
-    DWORD dwComputerNameLength, dwSize;
-    PSERVER_INFO pServerInfo = NULL;
+    DWORD dwComputerNameLength;
+    PSERVER_INFO pServerInfo;
+    LPWSTR pszName;
     OSVERSIONINFOW VersionInfo;
 
     TRACE("NetrServerGetInfo(%p %lu %p)\n",
           ServerName, Level, InfoStruct);
+
+    if (Level != 100 && Level != 101 && Level != 102)
+    {
+        FIXME("level %d unimplemented\n", Level);
+        return ERROR_INVALID_LEVEL;
+    }
 
     dwComputerNameLength = MAX_COMPUTERNAME_LENGTH + 1;
     GetComputerNameW(szComputerName, &dwComputerNameLength);
@@ -365,52 +372,38 @@ NetrServerGetInfo(
     VersionInfo.dwOSVersionInfoSize = sizeof(VersionInfo);
     GetVersionExW(&VersionInfo);
 
+    /* The server stub frees every embedded pointer on its own, so each one
+       must be a separate midl_user_allocate block */
+    pServerInfo = midl_user_allocate(sizeof(*pServerInfo));
+    pszName = midl_user_allocate(dwComputerNameLength * sizeof(WCHAR));
+    if (pServerInfo == NULL || pszName == NULL)
+    {
+        midl_user_free(pServerInfo);
+        midl_user_free(pszName);
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+
+    wcscpy(pszName, szComputerName);
+
     switch (Level)
     {
         case 100:
-            dwSize = sizeof(SERVER_INFO_100) +
-                     dwComputerNameLength * sizeof(WCHAR);
-            pServerInfo = midl_user_allocate(dwSize);
-            if (pServerInfo == NULL)
-                return ERROR_NOT_ENOUGH_MEMORY;
-
             pServerInfo->ServerInfo100.sv100_platform_id = PLATFORM_ID_NT;
-            pServerInfo->ServerInfo100.sv100_name = (LPWSTR)((ULONG_PTR)pServerInfo + sizeof(SERVER_INFO_100));
-            wcscpy(pServerInfo->ServerInfo100.sv100_name, szComputerName);
-
-            *InfoStruct = pServerInfo;
+            pServerInfo->ServerInfo100.sv100_name = pszName;
             break;
 
         case 101:
-            dwSize = sizeof(SERVER_INFO_101) +
-                     dwComputerNameLength * sizeof(WCHAR);
-            pServerInfo = midl_user_allocate(dwSize);
-            if (pServerInfo == NULL)
-                return ERROR_NOT_ENOUGH_MEMORY;
-
             pServerInfo->ServerInfo101.sv101_platform_id = PLATFORM_ID_NT;
-            pServerInfo->ServerInfo101.sv101_name = (LPWSTR)((ULONG_PTR)pServerInfo + sizeof(SERVER_INFO_101));
-            wcscpy(pServerInfo->ServerInfo101.sv101_name, szComputerName);
-
+            pServerInfo->ServerInfo101.sv101_name = pszName;
             pServerInfo->ServerInfo101.sv101_version_major = VersionInfo.dwMajorVersion;
             pServerInfo->ServerInfo101.sv101_version_minor = VersionInfo.dwMinorVersion;
             pServerInfo->ServerInfo101.sv101_type = dwServiceBits | SV_TYPE_NT;
             pServerInfo->ServerInfo101.sv101_comment = NULL; /* FIXME */
-
-            *InfoStruct = pServerInfo;
             break;
 
         case 102:
-            dwSize = sizeof(SERVER_INFO_102) +
-                     dwComputerNameLength * sizeof(WCHAR);
-            pServerInfo = midl_user_allocate(dwSize);
-            if (pServerInfo == NULL)
-                return ERROR_NOT_ENOUGH_MEMORY;
-
             pServerInfo->ServerInfo102.sv102_platform_id = PLATFORM_ID_NT;
-            pServerInfo->ServerInfo102.sv102_name = (LPWSTR)((ULONG_PTR)pServerInfo + sizeof(SERVER_INFO_102));
-            wcscpy(pServerInfo->ServerInfo102.sv102_name, szComputerName);
-
+            pServerInfo->ServerInfo102.sv102_name = pszName;
             pServerInfo->ServerInfo102.sv102_version_major = VersionInfo.dwMajorVersion;
             pServerInfo->ServerInfo102.sv102_version_minor = VersionInfo.dwMinorVersion;
             pServerInfo->ServerInfo102.sv102_type = dwServiceBits | SV_TYPE_NT;
@@ -423,14 +416,10 @@ NetrServerGetInfo(
             pServerInfo->ServerInfo102.sv102_anndelta = 0; /* FIXME */
             pServerInfo->ServerInfo102.sv102_licenses = 0; /* FIXME */
             pServerInfo->ServerInfo102.sv102_userpath = NULL; /* FIXME */
-
-            *InfoStruct = pServerInfo;
             break;
-
-        default:
-            FIXME("level %d unimplemented\n", Level);
-            return ERROR_INVALID_LEVEL;
     }
+
+    *InfoStruct = pServerInfo;
 
     return NERR_Success;
 }
