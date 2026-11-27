@@ -416,7 +416,14 @@ SampRemoveUserFromDomainAliases(
                             L"Members",
                             KEY_READ | KEY_WRITE,
                             &AliasesMembersKeyHandle);
-    if (!NT_SUCCESS(Status))
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+    {
+        /* No alias of this domain has ever had a member: nothing to remove */
+        TRACE("No alias members in this domain\n");
+        Status = STATUS_SUCCESS;
+        goto done;
+    }
+    else if (!NT_SUCCESS(Status))
     {
         ERR("Failed to open the Members key (Status %08lX)\n", Status);
         goto done;
