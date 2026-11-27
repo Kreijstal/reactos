@@ -169,6 +169,9 @@ typedef struct _SOFTGPU_DEVICE
     volatile LONG       IndicateCount;
     volatile LONG       IndicateStatus;
 
+    /* DxgkDdiQueryChildRelations calls (SOFTGPU_ESCAPE_DISPLAY_STATE) */
+    volatile LONG       ChildRelationsCount;
+
     /* What the last DxgkDdiCommitVidPn got (SOFTGPU_ESCAPE_DISPLAY_STATE) */
     ULONG               CommitCount;
     ULONG               CommitPathCount;
@@ -203,6 +206,9 @@ typedef struct _SOFTGPU_DEVICE
     DXGK_INTERFACE      DxgkInterface;
 
 } SOFTGPU_DEVICE, *PSOFTGPU_DEVICE;
+
+/* How long detecting the connected monitor takes in the late monitor test mode */
+#define SOFTGPU_DETECT_DELAY_MS     200
 
 /* Service value LateConnectMs, read in DriverEntry (0 = test mode off) */
 extern ULONG SoftGpuLateConnectMs;

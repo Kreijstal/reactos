@@ -184,6 +184,7 @@ SoftGpuDdiEscape(
         State->CommitPathCount = Device->CommitPathCount;
         State->CommitSourceWidth = Device->CommitSourceWidth;
         State->CommitSourceHeight = Device->CommitSourceHeight;
+        State->ChildRelationsCount = (unsigned long)Device->ChildRelationsCount;
         return STATUS_SUCCESS;
     }
     if (Data->Code == SOFTGPU_ESCAPE_SEGMENT)

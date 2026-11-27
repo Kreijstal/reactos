@@ -1001,7 +1001,11 @@ SoftGpuDdiQueryChildRelations(
     _Out_ PDXGK_CHILD_DESCRIPTOR ChildRelations,
     _In_  ULONG                  ChildRelationsSize)
 {
+    PSOFTGPU_DEVICE Device = (PSOFTGPU_DEVICE)MiniportDeviceContext;
+
     DPRINT("SOFTGPU: QueryChildRelations size=%lu\n", ChildRelationsSize);
+
+    InterlockedIncrement(&Device->ChildRelationsCount);
 
     if (ChildRelations == NULL)
         return STATUS_INVALID_PARAMETER;
@@ -1054,6 +1058,19 @@ SoftGpuDdiQueryChildStatus(
         /* The virtual monitor is always connected, except in the late
          * monitor test mode until its connection was reported. */
         ChildStatus->HotPlug.Connected = (Device->MonitorConnected != 0);
+
+        /* In that mode, detecting the connected monitor takes a while, as
+         * reading a panel over its connector does, so dxgkrnl's topology
+         * update after the report overlaps its re-enumeration of the
+         * children. */
+        if (Device->LateConnectMs != 0 && ChildStatus->HotPlug.Connected)
+        {
+            LARGE_INTEGER Interval;
+
+            ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+            Interval.QuadPart = -(LONGLONG)SOFTGPU_DETECT_DELAY_MS * 10000;
+            KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+        }
     }
 
     return STATUS_SUCCESS;

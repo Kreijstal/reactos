@@ -85,4 +85,5 @@ typedef struct _SOFTGPU_ESCAPE_DISPLAY_STATE_DATA
     unsigned long       CommitPathCount;    /* out: paths of the last commit     */
     unsigned long       CommitSourceWidth;  /* out: its pinned source mode       */
     unsigned long       CommitSourceHeight;
+    unsigned long       ChildRelationsCount; /* out: DxgkDdiQueryChildRelations calls */
 } SOFTGPU_ESCAPE_DISPLAY_STATE_DATA;

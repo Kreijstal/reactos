@@ -26,7 +26,9 @@
  *    its output reports disconnected at start and connects later through
  *    DxgkCbIndicateChildStatus, from a DPC.  Like Windows, dxgkrnl must then
  *    set the mode on a topology with a path to it, or the display stays
- *    dark for the whole session.
+ *    dark for the whole session.  Like Windows, dxgkrnl asks for the
+ *    children (DxgkDdiQueryChildRelations) once, at start: the descriptors
+ *    list every child the miniport can have.
  *
  * Other adapters do not know the escapes; the tests skip there.
  */
@@ -284,10 +286,10 @@ Test_LateMonitor(void)
         ok(NT_SUCCESS(SoftGpuEscape(&State, sizeof(State))), "display state escape failed\n");
     }
     trace("late monitor (%lu ms): connected %lu, %lu report(s) 0x%08lx, %lu mode set(s), "
-          "last %lu path(s) %lux%lu\n",
+          "last %lu path(s) %lux%lu, %lu child relations quer(ies)\n",
           State.LateConnectMs, State.MonitorConnected, State.IndicateCount,
           State.IndicateStatus, State.CommitCount, State.CommitPathCount,
-          State.CommitSourceWidth, State.CommitSourceHeight);
+          State.CommitSourceWidth, State.CommitSourceHeight, State.ChildRelationsCount);
 
     ok(State.MonitorConnected, "the monitor never got connected\n");
     ok(State.IndicateCount >= 1, "the connection was never reported\n");
@@ -299,6 +301,9 @@ Test_LateMonitor(void)
     ok(State.CommitSourceWidth != 0 && State.CommitSourceHeight != 0,
        "the last mode set pinned no source mode (%lux%lu)\n",
        State.CommitSourceWidth, State.CommitSourceHeight);
+    ok(State.ChildRelationsCount == 1,
+       "DxgkDdiQueryChildRelations called %lu times, expected once at start\n",
+       State.ChildRelationsCount);
 
     /* The output scans out the desktop GDI draws. */
     memset(&DevMode, 0, sizeof(DevMode));
