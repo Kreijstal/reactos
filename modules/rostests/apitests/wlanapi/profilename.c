@@ -10,6 +10,10 @@
  * read back as the characters, also after the service has reloaded its store.
  * Needs a wireless interface; the reload part also needs the rights to
  * restart WlanSvc.  Skipped otherwise.
+ *
+ * Element names are case-sensitive too: <Name> is no <name>, so a profile
+ * whose name element is spelt <Name> has no name and is no valid profile,
+ * even though its SSID has a <name>.
  */
 
 #include <apitest.h>
@@ -23,6 +27,8 @@ static const WCHAR Lower[] = L"rostest-name-case";
 static const WCHAR EscapedXmlName[] = L"rostest-a&amp;b&lt;c&gt;d&quot;e&apos;f&#x41;&#66;";
 static const WCHAR EscapedName[] = L"rostest-a&b<c>d\"e'fAB";
 static const WCHAR Renamed[] = L"rostest-<renamed> & \"quoted\" 'too'";
+static const WCHAR TagCaseName[] = L"rostest-tag-case";
+static const WCHAR TagCaseSsid[] = L"rostest-tag-case-ssid";
 
 static DWORD
 SetProfile(HANDLE Client, const GUID *Interface, PCWSTR XmlName, BOOL Overwrite)
@@ -87,6 +93,38 @@ CleanUp(HANDLE Client, const GUID *Interface)
     WlanDeleteProfile(Client, Interface, EscapedName, NULL);
     WlanDeleteProfile(Client, Interface, Renamed, NULL);
     WlanDeleteProfile(Client, Interface, L"rostest-name-none", NULL);
+    WlanDeleteProfile(Client, Interface, TagCaseName, NULL);
+    WlanDeleteProfile(Client, Interface, TagCaseSsid, NULL);
+}
+
+/* <Name> is not the profile's <name>. */
+static VOID
+TestTagCase(HANDLE Client, const GUID *Interface)
+{
+    WCHAR Xml[1024];
+    DWORD Ret, Reason = 0;
+
+    _snwprintf(Xml, ARRAYSIZE(Xml),
+        L"<?xml version=\"1.0\"?>"
+        L"<WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\">"
+        L"<Name>%s</Name>"
+        L"<SSIDConfig><SSID><name>%s</name></SSID></SSIDConfig>"
+        L"<connectionType>ESS</connectionType>"
+        L"<connectionMode>manual</connectionMode>"
+        L"<MSM><security><authEncryption>"
+        L"<authentication>open</authentication><encryption>none</encryption>"
+        L"<useOneX>false</useOneX>"
+        L"</authEncryption></security></MSM>"
+        L"</WLANProfile>",
+        TagCaseName, TagCaseSsid);
+    Xml[ARRAYSIZE(Xml) - 1] = UNICODE_NULL;
+
+    Ret = WlanSetProfile(Client, Interface, 0, Xml, NULL, FALSE, NULL, &Reason);
+    ok(Ret == ERROR_BAD_PROFILE, "WlanSetProfile(<Name>) returned %lu\n", Ret);
+    ok(CountNamed(Client, Interface, TagCaseName) == 0, "%ld profiles '%ls'\n",
+       CountNamed(Client, Interface, TagCaseName), TagCaseName);
+    ok(CountNamed(Client, Interface, TagCaseSsid) == 0, "%ld profiles '%ls'\n",
+       CountNamed(Client, Interface, TagCaseSsid), TagCaseSsid);
 }
 
 static VOID
@@ -241,6 +279,7 @@ START_TEST(profilename)
     CleanUp(Client, &Interface);
 
     TestCase(Client, &Interface);
+    TestTagCase(Client, &Interface);
 
     /* Renamed, escaped by hand the way the service writes it. */
     for (p = Renamed, q = EscapedRenamed; *p != UNICODE_NULL; p++)

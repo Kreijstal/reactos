@@ -17,8 +17,8 @@
 #include <debug.h>
 
 /*
- * Return a pointer just past the first "<tag ...>", or NULL.  Tag matching is
- * case-insensitive and tolerates attributes.
+ * Return a pointer just past the first "<tag ...>", or NULL.  Element names are
+ * case-sensitive, as in XML; attributes are tolerated.
  */
 static LPCWSTR
 XmlFindOpen(LPCWSTR xml, LPCWSTR tag)
@@ -29,7 +29,7 @@ XmlFindOpen(LPCWSTR xml, LPCWSTR tag)
     while ((p = wcschr(p, L'<')) != NULL)
     {
         LPCWSTR q = p + 1;
-        if (_wcsnicmp(q, tag, tlen) == 0)
+        if (wcsncmp(q, tag, tlen) == 0)
         {
             WCHAR c = q[tlen];
             if (c == L'>' || c == L' ' || c == L'\t' || c == L'\r' || c == L'\n' || c == L'/')
@@ -110,15 +110,30 @@ XmlDecodeEntity(LPCWSTR p, LPCWSTR end, PULONG c)
 }
 
 /*
- * Extract the text content of the first <tag>...</tag> into out (NUL-terminated,
- * up to outChars-1 chars), with its entity references replaced by the
- * characters they stand for.  Returns TRUE on success.  Leading/trailing ASCII
- * whitespace is trimmed.
+ * A pointer just past the profile's own "<name>", or NULL.  That is the
+ * WLANProfile element's <name>, which comes before its <SSIDConfig>; the
+ * <name> of an SSID inside the SSIDConfig is no profile name.
+ */
+static LPCWSTR
+XmlFindProfileName(LPCWSTR xml)
+{
+    LPCWSTR name = XmlFindOpen(xml, L"name");
+    LPCWSTR ssidConfig = XmlFindOpen(xml, L"SSIDConfig");
+
+    if (name != NULL && ssidConfig != NULL && name > ssidConfig)
+        return NULL;
+    return name;
+}
+
+/*
+ * Extract the text content of the element whose content starts at start
+ * (just past its opening tag) into out (NUL-terminated, up to outChars-1
+ * chars), with its entity references replaced by the characters they stand
+ * for.  Returns TRUE on success.  Leading/trailing ASCII whitespace is trimmed.
  */
 static BOOL
-XmlGetText(LPCWSTR xml, LPCWSTR tag, LPWSTR out, size_t outChars)
+XmlGetTextAt(LPCWSTR start, LPWSTR out, size_t outChars)
 {
-    LPCWSTR start = XmlFindOpen(xml, tag);
     LPCWSTR end;
     size_t n;
 
@@ -165,6 +180,13 @@ XmlGetText(LPCWSTR xml, LPCWSTR tag, LPWSTR out, size_t outChars)
     }
     out[n] = L'\0';
     return TRUE;
+}
+
+/* The text of the first <tag>...</tag>, as XmlGetTextAt. */
+static BOOL
+XmlGetText(LPCWSTR xml, LPCWSTR tag, LPWSTR out, size_t outChars)
+{
+    return XmlGetTextAt(XmlFindOpen(xml, tag), out, outChars);
 }
 
 /* Convert a UTF-16 SSID name into a DOT11_SSID (octet copy of the low byte). */
@@ -214,7 +236,7 @@ WlanSvcParseProfileXml(LPCWSTR Xml, PWLANSVC_PROFILE *ppProfile)
         return ERROR_NOT_ENOUGH_MEMORY;
 
     /* Profile <name> (the top-level one, used as the store key). */
-    if (XmlGetText(Xml, L"name", buf, ARRAYSIZE(buf)))
+    if (XmlGetTextAt(XmlFindProfileName(Xml), buf, ARRAYSIZE(buf)))
         wcsncpy(prof->Name, buf, WLAN_MAX_NAME_LENGTH - 1);
 
     /* The SSID's own <name> lives under <SSIDConfig><SSID>; search from there
@@ -231,14 +253,7 @@ WlanSvcParseProfileXml(LPCWSTR Xml, PWLANSVC_PROFILE *ppProfile)
     if (prof->Ssid.uSSIDLength == 0 && prof->Name[0] != L'\0')
         SsidFromText(prof->Name, &prof->Ssid);
 
-    if (prof->Name[0] == L'\0' && prof->Ssid.uSSIDLength != 0)
-    {
-        ULONG i;
-        for (i = 0; i < prof->Ssid.uSSIDLength; i++)
-            prof->Name[i] = (WCHAR)prof->Ssid.ucSSID[i];
-        prof->Name[prof->Ssid.uSSIDLength] = L'\0';
-    }
-
+    /* A profile without its own <name> is no valid profile. */
     if (prof->Name[0] == L'\0' || prof->Ssid.uSSIDLength == 0)
     {
         WlanSvcFreeProfile(prof);
@@ -604,12 +619,12 @@ WlanSvcXmlEntity(WCHAR c)
     }
 }
 
-/* Xml with the text of its profile <name> (the first one) replaced by Name,
+/* Xml with the text of its profile <name> replaced by Name,
  * escaped; heap block, caller frees. */
 static LPWSTR
 WlanSvcXmlWithName(LPCWSTR Xml, LPCWSTR Name)
 {
-    LPCWSTR start = XmlFindOpen(Xml, L"name");
+    LPCWSTR start = XmlFindProfileName(Xml);
     LPCWSTR end, p, entity;
     SIZE_T head, tail, nameLen = 0;
     LPWSTR out, q;
