@@ -37,9 +37,10 @@ typedef enum _SOCKET_STATE {
     SocketStateConnected
 } SOCKET_STATE, *PSOCKET_STATE;
 
+/* A request kept until the socket has the TDI object it is for */
 typedef struct _QUEUED_REQUEST {
     PTCP_REQUEST_SET_INFORMATION_EX Info;
-    PVOID Next;
+    struct _QUEUED_REQUEST *Next;
 } QUEUED_REQUEST, *PQUEUED_REQUEST;
 
 typedef struct _SOCKET_CONTEXT {
@@ -47,8 +48,6 @@ typedef struct _SOCKET_CONTEXT {
     INT SocketType;
     INT Protocol;
     DWORD Flags;
-    DWORD AddrFileEntityType;
-    DWORD AddrFileInstance;
     SOCKET_STATE SocketState;
     PQUEUED_REQUEST RequestQueue;
     BOOL DontRoute;
@@ -65,9 +64,8 @@ WSHIoctl_GetInterfaceList(
 
 INT
 SendRequest(
-    IN PVOID Request,
-    IN DWORD RequestSize,
-    IN DWORD IOCTL);
+    _In_ HANDLE Handle,
+    _In_ PTCP_REQUEST_SET_INFORMATION_EX Info);
 
 #endif /* __WSHTCPIP_H */
 

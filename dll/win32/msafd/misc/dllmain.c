@@ -719,6 +719,67 @@ MsafdWaitForAlert(
 }
 
 /*
+ * Gets from AFD the handles of the socket's TDI objects that Flags names
+ * (AFD_ADDRESS_HANDLE, AFD_CONNECTION_HANDLE) and the socket does not have
+ * yet.  They are what the helper sends its requests on, and the socket's to
+ * close.  An object the socket does not have gives no handle.
+ */
+static
+NTSTATUS
+MsafdGetTdiHandles(
+    _In_ PSOCKET_INFORMATION Socket,
+    _In_ ULONG Flags)
+{
+    IO_STATUS_BLOCK IOSB;
+    AFD_TDI_HANDLE_DATA HandleData;
+    HANDLE SockEvent;
+    NTSTATUS Status;
+
+    if (Socket->TdiAddressHandle)
+        Flags &= ~AFD_ADDRESS_HANDLE;
+    if (Socket->TdiConnectionHandle)
+        Flags &= ~AFD_CONNECTION_HANDLE;
+    if (!Flags)
+        return STATUS_SUCCESS;
+
+    Status = NtCreateEvent(&SockEvent,
+                           EVENT_ALL_ACCESS,
+                           NULL,
+                           SynchronizationEvent,
+                           FALSE);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    RtlZeroMemory(&HandleData, sizeof(HandleData));
+    Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
+                                   SockEvent,
+                                   NULL,
+                                   NULL,
+                                   &IOSB,
+                                   IOCTL_AFD_GET_TDI_HANDLES,
+                                   &Flags,
+                                   sizeof(Flags),
+                                   &HandleData,
+                                   sizeof(HandleData));
+    if (Status == STATUS_PENDING)
+    {
+        MsafdWaitForAlert(SockEvent);
+        Status = IOSB.Status;
+    }
+    NtClose(SockEvent);
+
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (Flags & AFD_ADDRESS_HANDLE)
+        Socket->TdiAddressHandle = HandleData.TdiAddressHandle;
+    if (Flags & AFD_CONNECTION_HANDLE)
+        Socket->TdiConnectionHandle = HandleData.TdiConnectionHandle;
+
+    return STATUS_SUCCESS;
+}
+
+/*
  * Waits for a blocking (non-overlapped) send or receive whose IOCTL returned
  * STATUS_PENDING, honouring SO_SNDTIMEO/SO_RCVTIMEO. A timeout of 0 (or
  * INFINITE) means wait forever. When the timeout expires the request is
@@ -2073,7 +2134,10 @@ MsafdAccept(
     AcceptSocketInfo->SharedData->State = SocketConnected;
     AcceptSocketInfo->SharedData->ConnectTime = GetCurrentTimeInSeconds();
     AcceptSocketInfo->SharedData->NonBlocking = Socket->SharedData->NonBlocking;
-    DereferenceSocket(AcceptSocketInfo);
+
+    /* The handles of the accepted socket's own TDI objects, for its helper.
+     * Without them the helper keeps the socket's options until it has them. */
+    MsafdGetTdiHandles(AcceptSocketInfo, AFD_ADDRESS_HANDLE | AFD_CONNECTION_HANDLE);
 
     /* Return Address in SOCKADDR FORMAT, as much of it as there is room for */
     if( SocketAddress )
@@ -2092,13 +2156,15 @@ MsafdAccept(
 
     TRACE("Socket %x\n", AcceptSocket);
 
-    if (Status == STATUS_SUCCESS && (Socket->HelperEvents & WSH_NOTIFY_ACCEPT))
+    /* The helper hears of the accept on the accepted socket: it is that
+     * socket's context that is now connected, with these handles */
+    if (Status == STATUS_SUCCESS && (AcceptSocketInfo->HelperEvents & WSH_NOTIFY_ACCEPT))
     {
-        Status = Socket->HelperData->WSHNotify(Socket->HelperContext,
-                                               Socket->Handle,
-                                               Socket->TdiAddressHandle,
-                                               Socket->TdiConnectionHandle,
-                                               WSH_NOTIFY_ACCEPT);
+        Status = AcceptSocketInfo->HelperData->WSHNotify(AcceptSocketInfo->HelperContext,
+                                                         AcceptSocketInfo->Handle,
+                                                         AcceptSocketInfo->TdiAddressHandle,
+                                                         AcceptSocketInfo->TdiConnectionHandle,
+                                                         WSH_NOTIFY_ACCEPT);
 
         /* The accept fails: the socket it made, and the connection AFD gave
          * that socket, go */
@@ -2106,11 +2172,13 @@ MsafdAccept(
         {
             INT CloseErrno;
 
+            DereferenceSocket(AcceptSocketInfo);
             WSPCloseSocket(AcceptSocket, &CloseErrno);
             if (lpErrno) *lpErrno = Status;
             return SOCKET_ERROR;
         }
     }
+    DereferenceSocket(AcceptSocketInfo);
 
     if (lpErrno) *lpErrno = NO_ERROR;
 
@@ -2313,7 +2381,9 @@ MsafdConnectAPC(
     if (IoStatusBlock->Status == STATUS_SUCCESS)
     {
         Socket->SharedData->State = SocketConnected;
-        Socket->TdiConnectionHandle = (HANDLE)IoStatusBlock->Information;
+        /* The connection's handle for the helper.  Without it the helper
+         * keeps the socket's connection options until it has one. */
+        MsafdGetTdiHandles(Socket, AFD_CONNECTION_HANDLE);
         Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
     }
 
@@ -2555,7 +2625,9 @@ MsafdConnect(
             goto Leave;
 
         Socket->SharedData->State = SocketConnected;
-        Socket->TdiConnectionHandle = (HANDLE)IOSB->Information;
+        /* The connection's handle for the helper.  Without it the helper
+         * keeps the socket's connection options until it has one. */
+        MsafdGetTdiHandles(Socket, AFD_CONNECTION_HANDLE);
         Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
     }
 
@@ -3668,7 +3740,6 @@ MsafdUpdateConnectionContext(
     PIO_STATUS_BLOCK           IOSB = &DummyIOSB;
     NTSTATUS                   Status;
     SOCK_SHARED_INFO SharedData;
-    AFD_TDI_HANDLE_DATA HandleData;
     HANDLE SockEvent;
     PSOCKET_INFORMATION Socket = GetSocketStructure(Handle);
 
@@ -3679,8 +3750,7 @@ MsafdUpdateConnectionContext(
     }
 
     if (Socket->SharedData->State == SocketConnected &&
-        Socket->TdiConnectionHandle &&
-        Socket->TdiAddressHandle)
+        Socket->TdiConnectionHandle)
     {
         DereferenceSocket(Socket);
         return NO_ERROR;
@@ -3713,7 +3783,10 @@ MsafdUpdateConnectionContext(
     }
 
     if (!NT_SUCCESS(Status))
+    {
+        NtClose(SockEvent);
         goto Quit;
+    }
 
     Socket->SharedData->State = SharedData.State;
 
@@ -3725,33 +3798,15 @@ MsafdUpdateConnectionContext(
         return SOCKET_ERROR;
     }
 
-    ULONG flags = AFD_CONNECTION_HANDLE | AFD_ADDRESS_HANDLE;
+    NtClose(SockEvent);
 
-    /* Get TDI handles from AFD */
-    Status = NtDeviceIoControlFile((HANDLE)Handle,
-                                   SockEvent,
-                                   NULL,
-                                   NULL,
-                                   IOSB,
-                                   IOCTL_AFD_GET_TDI_HANDLES,
-                                   &flags,
-                                   sizeof(flags),
-                                   &HandleData,
-                                   sizeof(HandleData));
-    
-    if (Status == STATUS_PENDING)
-    {
-        MsafdWaitForAlert(SockEvent);
-        Status = IOSB->Status;
-    }
+    /* Socket is now connected, update usermode msafd socket structure, same as the end of WSPConnect */
+    Status = MsafdGetTdiHandles(Socket, AFD_CONNECTION_HANDLE | AFD_ADDRESS_HANDLE);
 
     /* Bail out if the socket was destroyed */
     if (!NT_SUCCESS(Status))
         goto Quit;
 
-    /* Socket is now connected, update usermode msafd socket structure, same as the end of WSPConnect */
-    Socket->TdiConnectionHandle = HandleData.TdiConnectionHandle;
-    Socket->TdiAddressHandle = HandleData.TdiAddressHandle;
     Socket->SharedData->ConnectTime = SharedData.ConnectTime;
 
     /* Re-enable Async Event */
@@ -3765,8 +3820,6 @@ MsafdUpdateConnectionContext(
                                   Socket->TdiAddressHandle,
                                   Socket->TdiConnectionHandle,
                                   WSH_NOTIFY_CONNECT);
-
-    NtClose(SockEvent);
 
 Quit:
     DereferenceSocket(Socket);

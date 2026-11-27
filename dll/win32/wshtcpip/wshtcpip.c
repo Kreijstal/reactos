@@ -11,6 +11,23 @@
 #define NDEBUG
 #include <debug.h>
 
+static
+PTCP_REQUEST_SET_INFORMATION_EX
+AllocateRequest(
+    _In_ PSOCKET_CONTEXT Context,
+    _In_ ULONG Type,
+    _In_ ULONG Id,
+    _In_reads_bytes_(Length) const VOID *Value,
+    _In_ ULONG Length);
+
+static
+INT
+SendOrQueueRequest(
+    _In_ PSOCKET_CONTEXT Context,
+    _In_ PTCP_REQUEST_SET_INFORMATION_EX Info,
+    _In_opt_ HANDLE TdiAddressObjectHandle,
+    _In_opt_ HANDLE TdiConnectionObjectHandle);
+
 BOOL
 EXPORT
 DllMain(HANDLE hInstDll,
@@ -409,7 +426,6 @@ WSHIoctl(
     INT res;
     PSOCKET_CONTEXT Context = HelperDllSocketContext;
     PTCP_REQUEST_SET_INFORMATION_EX Info;
-    PQUEUED_REQUEST Queued, NextQueued;
 
     if (NeedsCompletion)
         *NeedsCompletion = FALSE;
@@ -436,59 +452,12 @@ WSHIoctl(
         /* Track the on/off state so WSHGetSocketInformation can report it */
         Context->KeepAlive = (((struct tcp_keepalive*)InputBuffer)->onoff != 0);
 
-        Info = HeapAlloc(GetProcessHeap(), 0, sizeof(*Info) + InputBufferLength);
+        Info = AllocateRequest(Context, INFO_TYPE_CONNECTION, TCP_SOCKET_KEEPALIVEVALS,
+                               InputBuffer, InputBufferLength);
         if (!Info)
             return WSAENOBUFS;
 
-        Info->ID.toi_entity.tei_entity = Context->AddrFileEntityType;
-        Info->ID.toi_entity.tei_instance = Context->AddrFileInstance;
-        Info->ID.toi_class = INFO_CLASS_PROTOCOL;
-        Info->ID.toi_type = INFO_TYPE_CONNECTION;
-        Info->ID.toi_id = TCP_SOCKET_KEEPALIVEVALS;
-        Info->BufferSize = InputBufferLength;
-        memcpy(Info->Buffer, InputBuffer, InputBufferLength);
-
-        if (Context->SocketState == SocketStateCreated)
-        {
-            if (Context->RequestQueue)
-            {
-                Queued = Context->RequestQueue;
-                while ((NextQueued = Queued->Next))
-                {
-                    Queued = NextQueued;
-                }
-
-                Queued->Next = HeapAlloc(GetProcessHeap(), 0, sizeof(QUEUED_REQUEST));
-                if (!Queued->Next)
-                {
-                    HeapFree(GetProcessHeap(), 0, Info);
-                    return WSAENOBUFS;
-                }
-
-                NextQueued = Queued->Next;
-                NextQueued->Next = NULL;
-                NextQueued->Info = Info;
-            }
-            else
-            {
-                Context->RequestQueue = HeapAlloc(GetProcessHeap(), 0, sizeof(QUEUED_REQUEST));
-                if (!Context->RequestQueue)
-                {
-                    HeapFree(GetProcessHeap(), 0, Info);
-                    return WSAENOBUFS;
-                }
-
-                Context->RequestQueue->Next = NULL;
-                Context->RequestQueue->Info = Info;
-            }
-
-            return 0;
-        }
-
-        res = SendRequest(Info, sizeof(*Info) + Info->BufferSize, IOCTL_TCP_SET_INFORMATION_EX);
-
-        HeapFree(GetProcessHeap(), 0, Info);
-        return res;
+        return SendOrQueueRequest(Context, Info, TdiAddressObjectHandle, TdiConnectionObjectHandle);
     }
 
     return WSAEINVAL;
@@ -517,29 +486,40 @@ WSHJoinLeaf(
     return NO_ERROR;
 }
 
+/* The handle Info goes on: a request for a connection goes on the socket's
+ * TDI connection object, any other on its address object.  Either is NULL
+ * until the socket has that object. */
+static
+HANDLE
+GetRequestHandle(
+    _In_ PTCP_REQUEST_SET_INFORMATION_EX Info,
+    _In_opt_ HANDLE TdiAddressObjectHandle,
+    _In_opt_ HANDLE TdiConnectionObjectHandle)
+{
+    if (Info->ID.toi_type == INFO_TYPE_CONNECTION)
+        return TdiConnectionObjectHandle;
+
+    return TdiAddressObjectHandle;
+}
+
+/* Sets an option of the socket's TDI object Handle: the object the request is
+ * sent on is the one it is for, the entity it names only says the kind */
 INT
 SendRequest(
-    IN PVOID Request,
-    IN DWORD RequestSize,
-    IN DWORD IOCTL)
+    _In_ HANDLE Handle,
+    _In_ PTCP_REQUEST_SET_INFORMATION_EX Info)
 {
-    BOOLEAN Success;
-    HANDLE TcpCC;
+    BOOL Success;
     DWORD BytesReturned;
 
-    if (openTcpFile(&TcpCC, FILE_READ_DATA | FILE_WRITE_DATA) != STATUS_SUCCESS)
-        return WSAEINVAL;
-
-    Success = DeviceIoControl(TcpCC,
-                              IOCTL,
-                              Request,
-                              RequestSize,
+    Success = DeviceIoControl(Handle,
+                              IOCTL_TCP_SET_INFORMATION_EX,
+                              Info,
+                              FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer) + Info->BufferSize,
                               NULL,
                               0,
                               &BytesReturned,
                               NULL);
-
-    closeTcpFile(TcpCC);
 
     DPRINT("DeviceIoControl: %ld\n", (Success ? NO_ERROR : GetLastError()));
 
@@ -547,6 +527,101 @@ SendRequest(
         return WSAEINVAL;
 
     return NO_ERROR;
+}
+
+/* A request to set option Id of the kind Type to the Length bytes of Value */
+static
+PTCP_REQUEST_SET_INFORMATION_EX
+AllocateRequest(
+    _In_ PSOCKET_CONTEXT Context,
+    _In_ ULONG Type,
+    _In_ ULONG Id,
+    _In_reads_bytes_(Length) const VOID *Value,
+    _In_ ULONG Length)
+{
+    PTCP_REQUEST_SET_INFORMATION_EX Info;
+
+    Info = HeapAlloc(GetProcessHeap(), 0, FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer) + Length);
+    if (!Info)
+        return NULL;
+
+    Info->ID.toi_entity.tei_entity = (Context->SocketType == SOCK_STREAM) ? CO_TL_ENTITY : CL_TL_ENTITY;
+    Info->ID.toi_entity.tei_instance = 0;
+    Info->ID.toi_class = INFO_CLASS_PROTOCOL;
+    Info->ID.toi_type = Type;
+    Info->ID.toi_id = Id;
+    Info->BufferSize = Length;
+    memcpy(Info->Buffer, Value, Length);
+
+    return Info;
+}
+
+/* Sends Info, which it frees, or keeps it until the socket has the object
+ * it is for: an option set before bind, connect or accept is set then */
+static
+INT
+SendOrQueueRequest(
+    _In_ PSOCKET_CONTEXT Context,
+    _In_ PTCP_REQUEST_SET_INFORMATION_EX Info,
+    _In_opt_ HANDLE TdiAddressObjectHandle,
+    _In_opt_ HANDLE TdiConnectionObjectHandle)
+{
+    HANDLE Handle;
+    PQUEUED_REQUEST Queued, *Link;
+    INT Status;
+
+    Handle = GetRequestHandle(Info, TdiAddressObjectHandle, TdiConnectionObjectHandle);
+    if (Handle)
+    {
+        Status = SendRequest(Handle, Info);
+        HeapFree(GetProcessHeap(), 0, Info);
+        return Status;
+    }
+
+    Queued = HeapAlloc(GetProcessHeap(), 0, sizeof(*Queued));
+    if (!Queued)
+    {
+        HeapFree(GetProcessHeap(), 0, Info);
+        return WSAENOBUFS;
+    }
+    Queued->Info = Info;
+    Queued->Next = NULL;
+
+    /* In the order they were set */
+    for (Link = &Context->RequestQueue; *Link; Link = &(*Link)->Next)
+        ;
+    *Link = Queued;
+
+    return NO_ERROR;
+}
+
+/* Sends the kept requests for the objects the socket now has */
+static
+VOID
+SendQueuedRequests(
+    _In_ PSOCKET_CONTEXT Context,
+    _In_opt_ HANDLE TdiAddressObjectHandle,
+    _In_opt_ HANDLE TdiConnectionObjectHandle)
+{
+    PQUEUED_REQUEST Queued, *Link;
+    HANDLE Handle;
+
+    Link = &Context->RequestQueue;
+    while ((Queued = *Link))
+    {
+        Handle = GetRequestHandle(Queued->Info, TdiAddressObjectHandle, TdiConnectionObjectHandle);
+        if (!Handle)
+        {
+            Link = &Queued->Next;
+            continue;
+        }
+
+        SendRequest(Handle, Queued->Info);
+
+        *Link = Queued->Next;
+        HeapFree(GetProcessHeap(), 0, Queued->Info);
+        HeapFree(GetProcessHeap(), 0, Queued);
+    }
 }
 
 INT
@@ -559,10 +634,6 @@ WSHNotify(
     IN  DWORD NotifyEvent)
 {
     PSOCKET_CONTEXT Context = HelperDllSocketContext;
-    NTSTATUS Status;
-    HANDLE TcpCC;
-    TDIEntityID *EntityIDs;
-    DWORD EntityCount, i;
     PQUEUED_REQUEST QueuedRequest, NextQueuedRequest;
 
     switch (NotifyEvent)
@@ -585,54 +656,10 @@ WSHNotify(
 
         case WSH_NOTIFY_BIND:
             DPRINT("WSHNotify: WSH_NOTIFY_BIND\n");
-            Status = openTcpFile(&TcpCC, FILE_READ_DATA);
-            if (Status != STATUS_SUCCESS)
-                return WSAEINVAL;
-
-            Status = tdiGetEntityIDSet(TcpCC,
-                                       &EntityIDs,
-                                       &EntityCount);
-
-            closeTcpFile(TcpCC);
-
-            if (Status != STATUS_SUCCESS)
-                return WSAEINVAL;
-
-            for (i = 0; i < EntityCount; i++)
-            {
-                if (EntityIDs[i].tei_entity == CO_TL_ENTITY ||
-                    EntityIDs[i].tei_entity == CL_TL_ENTITY ||
-                    EntityIDs[i].tei_entity == ER_ENTITY)
-                {
-                    Context->AddrFileInstance = EntityIDs[i].tei_instance;
-                    Context->AddrFileEntityType = EntityIDs[i].tei_entity;
-                }
-            }
-
-            DPRINT("Instance: %lx Type: %lx\n", Context->AddrFileInstance, Context->AddrFileEntityType);
-
-            tdiFreeThingSet(EntityIDs);
-
+            /* The options of the address object go on the handle of the
+             * socket's own address object, which it now has */
             Context->SocketState = SocketStateBound;
-
-            QueuedRequest = Context->RequestQueue;
-            while (QueuedRequest)
-            {
-                QueuedRequest->Info->ID.toi_entity.tei_entity = Context->AddrFileEntityType;
-                QueuedRequest->Info->ID.toi_entity.tei_instance = Context->AddrFileInstance;
-
-                SendRequest(QueuedRequest->Info,
-                            sizeof(*QueuedRequest->Info) + QueuedRequest->Info->BufferSize,
-                            IOCTL_TCP_SET_INFORMATION_EX);
-
-                NextQueuedRequest = QueuedRequest->Next;
-
-                HeapFree(GetProcessHeap(), 0, QueuedRequest->Info);
-                HeapFree(GetProcessHeap(), 0, QueuedRequest);
-
-                QueuedRequest = NextQueuedRequest;
-            }
-            Context->RequestQueue = NULL;
+            SendQueuedRequests(Context, TdiAddressObjectHandle, TdiConnectionObjectHandle);
             break;
 
         case WSH_NOTIFY_LISTEN:
@@ -644,7 +671,10 @@ WSHNotify(
         case WSH_NOTIFY_ACCEPT:
             DPRINT("WSHNotify: %s\n",
                    NotifyEvent == WSH_NOTIFY_CONNECT ? "WSH_NOTIFY_CONNECT" : "WSH_NOTIFY_ACCEPT");
+            /* The options of the connection go on the handle of the
+             * socket's own connection, which it now has */
             Context->SocketState = SocketStateConnected;
+            SendQueuedRequests(Context, TdiAddressObjectHandle, TdiConnectionObjectHandle);
             break;
 
         case WSH_NOTIFY_CONNECT_ERROR:
@@ -822,14 +852,10 @@ WSHSetSocketInformation(
     IN  INT OptionLength)
 {
     PSOCKET_CONTEXT Context = HelperDllSocketContext;
-    ULONG TdiType, TdiId;
-    INT Status;
+    ULONG TdiType, TdiId, IfIndex;
     PTCP_REQUEST_SET_INFORMATION_EX Info;
-    PQUEUED_REQUEST Queued, NextQueued;
 
     DPRINT("WSHSetSocketInformation\n");
-
-    /* FIXME: We only handle address file object here */
 
     switch (Level)
     {
@@ -913,68 +939,21 @@ WSHSetSocketInformation(
     GetTdiTypeId(Level, OptionName, &TdiType, &TdiId);
     ASSERT((TdiId != 0) && (TdiType != 0));
 
-    Info = HeapAlloc(GetProcessHeap(), 0, sizeof(*Info) + OptionLength);
-    if (!Info)
-        return WSAENOBUFS;
-
-    Info->ID.toi_entity.tei_entity = Context->AddrFileEntityType;
-    Info->ID.toi_entity.tei_instance = Context->AddrFileInstance;
-    Info->ID.toi_class = INFO_CLASS_PROTOCOL;
-    Info->ID.toi_type = TdiType;
-    Info->ID.toi_id = TdiId;
-    Info->BufferSize = OptionLength;
-    memcpy(Info->Buffer, OptionValue, OptionLength);
-
     if (Level == IPPROTO_IP && OptionName == IP_UNICAST_IF)
     {
         /* Windows takes the interface index in network byte order here.
          * TCPIP stores and compares it in host byte order */
-        Info->BufferSize = sizeof(ULONG);
-        *(PULONG)Info->Buffer = RtlUlongByteSwap(*(PULONG)OptionValue);
+        IfIndex = RtlUlongByteSwap(*(PULONG)OptionValue);
+        Info = AllocateRequest(Context, TdiType, TdiId, &IfIndex, sizeof(IfIndex));
     }
-
-    if (Context->SocketState == SocketStateCreated)
+    else
     {
-        if (Context->RequestQueue)
-        {
-            Queued = Context->RequestQueue;
-            while ((NextQueued = Queued->Next))
-            {
-               Queued = NextQueued;
-            }
-
-            Queued->Next = HeapAlloc(GetProcessHeap(), 0, sizeof(QUEUED_REQUEST));
-            if (!Queued->Next)
-            {
-                HeapFree(GetProcessHeap(), 0, Info);
-                return WSAENOBUFS;
-            }
-
-            NextQueued = Queued->Next;
-            NextQueued->Next = NULL;
-            NextQueued->Info = Info;
-        }
-        else
-        {
-            Context->RequestQueue = HeapAlloc(GetProcessHeap(), 0, sizeof(QUEUED_REQUEST));
-            if (!Context->RequestQueue)
-            {
-                HeapFree(GetProcessHeap(), 0, Info);
-                return WSAENOBUFS;
-            }
-
-            Context->RequestQueue->Next = NULL;
-            Context->RequestQueue->Info = Info;
-        }
-
-        return 0;
+        Info = AllocateRequest(Context, TdiType, TdiId, OptionValue, OptionLength);
     }
+    if (!Info)
+        return WSAENOBUFS;
 
-    Status = SendRequest(Info, sizeof(*Info) + Info->BufferSize, IOCTL_TCP_SET_INFORMATION_EX);
-
-    HeapFree(GetProcessHeap(), 0, Info);
-
-    return Status;
+    return SendOrQueueRequest(Context, Info, TdiAddressObjectHandle, TdiConnectionObjectHandle);
 }
 
 
