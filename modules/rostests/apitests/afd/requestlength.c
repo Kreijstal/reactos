@@ -371,9 +371,12 @@ TestShortListenOutput(void)
     NTSTATUS Status;
     SOCKET Listener, Client;
     ULONG_PTR Information;
-    UCHAR Buffer[LISTEN_ANSWER_LENGTH + 8];
+    /* MSVC does not take LISTEN_ANSWER_LENGTH as a constant expression */
+    UCHAR Buffer[128];
     ULONG i;
 
+    ok(LISTEN_ANSWER_LENGTH + 8 <= sizeof(Buffer), "Buffer too small for %u bytes\n",
+       (UINT)LISTEN_ANSWER_LENGTH);
     Listener = ListenerWithConnection(&Client);
     if (Listener == INVALID_SOCKET)
         return;
