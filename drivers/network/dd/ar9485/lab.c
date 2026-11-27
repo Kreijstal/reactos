@@ -967,6 +967,9 @@ AR9485LabDeleteControlDevice(VOID)
 VOID
 AR9485LabAttachAdapter(_In_ PAR9485_ADAPTER Adapter)
 {
+    /* The last halt took the control device away (see the detach below). */
+    if (!gLabInitialized)
+        (VOID)AR9485LabCreateControlDevice(g_NdisMiniportDriverHandle);
     if (!gLabInitialized)
         return;
 
@@ -992,6 +995,18 @@ AR9485LabDetachAdapter(_In_ PAR9485_ADAPTER Adapter)
         gLab.Adapter = NULL;
     }
     LabRelease();
+
+    /*
+     * The control device belongs to the driver object, and the I/O manager
+     * unloads a PnP driver only once its last device object is gone.  Kept
+     * until DriverUnload, it pinned the image: removing the AR9485 left the
+     * old ar9485.sys in memory, and the next start ran it again.  Delete it
+     * with the adapter, as NDIS miniports do with their control devices
+     * (create at the first initialize, delete at the last halt); the next
+     * initialize creates it again.
+     */
+    if (gLab.Adapter == NULL)
+        AR9485LabDeleteControlDevice();
 }
 
 BOOLEAN

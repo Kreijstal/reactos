@@ -68,7 +68,9 @@ DriverEntry(
      * init so it exists even with no AR9485 in the machine.  That is what lets
      * the whole harness -- encoding, bounds, marshalling, transport -- be
      * proven under QEMU against a scratch page before the one install boot is
-     * spent on real hardware.  A failure here is not fatal to the miniport. */
+     * spent on real hardware.  A failure here is not fatal to the miniport.
+     * Once an adapter came and went, the last halt deletes it so the driver
+     * can be unloaded (lab.c). */
     (VOID)AR9485LabCreateControlDevice(g_NdisMiniportDriverHandle);
 
     return STATUS_SUCCESS;
