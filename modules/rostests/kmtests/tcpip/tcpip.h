@@ -17,3 +17,9 @@
  * into three */
 #define TEST_MDL_CHAIN_TCP_DATA   "ABCDEFGHIJKL"
 #define TEST_MDL_CHAIN_TCP_ANSWER "mnopqrstuvwx"
+
+#define IOCTL_TEST_SET_INFO 4
+
+/* For the IOCTL_TCP_SET_INFORMATION_EX test */
+#define TEST_SET_INFO_OTHER_PORT   54330
+#define TEST_SET_INFO_ADDRESS_PORT 54331

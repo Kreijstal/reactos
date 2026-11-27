@@ -11,6 +11,7 @@
 extern KMT_MESSAGE_HANDLER TestTdi;
 extern KMT_MESSAGE_HANDLER TestConnect;
 extern KMT_MESSAGE_HANDLER TestMdlChain;
+extern KMT_MESSAGE_HANDLER TestSetInfo;
 
 static struct
 {
@@ -21,6 +22,7 @@ static struct
     { IOCTL_TEST_TDI,       TestTdi },
     { IOCTL_TEST_CONNECT,   TestConnect },
     { IOCTL_TEST_MDL_CHAIN, TestMdlChain },
+    { IOCTL_TEST_SET_INFO,  TestSetInfo },
 };
 
 NTSTATUS

@@ -211,3 +211,18 @@ START_TEST(TcpIpMdlChain)
 
     UnloadTcpIpTestDriver();
 }
+
+START_TEST(TcpIpSetInfo)
+{
+    DWORD Error;
+
+    Error = LoadTcpIpTestDriver();
+    ok_eq_int(Error, 0);
+    if (Error)
+        return;
+
+    Error = KmtSendToDriver(IOCTL_TEST_SET_INFO);
+    ok_eq_ulong(Error, ERROR_SUCCESS);
+
+    UnloadTcpIpTestDriver();
+}

@@ -78,6 +78,7 @@ KMT_TESTFUNC Test_TcpIpIoctl;
 KMT_TESTFUNC Test_TcpIpTdi;
 KMT_TESTFUNC Test_TcpIpConnect;
 KMT_TESTFUNC Test_TcpIpMdlChain;
+KMT_TESTFUNC Test_TcpIpSetInfo;
 
 /* tests with a leading '-' will not be listed */
 const KMT_TEST TestList[] =
@@ -152,6 +153,7 @@ const KMT_TEST TestList[] =
     { "TcpIpTdi",                     Test_TcpIpTdi },
     { "TcpIpConnect",                 Test_TcpIpConnect },
     { "TcpIpMdlChain",                Test_TcpIpMdlChain },
+    { "TcpIpSetInfo",                 Test_TcpIpSetInfo },
 #ifdef _M_AMD64
     { "RtlCaptureContextUM",          Test_RtlCaptureContext },
 #endif
