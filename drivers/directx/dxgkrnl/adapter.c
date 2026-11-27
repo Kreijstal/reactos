@@ -2927,7 +2927,8 @@ DxgkCbQueryServices(
  * directly at the current IRQL (safe because the miniport must not call
  * us with a non-trivial routine in that case).
  *
- * IRQL: PASSIVE_LEVEL
+ * IRQL: <= DISPATCH_LEVEL (WDK).  AMD's atikmdag calls it at DISPATCH_LEVEL
+ * when it is told that the lid closed.
  */
 NTSTATUS
 APIENTRY
@@ -2942,8 +2943,6 @@ DxgkCbSynchronizeExecution(
     PKINTERRUPT InterruptObject = NULL;
     ULONGLONG        TotalStart100ns;
     ULONGLONG        ElapsedUs;
-
-    PAGED_CODE();
 
     TotalStart100ns = DxgkpTraceNow100ns();
 
