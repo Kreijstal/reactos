@@ -669,6 +669,94 @@ VOID UnlockBuffers( PAFD_WSABUF Buf, UINT Count, BOOL Address ) {
     Buf = NULL;
 }
 
+/* Gathers what the Count buffers of a send LockBuffers() locked hold into the
+ * first of them, in their order: a datagram goes to the transport out of one
+ * buffer.  UnlockBuffers() gives the gathered buffer back as it would the
+ * first one. */
+NTSTATUS
+AfdGatherLockedBuffers(PAFD_WSABUF Buf, UINT Count)
+{
+    PAFD_MAPBUF Map = (PAFD_MAPBUF)(Buf + Count);
+    ULONG Length = 0, Offset = 0;
+    PCHAR Gathered;
+    PMDL Mdl;
+    BOOLEAN LockFailed = FALSE;
+    UINT i;
+
+    if (Count < 2)
+        return STATUS_SUCCESS;
+
+    /* A buffer LockBuffers() did not lock holds nothing */
+    for (i = 0; i < Count; i++)
+    {
+        if (!Map[i].Mdl)
+            continue;
+
+        if (Buf[i].len > MAXULONG - Length)
+            return STATUS_INVALID_BUFFER_SIZE;
+        Length += Buf[i].len;
+    }
+
+    if (Length == 0)
+    {
+        Buf[0].len = 0;
+        return STATUS_SUCCESS;
+    }
+
+    Gathered = ExAllocatePoolWithTag(NonPagedPool, Length, TAG_AFD_DATA_BUFFER);
+    if (!Gathered)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    /* Locked as LockBuffers() locks its copies, which UnlockBuffers() unlocks */
+    Mdl = IoAllocateMdl(Gathered, Length, FALSE, FALSE, NULL);
+    if (!Mdl)
+    {
+        ExFreePoolWithTag(Gathered, TAG_AFD_DATA_BUFFER);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    _SEH2_TRY {
+        MmProbeAndLockPages(Mdl, KernelMode, IoReadAccess);
+    } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+        LockFailed = TRUE;
+    } _SEH2_END;
+
+    if (LockFailed)
+    {
+        IoFreeMdl(Mdl);
+        ExFreePoolWithTag(Gathered, TAG_AFD_DATA_BUFFER);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    for (i = 0; i < Count; i++)
+    {
+        if (Map[i].Mdl)
+        {
+            /* A send's copies are read, never written back */
+            ASSERT(!Map[i].OriginalUserBuffer);
+
+            RtlCopyMemory(Gathered + Offset, Buf[i].buf, Buf[i].len);
+            Offset += Buf[i].len;
+
+            MmUnlockPages(Map[i].Mdl);
+            IoFreeMdl(Map[i].Mdl);
+            Map[i].Mdl = NULL;
+            ExFreePoolWithTag(Buf[i].buf, TAG_AFD_DATA_BUFFER);
+        }
+
+        Buf[i].buf = NULL;
+        Buf[i].len = 0;
+    }
+
+    ASSERT(Offset == Length);
+
+    Buf[0].buf = Gathered;
+    Buf[0].len = Length;
+    Map[0].Mdl = Mdl;
+
+    return STATUS_SUCCESS;
+}
+
 /* Produce a kernel-land handle array with handles replaced by object
  * pointers.  This will allow the system to do proper alerting */
 /*

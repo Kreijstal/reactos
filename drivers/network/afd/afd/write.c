@@ -66,8 +66,9 @@ AfdSendIsBuffering(PIRP Irp)
            Irp->IoStatus.Information < AfdSendRequestLength(SendReq);
 }
 
-/* The datagram a send of Count locked buffers sends: the first buffer, or
- * nothing for a send of none */
+/* The datagram a send of Count locked buffers sends: all of them, which
+ * AfdGatherLockedBuffers() gathered into the first, or the empty datagram for
+ * a send of none */
 static
 VOID
 AfdDatagramToSend(PAFD_WSABUF BufferArray, UINT Count, PCHAR *Buffer, PUINT Length)
@@ -77,11 +78,6 @@ AfdDatagramToSend(PAFD_WSABUF BufferArray, UINT Count, PCHAR *Buffer, PUINT Leng
         *Buffer = NULL;
         *Length = 0;
         return;
-    }
-
-    if (Count > 1)
-    {
-        AFD_DbgPrint(MIN_TRACE,("WARN: More than one buffer %u\n", Count));
     }
 
     *Buffer = BufferArray[0].buf;
@@ -610,12 +606,20 @@ AfdConnectedSocketWriteDataUdp(PAFD_FCB FCB,
                                               FALSE);
     }
     
-    if(!SendReq->BufferArray) 
+    if(!SendReq->BufferArray)
     {
-        return UnlockAndMaybeComplete(FCB, 
+        return UnlockAndMaybeComplete(FCB,
                                       STATUS_ACCESS_VIOLATION,
-                                      Irp, 
+                                      Irp,
                                       0);
+    }
+
+    /* The datagram is all of the buffers */
+    Status = AfdGatherLockedBuffers(SendReq->BufferArray, SendReq->BufferCount);
+    if (!NT_SUCCESS(Status))
+    {
+        UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
+        return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
     }
 
     Status = TdiBuildConnectionInfo(&TargetAddress, FCB->RemoteAddress);
@@ -1024,6 +1028,15 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         ExFreePoolWithTag(RemoteAddress, TAG_AFD_TRANSPORT_ADDRESS);
         return UnlockAndMaybeComplete( FCB, STATUS_ACCESS_VIOLATION,
                                        Irp, 0 );
+    }
+
+    /* The datagram is all of the buffers */
+    Status = AfdGatherLockedBuffers(SendReq->BufferArray, SendReq->BufferCount);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(RemoteAddress, TAG_AFD_TRANSPORT_ADDRESS);
+        UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
+        return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
     }
 
     AFD_DbgPrint

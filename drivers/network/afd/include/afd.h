@@ -360,6 +360,7 @@ PAFD_WSABUF LockBuffers(PAFD_WSABUF Buf, UINT Count,
                         KPROCESSOR_MODE LockMode,
                         BOOLEAN Wow64Is32Bit);
 VOID UnlockBuffers( PAFD_WSABUF Buf, UINT Count, BOOL Address );
+NTSTATUS AfdGatherLockedBuffers(PAFD_WSABUF Buf, UINT Count);
 BOOLEAN SocketAcquireStateLock( PAFD_FCB FCB );
 NTSTATUS NTAPI UnlockAndMaybeComplete
 ( PAFD_FCB FCB, NTSTATUS Status, PIRP Irp,
