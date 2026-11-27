@@ -18,6 +18,7 @@ extern void func_getnameinfo(void);
 extern void func_getservbyname(void);
 extern void func_getservbyport(void);
 extern void func_ioctlsocket(void);
+extern void func_nodelay(void);
 extern void func_nonblocking(void);
 extern void func_nostartup(void);
 extern void func_open_osfhandle(void);
@@ -51,6 +52,7 @@ const struct test winetest_testlist[] =
     { "getservbyname", func_getservbyname },
     { "getservbyport", func_getservbyport },
     { "ioctlsocket", func_ioctlsocket },
+    { "nodelay", func_nodelay },
     { "nonblocking", func_nonblocking },
     { "nostartup", func_nostartup },
     { "open_osfhandle", func_open_osfhandle },

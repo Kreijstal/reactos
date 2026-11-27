@@ -16,6 +16,7 @@ list(APPEND SOURCE
     getservbyport.c
     helpers.c
     ioctlsocket.c
+    nodelay.c
     nonblocking.c
     nostartup.c
     open_osfhandle.c
