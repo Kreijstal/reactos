@@ -498,6 +498,10 @@ typedef struct _PLUGPLAY_CONTROL_DEVICE_CONTROL_DATA
 } PLUGPLAY_CONTROL_DEVICE_CONTROL_DATA, *PPLUGPLAY_CONTROL_DEVICE_CONTROL_DATA;
 
 // PlugPlayControlQueryAndRemoveDevice (0x06)
+// Flags: the removal disables the device (CM_Disable_DevNode): it stays in the
+// tree with CM_PROB_DISABLED until it is enabled again.
+#define PNP_QUERY_REMOVE_DISABLE    0x00000001
+
 typedef struct _PLUGPLAY_CONTROL_QUERY_REMOVE_DATA
 {
     UNICODE_STRING DeviceInstance;

@@ -1382,6 +1382,17 @@ PiControlQueryRemoveDevice(
     NTSTATUS Status;
     UNICODE_STRING DeviceInstance;
     PNP_VETO_TYPE VetoType;
+    ULONG Flags;
+
+    _SEH2_TRY
+    {
+        Flags = ControlData->Flags;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
 
     Status = IopCaptureUnicodeString(&DeviceInstance, &ControlData->DeviceInstance);
     if (!NT_SUCCESS(Status))
@@ -1399,8 +1410,10 @@ PiControlQueryRemoveDevice(
         return STATUS_NO_SUCH_DEVICE;
     }
 
-    /* Query-remove and remove the device on the PnP worker */
-    Status = PiPerformSyncDeviceAction(DeviceObject, PiActionQueryRemoveDevice);
+    /* Query-remove and remove (or disable) the device on the PnP worker */
+    Status = PiPerformSyncDeviceAction(DeviceObject,
+                                       (Flags & PNP_QUERY_REMOVE_DISABLE) ?
+                                           PiActionDisableDevice : PiActionQueryRemoveDevice);
     ObDereferenceObject(DeviceObject);
 
     switch (Status)

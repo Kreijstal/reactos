@@ -5525,12 +5525,14 @@ SetupDiChangeState(
                     goto cleanup;
             }
 
-            /* Enable/disable device in registry */
-            hKey = SETUPDI_OpenDrvKey(hRootKey, deviceInfo, KEY_QUERY_VALUE | KEY_SET_VALUE);
+            /* Enable/disable device in registry: ConfigFlags and CSConfigFlags
+             * are values of the device (Enum) key, where the PnP manager reads
+             * them, not of its driver key. */
+            hKey = SETUPDI_OpenDevKey(hRootKey, deviceInfo, KEY_QUERY_VALUE | KEY_SET_VALUE);
             if (hKey == INVALID_HANDLE_VALUE && GetLastError() == ERROR_FILE_NOT_FOUND)
                 hKey = SETUPDI_CreateDevKey(hRootKey, deviceInfo, KEY_QUERY_VALUE | KEY_SET_VALUE);
             if (hKey == INVALID_HANDLE_VALUE)
-                break;
+                goto cleanup;
             dwLength = sizeof(DWORD);
             rc = RegQueryValueExW(
                 hKey,

@@ -334,7 +334,7 @@ DisableDeviceInstance(
     RtlInitUnicodeString(&QueryRemoveData.DeviceInstance,
                          pszDeviceInstance);
 
-    QueryRemoveData.Flags = 0;
+    QueryRemoveData.Flags = PNP_QUERY_REMOVE_DISABLE;
     QueryRemoveData.VetoType = 0;
     QueryRemoveData.VetoName = pszVetoName;
     QueryRemoveData.NameLength = ulNameLength;
@@ -3575,8 +3575,18 @@ EnableDeviceInstance(
     PLUGPLAY_CONTROL_DEVICE_CONTROL_DATA ControlData;
     CONFIGRET ret = CR_SUCCESS;
     NTSTATUS Status;
+    DWORD ulStatus, ulProblem;
 
     DPRINT("Enable device instance %S\n", pszDeviceInstance);
+
+    /* A disabled device keeps CM_PROB_DISABLED until it is enabled */
+    if (GetDeviceStatus(pszDeviceInstance, &ulStatus, &ulProblem) == CR_SUCCESS &&
+        (ulStatus & DN_HAS_PROBLEM) && ulProblem == CM_PROB_DISABLED)
+    {
+        ret = ClearDeviceStatus(pszDeviceInstance, DN_HAS_PROBLEM, CM_PROB_DISABLED);
+        if (ret != CR_SUCCESS)
+            return ret;
+    }
 
     RtlInitUnicodeString(&ControlData.DeviceInstance, pszDeviceInstance);
     Status = NtPlugPlayControl(PlugPlayControlStartDevice, &ControlData, sizeof(ControlData));

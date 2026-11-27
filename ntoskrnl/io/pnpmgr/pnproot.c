@@ -1328,6 +1328,24 @@ PnpRootPdoPnpControl(
             break;
 
         case IRP_MN_REMOVE_DEVICE:
+        {
+            PDEVICE_NODE DeviceNode = IopGetDeviceNode(DeviceObject);
+
+            /*
+             * A disabled device is still there: like any bus driver, keep the
+             * PDO of a device that is present, so that enabling it
+             * (CM_Enable_DevNode) starts it again.  Deleting it made a
+             * disabled root device disappear from the tree, and it could not
+             * be enabled any more.
+             */
+            if (DeviceNode != NULL &&
+                (DeviceNode->Flags & DNF_HAS_PROBLEM) &&
+                DeviceNode->Problem == CM_PROB_DISABLED)
+            {
+                Status = STATUS_SUCCESS;
+                break;
+            }
+
             /* Remove the device from the device list and decrement the device count*/
             KeAcquireGuardedMutex(&FdoDeviceExtension->DeviceListLock);
             RemoveEntryList(&DeviceExtension->DeviceInfo->ListEntry);
@@ -1356,6 +1374,7 @@ PnpRootPdoPnpControl(
             /* Return success */
             Status = STATUS_SUCCESS;
             break;
+        }
 
         case IRP_MN_QUERY_ID: /* 0x13 */
             Status = PdoQueryId(DeviceObject, Irp, IrpSp);

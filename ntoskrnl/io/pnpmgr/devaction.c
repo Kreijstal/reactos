@@ -624,6 +624,26 @@ PiCallDriverAddDevice(
         return Status;
     }
 
+    // a device disabled through its ConfigFlags (SetupDi DICS_DISABLE) gets no drivers
+    Status = IopGetRegistryValue(SubKey, REGSTR_VAL_CONFIGFLAGS, &kvInfo);
+    if (NT_SUCCESS(Status))
+    {
+        BOOLEAN Disabled = (kvInfo->Type == REG_DWORD &&
+                            kvInfo->DataLength == sizeof(ULONG) &&
+                            (*(PULONG)((ULONG_PTR)kvInfo + kvInfo->DataOffset) &
+                             CONFIGFLAG_DISABLED));
+
+        ExFreePool(kvInfo);
+        kvInfo = NULL;
+        if (Disabled)
+        {
+            DPRINT("%wZ is disabled\n", &DeviceNode->InstancePath);
+            PiSetDevNodeProblem(DeviceNode, CM_PROB_DISABLED);
+            ZwClose(SubKey);
+            return STATUS_UNSUCCESSFUL;
+        }
+    }
+
     // try to get the class GUID of an instance and its registry key
     Status = IopGetRegistryValue(SubKey, REGSTR_VAL_CLASSGUID, &kvInfo);
     if (NT_SUCCESS(Status))
@@ -2418,7 +2438,9 @@ IopRemoveDevice(PDEVICE_NODE DeviceNode)
  *             CM_Disable_DevNode)
  *
  * The removal is vetoed while there are open handles to the device stack or when
- * a driver fails IRP_MN_QUERY_REMOVE_DEVICE.
+ * a driver fails IRP_MN_QUERY_REMOVE_DEVICE. A disabled device stays in the tree
+ * with CM_PROB_DISABLED, which keeps the PnP manager from starting it again until
+ * user mode clears the problem (CM_Enable_DevNode).
  *
  * @return     STATUS_SUCCESS, STATUS_FILES_OPEN for open handles, STATUS_CANNOT_DELETE for a
  *             device that is not disableable, STATUS_PLUGPLAY_QUERY_VETOED for a driver veto
@@ -2426,7 +2448,8 @@ IopRemoveDevice(PDEVICE_NODE DeviceNode)
 static
 NTSTATUS
 PiQueryRemoveDevice(
-    _In_ PDEVICE_NODE DeviceNode)
+    _In_ PDEVICE_NODE DeviceNode,
+    _In_ BOOLEAN Disable)
 {
     PDEVICE_OBJECT DeviceObject = DeviceNode->PhysicalDeviceObject;
     NTSTATUS Status;
@@ -2488,6 +2511,10 @@ PiQueryRemoveDevice(
         return (Status == STATUS_FILES_OPEN) ? Status : STATUS_PLUGPLAY_QUERY_VETOED;
     }
 
+    /* Before the IRP, so that the bus sees a disabled device: it keeps the
+     * PDO, and the node stays in the tree, DeviceNodeRemoved */
+    if (Disable)
+        PiSetDevNodeProblem(DeviceNode, CM_PROB_DISABLED);
     IopSendRemoveDevice(DeviceObject);
     return STATUS_SUCCESS;
 }
@@ -3039,6 +3066,8 @@ ActionToStr(
             return "PiActionQueryState";
         case PiActionQueryRemoveDevice:
             return "PiActionQueryRemoveDevice";
+        case PiActionDisableDevice:
+            return "PiActionDisableDevice";
         case PiActionRemovePendingCloses:
             return "PiActionRemovePendingCloses";
         case PiActionClearProblem:
@@ -3168,7 +3197,11 @@ PipDeviceActionWorker(
                 break;
 
             case PiActionQueryRemoveDevice:
-                status = PiQueryRemoveDevice(deviceNode);
+                status = PiQueryRemoveDevice(deviceNode, FALSE);
+                break;
+
+            case PiActionDisableDevice:
+                status = PiQueryRemoveDevice(deviceNode, TRUE);
                 break;
 
             case PiActionRemovePendingCloses:
