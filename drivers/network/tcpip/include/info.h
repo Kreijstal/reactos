@@ -150,7 +150,7 @@ TDI_STATUS SetAddressFileInfo(TDIObjectID *ID,
 
 TDI_STATUS GetAddressFileInfo(TDIObjectID *ID,
                               PADDRESS_FILE AddrFile,
-                              PVOID Buffer,
+                              PNDIS_BUFFER Buffer,
                               PUINT BufferSize);
 
 TDI_STATUS SetConnectionInfo(TDIObjectID *ID,

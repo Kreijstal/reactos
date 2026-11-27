@@ -88,7 +88,7 @@ TDI_STATUS SetAddressFileInfo(TDIObjectID *ID,
 
 TDI_STATUS GetAddressFileInfo(TDIObjectID *ID,
                               PADDRESS_FILE AddrFile,
-                              PVOID Buffer,
+                              PNDIS_BUFFER Buffer,
                               PUINT BufferSize)
 {
     UINT Value;
@@ -137,8 +137,6 @@ TDI_STATUS GetAddressFileInfo(TDIObjectID *ID,
         return TDI_BUFFER_TOO_SMALL;
     }
 
-    *((PUINT)Buffer) = Value;
-    *BufferSize = sizeof(UINT);
-
-    return TDI_SUCCESS;
+    /* The answer goes into the caller's buffer, which Buffer describes */
+    return InfoCopyOut((PCHAR)&Value, sizeof(Value), Buffer, BufferSize);
 }
