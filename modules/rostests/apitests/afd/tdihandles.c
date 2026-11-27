@@ -18,6 +18,7 @@
 #define TTL_BY_ENTITY 55
 #define TTL_BY_SOCKET 44
 #define TTL_BY_HELPER 77
+#define TTL_BY_ACCEPTED 99
 
 /* A control channel of \Device\Tcp */
 static
@@ -295,6 +296,18 @@ TestTdiHandles(
         if (NT_SUCCESS(Status))
         {
             ok(Handles.TdiConnectionHandle != NULL, "No connection handle\n");
+
+            /* Its address object options are its connection's: it has the
+             * listener's, set after the listener listened... */
+            ok_eq_ulong(QueryTtl(Handles.TdiConnectionHandle, Other), (ULONG)TTL_BY_SOCKET);
+
+            /* ...and one set on it is for it alone */
+            Ttl = TTL_BY_ACCEPTED;
+            Result = setsockopt(Accepted, IPPROTO_IP, IP_TTL, (const char *)&Ttl, sizeof(Ttl));
+            ok(Result == 0, "setsockopt(IP_TTL) failed with %d\n", WSAGetLastError());
+            ok_eq_ulong(QueryTtl(Handles.TdiConnectionHandle, Other), (ULONG)TTL_BY_ACCEPTED);
+            ok_eq_ulong(QueryTtl(ControlChannel, Entity), (ULONG)TTL_BY_SOCKET);
+
             ok(CloseHandle(Handles.TdiConnectionHandle), "CloseHandle failed with %lu\n", GetLastError());
         }
         closesocket(Accepted);
