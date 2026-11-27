@@ -33,6 +33,38 @@ ReceiveDatagram(
     return AfdRequest((HANDLE)Socket, IOCTL_AFD_RECV_DATAGRAM, &RecvInfo, sizeof(RecvInfo), NULL, 0, Information);
 }
 
+/* A datagram send of Count buffers to To */
+static
+NTSTATUS
+SendDatagram(
+    _In_ SOCKET Socket,
+    _In_opt_ PAFD_WSABUF Buffers,
+    _In_ ULONG Count,
+    _In_ const struct sockaddr_in *To,
+    _Out_ PULONG_PTR Information)
+{
+    AFD_SEND_INFO_UDP SendInfo;
+    struct
+    {
+        TRANSPORT_ADDRESS Address;
+        UCHAR More[TDI_ADDRESS_LENGTH_IP];
+    } Remote;
+
+    RtlZeroMemory(&Remote, sizeof(Remote));
+    Remote.Address.TAAddressCount = 1;
+    Remote.Address.Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
+    Remote.Address.Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
+    RtlCopyMemory(Remote.Address.Address[0].Address, &To->sin_port, TDI_ADDRESS_LENGTH_IP);
+
+    RtlZeroMemory(&SendInfo, sizeof(SendInfo));
+    SendInfo.BufferArray = Buffers;
+    SendInfo.BufferCount = Count;
+    SendInfo.TdiConnection.RemoteAddress = &Remote.Address;
+    SendInfo.TdiConnection.RemoteAddressLength = sizeof(Remote);
+
+    return AfdRequest((HANDLE)Socket, IOCTL_AFD_SEND_DATAGRAM, &SendInfo, sizeof(SendInfo), NULL, 0, Information);
+}
+
 /* A send or receive (IOCTL_AFD_SEND or IOCTL_AFD_RECV) of Count buffers */
 static
 NTSTATUS
@@ -361,6 +393,238 @@ TestPartialReceive(void)
     closesocket(Sender);
 }
 
+/* Receives the datagram waiting on Receiver whole, and checks it is Expected
+ * from Sender */
+static
+void
+ExpectDatagram(
+    _In_ SOCKET Receiver,
+    _In_reads_bytes_(ExpectedLength) const CHAR *Expected,
+    _In_ INT ExpectedLength,
+    _In_ const struct sockaddr_in *Sender)
+{
+    CHAR Buffer[2 * DATAGRAM_LENGTH];
+    struct sockaddr_in From;
+    INT FromLength, Received;
+
+    ok(WaitReadable(Receiver), "The datagram did not arrive\n");
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    memset(&From, 0xCC, sizeof(From));
+    FromLength = sizeof(From);
+    Received = recvfrom(Receiver, Buffer, sizeof(Buffer), 0, (struct sockaddr *)&From, &FromLength);
+    ok(Received == ExpectedLength, "recvfrom returned %d (%d), expected %d\n",
+       Received, WSAGetLastError(), ExpectedLength);
+    if (Received == ExpectedLength)
+    {
+        ok(!memcmp(Buffer, Expected, ExpectedLength), "Received %.*s\n", Received, Buffer);
+        ok_from(From, FromLength, *Sender);
+    }
+}
+
+/* A datagram send of several buffers sends one datagram of all of them, in
+ * their order, whether it is to an address or on a connected socket */
+static
+void
+TestGatherSend(void)
+{
+    NTSTATUS Status;
+    SOCKET Sender, Receiver;
+    struct sockaddr_in SenderAddress, ReceiverAddress;
+    AFD_WSABUF Buffers[4];
+    WSABUF WsaBuffers[3];
+    CHAR First[] = "da", Third[] = "tag", Fourth[] = "ram";
+    ULONG_PTR Information;
+    DWORD Sent;
+
+    Sender = LoopbackSocket(SOCK_DGRAM, &SenderAddress);
+    if (Sender == INVALID_SOCKET)
+        return;
+    Receiver = LoopbackSocket(SOCK_DGRAM, &ReceiverAddress);
+    if (Receiver == INVALID_SOCKET)
+    {
+        closesocket(Sender);
+        return;
+    }
+
+    /* With an empty one among them */
+    Buffers[0].buf = First;
+    Buffers[0].len = 2;
+    Buffers[1].buf = Third;
+    Buffers[1].len = 0;
+    Buffers[2].buf = Third;
+    Buffers[2].len = 3;
+    Buffers[3].buf = Fourth;
+    Buffers[3].len = 3;
+    Status = SendDatagram(Sender, Buffers, 4, &ReceiverAddress, &Information);
+    ok(Status == STATUS_SUCCESS, "IOCTL_AFD_SEND_DATAGRAM of four buffers returned %lx\n", Status);
+    ok(Information == DATAGRAM_LENGTH, "Sent %Iu bytes\n", Information);
+    ExpectDatagram(Receiver, DATAGRAM, DATAGRAM_LENGTH, &SenderAddress);
+
+    WsaBuffers[0].buf = First;
+    WsaBuffers[0].len = 2;
+    WsaBuffers[1].buf = Third;
+    WsaBuffers[1].len = 3;
+    WsaBuffers[2].buf = Fourth;
+    WsaBuffers[2].len = 3;
+    Sent = 0;
+    ok(WSASendTo(Sender, WsaBuffers, 3, &Sent, 0, (struct sockaddr *)&ReceiverAddress, sizeof(ReceiverAddress),
+                 NULL, NULL) == 0,
+       "WSASendTo failed with %d\n", WSAGetLastError());
+    ok(Sent == DATAGRAM_LENGTH, "WSASendTo sent %lu bytes\n", Sent);
+    ExpectDatagram(Receiver, DATAGRAM, DATAGRAM_LENGTH, &SenderAddress);
+
+    /* Connected */
+    ok(connect(Sender, (struct sockaddr *)&ReceiverAddress, sizeof(ReceiverAddress)) == 0,
+       "connect failed with %d\n", WSAGetLastError());
+    Status = Transfer(Sender, IOCTL_AFD_SEND, Buffers, 4, &Information);
+    ok(Status == STATUS_SUCCESS, "IOCTL_AFD_SEND of four buffers returned %lx\n", Status);
+    ok(Information == DATAGRAM_LENGTH, "Sent %Iu bytes\n", Information);
+    ExpectDatagram(Receiver, DATAGRAM, DATAGRAM_LENGTH, &SenderAddress);
+
+    Sent = 0;
+    ok(WSASend(Sender, WsaBuffers, 3, &Sent, 0, NULL, NULL) == 0, "WSASend failed with %d\n", WSAGetLastError());
+    ok(Sent == DATAGRAM_LENGTH, "WSASend sent %lu bytes\n", Sent);
+    ExpectDatagram(Receiver, DATAGRAM, DATAGRAM_LENGTH, &SenderAddress);
+
+    closesocket(Receiver);
+    closesocket(Sender);
+}
+
+/* A datagram receive of several buffers fills them in their order, and the
+ * datagram is truncated only when it does not fit all of them */
+static
+void
+TestScatterReceive(void)
+{
+    NTSTATUS Status;
+    SOCKET Sender, Receiver;
+    struct sockaddr_in SenderAddress, From;
+    INT FromLength;
+    AFD_WSABUF Buffers[4];
+    WSABUF WsaBuffers[2];
+    CHAR First[3], Second[3], Third[DATAGRAM_LENGTH], Untouched[DATAGRAM_LENGTH];
+    ULONG_PTR Information;
+    DWORD Received, Flags;
+
+    memset(Untouched, 0xCC, sizeof(Untouched));
+
+    /* The datagram fits: the first two get three bytes each, the empty one
+     * none, the last the two left */
+    if (!DatagramWaiting(&Sender, &SenderAddress, &Receiver))
+        return;
+    memset(First, 0xCC, sizeof(First));
+    memset(Second, 0xCC, sizeof(Second));
+    memset(Third, 0xCC, sizeof(Third));
+    memset(&From, 0xCC, sizeof(From));
+    FromLength = sizeof(From);
+    Buffers[0].buf = First;
+    Buffers[0].len = sizeof(First);
+    Buffers[1].buf = Second;
+    Buffers[1].len = sizeof(Second);
+    Buffers[2].buf = Untouched;
+    Buffers[2].len = 0;
+    Buffers[3].buf = Third;
+    Buffers[3].len = sizeof(Third);
+    Status = ReceiveDatagram(Receiver, Buffers, 4, &From, &FromLength, &Information);
+    ok(Status == STATUS_SUCCESS, "IOCTL_AFD_RECV_DATAGRAM of four buffers returned %lx\n", Status);
+    ok(Information == DATAGRAM_LENGTH, "Received %Iu bytes\n", Information);
+    ok(!memcmp(First, "dat", 3), "The first buffer holds %.3s\n", First);
+    ok(!memcmp(Second, "agr", 3), "The second buffer holds %.3s\n", Second);
+    ok(!memcmp(Third, "am", 2), "The last buffer holds %.2s\n", Third);
+    ok(!memcmp(Third + 2, Untouched, sizeof(Third) - 2),
+       "The last buffer was written past the datagram: %02x\n", (UCHAR)Third[2]);
+    ok_from(From, FromLength, SenderAddress);
+    closesocket(Receiver);
+    closesocket(Sender);
+
+    /* It does not: what fits is received, and the rest is lost */
+    if (!DatagramWaiting(&Sender, &SenderAddress, &Receiver))
+        return;
+    memset(First, 0xCC, sizeof(First));
+    memset(Second, 0xCC, sizeof(Second));
+    memset(&From, 0xCC, sizeof(From));
+    FromLength = sizeof(From);
+    Status = ReceiveDatagram(Receiver, Buffers, 2, &From, &FromLength, &Information);
+    ok(Status == STATUS_BUFFER_OVERFLOW, "IOCTL_AFD_RECV_DATAGRAM of six bytes returned %lx\n", Status);
+    ok(Information == 6, "Received %Iu bytes\n", Information);
+    ok(!memcmp(First, "dat", 3), "The first buffer holds %.3s\n", First);
+    ok(!memcmp(Second, "agr", 3), "The second buffer holds %.3s\n", Second);
+    ok_from(From, FromLength, SenderAddress);
+    ok(recv(Receiver, Third, sizeof(Third), 0) == SOCKET_ERROR, "A datagram was left\n");
+    closesocket(Receiver);
+    closesocket(Sender);
+
+    /* Through Winsock */
+    if (!DatagramWaiting(&Sender, &SenderAddress, &Receiver))
+        return;
+    memset(First, 0xCC, sizeof(First));
+    memset(Third, 0xCC, sizeof(Third));
+    memset(&From, 0xCC, sizeof(From));
+    FromLength = sizeof(From);
+    WsaBuffers[0].buf = First;
+    WsaBuffers[0].len = sizeof(First);
+    WsaBuffers[1].buf = Third;
+    WsaBuffers[1].len = sizeof(Third);
+    Received = 0;
+    Flags = 0;
+    ok(WSARecvFrom(Receiver, WsaBuffers, 2, &Received, &Flags, (struct sockaddr *)&From, &FromLength,
+                   NULL, NULL) == 0,
+       "WSARecvFrom failed with %d\n", WSAGetLastError());
+    ok(Received == DATAGRAM_LENGTH, "WSARecvFrom received %lu bytes\n", Received);
+    ok(!memcmp(First, "dat", 3), "The first buffer holds %.3s\n", First);
+    ok(!memcmp(Third, "agram", 5), "The second buffer holds %.5s\n", Third);
+    ok_from(From, FromLength, SenderAddress);
+    closesocket(Receiver);
+    closesocket(Sender);
+}
+
+/* A datagram of no bytes is sent, and received as one */
+static
+void
+TestEmptyDatagram(void)
+{
+    NTSTATUS Status;
+    SOCKET Sender, Receiver;
+    struct sockaddr_in SenderAddress, ReceiverAddress;
+    CHAR Data[] = DATAGRAM;
+    AFD_WSABUF Buffer;
+    ULONG_PTR Information;
+
+    Sender = LoopbackSocket(SOCK_DGRAM, &SenderAddress);
+    if (Sender == INVALID_SOCKET)
+        return;
+    Receiver = LoopbackSocket(SOCK_DGRAM, &ReceiverAddress);
+    if (Receiver == INVALID_SOCKET)
+    {
+        closesocket(Sender);
+        return;
+    }
+
+    ok(sendto(Sender, Data, 0, 0, (struct sockaddr *)&ReceiverAddress, sizeof(ReceiverAddress)) == 0,
+       "sendto failed with %d\n", WSAGetLastError());
+    ExpectDatagram(Receiver, Data, 0, &SenderAddress);
+
+    Buffer.buf = Data;
+    Buffer.len = 0;
+    Status = SendDatagram(Sender, &Buffer, 1, &ReceiverAddress, &Information);
+    ok(Status == STATUS_SUCCESS, "IOCTL_AFD_SEND_DATAGRAM of no bytes returned %lx\n", Status);
+    ok(Information == 0, "Sent %Iu bytes\n", Information);
+    ExpectDatagram(Receiver, Data, 0, &SenderAddress);
+
+    /* Connected */
+    ok(connect(Sender, (struct sockaddr *)&ReceiverAddress, sizeof(ReceiverAddress)) == 0,
+       "connect failed with %d\n", WSAGetLastError());
+    ok(send(Sender, Data, 0, 0) == 0, "send failed with %d\n", WSAGetLastError());
+    ExpectDatagram(Receiver, Data, 0, &SenderAddress);
+
+    /* The datagram after it is still its own */
+    ok(send(Sender, Data, DATAGRAM_LENGTH, 0) == DATAGRAM_LENGTH, "send failed with %d\n", WSAGetLastError());
+    ExpectDatagram(Receiver, Data, DATAGRAM_LENGTH, &SenderAddress);
+
+    closesocket(Receiver);
+    closesocket(Sender);
+}
+
 START_TEST(buffercount)
 {
     WSADATA WsaData;
@@ -376,6 +640,10 @@ START_TEST(buffercount)
     TestNoBufferReceive();
     TestNoBufferSend();
     TestNoBufferStream();
+
+    TestGatherSend();
+    TestScatterReceive();
+    TestEmptyDatagram();
 
     WSACleanup();
 }
