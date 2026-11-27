@@ -626,8 +626,10 @@ VOID UnlockBuffers( PAFD_WSABUF Buf, UINT Count, BOOL Address ) {
         if( Map[i].Mdl ) {
             PVOID KernelBuf = Buf[i].buf;                /* kernel copy */
             PVOID UserBuf   = Map[i].OriginalUserBuffer; /* original user ptr */
-            ULONG Len       = Buf[i].len;
+            ULONG Len       = Map[i].BytesWritten;   /* what the receive filled */
             PEPROCESS OriginalProcess = Map[i].OriginalProcess;
+
+            ASSERT(Len <= Buf[i].len);
 
             if (UserBuf != NULL && KernelBuf != NULL && Len > 0)
             {

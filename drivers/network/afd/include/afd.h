@@ -125,6 +125,10 @@ typedef struct _AFD_MAPBUF {
      * blocking recv() returned positive byte counts but the user buffer
      * contained zeros. */
     PEPROCESS OriginalProcess;
+    /* How much of the buffer a receive filled, from its start: what
+     * UnlockBuffers copies back.  The rest of the caller's buffer is not
+     * the receive's to write. */
+    ULONG BytesWritten;
 } AFD_MAPBUF, *PAFD_MAPBUF;
 
 typedef struct _AFD_DEVICE_EXTENSION {

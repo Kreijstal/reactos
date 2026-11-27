@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS API Tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     Test sends and receives of other than one buffer
+ * PURPOSE:     Test which of their buffers sends and receives use
  */
 
 #include "precomp.h"
@@ -292,11 +292,82 @@ TestNoBufferStream(void)
     closesocket(Listener);
 }
 
+/* A receive of less than its buffers hold writes what it received, and leaves
+ * the rest of the buffers alone */
+static
+void
+TestPartialReceive(void)
+{
+    NTSTATUS Status;
+    SOCKET Listener, Client, Server, Sender, Receiver;
+    struct sockaddr_in Address;
+    AFD_WSABUF Buffers[2];
+    CHAR First[2 * DATAGRAM_LENGTH], Second[DATAGRAM_LENGTH], Untouched[2 * DATAGRAM_LENGTH];
+    ULONG_PTR Information;
+
+    memset(Untouched, 0xCC, sizeof(Untouched));
+
+    /* A stream */
+    Listener = LoopbackSocket(SOCK_STREAM, &Address);
+    if (Listener == INVALID_SOCKET)
+        return;
+    ok(listen(Listener, 1) == 0, "listen failed with %d\n", WSAGetLastError());
+    Client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ok(Client != INVALID_SOCKET, "socket failed with %d\n", WSAGetLastError());
+    ok(connect(Client, (struct sockaddr *)&Address, sizeof(Address)) == 0,
+       "connect failed with %d\n", WSAGetLastError());
+    Server = accept(Listener, NULL, NULL);
+    ok(Server != INVALID_SOCKET, "accept failed with %d\n", WSAGetLastError());
+    if (Server != INVALID_SOCKET)
+    {
+        ok(send(Client, DATAGRAM, DATAGRAM_LENGTH, 0) == DATAGRAM_LENGTH, "send failed with %d\n", WSAGetLastError());
+        ok(WaitReadable(Server), "The data did not arrive\n");
+
+        memset(First, 0xCC, sizeof(First));
+        memset(Second, 0xCC, sizeof(Second));
+        Buffers[0].buf = First;
+        Buffers[0].len = sizeof(First);
+        Buffers[1].buf = Second;
+        Buffers[1].len = sizeof(Second);
+        Status = Transfer(Server, IOCTL_AFD_RECV, Buffers, 2, &Information);
+        ok(Status == STATUS_SUCCESS, "IOCTL_AFD_RECV returned %lx\n", Status);
+        ok(Information == DATAGRAM_LENGTH, "Received %Iu bytes\n", Information);
+        ok(!memcmp(First, DATAGRAM, DATAGRAM_LENGTH), "Received %.8s\n", First);
+        ok(!memcmp(First + DATAGRAM_LENGTH, Untouched, DATAGRAM_LENGTH),
+           "The first buffer was written past the data: %02x\n", (UCHAR)First[DATAGRAM_LENGTH]);
+        ok(!memcmp(Second, Untouched, sizeof(Second)),
+           "The second buffer was written: %02x\n", (UCHAR)Second[0]);
+
+        closesocket(Server);
+    }
+    closesocket(Client);
+    closesocket(Listener);
+
+    /* A datagram */
+    if (!DatagramWaiting(&Sender, &Address, &Receiver))
+        return;
+
+    memset(First, 0xCC, sizeof(First));
+    Buffers[0].buf = First;
+    Buffers[0].len = sizeof(First);
+    Status = ReceiveDatagram(Receiver, Buffers, 1, NULL, NULL, &Information);
+    ok(Status == STATUS_SUCCESS, "IOCTL_AFD_RECV_DATAGRAM returned %lx\n", Status);
+    ok(Information == DATAGRAM_LENGTH, "Received %Iu bytes\n", Information);
+    ok(!memcmp(First, DATAGRAM, DATAGRAM_LENGTH), "Received %.8s\n", First);
+    ok(!memcmp(First + DATAGRAM_LENGTH, Untouched, DATAGRAM_LENGTH),
+       "The buffer was written past the datagram: %02x\n", (UCHAR)First[DATAGRAM_LENGTH]);
+
+    closesocket(Receiver);
+    closesocket(Sender);
+}
+
 START_TEST(buffercount)
 {
     WSADATA WsaData;
 
     ok(WSAStartup(MAKEWORD(2, 2), &WsaData) == 0, "WSAStartup failed\n");
+
+    TestPartialReceive();
 
     TestTwoBufferReceive();
 

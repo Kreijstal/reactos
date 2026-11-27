@@ -138,6 +138,7 @@ static NTSTATUS TryToSatisfyRecvRequestFromBuffer( PAFD_FCB FCB,
                            BytesToCopy );
 
             MmUnmapLockedPages( Map[i].BufferAddress, Map[i].Mdl );
+            Map[i].BytesWritten = BytesToCopy;
 
             *TotalBytesCopied += BytesToCopy;
             FcbBytesCopied += BytesToCopy;
@@ -465,12 +466,14 @@ SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
                       AddrLen );
 
         MmUnmapLockedPages( AddressMap[0].BufferAddress, AddressMap[0].Mdl );
+        AddressMap[0].BytesWritten = AddrLen;
 
         AFD_DbgPrint(MID_TRACE,("Copying address len\n"));
 
         AddressMap[1].BufferAddress = MmMapLockedPages( AddressMap[1].Mdl, KernelMode );
         *((PINT)AddressMap[1].BufferAddress) = AddrLen;
         MmUnmapLockedPages( AddressMap[1].BufferAddress, AddressMap[1].Mdl );
+        AddressMap[1].BytesWritten = sizeof(INT);
     }
 
     /* The datagram goes to the first buffer, which a receive of no buffers
@@ -496,6 +499,7 @@ SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
                       BytesToCopy );
 
         MmUnmapLockedPages( Map[0].BufferAddress, Map[0].Mdl );
+        Map[0].BytesWritten = BytesToCopy;
 
         *TotalBytesCopied = BytesToCopy;
     }
