@@ -414,7 +414,9 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
         return NULL;
     }
 
-    Size = (sizeof(AFD_WSABUF) + sizeof(AFD_MAPBUF)) * (Count + Lock);
+    /* A request of no buffers has an array all the same, which its handler
+     * gives back: an allocation that holds none */
+    Size = (sizeof(AFD_WSABUF) + sizeof(AFD_MAPBUF)) * max(Count + Lock, 1);
     NewBuf = ExAllocatePoolWithTag(PagedPool, Size, TAG_AFD_WSA_BUFFER);
 
     AFD_DbgPrint(MID_TRACE,("Called(%p)\n", NewBuf));

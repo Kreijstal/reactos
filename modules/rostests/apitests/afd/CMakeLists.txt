@@ -4,6 +4,7 @@ include_directories(
 
 list(APPEND SOURCE
     AfdHelpers.c
+    buffercount.c
     requestlength.c
     select.c
     send.c

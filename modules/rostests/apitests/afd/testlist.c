@@ -1,6 +1,7 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_buffercount(void);
 extern void func_requestlength(void);
 extern void func_select(void);
 extern void func_send(void);
@@ -9,6 +10,7 @@ extern void func_windowsize(void);
 
 const struct test winetest_testlist[] =
 {
+    { "buffercount", func_buffercount },
     { "requestlength", func_requestlength },
     { "select", func_select },
     { "send", func_send },

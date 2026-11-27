@@ -427,54 +427,60 @@ SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
     PAFD_RECV_INFO RecvReq =
     GetLockedData(Irp, IrpSp);
     UINT BytesToCopy = 0, BytesAvailable = DatagramRecv->Len, AddrLen = 0;
-    PAFD_MAPBUF Map;
+    PAFD_MAPBUF Map, AddressMap;
     BOOLEAN ExtraBuffers = CheckUnlockExtraBuffers(FCB, IrpSp);
 
     Map = (PAFD_MAPBUF)(RecvReq->BufferArray +
                         RecvReq->BufferCount +
                         (ExtraBuffers ? EXTRA_LOCK_BUFFERS : 0));
 
-    BytesToCopy = MIN( RecvReq->BufferArray[0].len, BytesAvailable );
+    /* Copy the address, to the buffers LockBuffers() put after the caller's:
+     * the address, and the INT of its length */
+    AddressMap = &Map[RecvReq->BufferCount];
+    if (ExtraBuffers && AddressMap[0].Mdl && AddressMap[1].Mdl)
+    {
+        AFD_DbgPrint(MID_TRACE,("Checking TAAddressCount\n"));
 
-    AFD_DbgPrint(MID_TRACE,("BytesToCopy: %u len %u\n", BytesToCopy,
-                            RecvReq->BufferArray[0].len));
-
-    if( Map[0].Mdl ) {
-        /* Copy the address */
-        if( ExtraBuffers && Map[1].Mdl && Map[2].Mdl ) {
-            AFD_DbgPrint(MID_TRACE,("Checking TAAddressCount\n"));
-
-            if( DatagramRecv->Address->TAAddressCount != 1 ) {
-                AFD_DbgPrint
-                (MIN_TRACE,
-                 ("Wierd address count %d\n",
-                  DatagramRecv->Address->TAAddressCount));
-            }
-
-            AFD_DbgPrint(MID_TRACE,("Computing addr len\n"));
-
-            AddrLen = MIN(DatagramRecv->Address->Address->AddressLength +
-                          sizeof(USHORT),
-                          RecvReq->BufferArray[1].len);
-
-            AFD_DbgPrint(MID_TRACE,("Copying %u bytes of address\n", AddrLen));
-
-            Map[1].BufferAddress = MmMapLockedPages( Map[1].Mdl, KernelMode );
-
-            AFD_DbgPrint(MID_TRACE,("Done mapping, copying address\n"));
-
-            RtlCopyMemory( Map[1].BufferAddress,
-                          &DatagramRecv->Address->Address->AddressType,
-                          AddrLen );
-
-            MmUnmapLockedPages( Map[1].BufferAddress, Map[1].Mdl );
-
-            AFD_DbgPrint(MID_TRACE,("Copying address len\n"));
-
-            Map[2].BufferAddress = MmMapLockedPages( Map[2].Mdl, KernelMode );
-            *((PINT)Map[2].BufferAddress) = AddrLen;
-            MmUnmapLockedPages( Map[2].BufferAddress, Map[2].Mdl );
+        if( DatagramRecv->Address->TAAddressCount != 1 ) {
+            AFD_DbgPrint
+            (MIN_TRACE,
+             ("Wierd address count %d\n",
+              DatagramRecv->Address->TAAddressCount));
         }
+
+        AFD_DbgPrint(MID_TRACE,("Computing addr len\n"));
+
+        AddrLen = MIN(DatagramRecv->Address->Address->AddressLength +
+                      sizeof(USHORT),
+                      RecvReq->BufferArray[RecvReq->BufferCount].len);
+
+        AFD_DbgPrint(MID_TRACE,("Copying %u bytes of address\n", AddrLen));
+
+        AddressMap[0].BufferAddress = MmMapLockedPages( AddressMap[0].Mdl, KernelMode );
+
+        AFD_DbgPrint(MID_TRACE,("Done mapping, copying address\n"));
+
+        RtlCopyMemory( AddressMap[0].BufferAddress,
+                      &DatagramRecv->Address->Address->AddressType,
+                      AddrLen );
+
+        MmUnmapLockedPages( AddressMap[0].BufferAddress, AddressMap[0].Mdl );
+
+        AFD_DbgPrint(MID_TRACE,("Copying address len\n"));
+
+        AddressMap[1].BufferAddress = MmMapLockedPages( AddressMap[1].Mdl, KernelMode );
+        *((PINT)AddressMap[1].BufferAddress) = AddrLen;
+        MmUnmapLockedPages( AddressMap[1].BufferAddress, AddressMap[1].Mdl );
+    }
+
+    /* The datagram goes to the first buffer, which a receive of no buffers
+     * does not have */
+    *TotalBytesCopied = 0;
+    if (RecvReq->BufferCount && Map[0].Mdl) {
+        BytesToCopy = MIN( RecvReq->BufferArray[0].len, BytesAvailable );
+
+        AFD_DbgPrint(MID_TRACE,("BytesToCopy: %u len %u\n", BytesToCopy,
+                                RecvReq->BufferArray[0].len));
 
         AFD_DbgPrint(MID_TRACE,("Mapping data buffer pages\n"));
 

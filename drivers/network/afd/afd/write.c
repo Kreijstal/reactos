@@ -66,6 +66,28 @@ AfdSendIsBuffering(PIRP Irp)
            Irp->IoStatus.Information < AfdSendRequestLength(SendReq);
 }
 
+/* The datagram a send of Count locked buffers sends: the first buffer, or
+ * nothing for a send of none */
+static
+VOID
+AfdDatagramToSend(PAFD_WSABUF BufferArray, UINT Count, PCHAR *Buffer, PUINT Length)
+{
+    if (Count == 0)
+    {
+        *Buffer = NULL;
+        *Length = 0;
+        return;
+    }
+
+    if (Count > 1)
+    {
+        AFD_DbgPrint(MIN_TRACE,("WARN: More than one buffer %u\n", Count));
+    }
+
+    *Buffer = BufferArray[0].buf;
+    *Length = BufferArray[0].len;
+}
+
 /*
  * Appends as much of the not yet buffered part of a stream send as fits to the
  * window and returns how many bytes that was.  LockBuffers() has already
@@ -542,6 +564,8 @@ AfdConnectedSocketWriteDataUdp(PAFD_FCB FCB,
     PTDI_CONNECTION_INFORMATION TargetAddress;
     KPROCESSOR_MODE LockMode;
     NTSTATUS Status;
+    PCHAR Datagram;
+    UINT DatagramLength;
 
     /* Check that the socket is bound */
     if (FCB->SharedData.State != SOCKET_STATE_BOUND || !FCB->RemoteAddress)
@@ -607,10 +631,11 @@ AfdConnectedSocketWriteDataUdp(PAFD_FCB FCB,
     Status = QueueUserModeIrp(FCB, Irp, FUNCTION_SEND);
     if (Status == STATUS_PENDING)
     {
+        AfdDatagramToSend(SendReq->BufferArray, SendReq->BufferCount, &Datagram, &DatagramLength);
         Status = TdiSendDatagram(&FCB->SendIrp.InFlightRequest,
                                  FCB->AddressFile.Object,
-                                 SendReq->BufferArray[0].buf,
-                                 SendReq->BufferArray[0].len,
+                                 Datagram,
+                                 DatagramLength,
                                  TargetAddress,
                                  PacketSocketSendComplete,
                                  FCB);
@@ -904,6 +929,8 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PTRANSPORT_ADDRESS RemoteAddress;
     KPROCESSOR_MODE LockMode;
     BOOLEAN Convert32Bit = FALSE;
+    PCHAR Datagram;
+    UINT DatagramLength;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -1016,14 +1043,11 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         Status = QueueUserModeIrp(FCB, Irp, FUNCTION_SEND);
         if (Status == STATUS_PENDING)
         {
-            if (SendReq->BufferCount > 1)
-            {
-                AFD_DbgPrint(MIN_TRACE,("WARN: More than one buffer %ld\n", SendReq->BufferCount));
-            }
+            AfdDatagramToSend(SendReq->BufferArray, SendReq->BufferCount, &Datagram, &DatagramLength);
             Status = TdiSendDatagram(&FCB->SendIrp.InFlightRequest,
                                      FCB->AddressFile.Object,
-                                     SendReq->BufferArray[0].buf,
-                                     SendReq->BufferArray[0].len,
+                                     Datagram,
+                                     DatagramLength,
                                      TargetAddress,
                                      PacketSocketSendComplete,
                                      FCB);
@@ -1031,7 +1055,7 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             {
                 NT_VERIFY(RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]) == &Irp->Tail.Overlay.ListEntry);
                 Irp->IoStatus.Status = Status;
-                Irp->IoStatus.Information = ((Status == STATUS_SUCCESS) ? SendReq->BufferArray[0].len : 0);
+                Irp->IoStatus.Information = ((Status == STATUS_SUCCESS) ? DatagramLength : 0);
                 (void)IoSetCancelRoutine(Irp, NULL);
                 UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
                 UnlockRequest(Irp, IoGetCurrentIrpStackLocation(Irp));
