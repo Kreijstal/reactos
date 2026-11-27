@@ -176,12 +176,43 @@ PQUEUE_ENTRY LibTCPDequeuePacket(PCONNECTION_ENDPOINT Connection)
     return qp;
 }
 
-NTSTATUS LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PUCHAR RecvBuffer, UINT RecvLen, UINT *Received)
+/* Copies Length bytes of p from Offset to the chain at *Buffer, *BufferOffset,
+ * and moves those past what it copied */
+static
+UINT
+LibTCPCopyToBufferChain(struct pbuf *p, UINT Offset, UINT Length, PNDIS_BUFFER *Buffer, UINT *BufferOffset)
+{
+    PUCHAR Data;
+    UINT Size, Piece, Copied = 0;
+
+    while (Copied < Length && *Buffer)
+    {
+        NdisQueryBuffer(*Buffer, (PVOID *)&Data, &Size);
+        if (*BufferOffset >= Size)
+        {
+            NdisGetNextBuffer(*Buffer, Buffer);
+            *BufferOffset = 0;
+            continue;
+        }
+
+        ASSERT(Data);
+        Piece = MIN(Size - *BufferOffset, Length - Copied);
+        Piece = pbuf_copy_partial(p, Data + *BufferOffset, (u16_t)Piece, (u16_t)(Offset + Copied));
+        if (!Piece)
+            break;
+        *BufferOffset += Piece;
+        Copied += Piece;
+    }
+
+    return Copied;
+}
+
+NTSTATUS LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PNDIS_BUFFER RecvBuffer, UINT RecvLen, UINT *Received)
 {
     PQUEUE_ENTRY qp;
     struct pbuf* p;
     NTSTATUS Status;
-    UINT ReadLength, PayloadLength, Offset, Copied;
+    UINT ReadLength, PayloadLength, Offset, Copied, RecvOffset = 0;
 
     (*Received) = 0;
 
@@ -209,12 +240,12 @@ NTSTATUS LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PUCHA
                 qp = NULL;
             }
 
-            Copied = pbuf_copy_partial(p, RecvBuffer, ReadLength, Offset);
+            /* To all of the chain: RecvLen is no more than it holds */
+            Copied = LibTCPCopyToBufferChain(p, Offset, ReadLength, &RecvBuffer, &RecvOffset);
             ASSERT(Copied == ReadLength);
 
             /* Update trackers */
             RecvLen -= ReadLength;
-            RecvBuffer += ReadLength;
             (*Received) += ReadLength;
 
             if (qp != NULL)
@@ -819,8 +850,11 @@ LibTCPSendCallback(void *arg)
 {
     struct lwip_callback_msg *msg = arg;
     PTCP_PCB pcb = msg->Input.Send.Connection->SocketContext;
-    ULONG SendLength;
+    ULONG SendLength, Sent;
     UCHAR SendFlags;
+    PNDIS_BUFFER Buffer;
+    PVOID Data;
+    UINT Size;
 
     ASSERT(msg);
 
@@ -836,7 +870,6 @@ LibTCPSendCallback(void *arg)
         goto done;
     }
 
-    SendFlags = TCP_WRITE_FLAG_COPY;
     SendLength = msg->Input.Send.DataLength;
     if (tcp_sndbuf(pcb) == 0)
     {
@@ -848,25 +881,48 @@ LibTCPSendCallback(void *arg)
     {
         /* We've got some room so let's send what we can */
         SendLength = tcp_sndbuf(pcb);
-
-        /* Don't set the push flag */
-        SendFlags |= TCP_WRITE_FLAG_MORE;
     }
 
-    msg->Output.Send.Error = tcp_write(pcb,
-                                       msg->Input.Send.Data,
-                                       SendLength,
-                                       SendFlags);
-    if (msg->Output.Send.Error == ERR_OK)
+    /* The data is the start of the chain, a piece of each buffer of it at
+     * a time.  Only the last piece of the whole send pushes. */
+    Buffer = msg->Input.Send.Buffer;
+    Sent = 0;
+    msg->Output.Send.Error = ERR_OK;
+    while (Sent < SendLength && Buffer)
     {
-        /* Queued successfully so try to send it */
+        NdisQueryBuffer(Buffer, &Data, &Size);
+        Size = MIN(Size, SendLength - Sent);
+        if (Size)
+        {
+            ASSERT(Data);
+            SendFlags = TCP_WRITE_FLAG_COPY;
+            if (Sent + Size < msg->Input.Send.DataLength)
+                SendFlags |= TCP_WRITE_FLAG_MORE;
+
+            msg->Output.Send.Error = tcp_write(pcb, Data, (u16_t)Size, SendFlags);
+            if (msg->Output.Send.Error != ERR_OK)
+                break;
+            Sent += Size;
+        }
+        NdisGetNextBuffer(Buffer, &Buffer);
+    }
+
+    if (Sent)
+    {
+        /* Queued successfully, all or a start of it, so try to send it */
         tcp_output((PTCP_PCB)msg->Input.Send.Connection->SocketContext);
-        msg->Output.Send.Information = SendLength;
+        msg->Output.Send.Error = ERR_OK;
+        msg->Output.Send.Information = Sent;
     }
     else if (msg->Output.Send.Error == ERR_MEM)
     {
         /* The queue is too long */
         msg->Output.Send.Error = ERR_INPROGRESS;
+    }
+    else if (msg->Output.Send.Error == ERR_OK)
+    {
+        /* A send of nothing */
+        msg->Output.Send.Information = 0;
     }
 
 done:
@@ -874,7 +930,7 @@ done:
 }
 
 err_t
-LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len, ULONG *sent, const int safe)
+LibTCPSend(PCONNECTION_ENDPOINT Connection, PNDIS_BUFFER Buffer, ULONG len, ULONG *sent, const int safe)
 {
     err_t ret;
     struct lwip_callback_msg *msg;
@@ -884,7 +940,7 @@ LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len
     {
         KeInitializeEvent(&msg->Event, NotificationEvent, FALSE);
         msg->Input.Send.Connection = Connection;
-        msg->Input.Send.Data = dataptr;
+        msg->Input.Send.Buffer = Buffer;
         msg->Input.Send.DataLength = len;
 
         if (safe)

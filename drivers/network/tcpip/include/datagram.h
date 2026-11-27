@@ -12,7 +12,7 @@
 NTSTATUS DGReceiveDatagram(
     PADDRESS_FILE AddrFile,
     PTDI_CONNECTION_INFORMATION ConnInfo,
-    PCHAR Buffer,
+    PNDIS_BUFFER Buffer,
     ULONG ReceiveLength,
     ULONG ReceiveFlags,
     PTDI_CONNECTION_INFORMATION ReturnInfo,

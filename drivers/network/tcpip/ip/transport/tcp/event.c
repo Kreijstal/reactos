@@ -352,8 +352,8 @@ TCPSendEventHandler(void *arg, const u16_t space)
 
     while (!IsListEmpty(&Connection->SendRequest))
     {
-        UINT SendLen = 0;
-        PVOID SendBuffer = 0;
+        PTDI_REQUEST_KERNEL_SEND SendInfo;
+        ULONG SendLen;
 
         Entry = RemoveHeadList(&Connection->SendRequest);
 
@@ -364,13 +364,12 @@ TCPSendEventHandler(void *arg, const u16_t space)
         Irp = Bucket->Request.RequestContext;
         Mdl = Irp->MdlAddress;
 
-        TI_DbgPrint(DEBUG_TCP,
-                    ("Getting the user buffer from %x\n", Mdl));
+        /* What DispTdiSend() sent: SendLength bytes of all of the chain */
+        SendInfo = (PTDI_REQUEST_KERNEL_SEND)&IoGetCurrentIrpStackLocation(Irp)->Parameters;
+        SendLen = MIN(SendInfo->SendLength, GetBufferChainLength(Mdl));
 
-        NdisQueryBuffer( Mdl, &SendBuffer, &SendLen );
-
         TI_DbgPrint(DEBUG_TCP,
-                    ("Writing %d bytes to %x\n", SendLen, SendBuffer));
+                    ("Writing %d bytes from %x\n", SendLen, Mdl));
 
         TI_DbgPrint(DEBUG_TCP, ("Connection: %x\n", Connection));
         TI_DbgPrint
@@ -379,7 +378,7 @@ TCPSendEventHandler(void *arg, const u16_t space)
           Connection->SocketContext));
 
         Status = TCPTranslateError(LibTCPSend(Connection,
-                                              SendBuffer,
+                                              Mdl,
                                               SendLen, &BytesSent, TRUE));
 
         TI_DbgPrint(DEBUG_TCP,("TCP Bytes: %d\n", BytesSent));
@@ -431,8 +430,6 @@ TCPRecvEventHandler(void *arg)
     PIRP Irp;
     PMDL Mdl;
     UINT Received;
-    UINT RecvLen;
-    PUCHAR RecvBuffer;
     NTSTATUS Status;
 
     LockObject(Connection);
@@ -445,9 +442,8 @@ TCPRecvEventHandler(void *arg)
         Irp = Bucket->Request.RequestContext;
         Mdl = Irp->MdlAddress;
 
-        NdisQueryBuffer( Mdl, &RecvBuffer, &RecvLen );
-
-        Status = LibTCPGetDataFromConnectionQueue(Connection, RecvBuffer, RecvLen, &Received);
+        /* The data goes to all of the chain, as in TCPReceiveData() */
+        Status = LibTCPGetDataFromConnectionQueue(Connection, Mdl, GetBufferChainLength(Mdl), &Received);
         if (Status == STATUS_PENDING)
         {
             InsertHeadList(&Connection->ReceiveRequest, &Bucket->Entry);

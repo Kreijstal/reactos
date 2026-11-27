@@ -978,17 +978,11 @@ NTSTATUS DispTdiReceiveDatagram(
 
   if (NT_SUCCESS(Status))
     {
-	PVOID DataBuffer;
-	UINT BufferSize;
-
-	NdisQueryBuffer( (PNDIS_BUFFER)Irp->MdlAddress,
-			 &DataBuffer,
-			 &BufferSize );
-
+      /* The datagram goes to all of the chain */
       Status = DGReceiveDatagram(
 	  Request.Handle.AddressHandle,
 	  DgramInfo->ReceiveDatagramInformation,
-	  DataBuffer,
+	  (PNDIS_BUFFER)Irp->MdlAddress,
 	  DgramInfo->ReceiveLength,
 	  DgramInfo->ReceiveFlags,
 	  DgramInfo->ReturnDatagramInformation,
@@ -1055,16 +1049,13 @@ NTSTATUS DispTdiSend(
   TI_DbgPrint(MID_TRACE,("TCPIP<<< Got an MDL: %x\n", Irp->MdlAddress));
   if (NT_SUCCESS(Status))
     {
-	PVOID Data;
-	UINT Len;
-
-	NdisQueryBuffer( Irp->MdlAddress, &Data, &Len );
-
+	/* The data is SendLength bytes of the chain, and never more than
+	 * the chain holds */
 	TI_DbgPrint(MID_TRACE,("About to TCPSendData\n"));
 	Status = TCPSendData(
 	    TranContext->Handle.ConnectionContext,
-	    Data,
-	    SendInfo->SendLength,
+	    (PNDIS_BUFFER)Irp->MdlAddress,
+	    MIN(SendInfo->SendLength, GetBufferChainLength((PNDIS_BUFFER)Irp->MdlAddress)),
 	    &BytesSent,
 	    SendInfo->SendFlags,
 	    DispDataRequestComplete,
@@ -1124,22 +1115,36 @@ NTSTATUS DispTdiSendDatagram(
         (PDRIVER_CANCEL)DispCancelRequest);
 
     if (NT_SUCCESS(Status)) {
-	PVOID DataBuffer;
+	PNDIS_BUFFER Buffer = (PNDIS_BUFFER)Irp->MdlAddress;
+	PVOID DataBuffer, Gathered = NULL;
 	UINT BufferSize;
 
 	TI_DbgPrint(MID_TRACE,("About to query buffer %x\n", Irp->MdlAddress));
 
-        /* The empty datagram comes with no buffer */
-        if (Irp->MdlAddress)
-        {
-            NdisQueryBuffer( (PNDIS_BUFFER)Irp->MdlAddress,
-                             &DataBuffer,
-                             &BufferSize );
-        }
-        else
+        /* The datagram is SendLength bytes of all of the chain, and never
+         * more than it holds.  The empty datagram comes with no buffer. */
+        BufferSize = MIN(DgramInfo->SendLength, GetBufferChainLength(Buffer));
+        if (!Buffer || !BufferSize)
         {
             DataBuffer = NULL;
             BufferSize = 0;
+        }
+        else if (!Buffer->Next || MmGetMdlByteCount(Buffer) >= BufferSize)
+        {
+            NdisQueryBuffer(Buffer, &DataBuffer, &BufferSize);
+            BufferSize = MIN(DgramInfo->SendLength, BufferSize);
+        }
+        else
+        {
+            /* The protocols send a datagram out of one buffer */
+            Gathered = ExAllocatePoolWithTag(NonPagedPool, BufferSize, DATAGRAM_SEND_TAG);
+            if (!Gathered)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                goto done;
+            }
+            BufferSize = CopyBufferChainToBuffer(Gathered, Buffer, 0, BufferSize);
+            DataBuffer = Gathered;
         }
 
         /* FIXME: DgramInfo->SendDatagramInformation->RemoteAddress
@@ -1163,6 +1168,10 @@ NTSTATUS DispTdiSendDatagram(
             Status = STATUS_UNSUCCESSFUL;
             ASSERT(FALSE);
         }
+
+        /* The send has copied the datagram */
+        if (Gathered)
+            ExFreePoolWithTag(Gathered, DATAGRAM_SEND_TAG);
     }
 
 done:

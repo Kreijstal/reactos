@@ -53,6 +53,28 @@ INT SkipToOffset(
 }
 
 
+/*
+ * FUNCTION: Tells how many bytes a buffer chain describes
+ * ARGUMENTS:
+ *     Buffer = Pointer to the first NDIS buffer of the chain, may be NULL
+ * RETURNS:
+ *     The sum of the byte counts of the buffers of the chain
+ */
+ULONG GetBufferChainLength(
+    PNDIS_BUFFER Buffer)
+{
+    ULONG Length = 0;
+
+    for (; Buffer; Buffer = Buffer->Next)
+    {
+        ASSERT(Length + MmGetMdlByteCount(Buffer) >= Length);
+        Length += MmGetMdlByteCount(Buffer);
+    }
+
+    return Length;
+}
+
+
 UINT CopyBufferToBufferChain(
     PNDIS_BUFFER DstBuffer,
     UINT DstOffset,

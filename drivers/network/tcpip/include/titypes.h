@@ -79,8 +79,8 @@ typedef struct _DATAGRAM_RECEIVE_REQUEST {
     IP_ADDRESS RemoteAddress;              /* Remote address we receive from (NULL means any) */
     USHORT RemotePort;                     /* Remote port we receive from (0 means any) */
     PTDI_CONNECTION_INFORMATION ReturnInfo;/* Return information */
-    PCHAR Buffer;                          /* Pointer to receive buffer */
-    ULONG BufferSize;                      /* Size of Buffer */
+    PNDIS_BUFFER Buffer;                   /* The chain the datagram goes to */
+    ULONG BufferSize;                      /* Bytes of the chain the receive takes */
     DATAGRAM_COMPLETION_ROUTINE Complete;  /* Completion routine */
     PVOID Context;                         /* Pointer to context information */
     DATAGRAM_COMPLETION_ROUTINE UserComplete;   /* Completion routine */

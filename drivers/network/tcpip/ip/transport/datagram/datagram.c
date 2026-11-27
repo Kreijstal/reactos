@@ -151,10 +151,11 @@ DGDeliverData(
                            ("Target Buffer: %x, Source Buffer: %x, Size %d\n",
                             Current->Buffer, DataBuffer, DataSize));
 
-                /* Copy the data into buffer provided by the user */
-                RtlCopyMemory(Current->Buffer,
-                     DataBuffer,
-                     MIN(Current->BufferSize, DataSize));
+                /* Copy the data into the chain provided by the user, all of
+                 * it: BufferSize is no more than the chain holds */
+                BytesTaken = CopyBufferToBufferChain(Current->Buffer, 0, DataBuffer,
+                                                     MIN(Current->BufferSize, DataSize));
+                ASSERT(BytesTaken == MIN(Current->BufferSize, DataSize));
 
                 RTAIPAddress = (PTA_IP_ADDRESS)Current->ReturnInfo->RemoteAddress;
                 RTAIPAddress->TAAddressCount = 1;
@@ -270,7 +271,7 @@ VOID DGReceiveComplete(PVOID Context, NTSTATUS Status, ULONG Count) {
 NTSTATUS DGReceiveDatagram(
     PADDRESS_FILE AddrFile,
     PTDI_CONNECTION_INFORMATION ConnInfo,
-    PCHAR BufferData,
+    PNDIS_BUFFER Buffer,
     ULONG ReceiveLength,
     ULONG ReceiveFlags,
     PTDI_CONNECTION_INFORMATION ReturnInfo,
@@ -330,8 +331,10 @@ NTSTATUS DGReceiveDatagram(
 	IoMarkIrpPending(Irp);
 
 	ReceiveRequest->ReturnInfo = ReturnInfo;
-	ReceiveRequest->Buffer = BufferData;
-	ReceiveRequest->BufferSize = ReceiveLength;
+	/* The datagram goes to all of the chain, but to no more of it than
+	 * the receive is for */
+	ReceiveRequest->Buffer = Buffer;
+	ReceiveRequest->BufferSize = MIN(ReceiveLength, GetBufferChainLength(Buffer));
 	ReceiveRequest->UserComplete = Complete;
 	ReceiveRequest->UserContext = Context;
 	ReceiveRequest->Complete =

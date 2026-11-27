@@ -569,16 +569,14 @@ NTSTATUS TCPReceiveData
   PVOID Context )
 {
     PTDI_BUCKET Bucket;
-    PUCHAR DataBuffer;
-    UINT DataLen, Received;
+    UINT Received;
     NTSTATUS Status;
 
     TI_DbgPrint(DEBUG_TCP,("[IP, TCPReceiveData] Called for %d bytes (on socket %x)\n",
                            ReceiveLength, Connection->SocketContext));
 
-    NdisQueryBuffer(Buffer, &DataBuffer, &DataLen);
-
-    Status = LibTCPGetDataFromConnectionQueue(Connection, DataBuffer, DataLen, &Received);
+    /* The data goes to all of the chain */
+    Status = LibTCPGetDataFromConnectionQueue(Connection, Buffer, GetBufferChainLength(Buffer), &Received);
 
     if (Status == STATUS_PENDING)
     {
@@ -612,7 +610,7 @@ NTSTATUS TCPReceiveData
 
 NTSTATUS TCPSendData
 ( PCONNECTION_ENDPOINT Connection,
-  PCHAR BufferData,
+  PNDIS_BUFFER Buffer,
   ULONG SendLength,
   PULONG BytesSent,
   ULONG Flags,
@@ -632,7 +630,7 @@ NTSTATUS TCPSendData
                            Connection->SocketContext));
 
     Status = TCPTranslateError(LibTCPSend(Connection,
-                                          BufferData,
+                                          Buffer,
                                           SendLength,
                                           BytesSent,
                                           FALSE));

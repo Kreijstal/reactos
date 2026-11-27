@@ -158,7 +158,7 @@ NTSTATUS TCPReceiveData(
 
 NTSTATUS TCPSendData(
   PCONNECTION_ENDPOINT Connection,
-  PCHAR Buffer,
+  PNDIS_BUFFER Buffer,
   ULONG DataSize,
   PULONG DataUsed,
   ULONG Flags,

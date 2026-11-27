@@ -9,6 +9,9 @@
 
 UINT Random(VOID);
 
+ULONG GetBufferChainLength(
+    PNDIS_BUFFER Buffer);
+
 UINT CopyBufferToBufferChain(
     PNDIS_BUFFER DstBuffer,
     UINT DstOffset,

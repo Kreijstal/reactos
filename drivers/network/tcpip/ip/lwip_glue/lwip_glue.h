@@ -45,8 +45,8 @@ struct lwip_callback_msg
         } Listen;
         struct {
             PCONNECTION_ENDPOINT Connection;
-            void *Data;
-            u16_t DataLength;
+            PNDIS_BUFFER Buffer;
+            ULONG DataLength;
         } Send;
         struct {
             PCONNECTION_ENDPOINT Connection;
@@ -94,7 +94,7 @@ struct lwip_callback_msg
     } Output;
 };
 
-NTSTATUS    LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PUCHAR RecvBuffer, UINT RecvLen, UINT *Received);
+NTSTATUS    LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PNDIS_BUFFER RecvBuffer, UINT RecvLen, UINT *Received);
 
 /* Receive window accounting (see CONNECTION_ENDPOINT::PendingRecvCredit) */
 BOOLEAN     LibTCPAllocateRecvCredit(PCONNECTION_ENDPOINT Connection);
@@ -112,7 +112,7 @@ PTCP_PCB    LibTCPSocket(void *arg);
 VOID        LibTCPFreeSocket(PTCP_PCB pcb);
 err_t       LibTCPBind(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port);
 PTCP_PCB    LibTCPListen(PCONNECTION_ENDPOINT Connection, const ULONG backlog);
-err_t       LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len, ULONG *sent, const int safe);
+err_t       LibTCPSend(PCONNECTION_ENDPOINT Connection, PNDIS_BUFFER Buffer, ULONG len, ULONG *sent, const int safe);
 err_t       LibTCPConnect(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port);
 err_t       LibTCPShutdown(PCONNECTION_ENDPOINT Connection, const int shut_rx, const int shut_tx);
 VOID        LibTCPKickSend(PCONNECTION_ENDPOINT Connection);
