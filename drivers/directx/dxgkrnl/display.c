@@ -1110,6 +1110,174 @@ DxgkDisplayUpdateTopology(
     return Status;
 }
 
+/* A panel built into the computer, which the lid covers */
+static BOOLEAN
+DxgkpIsInternalPanel(
+    _In_ const DXGK_CHILD_DESCRIPTOR *Child)
+{
+    if (Child->ChildDeviceType != TypeVideoOutput)
+        return FALSE;
+
+    switch (Child->ChildCapabilities.Type.VideoOutput.InterfaceTechnology)
+    {
+        case D3DKMDT_VOT_INTERNAL:
+        case D3DKMDT_VOT_LVDS:
+        case D3DKMDT_VOT_DISPLAYPORT_EMBEDDED:
+        case D3DKMDT_VOT_UDI_EMBEDDED:
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
+static VOID
+DxgkpSetSourceVisibility(
+    _In_ PDXGKRNL_ADAPTER Adapter,
+    _In_ D3DDDI_VIDEO_PRESENT_SOURCE_ID SourceId,
+    _In_ BOOLEAN Visible)
+{
+    DXGKARG_SETVIDPNSOURCEVISIBILITY Visibility;
+    NTSTATUS Status;
+
+    if (DXGK_CB(Adapter, DxgkDdiSetVidPnSourceVisibility) == NULL)
+        return;
+
+    RtlZeroMemory(&Visibility, sizeof(Visibility));
+    Visibility.VidPnSourceId = SourceId;
+    Visibility.Visible = Visible;
+    Status = DXGK_CB(Adapter, DxgkDdiSetVidPnSourceVisibility)(
+                 Adapter->MiniportDeviceContext, &Visibility);
+    if (!NT_SUCCESS(Status))
+    {
+        DXGKRNL_WARN("DxgkDisplaySetLidState: SetVidPnSourceVisibility(%u, %u) 0x%08lX\n",
+                     SourceId, Visible, Status);
+    }
+}
+
+/*
+ * DxgkDisplaySetLidState
+ *
+ * The lid opened or closed (after DxgkDdiNotifyAcpiEvent).  As Windows turns
+ * the display off while the lid is closed and on again when it opens, the
+ * panels built into the computer stop: the sources that drive only internal
+ * panels stop scanning out (DxgkDdiSetVidPnSourceVisibility FALSE), then
+ * each internal panel goes to D3 (DxgkDdiSetPowerState with its child id).
+ * On open each one goes back to D0 and its sources scan out again.
+ *
+ * A miniport may blank its panel when it is told that the lid closed and
+ * restore it only on these calls: on the ASUS X550DP, AMD's panel stayed
+ * blanked after the lid reopened.
+ *
+ * IRQL: PASSIVE_LEVEL
+ */
+VOID
+DxgkDisplaySetLidState(
+    _In_ PDXGKRNL_ADAPTER Adapter,
+    _In_ BOOLEAN          Open)
+{
+    BOOLEAN SourceInternal[DXGKP_MAX_SOURCES], SourceExternal[DXGKP_MAX_SOURCES];
+    PDXGKP_VIDPN VidPn;
+    LARGE_INTEGER Interval;
+    ULONG i, j, Count;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (Adapter->ChildDescriptors == NULL ||
+        DXGK_CB(Adapter, DxgkDdiSetPowerState) == NULL)
+    {
+        return;
+    }
+
+    /* Keep the present worker out, as for a mode set */
+    Interval.QuadPart = -10 * 1000; /* 1 ms */
+    while (InterlockedCompareExchange(&g_PresentDispatchBusy, 1, 0) != 0)
+        KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+    DxgkpLockModeSet(Adapter);
+
+    if (Adapter->LidPanelsOff == !Open)
+        goto Done;
+    Adapter->LidPanelsOff = !Open;
+
+    /* The sources of the committed paths, by the kind of panel they drive */
+    RtlZeroMemory(SourceInternal, sizeof(SourceInternal));
+    RtlZeroMemory(SourceExternal, sizeof(SourceExternal));
+    VidPn = (PDXGKP_VIDPN)Adapter->VidPn;
+    if (VidPn != NULL && Adapter->VidPnCommitted)
+    {
+        for (i = 0; i < VidPn->NumPaths; i++)
+        {
+            D3DDDI_VIDEO_PRESENT_SOURCE_ID SourceId = VidPn->Paths[i].VidPnSourceId;
+            BOOLEAN Internal = FALSE;
+
+            if (SourceId >= DXGKP_MAX_SOURCES)
+                continue;
+            for (j = 0; j < Adapter->NumberOfChildren; j++)
+            {
+                if (Adapter->ChildDescriptors[j].ChildUid == VidPn->Paths[i].VidPnTargetId)
+                {
+                    Internal = DxgkpIsInternalPanel(&Adapter->ChildDescriptors[j]);
+                    break;
+                }
+            }
+            if (Internal)
+                SourceInternal[SourceId] = TRUE;
+            else
+                SourceExternal[SourceId] = TRUE;
+        }
+    }
+
+    if (!Open)
+    {
+        for (i = 0; i < DXGKP_MAX_SOURCES; i++)
+        {
+            if (SourceInternal[i] && !SourceExternal[i])
+                DxgkpSetSourceVisibility(Adapter, i, FALSE);
+        }
+    }
+
+    for (Count = 0, j = 0; j < Adapter->NumberOfChildren; j++)
+    {
+        if (!DxgkpIsInternalPanel(&Adapter->ChildDescriptors[j]))
+            continue;
+
+        Status = DXGK_CB(Adapter, DxgkDdiSetPowerState)(
+                     Adapter->MiniportDeviceContext,
+                     Adapter->ChildDescriptors[j].ChildUid,
+                     Open ? PowerDeviceD0 : PowerDeviceD3,
+                     PowerActionNone);
+        DXGKRNL_WARN("DxgkDisplaySetLidState: lid %s: panel %lu to D%u: 0x%08lX\n",
+                     Open ? "open" : "closed", Adapter->ChildDescriptors[j].ChildUid,
+                     Open ? 0 : 3, Status);
+        Count++;
+    }
+
+    if (Open)
+    {
+        for (i = 0; i < DXGKP_MAX_SOURCES; i++)
+        {
+            if (SourceInternal[i] && !SourceExternal[i])
+                DxgkpSetSourceVisibility(Adapter, i, TRUE);
+        }
+
+        /* Show the whole desktop again */
+        if (Count != 0 && Adapter->CommittedWidth != 0 && Adapter->ShadowFb != NULL)
+        {
+            RECTL Full;
+
+            Full.left = 0;
+            Full.top = 0;
+            Full.right = (LONG)Adapter->CommittedWidth;
+            Full.bottom = (LONG)Adapter->CommittedHeight;
+            DxgkpRecordDirtyRect(Adapter, &Full);
+        }
+    }
+
+Done:
+    DxgkpUnlockModeSet(Adapter);
+    InterlockedExchange(&g_PresentDispatchBusy, 0);
+}
+
 /*
  * The mode the display IOCTLs report and the desktop GDI draws: the
  * committed source mode, else the firmware (POST) mode, else 1024x768.

@@ -938,6 +938,7 @@ typedef struct _DXGKP_LID_WORK
  * PO_CB_LID_SWITCH_STATE).  A miniport that wants its children polled
  * again (DXGK_ACPI_POLL_DISPLAY_CHILDREN) gets a topology update; it may
  * also report the change itself through DxgkCbIndicateChildStatus.
+ * Then the internal panels are turned off or on (DxgkDisplaySetLidState).
  *
  * IRQL: PASSIVE_LEVEL
  */
@@ -998,6 +999,10 @@ DxgkpLidWorker(
                 DXGKRNL_WARN("DxgkpLidWorker: the miniport asks for a new mode; not done\n");
             }
         }
+
+        /* The internal panels are off while the lid is closed */
+        if (Adapter->State == DxgkAdapterStateStarted)
+            DxgkDisplaySetLidState(Adapter, Work->Open);
 
         ObDereferenceObject(Adapter->FunctionalDeviceObject);
     }

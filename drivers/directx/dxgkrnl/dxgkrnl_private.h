@@ -741,6 +741,12 @@ struct _DXGKRNL_ADAPTER
      */
     LIST_ENTRY                  MiniportAdapterListEntry;
     LIST_ENTRY                  GlobalAdapterListEntry;
+
+    /*
+     * The internal panels are off because the lid is closed
+     * (DxgkDisplaySetLidState).  Protected by ModeSetMutex.
+     */
+    BOOLEAN                     LidPanelsOff;
 };
 
 /* Convenience macro: cast a PDEVICE_OBJECT to its DXGKRNL_ADAPTER extension. */
@@ -1639,6 +1645,11 @@ DxgkVidPnRefreshTopology(
 NTSTATUS
 DxgkDisplayUpdateTopology(
     _In_ PDXGKRNL_ADAPTER Adapter);
+
+VOID
+DxgkDisplaySetLidState(
+    _In_ PDXGKRNL_ADAPTER Adapter,
+    _In_ BOOLEAN          Open);
 
 BOOLEAN
 DxgkpGetReportedChildConnection(
