@@ -49,6 +49,7 @@ WlanGetNetworkBssList(IN HANDLE hClientHandle,
                       OUT PWLAN_BSS_LIST *ppWlanBssList);
 
 /* main.c */
+BOOL WlanIsClientHandle(HANDLE hClientHandle);
 PVOID WINAPI WlanAllocateMemory(DWORD dwSize);
 VOID  WINAPI WlanFreeMemory(PVOID pMemory);
 

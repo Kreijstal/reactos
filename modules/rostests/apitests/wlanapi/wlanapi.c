@@ -68,7 +68,40 @@ static void WlanCloseHandle_test(void)
 
     /* invalid hClientHandle */
     ret = WlanCloseHandle(hClientHandle, NULL);
-    ok(ret == ERROR_INVALID_HANDLE, "expected failure\n");
+    ok(ret == ERROR_INVALID_HANDLE, "expected ERROR_INVALID_HANDLE, got %lu\n", ret);
+}
+
+/* A handle that is not open is refused with ERROR_INVALID_HANDLE by every call
+ * that takes one, once its other parameters are valid. */
+static void WlanInvalidHandle_test(void)
+{
+    HANDLE hBogus = (HANDLE)(ULONG_PTR)0xdeadbeefdeadbeef;
+    HANDLE hClient = NULL;
+    PWLAN_INTERFACE_INFO_LIST pIfList = NULL;
+    PWLAN_PROFILE_INFO_LIST pList = NULL;
+    DWORD ret, dwNegotiated = 0;
+
+    ret = WlanEnumInterfaces(hBogus, NULL, &pIfList);
+    ok(ret == ERROR_INVALID_HANDLE, "WlanEnumInterfaces: expected ERROR_INVALID_HANDLE, got %lu\n", ret);
+    ret = WlanGetProfileList(hBogus, &InterfaceGuid, NULL, &pList);
+    ok(ret == ERROR_INVALID_HANDLE, "WlanGetProfileList: expected ERROR_INVALID_HANDLE, got %lu\n", ret);
+    ret = WlanDeleteProfile(hBogus, &InterfaceGuid, L"test", NULL);
+    ok(ret == ERROR_INVALID_HANDLE, "WlanDeleteProfile: expected ERROR_INVALID_HANDLE, got %lu\n", ret);
+
+    ret = WlanOpenHandle(2, NULL, &dwNegotiated, &hClient);
+    if (ret != ERROR_SUCCESS)
+    {
+        skip("WlanSvc not running (WlanOpenHandle=%lu); closed handle not tested\n", ret);
+        return;
+    }
+
+    /* A closed handle is no longer in the table. */
+    ret = WlanCloseHandle(hClient, NULL);
+    ok(ret == ERROR_SUCCESS, "WlanCloseHandle returned %lu\n", ret);
+    ret = WlanCloseHandle(hClient, NULL);
+    ok(ret == ERROR_INVALID_HANDLE, "Second WlanCloseHandle: expected ERROR_INVALID_HANDLE, got %lu\n", ret);
+    ret = WlanEnumInterfaces(hClient, NULL, &pIfList);
+    ok(ret == ERROR_INVALID_HANDLE, "WlanEnumInterfaces(closed): expected ERROR_INVALID_HANDLE, got %lu\n", ret);
 }
 
 static void WlanConnect_test(void)
@@ -218,11 +251,10 @@ static void WlanGetInterfaceCapability_test(void)
 }
 
 /*
- * Round-trip the profile store: open a real WlanSvc handle, write a
- * profile, list profiles, fetch the just-written XML back, then delete
- * it.  Skips entirely when WlanSvc is not running, so the test is
- * harmless on stock ReactOS / Windows installs where the service is
- * stopped by default.
+ * Round-trip the profile store: open a real WlanSvc handle, write a profile
+ * to the first wireless interface, list profiles, fetch the just-written XML
+ * back, then delete it.  Profiles belong to an interface, so this needs one;
+ * skipped when WlanSvc is not running or there is no wireless interface.
  */
 static void Wlan_Profile_RoundTrip(void)
 {
@@ -231,6 +263,12 @@ static void Wlan_Profile_RoundTrip(void)
         L"<WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\">"
         L"<name>WlanapiApitestProfile</name>"
         L"<SSIDConfig><SSID><name>apitest-ssid</name></SSID></SSIDConfig>"
+        L"<connectionType>ESS</connectionType>"
+        L"<connectionMode>manual</connectionMode>"
+        L"<MSM><security><authEncryption>"
+        L"<authentication>open</authentication><encryption>none</encryption>"
+        L"<useOneX>false</useOneX>"
+        L"</authEncryption></security></MSM>"
         L"</WLANProfile>";
     static const WCHAR kProfileName[] = L"WlanapiApitestProfile";
 
@@ -239,6 +277,7 @@ static void Wlan_Profile_RoundTrip(void)
     LPWSTR pXmlOut = NULL;
     PWLAN_PROFILE_INFO_LIST pList = NULL;
     PWLAN_INTERFACE_INFO_LIST pIfList = NULL;
+    GUID Interface;
     DWORD i;
     BOOL Found;
 
@@ -250,28 +289,47 @@ static void Wlan_Profile_RoundTrip(void)
     }
 
     /* Interface enumeration: must succeed even with no Wi-Fi adapter
-     * present (empty list, dwNumberOfItems == 0).  Verifies the
-     * "successful empty" path landed in _RpcEnumInterfaces. */
+     * present (empty list, dwNumberOfItems == 0). */
     ret = WlanEnumInterfaces(hClient, NULL, &pIfList);
     ok(ret == ERROR_SUCCESS, "WlanEnumInterfaces=%lu (expected ERROR_SUCCESS)\n", ret);
-    if (pIfList)
+
+    /* An interface that does not exist is not found, and holds no profiles. */
     {
-        WlanFreeMemory(pIfList);
-        pIfList = NULL;
+        DOT11_SSID Ssid = {0};
+        DWORD ret2 = WlanScan(hClient, &InterfaceGuid, &Ssid, NULL, NULL);
+        ok(ret2 == ERROR_NOT_FOUND,
+           "WlanScan on an unknown interface=%lu (expected ERROR_NOT_FOUND)\n", ret2);
+        ret2 = WlanGetProfile(hClient, &InterfaceGuid, kProfileName, NULL,
+                              &pXmlOut, &dwFlags, &dwGranted);
+        ok(ret2 != ERROR_SUCCESS, "WlanGetProfile on an unknown interface succeeded\n");
+        if (ret2 == ERROR_SUCCESS && pXmlOut != NULL)
+            WlanFreeMemory(pXmlOut);
+        pXmlOut = NULL;
     }
 
+    if (ret != ERROR_SUCCESS || pIfList == NULL || pIfList->dwNumberOfItems == 0)
+    {
+        skip("No wireless interface; profile round-trip skipped\n");
+        if (pIfList)
+            WlanFreeMemory(pIfList);
+        WlanCloseHandle(hClient, NULL);
+        return;
+    }
+    Interface = pIfList->InterfaceInfo[0].InterfaceGuid;
+    WlanFreeMemory(pIfList);
+
     /* Delete any leftover from a previous failed run. */
-    WlanDeleteProfile(hClient, &InterfaceGuid, kProfileName, NULL);
+    WlanDeleteProfile(hClient, &Interface, kProfileName, NULL);
 
     /* Save a profile. */
-    ret = WlanSetProfile(hClient, &InterfaceGuid, 0, kProfileXml, NULL, TRUE,
+    ret = WlanSetProfile(hClient, &Interface, 0, kProfileXml, NULL, TRUE,
                          NULL, &dwReasonCode);
     ok(ret == ERROR_SUCCESS,
        "WlanSetProfile=%lu (expected ERROR_SUCCESS; reason=%lu)\n",
        ret, dwReasonCode);
 
     /* Enumerate and confirm it shows up. */
-    ret = WlanGetProfileList(hClient, &InterfaceGuid, NULL, &pList);
+    ret = WlanGetProfileList(hClient, &Interface, NULL, &pList);
     ok(ret == ERROR_SUCCESS, "WlanGetProfileList=%lu\n", ret);
     Found = FALSE;
     if (ret == ERROR_SUCCESS && pList != NULL)
@@ -288,31 +346,27 @@ static void Wlan_Profile_RoundTrip(void)
     }
     ok(Found, "Profile not found in WlanGetProfileList\n");
 
-    /* Read it back. */
-    ret = WlanGetProfile(hClient, &InterfaceGuid, kProfileName, NULL,
+    /* Read it back: the XML the service returns is its own rendering of the
+     * profile, so check what it describes rather than the bytes. */
+    ret = WlanGetProfile(hClient, &Interface, kProfileName, NULL,
                          &pXmlOut, &dwFlags, &dwGranted);
     ok(ret == ERROR_SUCCESS, "WlanGetProfile=%lu\n", ret);
     if (ret == ERROR_SUCCESS && pXmlOut != NULL)
     {
-        ok(wcscmp(pXmlOut, kProfileXml) == 0, "Round-tripped XML differs\n");
+        ok(wcsstr(pXmlOut, L"<name>WlanapiApitestProfile</name>") != NULL,
+           "Round-tripped XML lost the profile name\n");
+        ok(wcsstr(pXmlOut, L"<name>apitest-ssid</name>") != NULL,
+           "Round-tripped XML lost the SSID\n");
         WlanFreeMemory(pXmlOut);
     }
 
     /* Delete it; second delete should report NOT_FOUND. */
-    ret = WlanDeleteProfile(hClient, &InterfaceGuid, kProfileName, NULL);
+    ret = WlanDeleteProfile(hClient, &Interface, kProfileName, NULL);
     ok(ret == ERROR_SUCCESS, "WlanDeleteProfile=%lu\n", ret);
 
-    ret = WlanDeleteProfile(hClient, &InterfaceGuid, kProfileName, NULL);
+    ret = WlanDeleteProfile(hClient, &Interface, kProfileName, NULL);
     ok(ret == ERROR_NOT_FOUND,
        "WlanDeleteProfile of stale name=%lu (expected ERROR_NOT_FOUND)\n", ret);
-
-    /* Driver-dependent calls return NOT_FOUND, not CALL_NOT_IMPLEMENTED. */
-    {
-        DOT11_SSID Ssid = {0};
-        ret = WlanScan(hClient, &InterfaceGuid, &Ssid, NULL, NULL);
-        ok(ret == ERROR_NOT_FOUND,
-           "WlanScan with no driver=%lu (expected ERROR_NOT_FOUND)\n", ret);
-    }
 
     WlanCloseHandle(hClient, NULL);
 }
@@ -330,5 +384,6 @@ START_TEST(wlanapi)
     WlanGetProfile_test();
     WlanEnumInterfaces_test();
     WlanGetInterfaceCapability_test();
+    WlanInvalidHandle_test();
     Wlan_Profile_RoundTrip();
 }

@@ -33,6 +33,79 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(wlanapi);
 
+/*
+ * The client handles this process has open.  A handle is the service's
+ * context handle; the RPC runtime cannot tell a stale or made-up one from a
+ * real one, so every call looks the caller's handle up here first and answers
+ * ERROR_INVALID_HANDLE for one that is not in the table.
+ */
+typedef struct _WLAN_CLIENT_HANDLE
+{
+    struct _WLAN_CLIENT_HANDLE *Next;
+    HANDLE                      hClientHandle;
+} WLAN_CLIENT_HANDLE, *PWLAN_CLIENT_HANDLE;
+
+static PWLAN_CLIENT_HANDLE ClientHandleList = NULL;
+static CRITICAL_SECTION    ClientHandleLock;
+
+BOOL
+WlanIsClientHandle(HANDLE hClientHandle)
+{
+    PWLAN_CLIENT_HANDLE Entry;
+
+    EnterCriticalSection(&ClientHandleLock);
+    for (Entry = ClientHandleList; Entry != NULL; Entry = Entry->Next)
+    {
+        if (Entry->hClientHandle == hClientHandle)
+            break;
+    }
+    LeaveCriticalSection(&ClientHandleLock);
+    return (Entry != NULL);
+}
+
+/* Take hClientHandle out of the table; FALSE if it was not in it. */
+static BOOL
+WlanRemoveClientHandle(HANDLE hClientHandle)
+{
+    PWLAN_CLIENT_HANDLE *Link, Entry = NULL;
+
+    EnterCriticalSection(&ClientHandleLock);
+    for (Link = &ClientHandleList; *Link != NULL; Link = &(*Link)->Next)
+    {
+        if ((*Link)->hClientHandle == hClientHandle)
+        {
+            Entry = *Link;
+            *Link = Entry->Next;
+            break;
+        }
+    }
+    LeaveCriticalSection(&ClientHandleLock);
+
+    if (Entry == NULL)
+        return FALSE;
+    HeapFree(GetProcessHeap(), 0, Entry);
+    return TRUE;
+}
+
+BOOL
+WINAPI
+DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
+{
+    switch (fdwReason)
+    {
+        case DLL_PROCESS_ATTACH:
+            DisableThreadLibraryCalls(hinstDLL);
+            InitializeCriticalSection(&ClientHandleLock);
+            break;
+
+        case DLL_PROCESS_DETACH:
+            if (lpvReserved == NULL)
+                DeleteCriticalSection(&ClientHandleLock);
+            break;
+    }
+    return TRUE;
+}
+
 DWORD
 WlanRpcStatusToWinError(RPC_STATUS Status)
 {
@@ -133,6 +206,9 @@ WlanConnect(IN HANDLE hClientHandle,
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (pConnectionParameters == NULL))
         return ERROR_INVALID_PARAMETER;
 
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+
     RpcTryExcept
     {
         dwResult = _RpcConnect(hClientHandle, pInterfaceGuid, &pConnectionParameters);
@@ -157,6 +233,9 @@ WlanDisconnect(IN HANDLE hClientHandle,
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL))
         return ERROR_INVALID_PARAMETER;
 
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+
     RpcTryExcept
     {
         dwResult = _RpcDisconnect(hClientHandle, pInterfaceGuid);
@@ -179,16 +258,22 @@ WlanOpenHandle(IN DWORD dwClientVersion,
 {
     DWORD dwResult = ERROR_SUCCESS;
     WCHAR szDummy[] = L"localhost";
+    HANDLE hClientHandle = NULL;
+    PWLAN_CLIENT_HANDLE Entry;
 
     if ((pReserved != NULL) || (pdwNegotiatedVersion == NULL) || (phClientHandle == NULL))
         return ERROR_INVALID_PARAMETER;
+
+    Entry = HeapAlloc(GetProcessHeap(), 0, sizeof(*Entry));
+    if (Entry == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
 
     RpcTryExcept
     {
         dwResult = _RpcOpenHandle(szDummy,
                                 dwClientVersion,
                                 pdwNegotiatedVersion,
-                                (WLANSVC_RPC_HANDLE) phClientHandle);
+                                (WLANSVC_RPC_HANDLE)&hClientHandle);
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -196,7 +281,20 @@ WlanOpenHandle(IN DWORD dwClientVersion,
     }
     RpcEndExcept;
 
-    return dwResult;
+    if (dwResult != ERROR_SUCCESS)
+    {
+        HeapFree(GetProcessHeap(), 0, Entry);
+        return dwResult;
+    }
+
+    Entry->hClientHandle = hClientHandle;
+    EnterCriticalSection(&ClientHandleLock);
+    Entry->Next = ClientHandleList;
+    ClientHandleList = Entry;
+    LeaveCriticalSection(&ClientHandleLock);
+
+    *phClientHandle = hClientHandle;
+    return ERROR_SUCCESS;
 }
 
 DWORD
@@ -208,6 +306,9 @@ WlanCloseHandle(IN HANDLE hClientHandle,
 
     if ((pReserved != NULL) || (hClientHandle == NULL))
         return ERROR_INVALID_PARAMETER;
+
+    if (!WlanRemoveClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
 
     /* Tear down any notification worker bound to this handle first. */
     WlanStopNotificationThread(hClientHandle);
@@ -236,6 +337,9 @@ WlanEnumInterfaces(IN HANDLE hClientHandle,
     if ((pReserved != NULL) || (ppInterfaceList == NULL) || (hClientHandle == NULL))
         return ERROR_INVALID_PARAMETER;
 
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+
     RpcTryExcept
     {
         dwResult = _RpcEnumInterfaces(hClientHandle, ppInterfaceList);
@@ -261,6 +365,9 @@ WlanScan(IN HANDLE hClientHandle,
 
     if ((pReserved != NULL) || (pInterfaceGuid == NULL) || (hClientHandle == NULL))
         return ERROR_INVALID_PARAMETER;
+
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
 
     RpcTryExcept
     {
@@ -292,6 +399,9 @@ WlanQueryInterface(IN HANDLE hClientHandle,
 
     if ((pReserved != NULL) || (pInterfaceGuid == NULL) || (hClientHandle == NULL) || (pdwDataSize == NULL) || (ppData == NULL))
         return ERROR_INVALID_PARAMETER;
+
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
 
     *ppData = NULL;
     *pdwDataSize = 0;
@@ -336,6 +446,9 @@ WlanGetInterfaceCapability(IN HANDLE hClientHandle,
     if ((pReserved != NULL) || (pInterfaceGuid == NULL) || (hClientHandle == NULL) || (ppCapability == NULL))
         return ERROR_INVALID_PARAMETER;
 
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+
     UNIMPLEMENTED;
     return ERROR_SUCCESS;
 }
@@ -350,6 +463,9 @@ DWORD WINAPI WlanRegisterNotification(IN HANDLE hClientHandle,
 {
     if ((pReserved != NULL) || (hClientHandle == NULL))
         return ERROR_INVALID_PARAMETER;
+
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
 
     return WlanRegisterNotificationImpl(hClientHandle,
                                         dwNotifSource,
@@ -387,6 +503,9 @@ WlanIhvControl(IN HANDLE hClientHandle,
     if ((hClientHandle == NULL) || (pInterfaceGuid == NULL) || (pdwBytesReturned == NULL))
         return ERROR_INVALID_PARAMETER;
 
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+
     UNIMPLEMENTED;
     return ERROR_SUCCESS;
 }
@@ -401,6 +520,9 @@ WlanSetSecuritySettings(IN HANDLE hClientHandle,
 
     if ((hClientHandle == NULL) || (strModifiedSDDL == NULL) || (SecurableObject >= WLAN_SECURABLE_OBJECT_COUNT))
         return ERROR_INVALID_PARAMETER;
+
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
 
     RpcTryExcept
     {
@@ -427,6 +549,9 @@ WlanGetAvailableNetworkList(IN HANDLE hClientHandle,
 
     if ((pReserved != NULL) || (pInterfaceGuid == NULL) || (hClientHandle == NULL) || (ppAvailableNetworkList == NULL))
         return ERROR_INVALID_PARAMETER;
+
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
 
     *ppAvailableNetworkList = NULL;
 
@@ -462,6 +587,9 @@ WlanGetNetworkBssList(IN HANDLE hClientHandle,
 
     if ((pReserved != NULL) || (pInterfaceGuid == NULL) || (hClientHandle == NULL) || (ppWlanBssList == NULL))
         return ERROR_INVALID_PARAMETER;
+
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
 
     *ppWlanBssList = NULL;
 

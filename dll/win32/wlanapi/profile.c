@@ -27,6 +27,7 @@
 #include <windef.h>
 #include <winbase.h>
 #include <wlansvc_c.h>
+#include "wlanapi_local.h"
 
 #include <wine/debug.h>
 
@@ -43,6 +44,9 @@ WlanDeleteProfile(IN HANDLE hClientHandle,
 
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (strProfileName == NULL))
         return ERROR_INVALID_PARAMETER;
+
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
 
     RpcTryExcept
     {
@@ -69,6 +73,9 @@ WlanRenameProfile(IN HANDLE hClientHandle,
 
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (strOldProfileName == NULL) || (strNewProfileName == NULL))
         return ERROR_INVALID_PARAMETER;
+
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
 
     RpcTryExcept
     {
@@ -97,6 +104,9 @@ WlanGetProfile(IN HANDLE hClientHandle,
 
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (pstrProfileXml  == NULL) || (strProfileName == NULL))
         return ERROR_INVALID_PARAMETER;
+
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
 
     *pstrProfileXml = NULL;
 
@@ -134,6 +144,9 @@ WlanSetProfile(IN HANDLE hClientHandle,
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (strProfileXml == NULL) || (pdwReasonCode == NULL))
         return ERROR_INVALID_PARAMETER;
 
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+
     RpcTryExcept
     {
         dwResult = _RpcSetProfile(hClientHandle,
@@ -165,6 +178,9 @@ WlanGetProfileCustomUserData(IN HANDLE hClientHandle,
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (strProfileName == NULL))
         return ERROR_INVALID_PARAMETER;
 
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+
     UNIMPLEMENTED;
     return ERROR_SUCCESS;
 }
@@ -184,6 +200,9 @@ WlanSetProfileCustomUserData(IN HANDLE hClientHandle,
     if ((dwDataSize != 0) && (pData == NULL))
         return ERROR_INVALID_PARAMETER;
 
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+
     UNIMPLEMENTED;
     return ERROR_SUCCESS;
 }
@@ -199,6 +218,9 @@ WlanGetProfileList(IN HANDLE hClientHandle,
 
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (ppProfileList  == NULL))
         return ERROR_INVALID_PARAMETER;
+
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
 
     *ppProfileList = NULL;
 
@@ -228,6 +250,9 @@ WlanSetProfileList(IN HANDLE hClientHandle,
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (strProfileNames  == NULL) || (dwItems == 0))
         return ERROR_INVALID_PARAMETER;
 
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+
     RpcTryExcept
     {
         /* An array of string pointers, as the interface declares it. */
@@ -255,6 +280,9 @@ WlanSetProfilePosition(IN HANDLE hClientHandle,
 
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (strProfileName == NULL))
         return ERROR_INVALID_PARAMETER;
+
+    if (!WlanIsClientHandle(hClientHandle))
+        return ERROR_INVALID_HANDLE;
 
     RpcTryExcept
     {
