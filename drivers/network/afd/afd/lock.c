@@ -67,8 +67,18 @@ PVOID LockRequest( PIRP Irp,
             }
 
             /* SEH-guarded copy from user space - bypasses ReactOS's
-             * broken MmProbeAndLockPages. */
+             * broken MmProbeAndLockPages.  A user-mode caller's input must
+             * be user memory: it is read, and, for a request that answers
+             * in it, written back (UnlockRequest()). */
             _SEH2_TRY {
+                if (Irp->RequestorMode != KernelMode)
+                {
+                    if (Output)
+                        ProbeForWrite(UserBuffer, BufferLength, 1);
+                    else
+                        ProbeForRead(UserBuffer, BufferLength, 1);
+                }
+
                 RtlCopyMemory(KernelBuffer, UserBuffer, BufferLength);
             } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
                 CopyStatus = _SEH2_GetExceptionCode();
@@ -110,8 +120,9 @@ PVOID LockRequest( PIRP Irp,
             Irp->Tail.Overlay.DriverContext[2] = (Output && UserBuffer) ?
                                                  PsGetCurrentProcess() : NULL;
 
+            /* The buffers the request points to are the requestor's too */
             if (LockMode != NULL)
-                *LockMode = UserMode;
+                *LockMode = Irp->RequestorMode;
             break;
 
         case IRP_MJ_READ:
