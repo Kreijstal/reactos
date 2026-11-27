@@ -275,30 +275,26 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
         goto end;
     }
 
-    Status = SatisfyAccept(NULL, Irp, NewFileObject, Qelt, TRUE);
-
-    if (Qelt->Object.Object)
-    {
-        /* The accept socket is closed and refused it: the connection waits
-         * for the next accept */
-        ASSERT(FCB2->SharedData.State == SOCKET_STATE_CLOSED);
-        InsertHeadList(&FCB->PendingConnections, &Qelt->ListEntry);
-        goto end;
-    }
-
-    /* The output buffer: the first data block, then the local address, then
-     * the remote one */
+    /* Whatever can fail is done before the connection is the accept
+     * socket's: a failure fails the AcceptEx, and the connection waits for
+     * the next accept, as it does above.  First the output buffer: the first
+     * data block, then the local address, then the remote one. */
     BYTE *OutputBuffer = MmGetSystemAddressForMdlSafe((PMDL)Irp->Tail.Overlay.DriverContext[3], NormalPagePriority);
     if (!OutputBuffer)
+    {
+        InsertHeadList(&FCB->PendingConnections, &Qelt->ListEntry);
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         goto end;
+    }
     BYTE *BufferPtr = OutputBuffer;
 
-    /* Query TCPIP to find the local address of the socket */
+    /* Then the connection's local address, from the transport */
     LONG RequestSize = (FIELD_OFFSET(TDI_ADDRESS_INFO, Address.Address[0].Address) + FCB->LocalAddress->Address[0].AddressLength);
     PTRANSPORT_ADDRESS RemoteAddress = (PTRANSPORT_ADDRESS)Qelt->ConnInfo->RemoteAddress;
     PTDI_ADDRESS_INFO Buffer = ExAllocatePoolWithTag(NonPagedPool, RequestSize, 'bufT');
     if (Buffer == NULL)
     {
+        InsertHeadList(&FCB->PendingConnections, &Qelt->ListEntry);
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto end;
     }
@@ -307,6 +303,7 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     if (Mdl == NULL)
     {
         ExFreePool(Buffer);
+        InsertHeadList(&FCB->PendingConnections, &Qelt->ListEntry);
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto end;
     }
@@ -319,15 +316,42 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
         Status = _SEH2_GetExceptionCode();
+        IoFreeMdl(Mdl);
         ExFreePool(Buffer);
+        InsertHeadList(&FCB->PendingConnections, &Qelt->ListEntry);
         goto end;
     }
     _SEH2_END;
 
-    Status = TdiQueryInformation(
-        FCB2->Connection.Object, TDI_QUERY_ADDRESS_INFO, Mdl);
+    /* TdiQueryInformation() consumes the MDL */
+    Status = TdiQueryInformation(Qelt->Object.Object, TDI_QUERY_ADDRESS_INFO, Mdl);
     if (!NT_SUCCESS(Status))
+    {
+        ExFreePool(Buffer);
+        InsertHeadList(&FCB->PendingConnections, &Qelt->ListEntry);
         goto end;
+    }
+
+    Status = SatisfyAccept(NULL, Irp, NewFileObject, Qelt, TRUE);
+
+    if (Qelt->Object.Object)
+    {
+        /* The accept socket is closed and refused it: the connection waits
+         * for the next accept */
+        ASSERT(FCB2->SharedData.State == SOCKET_STATE_CLOSED);
+        ExFreePool(Buffer);
+        InsertHeadList(&FCB->PendingConnections, &Qelt->ListEntry);
+        goto end;
+    }
+
+    /* The accept socket has the connection now, but could not make it its
+     * own: the AcceptEx fails, and closing the socket closes the
+     * connection */
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePool(Buffer);
+        goto end;
+    }
 
     /* Write the local address, then the remote one, past the data block:
      * AfdSuperAccept() checked that the three fit in the buffer */
