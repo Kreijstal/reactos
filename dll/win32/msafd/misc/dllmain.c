@@ -1728,8 +1728,7 @@ MsafdAccept(
     union
     {
         AFD_RECEIVED_ACCEPT_DATA Data;
-        UCHAR Bytes[FIELD_OFFSET(AFD_RECEIVED_ACCEPT_DATA, Address.Address[0].AddressType) +
-                    sizeof(SOCKADDR_STORAGE)];
+        UCHAR Bytes[sizeof(AFD_RECEIVED_ACCEPT_DATA) + sizeof(SOCKADDR_STORAGE)];
     }                           ReceiveBuffer;
     HANDLE                      SockEvent;
 
