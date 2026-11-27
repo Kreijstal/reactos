@@ -125,9 +125,26 @@ static NTSTATUS SatisfyAccept(PAFD_DEVICE_EXTENSION DeviceExt,
 }
 
 static NTSTATUS SatisfyPreAccept( PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt ) {
+    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
     PAFD_RECEIVED_ACCEPT_DATA ListenReceive =
         (PAFD_RECEIVED_ACCEPT_DATA)Irp->AssociatedIrp.SystemBuffer;
     PTA_IP_ADDRESS IPAddr;
+    ULONG AnswerLength = FIELD_OFFSET(AFD_RECEIVED_ACCEPT_DATA, Address) +
+                         TaLengthOfTransportAddress(Qelt->ConnInfo->RemoteAddress);
+
+    /* The answer is the output (METHOD_BUFFERED): an output too short for it
+     * fails the wait, and the connection waits for the next one */
+    if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength < AnswerLength)
+    {
+        AFD_DbgPrint(MIN_TRACE,("Output of %lu bytes cannot hold %lu\n",
+                                IrpSp->Parameters.DeviceIoControl.OutputBufferLength,
+                                AnswerLength));
+        Irp->IoStatus.Information = 0;
+        Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+        (void)IoSetCancelRoutine(Irp, NULL);
+        IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+        return STATUS_BUFFER_TOO_SMALL;
+    }
 
     ListenReceive->SequenceNumber = Qelt->Seq;
 
@@ -152,9 +169,9 @@ static NTSTATUS SatisfyPreAccept( PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt ) {
     AFD_DbgPrint(MID_TRACE,("IPAddr->Address[0].Address[0].sin_addr %x\n",
                             IPAddr->Address[0].Address[0].in_addr));
 
-    if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
+    if( Irp->MdlAddress ) UnlockRequest( Irp, IrpSp );
 
-    Irp->IoStatus.Information = ((PCHAR)&IPAddr[1]) - ((PCHAR)ListenReceive);
+    Irp->IoStatus.Information = AnswerLength;
     Irp->IoStatus.Status = STATUS_SUCCESS;
     (void)IoSetCancelRoutine(Irp, NULL);
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
