@@ -286,13 +286,28 @@ WlanSvcSetProfile(PWLANSVC_INTERFACE Iface,
             WlanSvcFreeProfile(prof);
             return ERROR_ALREADY_EXISTS;
         }
+
+        /* An overwritten profile keeps its place in the preference list:
+         * the new record takes the old one's slot. */
+        InsertTailList(&existing->ListEntry, &prof->ListEntry);
         RemoveEntryList(&existing->ListEntry);
-        Iface->ProfileCount--;
         WlanSvcFreeProfile(existing);
     }
+    else
+    {
+        /* A new profile goes to the top of the list, below the group policy
+         * profiles, which always come first. */
+        PLIST_ENTRY entry = Iface->ProfileListHead.Flink;
 
-    InsertTailList(&Iface->ProfileListHead, &prof->ListEntry);
-    Iface->ProfileCount++;
+        while (entry != &Iface->ProfileListHead &&
+               (CONTAINING_RECORD(entry, WLANSVC_PROFILE, ListEntry)->Flags &
+                WLAN_PROFILE_GROUP_POLICY))
+        {
+            entry = entry->Flink;
+        }
+        InsertTailList(entry, &prof->ListEntry);
+        Iface->ProfileCount++;
+    }
 
     WlanSvcIndicateAcm(Iface, wlan_notification_acm_profile_change);
     return ERROR_SUCCESS;

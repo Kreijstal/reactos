@@ -225,6 +225,11 @@ typedef struct _WLAN_RAW_DATA {
 #endif
 } WLAN_RAW_DATA, *PWLAN_RAW_DATA;
 
+/* WLAN_PROFILE_INFO dwFlags */
+#define WLAN_PROFILE_GROUP_POLICY       0x00000001
+#define WLAN_PROFILE_USER               0x00000002
+#define WLAN_PROFILE_GET_PLAINTEXT_KEY  0x00000004
+
 typedef struct _WLAN_PROFILE_INFO {
     WCHAR strProfileName[256];
     DWORD dwFlags;

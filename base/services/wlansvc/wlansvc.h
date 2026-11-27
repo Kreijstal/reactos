@@ -82,6 +82,12 @@
 #define WLAN_NOTIFICATION_SOURCE_IHV          0x00000040
 #endif
 
+/* WLAN_PROFILE_INFO dwFlags (wlanapi.h; the IDL does not carry #defines). */
+#ifndef WLAN_PROFILE_GROUP_POLICY
+#define WLAN_PROFILE_GROUP_POLICY       0x00000001
+#define WLAN_PROFILE_USER               0x00000002
+#endif
+
 /* These declarations are now emitted into wlansvc_s.h because they are part
  * of the RPC interface.  Do not duplicate wlanapi.h's definitions here: the
  * generated header is included by precomp.h first. */
