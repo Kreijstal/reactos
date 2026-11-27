@@ -8,6 +8,7 @@ list(APPEND SOURCE
     requestlength.c
     select.c
     send.c
+    tdihandles.c
     userbuffer.c
     windowsize.c)
 
