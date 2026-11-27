@@ -307,14 +307,18 @@ typedef struct _DXGK_START_INFO
  */
 typedef enum _DXGK_EVENT_TYPE
 {
-    DpEventType_Uninitialized   = 0,
-    DpEventTypePowerStateChange = 1,
-    DpEventTypeDisplaySwitch    = 2,
-    DpEventTypeDockingEvent     = 3,
-    DpEventTypeAcpiEvent        = 4,
-    DpEventTypeResumeEvent      = 5,
-    DpEventTypeDPCRoutineEvent  = 6,
-} DXGK_EVENT_TYPE;
+    DxgkUndefinedEvent,
+    DxgkAcpiEvent,
+    DxgkPowerStateEvent,
+    DxgkDockingEvent,
+    DxgkChainedAcpiEvent
+} DXGK_EVENT_TYPE, *PDXGK_EVENT_TYPE;
+
+/* AcpiFlags a miniport returns from DxgkDdiNotifyAcpiEvent */
+#define DXGK_ACPI_POLL_DISPLAY_CHILDREN     0x00000001
+#define DXGK_ACPI_CHANGE_DISPLAY_MODE       0x00000002
+#define DXGK_ACPI_CHANGE_DISPLAY_TOPOLOGY   0x00000004
+#define DXGK_ACPI_CHAIN_NOT_HANDLED         0x00000008
 
 
 /* =========================================================================
