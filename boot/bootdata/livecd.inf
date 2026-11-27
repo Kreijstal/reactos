@@ -264,7 +264,7 @@ HKLM,"SYSTEM\Setup","CmdLine",0x00020000,"setup -mini"
 
 ; User Profile List
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList",,0x00000012
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList","Default",0x00000000,"%SystemDrive%\Users\Default"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList","Default",0x00020000,"%SystemDrive%\Users\Default"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList","ProfilesDirectory",0x00020000,"%SystemDrive%\Users"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList","ProgramData",0x00020000,"%SystemDrive%\ProgramData"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList","Public",0x00020000,"%SystemDrive%\Users\Public"

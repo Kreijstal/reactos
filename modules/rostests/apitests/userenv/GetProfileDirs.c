@@ -6,6 +6,7 @@
  */
 
 #include <apitest.h>
+#include <winreg.h>
 #include <userenv.h>
 
 /* The Get[AllUsers|DefaultUser|User]Profile[s]Directory have the same prototype */
@@ -24,6 +25,45 @@ GET_PROFILE_DIRS GetProfileDirsFuncsList[] =
     {GetProfilesDirectoryW,           L"GetProfilesDirectoryW"},
 //  {GetUserProfileDirectoryW,        L"GetUserProfileDirectoryW"},
 };
+
+/*
+ * The directories come from the ProfileList values, which are there from the
+ * start (in the hive setup and the live CD ship), as unexpanded
+ * REG_EXPAND_SZ paths.
+ */
+static void
+TestProfileListValue(LPCWSTR pValueName, GET_PROFILE_DIRS_FUNC pFunc, LPCWSTR pFuncName)
+{
+    HKEY hKey;
+    LONG Error;
+    DWORD dwType = REG_NONE, cbData, cchSize;
+    WCHAR szValue[MAX_PATH], szExpanded[MAX_PATH], szProfileDir[MAX_PATH];
+
+    Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                          L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
+                          0, KEY_QUERY_VALUE, &hKey);
+    ok(Error == ERROR_SUCCESS, "RegOpenKeyExW(ProfileList) returned %ld\n", Error);
+    if (Error != ERROR_SUCCESS)
+        return;
+
+    cbData = sizeof(szValue) - sizeof(WCHAR);
+    Error = RegQueryValueExW(hKey, pValueName, NULL, &dwType, (LPBYTE)szValue, &cbData);
+    RegCloseKey(hKey);
+    ok(Error == ERROR_SUCCESS, "ProfileList\\%S: RegQueryValueExW returned %ld\n", pValueName, Error);
+    if (Error != ERROR_SUCCESS)
+        return;
+    szValue[cbData / sizeof(WCHAR)] = UNICODE_NULL;
+    ok(dwType == REG_EXPAND_SZ, "ProfileList\\%S: type %lu, expected REG_EXPAND_SZ\n", pValueName, dwType);
+
+    if (pFunc == NULL)
+        return;
+    ok(ExpandEnvironmentStringsW(szValue, szExpanded, _countof(szExpanded)) != 0,
+       "ExpandEnvironmentStringsW(%S) failed\n", szValue);
+    cchSize = _countof(szProfileDir);
+    ok(pFunc(szProfileDir, &cchSize), "%S failed with %lu\n", pFuncName, GetLastError());
+    ok(lstrcmpiW(szProfileDir, szExpanded) == 0, "%S: '%S', ProfileList\\%S is '%S'\n",
+       pFuncName, szProfileDir, pValueName, szExpanded);
+}
 
 START_TEST(GetProfileDirs)
 {
@@ -81,6 +121,11 @@ START_TEST(GetProfileDirs)
         ok(cchSize != 0, "%S: Expected a profile directory size != 0, got 0\n", GetProfileDirs->pFuncName);
         ok(*szProfileDir, "%S: Expected a profile directory, got nothing\n", GetProfileDirs->pFuncName);
     }
+
+    TestProfileListValue(L"ProgramData", GetAllUsersProfileDirectoryW, L"GetAllUsersProfileDirectoryW");
+    TestProfileListValue(L"Default", GetDefaultUserProfileDirectoryW, L"GetDefaultUserProfileDirectoryW");
+    TestProfileListValue(L"ProfilesDirectory", GetProfilesDirectoryW, L"GetProfilesDirectoryW");
+    TestProfileListValue(L"Public", NULL, NULL);
 
     // TODO: Add more tests!
 }
