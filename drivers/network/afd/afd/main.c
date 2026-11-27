@@ -275,6 +275,27 @@ AfdSetDisconnectDataSize(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, 0);
 }
 
+/* Opens Object, one of the socket's TDI objects, for the caller: the handles
+ * AFD keeps are its own kernel handles, of no use to the caller.  A socket
+ * without the object (one not bound, not connected) gives no handle. */
+static
+NTSTATUS
+AfdOpenTdiHandle(PIRP Irp, PFILE_OBJECT Object, PHANDLE Handle)
+{
+    *Handle = NULL;
+
+    if (!Object)
+        return STATUS_SUCCESS;
+
+    return ObOpenObjectByPointer(Object,
+                                 Irp->RequestorMode == KernelMode ? OBJ_KERNEL_HANDLE : 0,
+                                 NULL,
+                                 MAXIMUM_ALLOWED,
+                                 *IoFileObjectType,
+                                 Irp->RequestorMode,
+                                 Handle);
+}
+
 static NTSTATUS NTAPI
 AfdGetTdiHandles(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 PIO_STACK_LOCATION IrpSp)
@@ -285,6 +306,7 @@ AfdGetTdiHandles(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PAFD_FCB FCB = FileObject->FsContext;
     PULONG HandleFlags;
     PAFD_TDI_HANDLE_DATA HandleData = Irp->UserBuffer;
+    HANDLE AddressHandle = NULL, ConnectionHandle = NULL;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -303,10 +325,21 @@ AfdGetTdiHandles(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     Status = STATUS_SUCCESS;
 
     if ((*HandleFlags) & AFD_ADDRESS_HANDLE)
+        Status = AfdOpenTdiHandle(Irp, FCB->AddressFile.Object, &AddressHandle);
+
+    /* A listening socket has no connection: the one it keeps is the next
+     * one it accepts, which becomes the accepting socket's */
+    if (NT_SUCCESS(Status) && ((*HandleFlags) & AFD_CONNECTION_HANDLE) &&
+        FCB->SharedData.State != SOCKET_STATE_LISTENING)
+    {
+        Status = AfdOpenTdiHandle(Irp, FCB->Connection.Object, &ConnectionHandle);
+    }
+
+    if (NT_SUCCESS(Status) && ((*HandleFlags) & AFD_ADDRESS_HANDLE))
     {
         Status = AfdCopyToCaller(Irp,
                                  &HandleData->TdiAddressHandle,
-                                 &FCB->AddressFile.Handle,
+                                 &AddressHandle,
                                  sizeof(HandleData->TdiAddressHandle));
     }
 
@@ -314,8 +347,18 @@ AfdGetTdiHandles(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     {
         Status = AfdCopyToCaller(Irp,
                                  &HandleData->TdiConnectionHandle,
-                                 &FCB->Connection.Handle,
+                                 &ConnectionHandle,
                                  sizeof(HandleData->TdiConnectionHandle));
+    }
+
+    /* The caller has the handles only if it has the answer.  This is its
+     * process: ZwClose() closes them there. */
+    if (!NT_SUCCESS(Status))
+    {
+        if (AddressHandle)
+            ZwClose(AddressHandle);
+        if (ConnectionHandle)
+            ZwClose(ConnectionHandle);
     }
 
     return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
