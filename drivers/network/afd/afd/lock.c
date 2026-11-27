@@ -278,10 +278,21 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
     UINT i;
     /* Copy the buffer array so we don't lose it */
     UINT Lock = LockAddress ? 2 : 0;
-    UINT Size = (sizeof(AFD_WSABUF) + sizeof(AFD_MAPBUF)) * (Count + Lock);
-    PAFD_WSABUF NewBuf = ExAllocatePoolWithTag(PagedPool, Size, TAG_AFD_WSA_BUFFER);
+    UINT Size;
+    PAFD_WSABUF NewBuf;
     BOOLEAN LockFailed = FALSE;
     PAFD_MAPBUF MapBuf;
+
+    /* The count is the caller's.  One whose copy, with the address buffers,
+     * would not fit in a UINT names more buffers than there is memory for. */
+    if (Count > MAXUINT / (sizeof(AFD_WSABUF) + sizeof(AFD_MAPBUF)) - Lock)
+    {
+        AFD_DbgPrint(MIN_TRACE,("%u buffers\n", Count));
+        return NULL;
+    }
+
+    Size = (sizeof(AFD_WSABUF) + sizeof(AFD_MAPBUF)) * (Count + Lock);
+    NewBuf = ExAllocatePoolWithTag(PagedPool, Size, TAG_AFD_WSA_BUFFER);
 
     AFD_DbgPrint(MID_TRACE,("Called(%p)\n", NewBuf));
 
