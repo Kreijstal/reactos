@@ -120,21 +120,21 @@ AfdSetDisconnectOptionsSize(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 {
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
-    PUINT DisconnectOptionsSize = LockRequest(Irp, IrpSp, FALSE, NULL);
+    PUINT DisconnectOptionsSize;
     UINT BufferSize = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
     if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
 
-    if (!DisconnectOptionsSize)
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
-
     if (BufferSize < sizeof(UINT))
     {
         AFD_DbgPrint(MIN_TRACE,("Buffer too small\n"));
         return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, 0);
     }
+
+    if (!(DisconnectOptionsSize = LockRequest(Irp, IrpSp, FALSE, NULL)))
+        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
 
     if (FCB->DisconnectOptions)
     {
@@ -232,21 +232,21 @@ AfdSetDisconnectDataSize(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 {
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
-    PUINT DisconnectDataSize = LockRequest(Irp, IrpSp, FALSE, NULL);
+    PUINT DisconnectDataSize;
     UINT BufferSize = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
     if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
 
-    if (!DisconnectDataSize)
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
-
     if (BufferSize < sizeof(UINT))
     {
         AFD_DbgPrint(MIN_TRACE,("Buffer too small\n"));
         return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, 0);
     }
+
+    if (!(DisconnectDataSize = LockRequest(Irp, IrpSp, FALSE, NULL)))
+        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
 
     if (FCB->DisconnectData)
     {
@@ -273,15 +273,12 @@ AfdGetTdiHandles(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 {
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
-    PULONG HandleFlags = LockRequest(Irp, IrpSp, TRUE, NULL);
+    PULONG HandleFlags;
     PAFD_TDI_HANDLE_DATA HandleData = Irp->UserBuffer;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
     if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
-
-    if (!HandleFlags)
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
 
     if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(ULONG) ||
         IrpSp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(*HandleData))
@@ -289,6 +286,9 @@ AfdGetTdiHandles(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         AFD_DbgPrint(MIN_TRACE,("Buffer too small\n"));
         return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, 0);
     }
+
+    if (!(HandleFlags = LockRequest(Irp, IrpSp, TRUE, NULL)))
+        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
 
     if ((*HandleFlags) & AFD_ADDRESS_HANDLE)
         HandleData->TdiAddressHandle = FCB->AddressFile.Handle;
@@ -1234,6 +1234,94 @@ AfdQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCAT
 }
 
 static DRIVER_DISPATCH AfdDispatch;
+
+/* The least the input of a request must hold: the structure its handler
+ * reads, or the fixed part of one that ends in a variable part, which the
+ * handler checks against the rest of the input.  A request with less fails
+ * before its handler reads it.  The handlers that convert a 32-bit caller's
+ * structure take that structure's length.  The *_SIZE requests and
+ * IOCTL_AFD_GET_TDI_HANDLES check their input themselves. */
+static
+ULONG
+AfdRequestInputLength(PIRP Irp, ULONG IoControlCode)
+{
+#ifdef _WIN64
+    BOOLEAN Is32Bit = IoIs32bitProcess(Irp);
+#define AFD_CALLER_SIZEOF(Type) (Is32Bit ? sizeof(Type##32) : sizeof(Type))
+#define AFD_CALLER_OFFSET(Type, Field) (Is32Bit ? FIELD_OFFSET(Type##32, Field) : FIELD_OFFSET(Type, Field))
+#else
+#define AFD_CALLER_SIZEOF(Type) sizeof(Type)
+#define AFD_CALLER_OFFSET(Type, Field) FIELD_OFFSET(Type, Field)
+    UNREFERENCED_PARAMETER(Irp);
+#endif
+
+    switch (IoControlCode)
+    {
+    case IOCTL_AFD_BIND:
+        return FIELD_OFFSET(AFD_BIND_DATA, Address.Address[0].Address);
+
+    case IOCTL_AFD_CONNECT:
+        return FIELD_OFFSET(AFD_CONNECT_INFO, RemoteAddress.Address[0].Address);
+
+    case IOCTL_AFD_SUPER_CONNECT:
+        return FIELD_OFFSET(AFD_SUPER_CONNECT_INFO, RemoteAddress.Address[0].Address);
+
+    case IOCTL_AFD_START_LISTEN:
+        return sizeof(AFD_LISTEN_DATA);
+
+    case IOCTL_AFD_ACCEPT:
+        return sizeof(AFD_ACCEPT_DATA);
+
+    case IOCTL_AFD_SUPER_ACCEPT:
+        return sizeof(AFD_SUPER_ACCEPT_INFO);
+
+    case IOCTL_AFD_DEFER_ACCEPT:
+        return sizeof(AFD_DEFER_ACCEPT_DATA);
+
+    case IOCTL_AFD_RECV:
+        return AFD_CALLER_SIZEOF(AFD_RECV_INFO);
+
+    case IOCTL_AFD_RECV_DATAGRAM:
+        return sizeof(AFD_RECV_INFO_UDP);
+
+    case IOCTL_AFD_SEND:
+        return AFD_CALLER_SIZEOF(AFD_SEND_INFO);
+
+    case IOCTL_AFD_SEND_DATAGRAM:
+        return AFD_CALLER_SIZEOF(AFD_SEND_INFO_UDP);
+
+    case IOCTL_AFD_SELECT:
+        return AFD_CALLER_OFFSET(AFD_POLL_INFO, Handles);
+
+    case IOCTL_AFD_DISCONNECT:
+        return sizeof(AFD_DISCONNECT_INFO);
+
+    case IOCTL_AFD_GET_INFO:
+    case IOCTL_AFD_SET_INFO:
+        return sizeof(AFD_INFO);
+
+    case IOCTL_AFD_EVENT_SELECT:
+        return sizeof(AFD_EVENT_SELECT_INFO);
+
+    case IOCTL_AFD_ENUM_NETWORK_EVENTS:
+        return sizeof(AFD_ENUM_NETWORK_EVENTS_INFO);
+
+    /* The context, data or options themselves: any length but none */
+    case IOCTL_AFD_SET_CONTEXT:
+    case IOCTL_AFD_SET_CONNECT_DATA:
+    case IOCTL_AFD_SET_CONNECT_OPTIONS:
+    case IOCTL_AFD_SET_DISCONNECT_DATA:
+    case IOCTL_AFD_SET_DISCONNECT_OPTIONS:
+        return 1;
+
+    default:
+        return 0;
+    }
+
+#undef AFD_CALLER_SIZEOF
+#undef AFD_CALLER_OFFSET
+}
+
 static NTSTATUS
 AfdDispatchRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
@@ -1255,6 +1343,16 @@ AfdDispatchRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION Irp
 
     case IRP_MJ_DEVICE_CONTROL:
     {
+        if (IrpSp->Parameters.DeviceIoControl.InputBufferLength <
+            AfdRequestInputLength(Irp, IrpSp->Parameters.DeviceIoControl.IoControlCode))
+        {
+            AFD_DbgPrint(MIN_TRACE, ("IOCTL 0x%x: input of %lu bytes is too short\n",
+                                     IrpSp->Parameters.DeviceIoControl.IoControlCode,
+                                     IrpSp->Parameters.DeviceIoControl.InputBufferLength));
+            Status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
         switch( IrpSp->Parameters.DeviceIoControl.IoControlCode ) {
         case IOCTL_AFD_BIND:
             return AfdBindSocket( DeviceObject, Irp, IrpSp );

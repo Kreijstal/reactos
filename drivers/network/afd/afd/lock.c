@@ -164,6 +164,21 @@ PVOID LockRequest( PIRP Irp,
     return GetLockedData(Irp, IrpSp);
 }
 
+/* Whether a request that ends in a transport address, as locked by
+ * LockRequest(), holds the whole of its first address: TaCopyTransportAddress()
+ * copies as much.  AfdDispatchRequest() checked that the request holds the
+ * address up to its bytes. */
+BOOLEAN
+AfdRequestHoldsAddress(PIO_STACK_LOCATION IrpSp, PVOID Request, PTRANSPORT_ADDRESS Address)
+{
+    ULONG InputLength = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
+    ULONG AddressOffset = (ULONG)((PUCHAR)Address->Address[0].Address - (PUCHAR)Request);
+
+    ASSERT(InputLength >= AddressOffset);
+
+    return InputLength - AddressOffset >= Address->Address[0].AddressLength;
+}
+
 VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp )
 {
     PVOID KernelBuffer;

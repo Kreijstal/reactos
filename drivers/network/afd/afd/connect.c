@@ -88,21 +88,21 @@ AfdSetConnectOptionsSize(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 {
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
-    PUINT ConnectOptionsSize = LockRequest(Irp, IrpSp, FALSE, NULL);
+    PUINT ConnectOptionsSize;
     UINT BufferSize = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
     if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
 
-    if (!ConnectOptionsSize)
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
-
     if (BufferSize < sizeof(UINT))
     {
         AFD_DbgPrint(MIN_TRACE,("Buffer too small\n"));
         return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, 0);
     }
+
+    if (!(ConnectOptionsSize = LockRequest(Irp, IrpSp, FALSE, NULL)))
+        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
 
     if (FCB->ConnectOptions)
     {
@@ -199,21 +199,21 @@ AfdSetConnectDataSize(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 {
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
-    PUINT ConnectDataSize = LockRequest(Irp, IrpSp, FALSE, NULL);
+    PUINT ConnectDataSize;
     UINT BufferSize = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
     if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
 
-    if (!ConnectDataSize)
-        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
-
     if (BufferSize < sizeof(UINT))
     {
         AFD_DbgPrint(MIN_TRACE,("Buffer too small\n"));
         return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, 0);
     }
+
+    if (!(ConnectDataSize = LockRequest(Irp, IrpSp, FALSE, NULL)))
+        return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
 
     if (FCB->ConnectData)
     {
@@ -545,6 +545,9 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp,
                                        0 );
 
+    if (!AfdRequestHoldsAddress(IrpSp, ConnectReq, &ConnectReq->RemoteAddress))
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
+
     AFD_DbgPrint(MID_TRACE,("Connect request:\n"));
 #if 0
     OskitDumpBuffer
@@ -711,6 +714,9 @@ AfdStreamSocketSuperConnect(
     ConnectReq = LockRequest(Irp, IrpSp, FALSE, &LockMode);
     if (!ConnectReq)
         return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+
+    if (!AfdRequestHoldsAddress(IrpSp, ConnectReq, &ConnectReq->RemoteAddress))
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
 
     AFD_DbgPrint(MID_TRACE,("Connect request:\n"));
 #if DBG

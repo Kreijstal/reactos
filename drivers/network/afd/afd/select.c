@@ -333,8 +333,37 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     UINT i, Signalled = 0;
     ULONG Exclusive;
     ULONG HandleCount;
-    
-    UNREFERENCED_PARAMETER(IrpSp);
+    ULONG HandlesOffset, HandleSize;
+    ULONG InputLength = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
+    ULONG OutputLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+
+#ifdef _WIN64
+    if (IoIs32bitProcess(Irp))
+    {
+        HandlesOffset = FIELD_OFFSET(AFD_POLL_INFO32, Handles);
+        HandleSize = sizeof(AFD_HANDLE32);
+    }
+    else
+#endif
+    {
+        HandlesOffset = FIELD_OFFSET(AFD_POLL_INFO, Handles);
+        HandleSize = sizeof(AFD_HANDLE);
+    }
+
+    /* The handles are read, and their events written back, in place: the
+     * input and the output must both hold as many as the request counts.
+     * AfdDispatchRequest() checked that the input holds the count. */
+    ASSERT(InputLength >= HandlesOffset);
+    if (PollReq->HandleCount > (InputLength - HandlesOffset) / HandleSize ||
+        OutputLength < HandlesOffset + PollReq->HandleCount * HandleSize)
+    {
+        AFD_DbgPrint(MIN_TRACE, ("%lu handles do not fit in %lu/%lu bytes\n",
+                                 PollReq->HandleCount, InputLength, OutputLength));
+        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+        return STATUS_INVALID_PARAMETER;
+    }
 
 #ifdef _WIN64
     if (IoIs32bitProcess(Irp))

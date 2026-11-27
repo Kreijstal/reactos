@@ -368,6 +368,7 @@ VOID UnlockHandles( PAFD_HANDLE HandleArray, UINT HandleCount );
 PVOID LockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp, BOOLEAN Output, KPROCESSOR_MODE *LockMode );
 VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp );
 PVOID GetLockedData( PIRP Irp, PIO_STACK_LOCATION IrpSp );
+BOOLEAN AfdRequestHoldsAddress(PIO_STACK_LOCATION IrpSp, PVOID Request, PTRANSPORT_ADDRESS Address);
 NTSTATUS LeaveIrpUntilLater( PAFD_FCB FCB, PIRP Irp, UINT Function );
 NTSTATUS QueueUserModeIrp(PAFD_FCB FCB, PIRP Irp, UINT Function);
 

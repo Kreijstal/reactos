@@ -851,8 +851,8 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( !SocketAcquireStateLock( Fcb ) ) return LostSocket( Irp );
 
-    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(*AcceptRequest))
-        return UnlockAndMaybeComplete(Fcb, STATUS_INVALID_PARAMETER, Irp, 0);
+    /* AfdDispatchRequest() checked */
+    ASSERT(IrpSp->Parameters.DeviceIoControl.InputBufferLength >= sizeof(*AcceptRequest));
 
     if( !(AcceptRequest = LockRequest( Irp, IrpSp, FALSE, NULL )) )
         return UnlockAndMaybeComplete( Fcb, STATUS_NO_MEMORY, Irp,
@@ -982,8 +982,8 @@ NTSTATUS AfdDeferAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
 
-    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(*DeferData))
-        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
+    /* AfdDispatchRequest() checked */
+    ASSERT(IrpSp->Parameters.DeviceIoControl.InputBufferLength >= sizeof(*DeferData));
 
     if( !(DeferData = LockRequest( Irp, IrpSp, FALSE, NULL )) )
         return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
