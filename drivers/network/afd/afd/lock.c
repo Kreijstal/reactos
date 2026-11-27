@@ -241,15 +241,13 @@ AfdCopyFromCaller(PIRP Irp, PVOID Destination, const VOID *Source, SIZE_T Length
 }
 
 /* Captures a transport address a request points to, rather than holds: one
- * address, as the caller's says it is.  Room is made for as much of it as
- * TdiBuildConnectionInfo() copies for its type, which a shorter one leaves
- * zero. */
+ * address, as the caller's says it is */
 NTSTATUS
 AfdCaptureTransportAddress(PIRP Irp, PTRANSPORT_ADDRESS Address, PTRANSPORT_ADDRESS *Captured)
 {
     NTSTATUS Status;
     TRANSPORT_ADDRESS Header;
-    ULONG Length, CopyLength;
+    ULONG CopyLength;
     PTRANSPORT_ADDRESS Copy;
 
     *Captured = NULL;
@@ -260,10 +258,8 @@ AfdCaptureTransportAddress(PIRP Irp, PTRANSPORT_ADDRESS Address, PTRANSPORT_ADDR
         return Status;
 
     CopyLength = FIELD_OFFSET(TRANSPORT_ADDRESS, Address[0].Address) + Header.Address[0].AddressLength;
-    Length = FIELD_OFFSET(TRANSPORT_ADDRESS, Address[0].Address) +
-             max(Header.Address[0].AddressLength, TdiAddressSizeFromType(Header.Address[0].AddressType));
 
-    Copy = ExAllocatePoolZero(NonPagedPool, Length, TAG_AFD_TRANSPORT_ADDRESS);
+    Copy = ExAllocatePoolWithTag(NonPagedPool, CopyLength, TAG_AFD_TRANSPORT_ADDRESS);
     if (!Copy)
         return STATUS_NO_MEMORY;
 

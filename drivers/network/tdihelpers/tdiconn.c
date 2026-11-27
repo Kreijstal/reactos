@@ -224,16 +224,22 @@ NTSTATUS TdiBuildNullConnectionInfo
 }
 
 
+/* Copies an address, as long as it says it is, to a connection information
+ * with room for it */
 NTSTATUS
 TdiBuildConnectionInfoInPlace
 ( PTDI_CONNECTION_INFORMATION ConnectionInfo,
   PTRANSPORT_ADDRESS Address ) {
     NTSTATUS Status = STATUS_SUCCESS;
+    ULONG Length = FIELD_OFFSET(TRANSPORT_ADDRESS, Address[0].Address) +
+                   Address->Address[0].AddressLength;
+
+    NT_ASSERT(Length <= (ULONG)ConnectionInfo->RemoteAddressLength);
 
     _SEH2_TRY {
         RtlCopyMemory( ConnectionInfo->RemoteAddress,
                        Address,
-                       ConnectionInfo->RemoteAddressLength );
+                       Length );
     } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
         Status = _SEH2_GetExceptionCode();
     } _SEH2_END;
@@ -242,15 +248,46 @@ TdiBuildConnectionInfoInPlace
 }
 
 
+/* A connection information for an address, holding it as it is.  It has room
+ * for an address of its type too, which is what a transport answers in: an
+ * address shorter than its type's leaves the rest zero. */
 NTSTATUS
 TdiBuildConnectionInfo
 ( PTDI_CONNECTION_INFORMATION *ConnectionInfo,
   PTRANSPORT_ADDRESS Address ) {
-    NTSTATUS Status = TdiBuildNullConnectionInfo
-        ( ConnectionInfo, Address->Address[0].AddressType );
+    PTDI_CONNECTION_INFORMATION ConnInfo;
+    ULONG TypeLength, Length;
+    NTSTATUS Status;
 
-    if( NT_SUCCESS(Status) )
-        TdiBuildConnectionInfoInPlace( *ConnectionInfo, Address );
+    *ConnectionInfo = NULL;
 
-    return Status;
+    TypeLength = TaLengthOfTransportAddressByType(Address->Address[0].AddressType);
+    if (!TypeLength) {
+        DPRINT("Invalid parameter\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Length = max(TypeLength,
+                 FIELD_OFFSET(TRANSPORT_ADDRESS, Address[0].Address) +
+                 Address->Address[0].AddressLength);
+
+    ConnInfo = ExAllocatePoolZero(NonPagedPool,
+                                  sizeof(TDI_CONNECTION_INFORMATION) + Length,
+                                  TAG_AFD_TDI_CONNECTION_INFORMATION);
+    if (!ConnInfo)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    ConnInfo->OptionsLength = sizeof(ULONG);
+    ConnInfo->RemoteAddressLength = Length;
+    ConnInfo->RemoteAddress = (PTRANSPORT_ADDRESS)&ConnInfo[1];
+
+    Status = TdiBuildConnectionInfoInPlace(ConnInfo, Address);
+    if (!NT_SUCCESS(Status)) {
+        ExFreePoolWithTag(ConnInfo, TAG_AFD_TDI_CONNECTION_INFORMATION);
+        return Status;
+    }
+
+    *ConnectionInfo = ConnInfo;
+
+    return STATUS_SUCCESS;
 }
