@@ -6,6 +6,7 @@
  */
 
 #include <kmt_test.h>
+#include <acpiioct.h>
 
 /* Resolved at run time like the drivers that use them (usbhub3), so the test
  * calls the ntoskrnl export on every NTDDI configuration */
@@ -49,6 +50,11 @@ static const GUID TestGuidUsbSelectiveSuspend =
     { 0x48e6b7a6, 0x50f5, 0x4782, { 0xa5, 0xd4, 0x53, 0xbb, 0x8f, 0x07, 0xe2, 0x26 } };
 static const GUID TestGuidUsbHubTimeout =
     { 0x0853a681, 0x27c8, 0x4100, { 0xa2, 0xfd, 0x82, 0x01, 0x3e, 0x97, 0x06, 0x83 } };
+static const GUID TestGuidLidSwitch =
+    { 0xba3e0f4d, 0xb817, 0x4094, { 0xa2, 0xd1, 0xd5, 0x63, 0x79, 0xe6, 0xa0, 0xf3 } };
+/* GUID_DEVICE_LID, the interface of a lid device (poclass.h) */
+static const GUID TestGuidDeviceLid =
+    { 0x4afa3d52, 0x74a7, 0x11d0, { 0xbe, 0x5e, 0x00, 0xa0, 0xc9, 0x06, 0x28, 0x57 } };
 /* No power setting has this GUID */
 static const GUID TestGuidUnknown =
     { 0x6b1c4f3e, 0x09d2, 0x4c57, { 0x8a, 0x61, 0x2e, 0x4d, 0x73, 0x90, 0xb5, 0x1f } };
@@ -282,6 +288,122 @@ TestUnknownAndInvalid(VOID)
     RtlZeroMemory(Fake, sizeof(Fake));
     Status = pPoUnregisterPowerSettingCallback(Fake);
     ok_eq_hex(Status, STATUS_INVALID_PARAMETER);
+}
+
+/* Evaluates _LID of the lid device behind SymbolicLink (IOCTL_ACPI_EVAL_METHOD) */
+static
+NTSTATUS
+EvaluateLid(
+    _In_ PUNICODE_STRING SymbolicLink,
+    _Out_ PULONG LidState)
+{
+    PFILE_OBJECT FileObject;
+    PDEVICE_OBJECT DeviceObject, Pdo;
+    ACPI_EVAL_INPUT_BUFFER Input;
+    UCHAR OutputBuffer[sizeof(ACPI_EVAL_OUTPUT_BUFFER) + 16];
+    PACPI_EVAL_OUTPUT_BUFFER Output = (PACPI_EVAL_OUTPUT_BUFFER)OutputBuffer;
+    IO_STATUS_BLOCK IoStatus;
+    KEVENT Event;
+    PIRP Irp;
+    NTSTATUS Status;
+
+    Status = IoGetDeviceObjectPointer(SymbolicLink, FILE_READ_DATA, &FileObject, &DeviceObject);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* The ACPI PDO evaluates the methods of its namespace object */
+    Pdo = IoGetDeviceAttachmentBaseRef(DeviceObject);
+    ObDereferenceObject(FileObject);
+
+    RtlZeroMemory(&Input, sizeof(Input));
+    Input.Signature = ACPI_EVAL_INPUT_BUFFER_SIGNATURE;
+    RtlCopyMemory(Input.MethodName, "_LID", 4);
+    RtlZeroMemory(OutputBuffer, sizeof(OutputBuffer));
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp = IoBuildDeviceIoControlRequest(IOCTL_ACPI_EVAL_METHOD, Pdo,
+                                        &Input, sizeof(Input),
+                                        OutputBuffer, sizeof(OutputBuffer),
+                                        FALSE, &Event, &IoStatus);
+    if (!Irp)
+    {
+        ObDereferenceObject(Pdo);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    Status = IoCallDriver(Pdo, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = IoStatus.Status;
+    }
+    ObDereferenceObject(Pdo);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (Output->Signature != ACPI_EVAL_OUTPUT_BUFFER_SIGNATURE || Output->Count < 1 ||
+        Output->Argument[0].Type != ACPI_METHOD_ARGUMENT_INTEGER)
+    {
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    *LidState = (Output->Argument[0].Argument != 0) ? 1 : 0;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * GUID_LIDSWITCH_STATE_CHANGE: "The callback won't be called at all until a
+ * lid device is found and its current state is known" (0 closed, 1 open).
+ * With a lid, a registration made after boot gets the state at once.
+ */
+static
+VOID
+TestLidSwitch(VOID)
+{
+    static SETTING_CONTEXT Ctx;
+    PWSTR SymbolicLinks = NULL;
+    UNICODE_STRING Link;
+    ULONG LidState = 0;
+    PVOID Handle;
+    NTSTATUS Status;
+
+    Status = IoGetDeviceInterfaces((LPGUID)&TestGuidDeviceLid, NULL, 0, &SymbolicLinks);
+    if (!NT_SUCCESS(Status) || SymbolicLinks == NULL || SymbolicLinks[0] == UNICODE_NULL)
+    {
+        /* No lid: the setting never gets a value */
+        trace("No lid device (0x%08lx)\n", Status);
+        if (SymbolicLinks)
+            ExFreePool(SymbolicLinks);
+
+        InitContext(&Ctx);
+        Handle = NULL;
+        Status = pPoRegisterPowerSettingCallback(NULL, &TestGuidLidSwitch, SettingCallback, &Ctx, &Handle);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Status = WaitCalled(&Ctx, 2000);
+        ok_eq_hex(Status, STATUS_TIMEOUT);
+        ok_eq_long(Ctx.Count, 0L);
+        if (Handle)
+        {
+            Status = pPoUnregisterPowerSettingCallback(Handle);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+        }
+        return;
+    }
+
+    RtlInitUnicodeString(&Link, SymbolicLinks);
+    Status = EvaluateLid(&Link, &LidState);
+    ok(NT_SUCCESS(Status), "Evaluating _LID of %wZ failed: 0x%08lx\n", &Link, Status);
+    ExFreePool(SymbolicLinks);
+    if (!NT_SUCCESS(Status))
+        return;
+    trace("Lid is %s\n", LidState ? "open" : "closed");
+
+    InitContext(&Ctx);
+    Handle = RegisterAndCheckInitial(&TestGuidLidSwitch, "LIDSWITCH_STATE_CHANGE", &Ctx, LidState, FALSE);
+    if (Handle)
+    {
+        Status = pPoUnregisterPowerSettingCallback(Handle);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+    }
 }
 
 typedef struct _UNREGISTER_WORK
@@ -534,6 +656,7 @@ START_TEST(PoPowerSettingCallback)
     }
 
     TestInitialValues();
+    TestLidSwitch();
     TestTwoRegistrations();
     TestUnknownAndInvalid();
     TestUnregisterFromOtherThread();
