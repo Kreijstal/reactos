@@ -255,12 +255,22 @@ NwifiSupplicantStart(
         RsnaSeed(&Sup->Ctx, Seed, sizeof(Seed));
     }
 
-    /* Allocate the deferred key-install work item (associated with the upper
-     * miniport handle so NDIS scopes it to this adapter). */
-    if (Sup->InstallWorkItem == NULL && Adapter->MiniportAdapterHandle != NULL)
+    /* Allocate the deferred key-install work item from the lower (dot11)
+     * adapter, as the scan work item is: the keys go to that miniport, and
+     * the upper one may not exist.  Allocated from the upper handle, a
+     * missing upper miniport (after a lower adapter restart) left the item
+     * NULL, the install was skipped without a word, and every handshake
+     * completed on the AP while the station never got a key. */
+    if (Sup->InstallWorkItem == NULL &&
+        Adapter->LowerBindParameters.MiniportHandle != NULL)
     {
         Sup->InstallWorkItem =
-            NdisAllocateIoWorkItem(Adapter->MiniportAdapterHandle);
+            NdisAllocateIoWorkItem(Adapter->LowerBindParameters.MiniportHandle);
+    }
+    if (Sup->InstallWorkItem == NULL)
+    {
+        DPRINT1("NWIFI: no key-install work item; the link cannot come up\n");
+        return NDIS_STATUS_RESOURCES;
     }
     Sup->Msm = Msm;
 
