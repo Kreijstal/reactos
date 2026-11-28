@@ -156,6 +156,7 @@ KMT_TESTFUNC Test_ObTypes;
 KMT_TESTFUNC Test_PoFx;
 KMT_TESTFUNC Test_PoFxCallbacks;
 KMT_TESTFUNC Test_PoPowerSettingCallback;
+KMT_TESTFUNC Test_PoShutdownReset;
 KMT_TESTFUNC Test_PsNotify;
 KMT_TESTFUNC Test_PsQuota;
 KMT_TESTFUNC Test_PsSystemAffinity;
@@ -333,6 +334,7 @@ const KMT_TEST TestList[] =
     { "PoFx",                               Test_PoFx },
     { "PoFxCallbacks",                      Test_PoFxCallbacks },
     { "PoPowerSettingCallback",             Test_PoPowerSettingCallback },
+    { "PoShutdownReset",                    Test_PoShutdownReset },
     { "PsNotify",                           Test_PsNotify },
     { "PsQuota",                            Test_PsQuota },
     { "PsSystemAffinity",                   Test_PsSystemAffinity },
