@@ -143,6 +143,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeFreezeIrql.c
     ntos_ke/KeGuardedMutex.c
     ntos_ke/KeIpi.c
+    ntos_ke/KeFlushDpcsAffinity.c
     ntos_ke/KeInterruptAffinity.c
     ntos_ke/KeIrql.c
     ntos_ke/KeMutex.c
