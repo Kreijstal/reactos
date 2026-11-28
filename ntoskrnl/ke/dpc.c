@@ -1030,9 +1030,10 @@ KeFlushQueuedDpcs(VOID)
 {
     ULONG ProcessorIndex;
     PKPRCB TargetPrcb;
+    KAFFINITY OldAffinity = 0;
+    BOOLEAN Switched = FALSE;
 
     PAGED_CODE();
-    ASSERT(KeGetCurrentThread()->SystemAffinityActive == FALSE);
 
     /* Loop all processors */
     for (ProcessorIndex = 0; ProcessorIndex < KeNumberProcessors; ProcessorIndex++)
@@ -1050,19 +1051,27 @@ KeFlushQueuedDpcs(VOID)
                 /* Request a DPC interrupt */
                 HalRequestSoftwareInterrupt(DISPATCH_LEVEL);
             }
-            else
+            else if (!Switched)
             {
                 /* Attach to the target processor. This will cause a DPC
-                   interrupt on the target processor and flush all DPCs. */
+                   interrupt on the target processor and flush all DPCs.
+                   The caller may have a system affinity of its own (the
+                   shutdown thread is pinned to the boot processor while it
+                   powers the devices down), which is restored below. */
+                OldAffinity = KiSetSystemAffinityThreadSave(TargetPrcb->SetMember);
+                Switched = TRUE;
+            }
+            else
+            {
                 KeSetSystemAffinityThread(TargetPrcb->SetMember);
             }
         }
     }
 
-    /* Revert back to user affinity */
-    if (KeGetCurrentThread()->SystemAffinityActive)
+    /* Give the caller back the affinity it had */
+    if (Switched)
     {
-        KeRevertToUserAffinityThread();
+        KiRestoreSystemAffinityThread(OldAffinity);
     }
 }
 
