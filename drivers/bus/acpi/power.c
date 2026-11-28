@@ -104,14 +104,13 @@ Bus_FDO_Power (
        * on every software reboot of the ASUS X550DP (docs/asus.txt 2.7).
        * The HAL resets the machine afterwards.
        *
-       * The firmware is still told that the system is leaving S0 for S5:
-       * Windows goes through S5 for a restart, so firmware writes its reset
-       * path for that, and Linux does the same on restart (_TTS(5) from its
-       * reboot notifier, then acpi_sleep_prepare(S5) = _PTS(5), and all GPEs
-       * disabled). The ASUS X550DP's FADT reset register is an SMI
-       * (0xB2 <- 0x8E); its _PTS(5) prepares the EC (EC0S) and raises the
-       * OEM sleep SMI 0x9D first, and without that the reset SMI leaves the
-       * machine dark (#315). */
+       * The firmware is still told that the system leaves S0 for S5, as for a
+       * power-off: Windows goes through S5 for a restart ("A full shutdown
+       * (S5) occurs when a system restart is requested"), and Linux does the
+       * same since 6.1 because "some BIOSes depend on it to perform proper
+       * reboot". _TTS(5) came with the query. This FDO gets the last SET IRP
+       * of the walk, so _PTS(5) runs after every device is told, where the
+       * ACPI specification places it. */
       if (AcpiState == ACPI_STATE_S5 &&
           stack->Parameters.Power.ShutdownType == PowerActionShutdownReset)
       {
@@ -131,6 +130,16 @@ Bus_FDO_Power (
       }
       }
   }
+    }
+    else if (stack->MinorFunction == IRP_MN_QUERY_POWER &&
+             powerType == SystemPowerState &&
+             powerState.SystemState == PowerSystemShutdown)
+    {
+        /* The ACPI specification has _TTS evaluated before any device is
+         * told about the transition. The power manager queries every device,
+         * this FDO last, before it sends the first S5 SET IRP, for a restart
+         * as for a power-off. */
+        acpi_transition_to_state(ACPI_STATE_S5);
     }
     PoStartNextPowerIrp (Irp);
     IoSkipCurrentIrpStackLocation(Irp);

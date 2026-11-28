@@ -396,29 +396,39 @@ acpi_suspend (
 }
 
 /**
- * acpi_prepare_for_reset - tell the firmware the system leaves S0 for a restart
+ * acpi_transition_to_state - _TTS: the sleep state the system is about to enter
  *
- * Everything an S5 transition does short of entering S5: _TTS(5), then
- * AcpiEnterSleepStatePrep(S5) (_PTS(5) and _SST), then all GPEs off so no
- * event runs AML on the way to the reset. The HAL writes the reset register
- * afterwards. This is the restart path Windows takes (it goes through S5) and
- * the one Linux takes (tts_notify_reboot, then acpi_power_off_prepare for
- * SYS_OFF_MODE_RESTART_PREPARE).
+ * Evaluated before any device is told about the transition. Optional.
  */
 VOID
-acpi_prepare_for_reset(VOID)
+acpi_transition_to_state(UINT32 state)
 {
 	ACPI_OBJECT_LIST ArgList;
 	ACPI_OBJECT Arg;
 	ACPI_STATUS Status;
 
 	Arg.Type = ACPI_TYPE_INTEGER;
-	Arg.Integer.Value = ACPI_STATE_S5;
+	Arg.Integer.Value = state;
 	ArgList.Count = 1;
 	ArgList.Pointer = &Arg;
 	Status = AcpiEvaluateObject(NULL, "\\_TTS", &ArgList, NULL);
 	if (ACPI_FAILURE(Status) && Status != AE_NOT_FOUND)
-		DPRINT1("ACPI: _TTS(5) failed 0x%X\n", Status);
+		DPRINT1("ACPI: _TTS(%u) failed 0x%X\n", state, Status);
+}
+
+/**
+ * acpi_prepare_for_reset - tell the firmware the system leaves S0 for a restart
+ *
+ * What an S5 transition does after the devices are told, short of entering
+ * S5: AcpiEnterSleepStatePrep(S5) (_PTS(5) and _SST), then all GPEs off so no
+ * event runs AML on the way to the reset. _TTS(5) came first, with the query.
+ * The HAL writes the reset register afterwards. Linux does the same on a
+ * restart (acpi_power_off_prepare for SYS_OFF_MODE_RESTART_PREPARE).
+ */
+VOID
+acpi_prepare_for_reset(VOID)
+{
+	ACPI_STATUS Status;
 
 	Status = AcpiEnterSleepStatePrep(ACPI_STATE_S5);
 	if (ACPI_FAILURE(Status))
