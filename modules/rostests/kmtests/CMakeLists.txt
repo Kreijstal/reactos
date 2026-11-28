@@ -177,6 +177,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_po/PoFxCallbacks.c
     ntos_po/PoPowerSettingCallback.c
     ntos_po/PoShutdownReset.c
+    ntos_po/PoShutdownResetUsb.c
     ntos_ps/PsNotify.c
     ntos_ps/PsQuota.c
     ntos_ps/PsSystemAffinity.c
