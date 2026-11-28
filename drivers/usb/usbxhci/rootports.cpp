@@ -50,6 +50,7 @@ static const ULONG XhciResumeSignalMs = 50;
 static const ULONG XhciU3WaitSteps = 2400;
 static const ULONG XhciU0WaitSteps = 1200;
 static const ULONG XhciResumeWaitSteps = 1200;
+static const ULONG XhciU3ExitWaitSteps = 10000;
 
 static const ULONG XhciPortGone = 0xFFFFFFFF;
 
@@ -838,6 +839,75 @@ XhciRootHub::ResuspendResumedPorts()
     }
 }
 
+/**
+ * Takes every suspended port back to U0 for a system shutdown or restart.
+ * The port keeps its power over a restart (and often over S5), so a device
+ * left in U3 is still suspended when the boot firmware starts, which may not
+ * cope with a port in U3 and then does not find the boot device (Linux xhci
+ * 34cd2db408d5 and c3bbacd61baa). Linux leaves the devices running at
+ * shutdown; so does this.
+ */
+VOID
+XhciRootHub::ResumeSuspendedPorts()
+{
+    ULONG Number;
+
+    for (Number = 1; Number <= m_PortCount; Number++)
+    {
+        Port* P = &m_Ports[Number - 1];
+        ULONG Remaining = XhciU3ExitWaitSteps;
+        ULONG PortSc;
+        ULONG Link;
+
+        if (P->Major == 0)
+            continue;
+
+        if (P->Major == 2)
+            KeCancelTimer(&P->ResumeTimer);
+
+        PortSc = ReadPortSc(P);
+        if (PortSc == XhciPortGone || !XhciPortActive(PortSc))
+            continue;
+
+        Link = XhciLinkState(PortSc);
+        if (Link != PORT_LINK_STATE_U3 && Link != XHCI_PLS_RESUME)
+            continue;
+
+        if (P->Major == 2)
+        {
+            LARGE_INTEGER Interval = XhciRelativeMs(XhciResumeSignalMs);
+
+            /* xHCI 4.15.2.2: drive resume for TDRSMDN, then end it with U0 */
+            if (Link == PORT_LINK_STATE_U3)
+                UpdatePortSc(P, XHCI_PORTSC_PRESERVE, XhciLinkWrite(XHCI_PLS_RESUME));
+            KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+        }
+
+        UpdatePortSc(P, XHCI_PORTSC_PRESERVE, XHCI_PORTSC_PLC | XhciLinkWrite(PORT_LINK_STATE_U0));
+
+        for (;;)
+        {
+            PortSc = ReadPortSc(P);
+            Link = XhciLinkState(PortSc);
+
+            if (PortSc == XhciPortGone || !XhciPortActive(PortSc) || Link == PORT_LINK_STATE_U0)
+                break;
+
+            if (Remaining == 0)
+            {
+                DPRINT1("Port %lu: still not in U0 for the shutdown, PORTSC 0x%08lx\n", Number, PortSc);
+                break;
+            }
+
+            Remaining--;
+            KeStallExecutionProcessor(10);
+        }
+
+        UpdatePortSc(P, XHCI_PORTSC_PRESERVE, XHCI_PORTSC_PLC);
+        P->ResumeHandled = FALSE;
+    }
+}
+
 /* Power **********************************************************************/
 
 VOID
@@ -884,7 +954,11 @@ XhciRootHub::D0Exit()
     BOOLEAN AnyConnected = FALSE;
     ULONG Number;
 
-    ResuspendResumedPorts();
+    /* A system shutdown or restart hands the ports to the firmware awake */
+    if (FinalPowerOff && Action == XhciController::SystemAction::Shutdown)
+        ResumeSuspendedPorts();
+    else
+        ResuspendResumedPorts();
 
     for (Number = 1; Number <= m_PortCount; Number++)
     {

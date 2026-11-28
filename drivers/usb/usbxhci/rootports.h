@@ -184,6 +184,8 @@ private:
         _In_ Port* P);
     VOID
     ResuspendResumedPorts();
+    VOID
+    ResumeSuspendedPorts();
     BOOLEAN
     IsPortConnected(
         _In_ const Port* P) const;
