@@ -479,11 +479,12 @@ PopSetSystemPowerState(SYSTEM_POWER_STATE PowerState, POWER_ACTION PowerAction)
 
     if (!PopAcpiPresent) return STATUS_NOT_IMPLEMENTED;
 
+    /* The system power device is told last, for a restart too: Windows goes
+     * through S5 for a restart, and the ACPI driver tells the firmware then
+     * (_PTS(5)) without entering S5 */
     if (Fdo != NULL)
     {
-        if (PowerAction != PowerActionShutdownReset)
-            PopSendSetSystemPowerState(Fdo, PowerState, PowerAction);
-
+        PopSendSetSystemPowerState(Fdo, PowerState, PowerAction);
         ObDereferenceObject(Fdo);
     }
 
